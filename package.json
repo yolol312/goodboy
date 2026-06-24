@@ -1,0 +1,17 @@
+{
+  "name": "vcf",
+  "version": "0.1.0",
+  "description": "Vibe Coding Framework",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}

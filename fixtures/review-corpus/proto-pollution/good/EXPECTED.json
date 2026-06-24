@@ -1,0 +1,7 @@
+{
+  "dimension": "proto-pollution",
+  "minSeverity": "high",
+  "changedFiles": ["merge.ts"],
+  "fixed": true,
+  "oneLineDefect": "FIXED: only an explicit allow-list of fields is copied and __proto__/constructor/prototype are never followed → no pollution."
+}

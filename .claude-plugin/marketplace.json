@@ -1,0 +1,11 @@
+{
+  "name": "vcf",
+  "description": "Single-plugin marketplace for vcf",
+  "plugins": [
+    {
+      "name": "vcf",
+      "source": "./",
+      "description": "Vibe Coding Framework"
+    }
+  ]
+}

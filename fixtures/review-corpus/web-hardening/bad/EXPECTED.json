@@ -1,0 +1,6 @@
+{
+  "dimension": "error-path",
+  "minSeverity": "high",
+  "changedFiles": ["server.ts"],
+  "oneLineDefect": "decodeURIComponent(cookie) with no try/catch and no Bun.serve error handler → malformed cookie (%ZZ) throws an unhandled URIError, leaking a 500/dev-overlay."
+}

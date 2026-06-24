@@ -1,0 +1,223 @@
+// Read-before-edit 검증을 위한 파일 Read 기록.
+//
+// 상태 저장 형식 (sessionDir 안):
+//   reads.jsonl  — 각 줄: { file: string, turn: number, timestamp: string }
+//   edits.jsonl  — 같은 형식
+//   turn.txt     — 현재 턴 번호 (정수)
+
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+
+interface TrackRecord {
+  file: string;
+  turn: number;
+  timestamp: string;
+}
+
+function sessionDir(sessionId: string): string {
+  // sessionId에 path traversal 위험 문자가 있을 수 있으니 소독
+  const safe = (sessionId ?? 'unknown').replace(/[^a-zA-Z0-9_\-]/g, '_');
+  return join(tmpdir(), `vcf-session-${safe}`);
+}
+
+/** 세션별 상태 디렉터리 보장. /tmp/vcf-session-<sessionId>/ */
+export function ensureSessionDir(sessionId: string): string {
+  const dir = sessionDir(sessionId);
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch {
+    // best-effort
+  }
+  return dir;
+}
+
+function normalize(filePath: string): string {
+  try {
+    return resolve(filePath);
+  } catch {
+    return filePath;
+  }
+}
+
+function appendRecord(dir: string, fileName: string, record: TrackRecord): void {
+  try {
+    const path = join(dir, fileName);
+    appendFileSync(path, JSON.stringify(record) + '\n', 'utf8');
+  } catch {
+    // best-effort
+  }
+}
+
+function readRecords(dir: string, fileName: string): TrackRecord[] {
+  try {
+    const path = join(dir, fileName);
+    if (!existsSync(path)) return [];
+    const raw = readFileSync(path, 'utf8');
+    const out: TrackRecord[] = [];
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (trimmed === '') continue;
+      try {
+        const parsed = JSON.parse(trimmed) as Partial<TrackRecord>;
+        if (
+          parsed &&
+          typeof parsed.file === 'string' &&
+          typeof parsed.turn === 'number' &&
+          typeof parsed.timestamp === 'string'
+        ) {
+          out.push({ file: parsed.file, turn: parsed.turn, timestamp: parsed.timestamp });
+        }
+      } catch {
+        continue;
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/** Read 도구 호출 시 기록. PostToolUse hook이 호출. */
+export function recordRead(sessionId: string, filePath: string, turn: number): void {
+  const dir = ensureSessionDir(sessionId);
+  appendRecord(dir, 'reads.jsonl', {
+    file: normalize(filePath),
+    turn,
+    timestamp: new Date().toISOString(),
+  });
+}
+
+/** filePath가 최근 withinTurns 안에 Read 됐는지 확인. */
+export function wasFileReadRecently(
+  sessionId: string,
+  filePath: string,
+  currentTurn: number,
+  withinTurns: number,
+): boolean {
+  const dir = ensureSessionDir(sessionId);
+  const records = readRecords(dir, 'reads.jsonl');
+  const target = normalize(filePath);
+  const cutoff = currentTurn - withinTurns;
+  for (const r of records) {
+    if (r.file === target && r.turn >= cutoff && r.turn <= currentTurn) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** filePath가 최근 withinTurns 안에 Edit/Write 됐는지 확인.
+ *  FRICTION #4: 세션 내에서 Write/생성한 파일은 이미 내용을 알고 있으므로
+ *  read-before-edit를 만족시켜야 한다. wasFileReadRecently를 그대로 미러링. */
+export function wasFileEditedRecently(
+  sessionId: string,
+  filePath: string,
+  currentTurn: number,
+  withinTurns: number,
+): boolean {
+  const dir = ensureSessionDir(sessionId);
+  const records = readRecords(dir, 'edits.jsonl');
+  const target = normalize(filePath);
+  const cutoff = currentTurn - withinTurns;
+  for (const r of records) {
+    if (r.file === target && r.turn >= cutoff && r.turn <= currentTurn) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** 현재 턴 번호 조회. 없으면 0. */
+export function getCurrentTurn(sessionId: string): number {
+  try {
+    const dir = ensureSessionDir(sessionId);
+    const path = join(dir, 'turn.txt');
+    if (!existsSync(path)) return 0;
+    const raw = readFileSync(path, 'utf8').trim();
+    const n = parseInt(raw, 10);
+    return Number.isFinite(n) ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Stop hook에서 호출, 턴 카운터 증가 */
+export function incrementTurn(sessionId: string): number {
+  try {
+    const dir = ensureSessionDir(sessionId);
+    const current = getCurrentTurn(sessionId);
+    const next = current + 1;
+    writeFileSync(join(dir, 'turn.txt'), String(next), 'utf8');
+    return next;
+  } catch {
+    return getCurrentTurn(sessionId);
+  }
+}
+
+/** 이번 턴 안에 Edit/Write로 변경된 파일 기록 */
+export function recordEdit(sessionId: string, filePath: string, turn: number): void {
+  const dir = ensureSessionDir(sessionId);
+  appendRecord(dir, 'edits.jsonl', {
+    file: normalize(filePath),
+    turn,
+    timestamp: new Date().toISOString(),
+  });
+}
+
+/** 특정 턴 안에 Edit/Write된 파일 목록 (중복 제거) */
+export function getEditsInTurn(sessionId: string, turn: number): string[] {
+  const dir = ensureSessionDir(sessionId);
+  const records = readRecords(dir, 'edits.jsonl');
+  const out = new Set<string>();
+  for (const r of records) {
+    if (r.turn === turn) out.add(r.file);
+  }
+  return Array.from(out);
+}
+
+/** 최근 withinTurns 안의 Edit/Write 파일 목록 (중복 제거) */
+export function getRecentEdits(sessionId: string, withinTurns: number): string[] {
+  const dir = ensureSessionDir(sessionId);
+  const records = readRecords(dir, 'edits.jsonl');
+  const current = getCurrentTurn(sessionId);
+  const cutoff = current - withinTurns;
+  const out = new Set<string>();
+  for (const r of records) {
+    if (r.turn >= cutoff && r.turn <= current) out.add(r.file);
+  }
+  return Array.from(out);
+}
+
+/** 커서 턴 이상(turn >= cursorTurn)에 Edit/Write된 파일 목록 (중복 제거).
+ *  리뷰 커서 용도: 마지막으로 수락된 리뷰 시점(그 Stop의 현재 턴) 이후
+ *  변경된 파일만 "리뷰 필요" 대상으로 본다.
+ *
+ *  경계 설명(왜 >= 인가): 턴 카운터는 Stop hook에서만 증가한다. Stop#N이 턴을 N으로
+ *  올린 뒤 리뷰를 수락하고 커서를 N으로 기록한다. 그 다음 에이전트가 만드는 편집은
+ *  PostToolUse에서 getCurrentTurn()==N 으로 기록된다. 따라서 "커서 이후의 편집"은
+ *  turn >= N 이어야 그 편집들을 포함한다. 이전 피처(turn < N)는 자연히 제외된다.
+ *  커서 부재(첫 리뷰)는 cursorTurn=0 으로 호출 → 모든 편집 포함. */
+export function getEditsSince(sessionId: string, cursorTurn: number): string[] {
+  const dir = ensureSessionDir(sessionId);
+  const records = readRecords(dir, 'edits.jsonl');
+  const out = new Set<string>();
+  for (const r of records) {
+    if (r.turn >= cursorTurn) out.add(r.file);
+  }
+  return Array.from(out);
+}
+
+/** getEditsSince 대상 파일 중 가장 최근 편집의 ISO 타임스탬프. 없으면 null.
+ *  리뷰 staleness 판정에 사용: 리뷰가 이 시각보다 더 나중이어야 한다. */
+export function getLatestEditTimestampSince(sessionId: string, cursorTurn: number): string | null {
+  const dir = ensureSessionDir(sessionId);
+  const records = readRecords(dir, 'edits.jsonl');
+  let latest: string | null = null;
+  for (const r of records) {
+    if (r.turn >= cursorTurn) {
+      if (latest === null || r.timestamp > latest) latest = r.timestamp;
+    }
+  }
+  return latest;
+}

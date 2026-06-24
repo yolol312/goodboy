@@ -1,0 +1,6 @@
+{
+  "dimension": "proto-pollution",
+  "minSeverity": "high",
+  "changedFiles": ["merge.ts"],
+  "oneLineDefect": "setByPath walks dotted keys from a parsed JSON body with no __proto__/constructor filtering → {\"__proto__.polluted\":true} pollutes Object.prototype (({}).polluted===true)."
+}

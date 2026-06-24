@@ -1,0 +1,7 @@
+{
+  "name": "vcf",
+  "version": "0.1.0",
+  "description": "Vibe Coding Framework — hook + skill 기반 LLM 약점 강제 레이어",
+  "author": "seongmo",
+  "homepage": "https://github.com/seongmo/vcf"
+}

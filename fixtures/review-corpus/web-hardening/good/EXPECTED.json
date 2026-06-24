@@ -1,0 +1,7 @@
+{
+  "dimension": "error-path",
+  "minSeverity": "high",
+  "changedFiles": ["server.ts"],
+  "fixed": true,
+  "oneLineDefect": "FIXED: decodeURIComponent is guarded (try/catch → 400) and Bun.serve has an explicit error handler → no unhandled throw, no source leak."
+}

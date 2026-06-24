@@ -1,0 +1,6 @@
+{
+  "dimension": "ui-ux-accessibility",
+  "minSeverity": "medium",
+  "changedFiles": ["index.html"],
+  "oneLineDefect": "icon-only submit button has no accessible name, inputs have no <label>, and *:focus{outline:none} removes the focus indicator with no replacement."
+}

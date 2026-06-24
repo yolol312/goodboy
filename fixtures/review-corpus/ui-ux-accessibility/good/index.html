@@ -1,0 +1,41 @@
+<!doctype html>
+<!--
+  GOOD fixture. The accessibility defects are fixed:
+    1. icon-only button now has aria-label="Search".
+    2. every input has an associated <label for>.
+    3. focus ring is removed BUT a visible replacement (:focus-visible outline) exists.
+  A review probe should find NO accessible-name / focus-indicator / label defect.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Search</title>
+    <style>
+      * { box-sizing: border-box; }
+      body { font-family: sans-serif; margin: 2rem; }
+      /* visible replacement focus indicator */
+      *:focus { outline: none; }
+      *:focus-visible { outline: 2px solid #0b57d0; outline-offset: 2px; }
+      .row { display: flex; gap: 8px; align-items: flex-end; }
+      .field { display: flex; flex-direction: column; }
+      label { font-size: 12px; margin-bottom: 2px; }
+      input { padding: 8px; border: 1px solid #999; }
+      button { padding: 8px 10px; border: 1px solid #999; background: #eee; }
+    </style>
+  </head>
+  <body>
+    <h1>Search</h1>
+    <form class="row" action="#" method="get">
+      <div class="field">
+        <label for="q">Query</label>
+        <input id="q" type="text" name="q" />
+      </div>
+      <div class="field">
+        <label for="tag">Tag</label>
+        <input id="tag" type="text" name="tag" />
+      </div>
+      <button type="submit" aria-label="Search">🔍</button>
+    </form>
+  </body>
+</html>

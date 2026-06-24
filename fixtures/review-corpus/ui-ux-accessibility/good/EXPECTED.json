@@ -1,0 +1,7 @@
+{
+  "dimension": "ui-ux-accessibility",
+  "minSeverity": "medium",
+  "changedFiles": ["index.html"],
+  "fixed": true,
+  "oneLineDefect": "FIXED: button has aria-label, every input has a <label for>, and :focus-visible provides a visible focus indicator."
+}
