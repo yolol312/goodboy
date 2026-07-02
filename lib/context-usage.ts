@@ -28,6 +28,47 @@ const EXTENDED_CONTEXT_LIMIT = 1_000_000;
 // 경고가 더 일찍 뜨므로 컨텍스트 폭주를 더 안전하게 막는다.
 const DEFAULT_CONTEXT_LIMIT = STANDARD_CONTEXT_LIMIT;
 
+/** env override로 강제할 컨텍스트 한도(토큰수)를 읽는다.
+ *  VCF_CONTEXT_LIMIT이 양의 정수로 설정돼 있으면 그 값을 반환, 아니면 null.
+ *
+ *  ⚠️ 왜 필요한가: transcript usage 줄에 찍히는 실제 모델 ID(예: `claude-opus-4-8`)에는
+ *  1M 확장 컨텍스트 표식(`[1m]` 등)이 없다. 1M은 세션 토글이라 모델 ID로는 200K/1M을
+ *  구분할 수 없다. 따라서 1M 창을 쓰는 사용자는 이 env로 한도를 명시하는 것이 가장 정확하다.
+ *  (예: `VCF_CONTEXT_LIMIT=1000000`) 파싱 실패/음수/0/비수치 → null(무시). */
+function envContextLimitOverride(): number | null {
+  try {
+    const v = process.env.VCF_CONTEXT_LIMIT;
+    if (v === undefined || v.trim() === '') return null;
+    const n = parseInt(v.trim(), 10);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return n;
+  } catch {
+    return null;
+  }
+}
+
+/** 최종 컨텍스트 한도를 결정한다(우선순위 명확).
+ *   1) VCF_CONTEXT_LIMIT env override — 최우선(모델 판별 무시).
+ *   2) 모델 표식(`[1m]` 등) 기반 판별(limitForModel).
+ *   3) 안전 상향(오탐 회피): 관측 토큰이 (2)의 한도를 초과하면, 그 한도의 창은
+ *      물리적으로 그만큼의 입력을 담을 수 없다 = 실제 창이 더 크다는 "확정 증거"이므로
+ *      최소 1M(EXTENDED)으로 올린다. (추측이 아니라 논리적 하한 보정)
+ *      → 표식 없는 1M 세션이 200K로 오판돼 percent가 몇 배 부풀고 H1-03가 오탐 발동하는 것을 막는다.
+ *      토큰이 1M도 넘으면 진짜 1M 창 오버플로우이므로 percent>100은 정당(오탐 아님).
+ *  ⚠️ 전역 기본은 그대로 200K를 유지한다(표식 없는 정상 200K 세션의 H1-03를 무력화하지 않기 위해).
+ *     1M 창을 상시 쓰는 환경은 VCF_CONTEXT_LIMIT로 명시하는 것을 권장. */
+function resolveContextLimit(model: string | null, tokens: number): number {
+  const override = envContextLimitOverride();
+  if (override !== null) return override;
+
+  const modelLimit = limitForModel(model);
+  if (Number.isFinite(tokens) && tokens > modelLimit) {
+    // 관측 토큰이 후보 한도를 넘음 → 창이 더 크다. 최소 1M으로 보정.
+    return Math.max(modelLimit, EXTENDED_CONTEXT_LIMIT);
+  }
+  return modelLimit;
+}
+
 interface UsageLike {
   input_tokens?: number;
   cache_read_input_tokens?: number;
@@ -223,7 +264,8 @@ export function getContextUsage(transcriptPath: string): ContextUsage | null {
   if (lastTokens === null) return null; // usage를 한 번도 못 찾음 → 측정 실패
 
   const model = lastModel ?? lastModelAny;
-  const limit = limitForModel(model);
+  // 한도 결정: VCF_CONTEXT_LIMIT env override > 모델 표식 판별 > 관측 토큰 기반 안전 상향.
+  const limit = resolveContextLimit(model, lastTokens);
   const percent = limit > 0 ? (lastTokens / limit) * 100 : 0;
 
   return { percent, tokens: lastTokens, limit, model };

@@ -46,12 +46,16 @@ export const TOKEN_HABITS: Record<string, TokenHabit> = {
   'H1-03': {
     id: 'H1-03',
     title: '컨텍스트 자동 compact 강제',
-    envVars: ['VCF_COMPACT_FORCE_PCT'],
+    envVars: ['VCF_COMPACT_FORCE_PCT', 'VCF_CONTEXT_LIMIT'],
     defaults: { VCF_COMPACT_FORCE_PCT: 50 },
     description:
       '컨텍스트 점유율이 강제 임계(기본 50%) 이상이면 자동 compact 신호(stopReason: compact_needed)와 ' +
       'decision:block으로 턴 종료를 막아 compact를 강제(공격적). ' +
-      'MAX_RETRIES 초과 시 통과+경고(무한 block 방지). 임계 미만이면 아무 동작 없음.',
+      'MAX_RETRIES 초과 시 통과+경고(무한 block 방지). 임계 미만이면 아무 동작 없음. ' +
+      '점유율은 (현재 입력 토큰 / 컨텍스트 한도)로 계산하는데, 한도는 모델 ID의 1M 표식으로 판별한다. ' +
+      '⚠️ 1M 확장 컨텍스트는 세션 토글이라 실제 모델 ID(예: claude-opus-4-8)에는 표식이 없어 200K로 오판될 수 있다 ' +
+      '(percent가 수 배로 부풀어 오탐 강제 발생). 1M 창을 쓰면 VCF_CONTEXT_LIMIT=1000000처럼 한도를 명시하면 정확하다 ' +
+      '(env가 모델 판별보다 최우선). env 미설정이어도 관측 토큰이 200K를 넘으면 자동으로 최소 1M 창으로 간주해 오탐을 회피한다.',
   },
   'H2-01': {
     id: 'H2-01',

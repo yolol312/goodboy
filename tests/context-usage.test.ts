@@ -232,3 +232,106 @@ describe('getContextUsage', () => {
     expect(getContextUsage(undefined)).toBeNull();
   });
 });
+
+describe('getContextUsage — VCF_CONTEXT_LIMIT env override & safe 1M defaulting', () => {
+  const ORIG = process.env.VCF_CONTEXT_LIMIT;
+  afterEach(() => {
+    if (ORIG === undefined) delete process.env.VCF_CONTEXT_LIMIT;
+    else process.env.VCF_CONTEXT_LIMIT = ORIG;
+  });
+
+  test('VCF_CONTEXT_LIMIT sets the limit used for percent', () => {
+    process.env.VCF_CONTEXT_LIMIT = '1000000';
+    const path = writeTranscript([
+      JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 310_000 } } }),
+    ]);
+    const u = getContextUsage(path);
+    expect(u).not.toBeNull();
+    expect(u!.limit).toBe(1_000_000);
+    expect(u!.percent).toBeCloseTo(31, 5); // 310k / 1M = 31%
+  });
+
+  test('real-world bug case: ~310K tokens on a 1M window computes ~31% (not ~155%)', () => {
+    // 실제 모델 ID(claude-opus-4-8)에는 1m 표식이 없다. env로 1M을 명시하면 정확.
+    process.env.VCF_CONTEXT_LIMIT = '1000000';
+    const path = writeTranscript([
+      JSON.stringify({
+        message: {
+          model: 'claude-opus-4-8',
+          usage: {
+            input_tokens: 2,
+            cache_creation_input_tokens: 2_130,
+            cache_read_input_tokens: 307_868,
+          },
+        },
+      }),
+    ]);
+    const u = getContextUsage(path);
+    expect(u).not.toBeNull();
+    expect(u!.tokens).toBe(310_000);
+    expect(u!.limit).toBe(1_000_000);
+    expect(u!.percent).toBeCloseTo(31, 5);
+    // 200K 기준이었다면 155% → H1-03 오탐. 이제 31%로 임계(50%) 미만.
+    expect(u!.percent).toBeLessThan(50);
+  });
+
+  test('env override takes priority over model [1m] marker', () => {
+    // 모델 표식은 1M이지만 env로 500K를 강제하면 env가 이긴다.
+    process.env.VCF_CONTEXT_LIMIT = '500000';
+    const path = writeTranscript([
+      JSON.stringify({ message: { model: 'claude-opus-4-8[1m]', usage: { input_tokens: 250_000 } } }),
+    ]);
+    const u = getContextUsage(path);
+    expect(u).not.toBeNull();
+    expect(u!.limit).toBe(500_000);
+    expect(u!.percent).toBeCloseTo(50, 5);
+  });
+
+  test('invalid/zero/negative VCF_CONTEXT_LIMIT is ignored (falls back to detection)', () => {
+    for (const bad of ['0', '-100', 'abc', '   ']) {
+      process.env.VCF_CONTEXT_LIMIT = bad;
+      const path = writeTranscript([
+        JSON.stringify({ message: { model: 'claude-3-5-sonnet', usage: { input_tokens: 100_000 } } }),
+      ]);
+      const u = getContextUsage(path);
+      expect(u).not.toBeNull();
+      expect(u!.limit).toBe(200_000); // env 무시 → 모델 기반
+    }
+  });
+
+  test('safe defaulting: tokens exceeding 200K (no marker, no env) bump limit to at least 1M', () => {
+    // env 없음 + 표식 없는 모델. 관측 토큰이 200K를 넘으면 200K 창일 수 없으므로 1M으로 상향.
+    delete process.env.VCF_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 310_000 } } }),
+    ]);
+    const u = getContextUsage(path);
+    expect(u).not.toBeNull();
+    expect(u!.limit).toBe(1_000_000); // 오탐 회피용 안전 상향
+    expect(u!.percent).toBeCloseTo(31, 5);
+    expect(u!.percent).toBeLessThan(50); // H1-03 오탐 발동 안 함
+  });
+
+  test('safe defaulting does NOT fire below 200K (normal 200K sessions keep H1-03)', () => {
+    // 표식 없는 정상 200K 세션이 150K이면 여전히 200K 한도(75%)로 남아 H1-03가 작동해야 한다.
+    delete process.env.VCF_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 150_000 } } }),
+    ]);
+    const u = getContextUsage(path);
+    expect(u).not.toBeNull();
+    expect(u!.limit).toBe(200_000);
+    expect(u!.percent).toBeCloseTo(75, 5);
+  });
+
+  test('tokens exceeding even 1M yield legitimate >100% (real overflow, not false positive)', () => {
+    delete process.env.VCF_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 1_200_000 } } }),
+    ]);
+    const u = getContextUsage(path);
+    expect(u).not.toBeNull();
+    expect(u!.limit).toBe(1_000_000);
+    expect(u!.percent).toBeGreaterThan(100);
+  });
+});
