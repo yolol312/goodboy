@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
+// H1-03 강제 자동 compact(force >= VCF_COMPACT_FORCE_PCT, 기본 50%)의 Stop hook 통합 테스트.
 const STOP_HOOK = resolve(import.meta.dir, '..', 'hooks', 'stop.ts');
 const tmpDirs: string[] = [];
 
@@ -65,6 +66,8 @@ interface StopOut {
   decision?: string;
   reason?: string;
   systemMessage?: string;
+  stopReason?: string;
+  additionalContext?: string;
 }
 
 async function runStop(
@@ -96,6 +99,7 @@ async function runStop(
 }
 
 const CODE_FILE = '/repo/util.ts';
+const COMPACT_MARKER = '/compact';
 
 /** A passing review for util.ts: future-dated, covers performance dimension. */
 function passingReview(): Record<string, unknown> {
@@ -110,75 +114,89 @@ function passingReview(): Record<string, unknown> {
   };
 }
 
-const COMPACT_MARKER = '/compact';
-
-describe('Stop hook — auto-compact warning', () => {
-  test('PASS path: context > 50% → compact warning appended to systemMessage', async () => {
+describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
+  test('context >= 50% → force BLOCK with auto-compact signal (stopReason + additionalContext)', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, [CODE_FILE]);
+    // Even with a passing review on disk, force takes precedence.
     writeReview(cwd, passingReview());
     const transcript = writeTranscript(cwd, 120_000); // 60% of 200K
     const out = await runStop(tmp, cwd, sessionId, transcript);
-    // Review passes (no block) and the compact warning rides along.
-    expect(out.decision).toBeUndefined();
-    expect(out.systemMessage).toBeDefined();
-    expect(out.systemMessage).toContain(COMPACT_MARKER);
-    expect(out.systemMessage).toContain('60%');
+
+    expect(out.decision).toBe('block');
+    expect(out.reason).toContain('강제');
+    expect(out.reason).toContain('60%');
+    expect(out.reason).toContain(COMPACT_MARKER);
+    // context-watchdog.sh와 동일한 자동 compact 유도 신호.
+    expect(out.stopReason).toBe('compact_needed');
+    expect(out.additionalContext).toBeDefined();
+    expect(out.additionalContext).toContain('60%');
   });
 
-  test('BLOCK path: context > 50% → compact warning appears even while review BLOCKS', async () => {
+  test('force takes precedence over review-required block', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, [CODE_FILE]);
-    // No review file on disk → Stop blocks demanding a review.
-    const transcript = writeTranscript(cwd, 150_000); // 75% of 200K
+    // No review file → normally review-required block. But context >= 50% forces compact first.
+    const transcript = writeTranscript(cwd, 130_000); // 65%
     const out = await runStop(tmp, cwd, sessionId, transcript);
+
     expect(out.decision).toBe('block');
-    // Compact warning must be independent of the block decision.
-    expect(out.systemMessage).toBeDefined();
-    expect(out.systemMessage).toContain(COMPACT_MARKER);
-    expect(out.systemMessage).toContain('75%');
+    expect(out.reason).toContain('강제'); // compact-force reason, NOT the review reason
+    expect(out.reason ?? '').not.toContain('리뷰가 필요합니다');
+    expect(out.stopReason).toBe('compact_needed');
   });
 
-  test('context < 50% → NO compact warning (pass path stays clean)', async () => {
+  test('context < 50% → NO force; review enforcement intact (review-required block)', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 1, [CODE_FILE]);
+    const transcript = writeTranscript(cwd, 80_000); // 40% — below force threshold
+    const out = await runStop(tmp, cwd, sessionId, transcript);
+
+    expect(out.decision).toBe('block');
+    expect(out.reason).toContain('리뷰가 필요합니다');
+    expect(out.stopReason).toBeUndefined();
+    expect(out.additionalContext).toBeUndefined();
+  });
+
+  test('context < 50% + passing review → clean pass (no force fields)', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, [CODE_FILE]);
     writeReview(cwd, passingReview());
-    const transcript = writeTranscript(cwd, 80_000); // 40% of 200K
+    const transcript = writeTranscript(cwd, 80_000); // 40%
     const out = await runStop(tmp, cwd, sessionId, transcript);
+
     expect(out.decision).toBeUndefined();
-    // Passing review with no other findings → no systemMessage at all here.
-    expect(out.systemMessage ?? '').not.toContain(COMPACT_MARKER);
+    expect(out.stopReason).toBeUndefined();
+    expect(out.reason).toBeUndefined();
   });
 
-  test('context < 50% → NO compact warning on a BLOCK path either', async () => {
+  test('MAX_RETRIES escape: repeated force eventually passes with a warning (no infinite block)', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, [CODE_FILE]);
-    const transcript = writeTranscript(cwd, 90_000); // 45% of 200K
-    const out = await runStop(tmp, cwd, sessionId, transcript);
-    expect(out.decision).toBe('block');
-    expect(out.systemMessage ?? '').not.toContain(COMPACT_MARKER);
+    writeReview(cwd, passingReview()); // so the escaped turn can actually pass review
+    const transcript = writeTranscript(cwd, 120_000); // 60% — always over threshold
+
+    const out1 = await runStop(tmp, cwd, sessionId, transcript);
+    const out2 = await runStop(tmp, cwd, sessionId, transcript);
+    const out3 = await runStop(tmp, cwd, sessionId, transcript);
+
+    // First two genuine stops: forced block.
+    expect(out1.decision).toBe('block');
+    expect(out1.stopReason).toBe('compact_needed');
+    expect(out2.decision).toBe('block');
+    // Third: MAX_RETRIES(3) escape → not force-blocked; passes with an escape warning.
+    expect(out3.decision).toBeUndefined();
+    expect(out3.stopReason).toBeUndefined();
+    expect(out3.systemMessage ?? '').toContain('H1-03 강제');
+    expect(out3.systemMessage ?? '').toContain('3회');
   });
 
-  test('no transcript_path / unmeasurable → no warning, review enforcement intact', async () => {
+  test('no transcript / unmeasurable → no force; review enforcement intact', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, [CODE_FILE]);
-    // No transcript at all → measurement fails → silent pass-through (no warning).
-    const out = await runStop(tmp, cwd, sessionId);
-    // Existing review enforcement must still BLOCK (no review file present).
+    const out = await runStop(tmp, cwd, sessionId); // no transcript
     expect(out.decision).toBe('block');
     expect(out.reason).toContain('리뷰');
-    expect(out.systemMessage ?? '').not.toContain(COMPACT_MARKER);
-  });
-
-  test('existing review enforcement unchanged when context is high (block reason intact)', async () => {
-    const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [CODE_FILE]);
-    const transcript = writeTranscript(cwd, 180_000); // 90% — well over threshold
-    const out = await runStop(tmp, cwd, sessionId, transcript);
-    // The review-required block must still fire with its original reason...
-    expect(out.decision).toBe('block');
-    expect(out.reason).toContain('리뷰가 필요합니다');
-    // ...and the compact warning is additive, not a replacement.
-    expect(out.systemMessage).toContain(COMPACT_MARKER);
+    expect(out.stopReason).toBeUndefined();
   });
 });

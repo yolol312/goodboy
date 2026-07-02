@@ -45,11 +45,13 @@ export const TOKEN_HABITS: Record<string, TokenHabit> = {
   },
   'H1-03': {
     id: 'H1-03',
-    title: '컨텍스트 다단계 compact 경고',
-    envVars: ['VCF_COMPACT_WARN_PCT'],
-    defaults: { VCF_COMPACT_WARN_PCT: 50 },
+    title: '컨텍스트 자동 compact 강제',
+    envVars: ['VCF_COMPACT_FORCE_PCT'],
+    defaults: { VCF_COMPACT_FORCE_PCT: 50 },
     description:
-      '컨텍스트 점유율 50/70/85% 단계별로 강도 상승 경고(비차단). 같은 단계는 세션당 1회.',
+      '컨텍스트 점유율이 강제 임계(기본 50%) 이상이면 자동 compact 신호(stopReason: compact_needed)와 ' +
+      'decision:block으로 턴 종료를 막아 compact를 강제(공격적). ' +
+      'MAX_RETRIES 초과 시 통과+경고(무한 block 방지). 임계 미만이면 아무 동작 없음.',
   },
   'H2-01': {
     id: 'H2-01',
@@ -113,8 +115,6 @@ export function envStr(name: string, dflt: string): string {
 export interface HabitState {
   /** H1-01: 세션 시작 시각(ISO). 최초 1회 기록. */
   sessionStartTs?: string;
-  /** H1-03: 마지막으로 노출한 compact 경고 단계(0/50/70/85). */
-  compactWarnStage?: number;
   /** H1-01: 긴 세션 경고를 이미 냈는지. */
   longSessionWarned?: boolean;
   /** H2-02(구): 이미 경고한 Bash flood 패턴 키 목록(사전 경고 시절 잔재, 하위호환용). */
@@ -149,38 +149,12 @@ export function writeHabitState(sessionId: string, state: HabitState): void {
   }
 }
 
-// --- H1-03: 컨텍스트 다단계 경고 --------------------------------------------
+// --- H1-03: 컨텍스트 자동 compact 강제 --------------------------------------
 
-/** compact 경고 단계 임계값. 최저 임계는 VCF_COMPACT_WARN_PCT로 조정(기본 50), 70/85는 고정. */
-export function compactStages(): number[] {
-  const low = envInt('VCF_COMPACT_WARN_PCT', 50);
-  return [low, 70, 85];
-}
-
-/** percent가 초과(>)한 임계값 중 가장 높은 단계를 반환. 하나도 초과 안 하면 0. */
-export function highestStageReached(percent: number, stages: number[]): number {
-  let reached = 0;
-  for (const s of stages) {
-    if (percent > s && s > reached) reached = s;
-  }
-  return reached;
-}
-
-/** 단계별 compact 경고 문구. stage>=70이면 "강한 경고"로 취급. */
-export function compactMessageForStage(stage: number, percent: number): string {
-  const p = Math.round(percent);
-  if (stage >= 85) {
-    return `⚠️ 컨텍스트 사용량 ${p}% — 즉시 /compact 또는 새 세션 시작을 강력히 권장합니다. (H1-03)`;
-  }
-  if (stage >= 70) {
-    return `⚠️ 컨텍스트 사용량 ${p}% — 지금 /compact 하세요. (H1-03)`;
-  }
-  return `⚠️ 컨텍스트 사용량 ${p}% — 곧 /compact 실행을 권장합니다. (H1-03)`;
-}
-
-/** stage가 "강한 경고"(70% 이상)인지. H1-01 스팸 억제 판단에 사용. */
-export function isStrongCompactStage(stage: number): boolean {
-  return stage >= 70;
+/** 강제 자동 compact 임계(%). 컨텍스트 점유율이 이 값 이상이면 Stop 훅이 compact를 강제한다.
+ *  VCF_COMPACT_FORCE_PCT로 조정, 기본 50. (하위 경고 단계 없이 전부 "강제"로 통일) */
+export function compactForcePct(): number {
+  return envInt('VCF_COMPACT_FORCE_PCT', 50);
 }
 
 // --- H2-02: Bash 대량출력 패턴 판정 -----------------------------------------

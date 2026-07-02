@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-// H1-03(다단계 compact 경고) + H1-01(긴 세션 경고)의 Stop hook 통합 테스트.
+// H1-03(강제 자동 compact) + H1-01(긴 세션 경고) 상호작용의 Stop hook 통합 테스트.
 const STOP_HOOK = resolve(import.meta.dir, '..', 'hooks', 'stop.ts');
 const tmpDirs: string[] = [];
 
@@ -66,6 +66,7 @@ interface StopOut {
   decision?: string;
   reason?: string;
   systemMessage?: string;
+  stopReason?: string;
 }
 
 async function runStop(
@@ -98,56 +99,41 @@ async function runStop(
 
 const CODE_FILE = '/repo/util.ts';
 
-describe('Stop hook — H1-03 multi-stage compact warning', () => {
-  test('stage 50 fires "곧" wording on first crossing', async () => {
+describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
+  test('context >= 50% → force block with compact-force reason + stopReason', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, [CODE_FILE]);
-    const t = writeTranscript(cwd, 120_000); // 60% → stage 50
+    const t = writeTranscript(cwd, 120_000); // 60% → force
     const out = await runStop(tmp, cwd, sessionId, t);
-    expect(out.systemMessage).toContain('/compact');
-    expect(out.systemMessage).toContain('곧');
-    expect(out.systemMessage).toContain('H1-03');
+    expect(out.decision).toBe('block');
+    expect(out.reason).toContain('강제');
+    expect(out.reason).toContain('/compact');
+    expect(out.stopReason).toBe('compact_needed');
   });
 
-  test('escalation: already warned at 50 → crossing 70 re-warns with stronger wording', async () => {
+  test('force suppresses H1-01 long-session warning even when tokens are high', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, [CODE_FILE]);
-    seedHabitState(tmp, sessionId, {
-      sessionStartTs: new Date().toISOString(),
-      compactWarnStage: 50,
-      longSessionWarned: true,
-    });
-    const t = writeTranscript(cwd, 150_000); // 75% → stage 70
+    // 120k tokens = 60% (>= force 50%) AND above token warn 50k → but force wins, H1-01 suppressed.
+    const t = writeTranscript(cwd, 120_000);
     const out = await runStop(tmp, cwd, sessionId, t);
-    expect(out.systemMessage).toContain('지금');
-    expect(out.systemMessage).toContain('/compact');
-  });
-
-  test('suppression: same stage already shown → no repeat warning', async () => {
-    const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [CODE_FILE]);
-    seedHabitState(tmp, sessionId, {
-      sessionStartTs: new Date().toISOString(),
-      compactWarnStage: 50,
-      longSessionWarned: true,
-    });
-    const t = writeTranscript(cwd, 120_000); // 60% → still stage 50 (already shown)
-    const out = await runStop(tmp, cwd, sessionId, t);
-    expect(out.systemMessage ?? '').not.toContain('/compact');
-    expect(out.systemMessage ?? '').not.toContain('긴 세션');
+    expect(out.decision).toBe('block');
+    expect(out.reason).toContain('강제');
+    expect(out.systemMessage ?? '').not.toContain('긴 세션'); // H1-01 suppressed
   });
 });
 
 describe('Stop hook — H1-01 long-session warning', () => {
-  test('token-based: tokens over VCF_TOKEN_WARN (below compact %) → long-session warning, no /compact', async () => {
+  test('token-based: tokens over VCF_TOKEN_WARN but below force % → long-session warning, no force', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, [CODE_FILE]);
-    // 60k tokens = 30% (below 50% compact) but above default token warn 50k.
+    // 60k tokens = 30% (below 50% force) but above default token warn 50k.
     const t = writeTranscript(cwd, 60_000);
     const out = await runStop(tmp, cwd, sessionId, t);
     expect(out.systemMessage).toContain('긴 세션');
     expect(out.systemMessage).toContain('H1-01');
-    expect(out.systemMessage ?? '').not.toContain('/compact');
+    expect(out.stopReason).toBeUndefined();
+    expect(out.reason ?? '').not.toContain('강제');
   });
 
   test('time-based: old sessionStartTs → long-session warning', async () => {
@@ -158,16 +144,7 @@ describe('Stop hook — H1-01 long-session warning', () => {
     const t = writeTranscript(cwd, 10_000); // 5% — nothing else triggers
     const out = await runStop(tmp, cwd, sessionId, t);
     expect(out.systemMessage).toContain('긴 세션');
-  });
-
-  test('suppressed when H1-03 fires a STRONG (85%) warning in the same Stop', async () => {
-    const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [CODE_FILE]);
-    const t = writeTranscript(cwd, 180_000); // 90% → stage 85 (strong)
-    const out = await runStop(tmp, cwd, sessionId, t);
-    expect(out.systemMessage).toContain('즉시');
-    expect(out.systemMessage).toContain('/compact');
-    expect(out.systemMessage ?? '').not.toContain('긴 세션'); // H1-01 suppressed
+    expect(out.stopReason).toBeUndefined();
   });
 
   test('fail-open: no transcript → no habit warnings (review enforcement intact)', async () => {
@@ -176,6 +153,6 @@ describe('Stop hook — H1-01 long-session warning', () => {
     const out = await runStop(tmp, cwd, sessionId);
     expect(out.decision).toBe('block'); // review still required
     expect(out.systemMessage ?? '').not.toContain('긴 세션');
-    expect(out.systemMessage ?? '').not.toContain('/compact');
+    expect(out.stopReason).toBeUndefined();
   });
 });

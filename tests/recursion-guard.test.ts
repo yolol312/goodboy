@@ -40,6 +40,25 @@ describe('recursion-guard hashPrompt', () => {
   });
 });
 
+describe('recursion-guard 강화된 임계값 (동일5/총30)', () => {
+  test('상수값이 강화 기준(5/30/60000)으로 고정되어 있다', () => {
+    expect(MAX_SAME_PROMPT).toBe(5);
+    expect(MAX_TOTAL).toBe(30);
+    expect(WINDOW_MS).toBe(60_000);
+  });
+
+  test('차단 메시지에 새 동일-프롬프트 임계(5)가 반영된다', () => {
+    const sid = newSession();
+    const now = 7_000_000;
+    let reason = '';
+    for (let i = 0; i < MAX_SAME_PROMPT; i++) {
+      const r = checkRecursionGuard(sid, 'flood same', now + i);
+      if (r.reason) reason = r.reason;
+    }
+    expect(reason).toContain(String(MAX_SAME_PROMPT)); // '5'
+  });
+});
+
 describe('recursion-guard checkRecursionGuard', () => {
   test('정상 케이스: 소수 호출은 통과', () => {
     const sid = newSession();

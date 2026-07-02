@@ -6,8 +6,8 @@
 //       "가볍고 보수적인" 방어선만 둔다.
 //
 // 역할:
-//   - 슬라이딩 윈도우(60초) 내 Agent/Task 총 호출 수가 상한(60)을 넘으면 차단.
-//   - 동일(정규화된) 프롬프트 해시가 윈도우(60초) 내 임계값(12회) 이상 반복되면 차단.
+//   - 슬라이딩 윈도우(60초) 내 Agent/Task 총 호출 수가 상한(30)을 넘으면 차단.
+//   - 동일(정규화된) 프롬프트 해시가 윈도우(60초) 내 임계값(5회) 이상 반복되면 차단.
 //   정상 병렬/재시도는 통과, 순간적 수백~수천 회 폭주만 차단한다.
 //
 // 안전성(fail-open):
@@ -23,13 +23,13 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs
 import { join } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
 
-// ---- 보수적 임계값 (recursion-guard.sh 글로벌판과 동일) ----------------------
+// ---- 보수적 임계값 (재귀 폭주 방어 강화 기준) --------------------------------
 /** 슬라이딩 윈도우 (밀리초). 60초. */
 export const WINDOW_MS = 60_000;
-/** 윈도우 내 Agent/Task 총 호출 상한. 이 값을 초과(>)하면 차단. */
-export const MAX_TOTAL = 60;
-/** 윈도우 내 동일 프롬프트 해시 반복 임계. 이 값 이상(>=)이면 차단. */
-export const MAX_SAME_PROMPT = 12;
+/** 윈도우 내 Agent/Task 총 호출 상한. 이 값을 초과(>)하면 차단. (강화: 60→30) */
+export const MAX_TOTAL = 30;
+/** 윈도우 내 동일 프롬프트 해시 반복 임계. 이 값 이상(>=)이면 차단. (강화: 12→5) */
+export const MAX_SAME_PROMPT = 5;
 // -----------------------------------------------------------------------------
 
 const STATE_FILE = 'recursion-guard.jsonl';

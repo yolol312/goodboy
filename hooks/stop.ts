@@ -4,8 +4,7 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import {
-  compactMessageForStage,
-  compactStages,
+  compactForcePct,
   envInt,
   findRecentReviewFile,
   getContextUsage,
@@ -13,9 +12,7 @@ import {
   getEditsSince,
   getLatestEditTimestampSince,
   highSeverityFindings,
-  highestStageReached,
   incrementTurn,
-  isStrongCompactStage,
   readHabitState,
   readReviewCursor,
   requiredDimensionsFor,
@@ -37,6 +34,10 @@ interface HookOutput {
   decision?: 'block';
   reason?: string;
   systemMessage?: string;
+  // context-watchdog.sh와 동일한 자동 compact 유도 신호(H1-03 강제):
+  //   top-level stopReason: 'compact_needed' + top-level additionalContext.
+  stopReason?: string;
+  additionalContext?: string;
   hookSpecificOutput?: {
     hookEventName: 'Stop';
     additionalContext?: string;
@@ -45,7 +46,11 @@ interface HookOutput {
 
 const MAX_RETRIES = 3;
 
-// 이번 Stop 실행에서 사용자에게 보일 토큰-습관 경고들(H1-03 compact 단계 경고, H1-01 긴 세션 경고).
+// H1-03 강제 자동 compact 재시도 카운터 파일. review 재시도(.vcf-retry-count.txt)와
+// 간섭하지 않도록 별도 파일에 동일 escape 패턴(MAX_RETRIES)으로 관리한다.
+const COMPACT_FORCE_COUNT_FILE = '.vcf-compact-force-count.txt';
+
+// 이번 Stop 실행에서 사용자에게 보일 토큰-습관 경고들(H1-01 긴 세션 경고, H1-03 강제 escape 통지).
 // emit()이 모든 출력 경로(block/pass)의 systemMessage에 이 경고들을 덧붙인다 —
 // 이 권고들은 리뷰 통과/차단과 독립적이어야 하기 때문.
 const habitWarnings: string[] = [];
@@ -58,52 +63,28 @@ async function readStdin(): Promise<string> {
   return data;
 }
 
-/** H1-03(다단계 compact 경고) + H1-01(긴 세션 경고)을 계산해 habitWarnings에 채운다.
+/** (H1-01) 긴 세션(경과시간/절대토큰) 경고를 계산해 habitWarnings에 채운다.
  *  - fail-open: 예외/측정불가면 조용히 통과(경고 없음). 절대 throw 하지 않는다.
- *  - 스팸 억제: compact 경고는 같은 단계 세션당 1회(더 높은 단계로 올라갈 때만 재경고).
- *    긴 세션 경고는 세션당 1회.
- *  - 중복 방지: H1-03가 이번 Stop에 강한 경고(70%+)를 냈으면 H1-01은 생략한다. */
-function maybeSetHabitWarnings(transcriptPath: string | undefined, sessionId: string): void {
+ *  - 세션당 1회. H1-03 강제가 이번 Stop에 발동했으면(forceActive) 스팸 방지로 생략한다.
+ *  - 세션 시작 시각(sessionStartTs)은 최초 1회 기록한다(시간 기반 판단용). */
+function maybeSetLongSessionWarning(
+  usage: ReturnType<typeof getContextUsage>,
+  sessionId: string,
+  forceActive: boolean,
+): void {
   try {
     const state = readHabitState(sessionId);
     let dirty = false;
 
-    // (H1-01) 세션 시작 시각 최초 1회 기록. 첫 Stop에선 경과시간 ~0이라 경고가 뜨지 않는다.
+    // 세션 시작 시각 최초 1회 기록. 첫 Stop에선 경과시간 ~0이라 경고가 뜨지 않는다.
     const nowMs = Date.now();
     if (!state.sessionStartTs) {
       state.sessionStartTs = new Date(nowMs).toISOString();
       dirty = true;
     }
 
-    // 컨텍스트 사용량(측정 실패 시 null → compact/token 경고 생략).
-    let usage: ReturnType<typeof getContextUsage> = null;
-    if (transcriptPath) {
-      try {
-        usage = getContextUsage(transcriptPath);
-      } catch {
-        usage = null;
-      }
-    }
-
-    // --- H1-03: 다단계 compact 경고 (50/70/85, 최저 임계는 VCF_COMPACT_WARN_PCT) ---
-    let strongCompactThisRun = false;
-    if (usage) {
-      const stages = compactStages();
-      const reached = highestStageReached(usage.percent, stages);
-      const lastStage = typeof state.compactWarnStage === 'number' ? state.compactWarnStage : 0;
-      if (reached > 0 && reached > lastStage) {
-        // 더 높은 단계로 처음 올라감 → 경고.
-        habitWarnings.push(compactMessageForStage(reached, usage.percent));
-        state.compactWarnStage = reached;
-        dirty = true;
-      }
-      // 현재 강한 단계(70%+)에 있으면 H1-01 중복 억제 판단에 반영(이미 경고했든 아니든).
-      if (reached > 0 && isStrongCompactStage(reached)) strongCompactThisRun = true;
-    }
-
-    // --- H1-01: 긴 세션(경과시간/절대토큰) 경고 ---
-    // H1-03가 이번 Stop에 강한 경고를 냈으면 스팸 방지를 위해 생략. 세션당 1회.
-    if (!strongCompactThisRun && !state.longSessionWarned) {
+    // H1-03 강제가 이번 Stop에 발동했으면 스팸 방지를 위해 H1-01 생략. 세션당 1회.
+    if (!forceActive && !state.longSessionWarned) {
       const timeWarnMin = envInt('VCF_SESSION_TIME_WARN_MIN', 35);
       const tokenWarn = envInt('VCF_TOKEN_WARN', 50_000);
       const startMs = state.sessionStartTs ? Date.parse(state.sessionStartTs) : NaN;
@@ -111,7 +92,7 @@ function maybeSetHabitWarnings(transcriptPath: string | undefined, sessionId: st
       const timeExceeded = elapsedMin > timeWarnMin;
       const tokenExceeded = usage ? usage.tokens > tokenWarn : false;
       if (timeExceeded || tokenExceeded) {
-        // ⚠️ 문구에 '/compact' 문자열을 넣지 않는다(compact 경고와 구분 + 기존 테스트 보존).
+        // ⚠️ 문구에 '/compact' 문자열을 넣지 않는다(강제 신호와 구분 + 기존 테스트 보존).
         habitWarnings.push(
           '긴 세션이 감지되었습니다 — 새 세션 시작 또는 대화 압축을 권장합니다. (긴 세션 경고, H1-01)',
         );
@@ -123,6 +104,68 @@ function maybeSetHabitWarnings(transcriptPath: string | undefined, sessionId: st
     if (dirty) writeHabitState(sessionId, state);
   } catch {
     // fail-open — 경고 계산 실패해도 Stop 흐름을 막지 않는다.
+  }
+}
+
+/** (H1-03) 컨텍스트 자동 compact 강제 판정.
+ *  컨텍스트 점유율이 VCF_COMPACT_FORCE_PCT(기본 50) 이상이면:
+ *   1) context-watchdog.sh와 동일한 자동 compact 유도 신호
+ *      (top-level stopReason: 'compact_needed' + additionalContext)를 실어 하네스 compact를 유도하고,
+ *   2) decision:'block' + reason으로 턴 종료를 막아 확실히 compact를 강제한다.
+ *  무한 block 방지: stop_hook_active(main B단계에서 조기 return)와 MAX_RETRIES escape를 재사용한다.
+ *   - 별도 카운터 파일(.vcf-compact-force-count.txt)을 사용해 review 재시도와 간섭하지 않는다.
+ *   - 강제가 MAX_RETRIES회 이상 지속되면 통과시키고 경고만 남긴다(영구 정지 방지).
+ *   - 임계 미만이면 카운터를 리셋하고 아무 동작도 하지 않는다.
+ *  fail-open: 측정 불가/예외 시 강제하지 않는다(null 반환).
+ *
+ *  @returns output: emit할 HookOutput(block) 또는 null(강제 안 함/escape 통과).
+ *           forced: 이번 Stop에서 강제가 발동했는지(escape 통과 포함) — H1-01 스팸 억제 판단용. */
+function maybeForceCompact(
+  usage: ReturnType<typeof getContextUsage>,
+  cwd: string,
+): { output: HookOutput | null; forced: boolean } {
+  try {
+    if (!usage) return { output: null, forced: false };
+    const forcePct = compactForcePct();
+    const pct = Math.round(usage.percent);
+    const claudeDir = ensureClaudeDir(cwd);
+
+    // 임계 미만 → 카운터 리셋 후 아무 동작 없음.
+    if (usage.percent < forcePct) {
+      resetRetryCount(claudeDir, COMPACT_FORCE_COUNT_FILE);
+      return { output: null, forced: false };
+    }
+
+    const count = readRetryCount(claudeDir, COMPACT_FORCE_COUNT_FILE) + 1;
+
+    // MAX_RETRIES escape — 강제를 반복했는데도 해소되지 않음 → 통과 + 경고(무한 block 방지).
+    if (count >= MAX_RETRIES) {
+      resetRetryCount(claudeDir, COMPACT_FORCE_COUNT_FILE);
+      habitWarnings.push(
+        `컨텍스트 사용률 ${pct}%가 지속됩니다. 자동 압축 강제를 ${MAX_RETRIES}회 시도했으나 ` +
+          '해소되지 않아 이번 턴은 통과시킵니다. 수동으로 /compact 또는 새 세션을 권장합니다. (H1-03 강제)',
+      );
+      return { output: null, forced: true };
+    }
+
+    writeRetryCount(claudeDir, count, COMPACT_FORCE_COUNT_FILE);
+    return {
+      output: {
+        decision: 'block',
+        reason:
+          `컨텍스트 사용률 ${pct}%로 임계 초과. 자동 압축이 필요합니다. ` +
+          `/compact 후 계속하세요. (H1-03 강제, ${count}/${MAX_RETRIES})`,
+        // context-watchdog.sh와 동일한 자동 compact 유도 신호(하네스가 인식하면 자동 compact 수행).
+        stopReason: 'compact_needed',
+        additionalContext:
+          `🔴 컨텍스트 사용량 ${pct}% (강제 임계 ${forcePct}% 초과). 자동 /compact를 실행합니다. ` +
+          '현재 작업의 핵심 결정사항과 남은 작업에 집중하여 compact하세요.',
+      },
+      forced: true,
+    };
+  } catch {
+    // fail-open — 판정 실패 시 강제하지 않는다.
+    return { output: null, forced: false };
   }
 }
 
@@ -150,9 +193,9 @@ function ensureClaudeDir(cwd: string): string {
   return dir;
 }
 
-function readRetryCount(claudeDir: string): number {
+function readRetryCount(claudeDir: string, file: string = '.vcf-retry-count.txt'): number {
   try {
-    const path = resolvePath(claudeDir, '.vcf-retry-count.txt');
+    const path = resolvePath(claudeDir, file);
     if (!existsSync(path)) return 0;
     const raw = readFileSync(path, 'utf8').trim();
     const n = parseInt(raw, 10);
@@ -162,17 +205,17 @@ function readRetryCount(claudeDir: string): number {
   }
 }
 
-function writeRetryCount(claudeDir: string, n: number): void {
+function writeRetryCount(claudeDir: string, n: number, file: string = '.vcf-retry-count.txt'): void {
   try {
-    writeFileSync(resolvePath(claudeDir, '.vcf-retry-count.txt'), String(n), 'utf8');
+    writeFileSync(resolvePath(claudeDir, file), String(n), 'utf8');
   } catch {
     // best-effort
   }
 }
 
-function resetRetryCount(claudeDir: string): void {
+function resetRetryCount(claudeDir: string, file: string = '.vcf-retry-count.txt'): void {
   try {
-    const path = resolvePath(claudeDir, '.vcf-retry-count.txt');
+    const path = resolvePath(claudeDir, file);
     if (existsSync(path)) unlinkSync(path);
   } catch {
     // best-effort
@@ -207,11 +250,31 @@ function main(): void {
         return;
       }
 
-      // (B2) auto-compact 경고 — 컨텍스트 점유율이 임계치를 넘으면 /compact 권고를
-      //   준비한다. emit()이 이후 모든 출력 경로(리뷰 block/pass)의 systemMessage에
-      //   이 경고를 덧붙이므로, 리뷰 통과/차단과 독립적으로 사용자에게 노출된다.
-      //   (B)의 무한루프 early-return은 이 위에서 끝나므로 그 경로엔 경고가 붙지 않는다.
-      maybeSetHabitWarnings(input.transcript_path, sessionId);
+      // (B2) 컨텍스트 사용량 측정. 측정 실패(null)면 강제/경고를 모두 생략한다(fail-open).
+      let usage: ReturnType<typeof getContextUsage> = null;
+      if (input.transcript_path) {
+        try {
+          usage = getContextUsage(input.transcript_path);
+        } catch {
+          usage = null;
+        }
+      }
+
+      // (B3) H1-03 강제 자동 compact — 컨텍스트 점유율이 강제 임계(기본 50%) 이상이면
+      //   자동 compact 신호 + decision:block으로 턴 종료를 막아 확실히 compact를 강제한다.
+      //   무한 block은 stop_hook_active(위 B)와 MAX_RETRIES escape로 방지한다.
+      const force = maybeForceCompact(usage, cwd);
+
+      // (B4) H1-01 긴 세션 경고 준비 — 강제가 발동했으면(force.forced) 스팸 방지로 생략.
+      //   emit()이 이후 모든 출력 경로의 systemMessage에 habitWarnings를 덧붙인다.
+      maybeSetLongSessionWarning(usage, sessionId, force.forced);
+
+      // 강제 block이 결정되면 리뷰 검사보다 우선해 즉시 emit하고 종료한다.
+      //   (B)의 무한루프 early-return은 위에서 끝나므로 강제/경고가 붙지 않는다.
+      if (force.output) {
+        emit(force.output);
+        return;
+      }
 
       // (C) 변경 검사 — 마지막으로 수락된 리뷰(커서) 이후 편집된 파일만 본다.
       //   커서 부재(첫 리뷰) → turn 0 = 세션 시작 이후 모든 편집.

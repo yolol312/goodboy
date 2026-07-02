@@ -3,11 +3,8 @@ import {
   bashOutputFloodMessage,
   bashOutputWarnThresholds,
   classifyBashFlood,
-  compactMessageForStage,
-  compactStages,
+  compactForcePct,
   extractBashOutput,
-  highestStageReached,
-  isStrongCompactStage,
   measureOutput,
   TOKEN_HABITS,
   wantsDetail,
@@ -37,41 +34,20 @@ describe('token-habits catalog', () => {
   });
 });
 
-describe('H1-03 compact stages', () => {
-  test('default stages are 50/70/85', () => {
-    setEnv('VCF_COMPACT_WARN_PCT', undefined);
-    expect(compactStages()).toEqual([50, 70, 85]);
+describe('H1-03 compact force threshold', () => {
+  test('default force threshold is 50%', () => {
+    setEnv('VCF_COMPACT_FORCE_PCT', undefined);
+    expect(compactForcePct()).toBe(50);
   });
 
-  test('VCF_COMPACT_WARN_PCT overrides only the lowest threshold', () => {
-    setEnv('VCF_COMPACT_WARN_PCT', '40');
-    expect(compactStages()).toEqual([40, 70, 85]);
+  test('VCF_COMPACT_FORCE_PCT overrides the force threshold', () => {
+    setEnv('VCF_COMPACT_FORCE_PCT', '65');
+    expect(compactForcePct()).toBe(65);
   });
 
-  test('highestStageReached picks the highest exceeded threshold (strict >)', () => {
-    const stages = [50, 70, 85];
-    expect(highestStageReached(49.9, stages)).toBe(0);
-    expect(highestStageReached(50, stages)).toBe(0); // strictly greater
-    expect(highestStageReached(60, stages)).toBe(50);
-    expect(highestStageReached(75, stages)).toBe(70);
-    expect(highestStageReached(90, stages)).toBe(85);
-  });
-
-  test('messages escalate in strength and carry habit ID + percent', () => {
-    expect(compactMessageForStage(50, 60)).toContain('곧');
-    expect(compactMessageForStage(50, 60)).toContain('/compact');
-    expect(compactMessageForStage(50, 60)).toContain('60%');
-    expect(compactMessageForStage(70, 75)).toContain('지금');
-    expect(compactMessageForStage(85, 90)).toContain('즉시');
-    for (const stage of [50, 70, 85]) {
-      expect(compactMessageForStage(stage, 88)).toContain('H1-03');
-    }
-  });
-
-  test('isStrongCompactStage true only at 70%+', () => {
-    expect(isStrongCompactStage(50)).toBe(false);
-    expect(isStrongCompactStage(70)).toBe(true);
-    expect(isStrongCompactStage(85)).toBe(true);
+  test('catalog H1-03 exposes VCF_COMPACT_FORCE_PCT default 50', () => {
+    expect(TOKEN_HABITS['H1-03']!.envVars).toContain('VCF_COMPACT_FORCE_PCT');
+    expect(TOKEN_HABITS['H1-03']!.defaults.VCF_COMPACT_FORCE_PCT).toBe(50);
   });
 });
 
