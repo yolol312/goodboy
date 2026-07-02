@@ -335,3 +335,137 @@ describe('getContextUsage — VCF_CONTEXT_LIMIT env override & safe 1M defaultin
     expect(u!.percent).toBeGreaterThan(100);
   });
 });
+
+
+describe('getContextUsage — runtime dynamic 1M detection (low-token false-positive fix)', () => {
+  const ORIG = process.env.VCF_CONTEXT_LIMIT;
+  afterEach(() => {
+    if (ORIG === undefined) delete process.env.VCF_CONTEXT_LIMIT;
+    else process.env.VCF_CONTEXT_LIMIT = ORIG;
+  });
+
+  /** Write a settings.json in a fresh temp dir and return its path (cleaned via shared tmpDirs). */
+  function writeSettings(model: unknown): string {
+    const dir = mkdtempSync(join(tmpdir(), 'vcf-ctx-settings-'));
+    tmpDirs.push(dir);
+    const path = join(dir, 'settings.json');
+    writeFileSync(path, JSON.stringify({ model }), 'utf8');
+    return path;
+  }
+
+  test('KEY SCENARIO: 1M session at 150K tokens → 15% (no false 75% force) via transcript resolvedModel', () => {
+    // usage 줄 model엔 표식이 없지만(claude-opus-4-8), Task 결과 resolvedModel엔 [1m]이 있다.
+    delete process.env.VCF_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({
+        type: 'user',
+        toolUseResult: { resolvedModel: 'claude-opus-4-8[1m]', status: 'completed' },
+      }),
+      JSON.stringify({
+        message: { model: 'claude-opus-4-8', usage: { input_tokens: 150_000 } },
+      }),
+    ]);
+    const u = getContextUsage(path);
+    expect(u).not.toBeNull();
+    expect(u!.limit).toBe(1_000_000);
+    expect(u!.tokens).toBe(150_000);
+    expect(u!.percent).toBeCloseTo(15, 5); // 200K였다면 75% → H1-03 오탐. 이제 15%.
+    expect(u!.percent).toBeLessThan(50);
+  });
+
+  test('structural resolvedModel [1m] anywhere (even after the usage line) is detected', () => {
+    delete process.env.VCF_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 120_000 } } }),
+      JSON.stringify({ toolUseResult: { resolvedModel: 'claude-sonnet-4-5[1m]' } }),
+    ]);
+    const u = getContextUsage(path);
+    expect(u!.limit).toBe(1_000_000);
+  });
+
+  test('hook input model with [1m] forces 1M even at low tokens', () => {
+    delete process.env.VCF_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 100_000 } } }),
+    ]);
+    const u = getContextUsage(path, { hookInput: { model: 'claude-opus-4-8[1m]' } });
+    expect(u!.limit).toBe(1_000_000);
+    expect(u!.percent).toBeCloseTo(10, 5);
+  });
+
+  test('hook input model WITHOUT marker → existing 200K logic preserved', () => {
+    delete process.env.VCF_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 150_000 } } }),
+    ]);
+    const u = getContextUsage(path, { hookInput: { model: 'claude-opus-4-8' } });
+    expect(u!.limit).toBe(200_000);
+    expect(u!.percent).toBeCloseTo(75, 5);
+  });
+
+  test('env override still wins over hook/transcript/settings dynamic signals', () => {
+    process.env.VCF_CONTEXT_LIMIT = '500000';
+    const path = writeTranscript([
+      JSON.stringify({ toolUseResult: { resolvedModel: 'claude-opus-4-8[1m]' } }),
+      JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 250_000 } } }),
+    ]);
+    const u = getContextUsage(path, {
+      hookInput: { model: 'claude-opus-4-8[1m]' },
+      settingsPath: writeSettings('claude-opus-4-8[1m]'),
+    });
+    expect(u!.limit).toBe(500_000); // env가 최우선
+    expect(u!.percent).toBeCloseTo(50, 5);
+  });
+
+  test('settings.json fallback: model [1m] → 1M when no higher-priority signal', () => {
+    delete process.env.VCF_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 150_000 } } }),
+    ]);
+    const u = getContextUsage(path, { settingsPath: writeSettings('claude-opus-4-8[1m]') });
+    expect(u!.limit).toBe(1_000_000);
+    expect(u!.percent).toBeCloseTo(15, 5);
+  });
+
+  test('settings.json without marker does NOT force 1M', () => {
+    delete process.env.VCF_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 150_000 } } }),
+    ]);
+    const u = getContextUsage(path, { settingsPath: writeSettings('claude-opus-4-8') });
+    expect(u!.limit).toBe(200_000);
+  });
+
+  test('fail-open: missing/garbage settings path never throws, falls through to default', () => {
+    delete process.env.VCF_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 150_000 } } }),
+    ]);
+    const missing = getContextUsage(path, { settingsPath: '/nonexistent/x/settings.json' });
+    expect(missing!.limit).toBe(200_000);
+
+    const garbageDir = mkdtempSync(join(tmpdir(), 'vcf-ctx-badsettings-'));
+    tmpDirs.push(garbageDir);
+    const garbagePath = join(garbageDir, 'settings.json');
+    writeFileSync(garbagePath, '{ not json', 'utf8');
+    const garbage = getContextUsage(path, { settingsPath: garbagePath });
+    expect(garbage!.limit).toBe(200_000);
+  });
+
+  test('false-positive guard: "[1m]" only in message CONTENT text (not a model field) → still 200K', () => {
+    delete process.env.VCF_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          model: 'claude-opus-4-8', // 표식 없음
+          content: [{ type: 'text', text: 'docs mention claude-opus-4-8[1m] here' }],
+          usage: { input_tokens: 150_000 },
+        },
+      }),
+    ]);
+    const u = getContextUsage(path);
+    expect(u!.limit).toBe(200_000); // 본문 텍스트의 [1m]은 구조적 신호가 아니므로 무시
+    expect(u!.percent).toBeCloseTo(75, 5);
+  });
+});

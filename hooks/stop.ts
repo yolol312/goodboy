@@ -27,6 +27,9 @@ interface StopInput {
   cwd?: string;
   hook_event_name?: string;
   stop_hook_active?: boolean;
+  // 일부/향후 Claude Code 버전이 세션 모델을 넘길 수 있음(예: `claude-opus-4-8[1m]`).
+  // 있으면 컨텍스트 창 동적 감지의 최우선 신호로 쓴다(없으면 무시).
+  model?: string;
 }
 
 interface HookOutput {
@@ -45,6 +48,18 @@ interface HookOutput {
 }
 
 const MAX_RETRIES = 3;
+
+/** $HOME/.claude/settings.json 경로. HOME 미설정/오류 시 null(설정 폴백을 건너뜀).
+ *  하드코딩 대신 process.env.HOME 기반으로 구성한다. */
+function settingsJsonPath(): string | null {
+  try {
+    const home = process.env.HOME;
+    if (!home || typeof home !== 'string' || home.trim() === '') return null;
+    return resolvePath(home, '.claude', 'settings.json');
+  } catch {
+    return null;
+  }
+}
 
 // H1-03 강제 자동 compact 재시도 카운터 파일. review 재시도(.vcf-retry-count.txt)와
 // 간섭하지 않도록 별도 파일에 동일 escape 패턴(MAX_RETRIES)으로 관리한다.
@@ -254,7 +269,10 @@ function main(): void {
       let usage: ReturnType<typeof getContextUsage> = null;
       if (input.transcript_path) {
         try {
-          usage = getContextUsage(input.transcript_path);
+          usage = getContextUsage(input.transcript_path, {
+            hookInput: input,
+            settingsPath: settingsJsonPath(),
+          });
         } catch {
           usage = null;
         }

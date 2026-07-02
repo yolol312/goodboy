@@ -47,25 +47,103 @@ function envContextLimitOverride(): number | null {
   }
 }
 
+/** 모델 문자열에 1M 확장 컨텍스트 표식(`[1m]` 등)이 있으면 true. (limitForModel 재사용) */
+function modelHasExtendedMarker(model: string | null | undefined): boolean {
+  if (!model || typeof model !== 'string') return false;
+  return limitForModel(model) === EXTENDED_CONTEXT_LIMIT;
+}
+
+/** settings.json(주어진 경로)의 `model` 필드에 1M 표식이 있으면 true.
+ *  신뢰도 중간: CLI `--model` 오버라이드로 실제 세션 모델과 다를 수 있어 폴백으로만 쓴다.
+ *  경로 미제공/읽기 실패/파싱 실패 → 조용히 false(fail-open). 경로는 호출측이
+ *  `$HOME/.claude/settings.json`처럼 HOME 기반으로 넘긴다(여기서 하드코딩하지 않음). */
+function settingsModelHasExtended(settingsPath: string | null | undefined): boolean {
+  if (!settingsPath || typeof settingsPath !== 'string') return false;
+  try {
+    const raw = readFileSync(settingsPath, 'utf8');
+    const parsed = JSON.parse(raw) as { model?: unknown };
+    if (parsed && typeof parsed === 'object' && typeof parsed.model === 'string') {
+      return modelHasExtendedMarker(parsed.model);
+    }
+  } catch {
+    // 조용히 skip (파일 없음/권한/깨진 JSON 등)
+  }
+  return false;
+}
+
+/** 한 transcript 줄(객체)에서 "구조적(파싱된) 모델 필드"에 1M 표식이 있는지 검사한다.
+ *  검사 대상: obj.model / obj.resolvedModel / obj.message.model / obj.message.message.model /
+ *            obj.response.model / obj.toolUseResult.resolvedModel.
+ *  ⚠️ 대화 본문 텍스트에 우연히 들어간 "[1m]"(예: 사용자가 붙여넣은 로그/문서)을 오탐하지 않도록
+ *     반드시 파싱된 모델 필드만 본다(원문 line을 문자열 검색하지 않는다).
+ *  근거: 실제 transcript에서 usage 줄의 message.model은 표식이 없지만(`claude-opus-4-8`),
+ *        Task/Agent tool 결과의 toolUseResult.resolvedModel에는 `claude-opus-4-8[1m]`이 남는다. */
+function objectHasExtendedModelMarker(obj: Record<string, unknown>): boolean {
+  const candidates: unknown[] = [];
+  const push = (c: unknown): void => {
+    if (!c || typeof c !== 'object') return;
+    const o = c as Record<string, unknown>;
+    candidates.push(o.model, o.resolvedModel);
+  };
+  push(obj);
+  if (obj.message && typeof obj.message === 'object') {
+    push(obj.message);
+    push((obj.message as Record<string, unknown>).message);
+  }
+  push(obj.response);
+  push(obj.toolUseResult);
+  for (const c of candidates) {
+    if (typeof c === 'string' && modelHasExtendedMarker(c)) return true;
+  }
+  return false;
+}
+
+interface LimitInputs {
+  /** usage 줄에서 읽은 모델(표시/기본 판별용). */
+  usageLineModel: string | null;
+  /** 현재 점유 토큰(안전 상향 판단용). */
+  tokens: number;
+  /** 훅 입력(Stop/PreToolUse stdin)의 model 필드. 있으면 최우선 동적 신호. */
+  hookModel?: string | null;
+  /** transcript의 구조적 모델 필드에서 1M 표식을 본 적이 있으면 true. */
+  transcriptExtended?: boolean;
+  /** settings.json 경로($HOME 기반). 미제공 시 settings 폴백을 건너뛴다. */
+  settingsPath?: string | null;
+}
+
 /** 최종 컨텍스트 한도를 결정한다(우선순위 명확).
  *   1) VCF_CONTEXT_LIMIT env override — 최우선(모델 판별 무시).
- *   2) 모델 표식(`[1m]` 등) 기반 판별(limitForModel).
- *   3) 안전 상향(오탐 회피): 관측 토큰이 (2)의 한도를 초과하면, 그 한도의 창은
- *      물리적으로 그만큼의 입력을 담을 수 없다 = 실제 창이 더 크다는 "확정 증거"이므로
- *      최소 1M(EXTENDED)으로 올린다. (추측이 아니라 논리적 하한 보정)
- *      → 표식 없는 1M 세션이 200K로 오판돼 percent가 몇 배 부풀고 H1-03가 오탐 발동하는 것을 막는다.
- *      토큰이 1M도 넘으면 진짜 1M 창 오버플로우이므로 percent>100은 정당(오탐 아님).
- *  ⚠️ 전역 기본은 그대로 200K를 유지한다(표식 없는 정상 200K 세션의 H1-03를 무력화하지 않기 위해).
- *     1M 창을 상시 쓰는 환경은 VCF_CONTEXT_LIMIT로 명시하는 것을 권장. */
-function resolveContextLimit(model: string | null, tokens: number): number {
+ *   2) 런타임 동적 감지 — 신뢰 순서대로:
+ *        (a) 훅 입력의 model 필드에 1M 표식 → 1M (있으면 가장 신뢰; 현재 CC 훅엔 대개 없음).
+ *        (b) transcript 구조적 모델 필드(resolvedModel 등)에 1M 표식 → 1M (실측 가능·신뢰).
+ *        (c) settings.json의 model에 1M 표식 → 1M (신뢰도 중간; CLI 오버라이드 가능, 폴백).
+ *      → 표식 없는 1M 세션이 저토큰(예: 150K)일 때 200K로 오판되던 구멍을 닫는다.
+ *   3) 기존 usage-줄 모델 표식 기반 판별(limitForModel). (2b가 사실상 포함하지만 방어적으로 유지)
+ *   4) 안전 상향(오탐 회피): 관측 토큰이 (3)의 한도를 초과하면 물리적으로 그 창일 수 없으므로
+ *      최소 1M으로 올린다. (추측이 아니라 논리적 하한 보정)
+ *   5) 기본 200K.
+ *  ⚠️ 어떤 1M 신호도 없으면 전역 기본은 그대로 200K를 유지한다(정상 200K 세션의 H1-03 유지).
+ *  fail-open: 모든 소스 읽기는 실패해도 예외 없이 다음 순위로 진행한다. */
+function resolveContextLimit(inp: LimitInputs): number {
+  // 1) env override — 최우선
   const override = envContextLimitOverride();
   if (override !== null) return override;
 
-  const modelLimit = limitForModel(model);
-  if (Number.isFinite(tokens) && tokens > modelLimit) {
-    // 관측 토큰이 후보 한도를 넘음 → 창이 더 크다. 최소 1M으로 보정.
+  // 2) 런타임 동적 감지: 훅 모델 → transcript 구조적 표식 → settings.json
+  if (modelHasExtendedMarker(inp.hookModel)) return EXTENDED_CONTEXT_LIMIT;
+  if (inp.transcriptExtended === true) return EXTENDED_CONTEXT_LIMIT;
+  if (settingsModelHasExtended(inp.settingsPath)) return EXTENDED_CONTEXT_LIMIT;
+
+  // 3) 기존 usage-줄 모델 표식 판별
+  const modelLimit = limitForModel(inp.usageLineModel);
+  if (modelLimit === EXTENDED_CONTEXT_LIMIT) return EXTENDED_CONTEXT_LIMIT;
+
+  // 4) 토큰이 후보 한도를 넘음 → 창이 더 크다. 최소 1M으로 보정.
+  if (Number.isFinite(inp.tokens) && inp.tokens > modelLimit) {
     return Math.max(modelLimit, EXTENDED_CONTEXT_LIMIT);
   }
+
+  // 5) 기본(200K)
   return modelLimit;
 }
 
@@ -193,7 +271,17 @@ function limitForModel(model: string | null): number {
  *  - transcript 없음/읽기 실패/usage 전무/garbage → null 반환(절대 throw 안 함).
  *    이 null은 "측정 실패" 신호로, 호출측은 경고를 띄우지 않는다.
  *  - 깨진 줄은 조용히 skip. */
-export function getContextUsage(transcriptPath: string): ContextUsage | null {
+export interface GetContextUsageOptions {
+  /** 훅 입력 객체(Stop/PreToolUse stdin). model 필드 접근용. 없으면 무시. */
+  hookInput?: { model?: unknown } | null;
+  /** settings.json 경로($HOME 기반). 미제공 시 settings 폴백을 건너뛴다. */
+  settingsPath?: string | null;
+}
+
+export function getContextUsage(
+  transcriptPath: string,
+  opts?: GetContextUsageOptions,
+): ContextUsage | null {
   if (!transcriptPath || typeof transcriptPath !== 'string') return null;
 
   let content: string;
@@ -215,6 +303,8 @@ export function getContextUsage(transcriptPath: string): ContextUsage | null {
   // 모델은 usage를 가진 마지막 줄의 model을 우선하고, 없으면 가장 최근에 본 어떤 model이라도 사용.
   let lastModel: string | null = null;
   let lastModelAny: string | null = null;
+  // transcript 어느 줄이든 구조적 모델 필드에 1M 표식이 있었으면 true(런타임 동적 감지 핵심 소스).
+  let sawExtendedMarker = false;
 
   for (const line of lines) {
     let trimmed: string;
@@ -243,6 +333,13 @@ export function getContextUsage(transcriptPath: string): ContextUsage | null {
       // 무시
     }
 
+    // 구조적 모델 필드(resolvedModel 등)에 1M 표식을 관측하면 기억한다(대화 본문 텍스트는 검사 안 함).
+    try {
+      if (!sawExtendedMarker && objectHasExtendedModelMarker(obj)) sawExtendedMarker = true;
+    } catch {
+      // 무시
+    }
+
     let tokens: number | null = null;
     try {
       tokens = contextTokensFromObject(obj);
@@ -264,8 +361,24 @@ export function getContextUsage(transcriptPath: string): ContextUsage | null {
   if (lastTokens === null) return null; // usage를 한 번도 못 찾음 → 측정 실패
 
   const model = lastModel ?? lastModelAny;
-  // 한도 결정: VCF_CONTEXT_LIMIT env override > 모델 표식 판별 > 관측 토큰 기반 안전 상향.
-  const limit = resolveContextLimit(model, lastTokens);
+  // 훅 입력의 model 필드(있으면). 표식 유무만 쓰므로 문자열이면 그대로 넘긴다.
+  const hookModel = (() => {
+    try {
+      const m = opts?.hookInput?.model;
+      return typeof m === 'string' && m.trim() !== '' ? m : null;
+    } catch {
+      return null;
+    }
+  })();
+  // 한도 결정: env override > 런타임 동적 감지(훅 모델 → transcript 표식 → settings.json)
+  //           > usage-줄 모델 표식 > 토큰 기반 안전 상향 > 기본 200K.
+  const limit = resolveContextLimit({
+    usageLineModel: model,
+    tokens: lastTokens,
+    hookModel,
+    transcriptExtended: sawExtendedMarker,
+    settingsPath: opts?.settingsPath ?? null,
+  });
   const percent = limit > 0 ? (lastTokens / limit) * 100 : 0;
 
   return { percent, tokens: lastTokens, limit, model };

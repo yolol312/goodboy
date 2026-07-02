@@ -83,7 +83,9 @@ async function runStop(
   });
   const proc = Bun.spawn(['bun', STOP_HOOK], {
     cwd,
-    env: { ...process.env, TMPDIR: tmp },
+    // HOME도 격리: 실제 ~/.claude/settings.json(개발자 머신의 [1m] 모델 등)이
+    // 컨텍스트 창 판별에 새어들어와 200K 기준 단정을 뒤집지 않게 한다.
+    env: { ...process.env, TMPDIR: tmp, HOME: tmp },
     stdin: new TextEncoder().encode(input),
     stdout: 'pipe',
     stderr: 'pipe',
