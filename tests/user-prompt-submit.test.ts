@@ -37,7 +37,8 @@ async function runHook(prompt: string): Promise<{ stdout: string; cwd: string }>
     stdin: new TextEncoder().encode(payload),
     stdout: 'pipe',
     stderr: 'pipe',
-    env: { ...process.env, CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT },
+    // H5-04 간결-우선 주입은 별도 테스트에서 검증. 여기선 꺼서 체크리스트/세션상태 동작만 격리 검증.
+    env: { ...process.env, CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT, VCF_CONCISE_DEFAULT: 'off' },
   });
   const stdout = await new Response(proc.stdout).text();
   await proc.exited;

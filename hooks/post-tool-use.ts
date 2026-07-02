@@ -1,10 +1,22 @@
 #!/usr/bin/env bun
-// PostToolUse hook — Read/Edit 추적(read-before-edit/리뷰용), 자동 검증 실행
+// PostToolUse hook — Read/Edit 추적(read-before-edit/리뷰용), 자동 검증 실행, Bash 대량출력 사후 경고(H2-02)
 
 import { execSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, resolve as resolvePath } from 'node:path';
-import { getCurrentTurn, recordEdit, recordRead } from '../lib';
+import {
+  bashOutputFloodMessage,
+  bashOutputWarnThresholds,
+  classifyBashFlood,
+  envStr,
+  extractBashOutput,
+  getCurrentTurn,
+  measureOutput,
+  readHabitState,
+  recordEdit,
+  recordRead,
+  writeHabitState,
+} from '../lib';
 
 interface PostToolInput {
   session_id?: string;
@@ -217,6 +229,27 @@ export function buildValidationContext(results: RunResult[]): {
   return { context, blocked };
 }
 
+/** H2-02 — Bash 실제 출력이 임계를 넘는지 판정해 사후 경고 문구를 만든다.
+ *  - 핵심 트리거는 실제 출력 크기(chars/lines). classifyBashFlood 패턴은 보조 신호로만 표기.
+ *  - 임계 이하 → null(무경고). fail-open은 호출부에서 처리한다.
+ *  반환: 경고 문구 또는 null. */
+export function buildBashOutputWarning(
+  toolResponse: unknown,
+  command: string,
+): string | null {
+  const output = extractBashOutput(toolResponse);
+  const { chars, lines } = measureOutput(output);
+  const { chars: charLimit, lines: lineLimit } = bashOutputWarnThresholds();
+  if (chars <= charLimit && lines <= lineLimit) return null;
+  let patternKey: string | null = null;
+  try {
+    patternKey = classifyBashFlood(command);
+  } catch {
+    patternKey = null;
+  }
+  return bashOutputFloodMessage(chars, lines, patternKey);
+}
+
 function main(): void {
   readStdin()
     .then((raw) => {
@@ -240,7 +273,18 @@ function main(): void {
         const turn = getCurrentTurn(sessionId);
         if (toolName === 'Read') {
           const fp = (toolInput.file_path as string | undefined) ?? '';
-          if (fp) recordRead(sessionId, resolvePath(cwd, fp), turn);
+          if (fp) {
+            const absFp = resolvePath(cwd, fp);
+            // H2-01: Read 시점의 파일 mtime을 함께 기록해 재-Read 게이트가
+            // "그 사이 파일이 바뀌었는지"를 판정할 수 있게 한다. stat 실패는 무시(mtime 생략).
+            let mtime: number | undefined;
+            try {
+              mtime = statSync(absFp).mtimeMs;
+            } catch {
+              mtime = undefined;
+            }
+            recordRead(sessionId, absFp, turn, mtime);
+          }
         } else if (toolName === 'Edit' || toolName === 'Write') {
           const fp = (toolInput.file_path as string | undefined) ?? '';
           if (fp) recordEdit(sessionId, resolvePath(cwd, fp), turn);
@@ -273,6 +317,28 @@ function main(): void {
           additionalContext = context;
         } catch (err) {
           process.stderr.write(`[vcf post-tool-use] validation error: ${String(err)}\n`);
+        }
+      }
+
+      // (C) H2-02 — Bash 대량출력 사후 경고(비차단, 세션당 1회).
+      //   실제 tool_response 출력 크기가 임계를 넘을 때만 경고한다(사후 교정).
+      //   에이전트에 확실히 도달하는 hookSpecificOutput.additionalContext로 전달.
+      //   ⚠️ rtk가 실제 Bash 토큰 필터링을 이미 하므로 vcf는 "경고"만 담당한다.
+      //   fail-open — 파싱/측정 실패 시 조용히 통과. env VCF_BASH_FLOOD_WARN=on|off(기본 on).
+      if (toolName === 'Bash' && envStr('VCF_BASH_FLOOD_WARN', 'on') !== 'off') {
+        try {
+          const command = (toolInput.command as string | undefined) ?? '';
+          const warning = buildBashOutputWarning(toolResponse, command);
+          if (warning) {
+            const state = readHabitState(sessionId);
+            if (!state.bashOutputWarned) {
+              writeHabitState(sessionId, { ...state, bashOutputWarned: true });
+              additionalContext = warning;
+            }
+          }
+        } catch (err) {
+          // fail-open — 경고 실패해도 도구 흐름을 막지 않는다.
+          process.stderr.write(`[vcf post-tool-use] bash-flood warn error: ${String(err)}\n`);
         }
       }
 

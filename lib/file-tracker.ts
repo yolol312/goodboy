@@ -13,6 +13,8 @@ interface TrackRecord {
   file: string;
   turn: number;
   timestamp: string;
+  /** H2-01: Read 시점의 파일 수정시각(mtimeMs). 없을 수 있음(하위호환). */
+  mtime?: number;
 }
 
 function sessionDir(sessionId: string): string {
@@ -66,7 +68,14 @@ function readRecords(dir: string, fileName: string): TrackRecord[] {
           typeof parsed.turn === 'number' &&
           typeof parsed.timestamp === 'string'
         ) {
-          out.push({ file: parsed.file, turn: parsed.turn, timestamp: parsed.timestamp });
+          const rec: TrackRecord = {
+            file: parsed.file,
+            turn: parsed.turn,
+            timestamp: parsed.timestamp,
+          };
+          // H2-01: mtime은 있을 때만 보존(구버전 라인은 mtime 없이 무시하고 계속 동작).
+          if (typeof parsed.mtime === 'number') rec.mtime = parsed.mtime;
+          out.push(rec);
         }
       } catch {
         continue;
@@ -78,14 +87,23 @@ function readRecords(dir: string, fileName: string): TrackRecord[] {
   }
 }
 
-/** Read 도구 호출 시 기록. PostToolUse hook이 호출. */
-export function recordRead(sessionId: string, filePath: string, turn: number): void {
+/** Read 도구 호출 시 기록. PostToolUse hook이 호출.
+ *  H2-01: mtime(파일 수정시각 mtimeMs)을 함께 기록하면 재-Read 게이트가
+ *  "그 사이 파일이 바뀌었는지"를 판정할 수 있다. mtime 미지정도 허용(하위호환). */
+export function recordRead(
+  sessionId: string,
+  filePath: string,
+  turn: number,
+  mtime?: number,
+): void {
   const dir = ensureSessionDir(sessionId);
-  appendRecord(dir, 'reads.jsonl', {
+  const record: TrackRecord = {
     file: normalize(filePath),
     turn,
     timestamp: new Date().toISOString(),
-  });
+  };
+  if (typeof mtime === 'number' && Number.isFinite(mtime)) record.mtime = mtime;
+  appendRecord(dir, 'reads.jsonl', record);
 }
 
 /** filePath가 최근 withinTurns 안에 Read 됐는지 확인. */
@@ -105,6 +123,37 @@ export function wasFileReadRecently(
     }
   }
   return false;
+}
+
+/** H2-01: filePath를 최근 withinTurns 안에 Read한 기록 중 가장 최근(높은 turn)의 mtime.
+ *  기록이 없거나 mtime이 없으면 null. 재-Read 게이트가 "그 사이 파일 변경 여부"를
+ *  판정하는 데 사용한다(mtime을 모르면 null → 게이트는 fail-open으로 허용). */
+export function getRecentReadMtime(
+  sessionId: string,
+  filePath: string,
+  currentTurn: number,
+  withinTurns: number,
+): number | null {
+  const dir = ensureSessionDir(sessionId);
+  const records = readRecords(dir, 'reads.jsonl');
+  const target = normalize(filePath);
+  const cutoff = currentTurn - withinTurns;
+  let best: number | null = null;
+  let bestTurn = -Infinity;
+  for (const r of records) {
+    if (
+      r.file === target &&
+      r.turn >= cutoff &&
+      r.turn <= currentTurn &&
+      typeof r.mtime === 'number'
+    ) {
+      if (r.turn >= bestTurn) {
+        bestTurn = r.turn;
+        best = r.mtime;
+      }
+    }
+  }
+  return best;
 }
 
 /** filePath가 최근 withinTurns 안에 Edit/Write 됐는지 확인.

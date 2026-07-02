@@ -6,9 +6,12 @@ import { resolve as resolvePath } from 'node:path';
 import {
   buildRequiredInputsChecklist,
   classifyRisk,
+  CONCISE_INSTRUCTION,
   detectRiskOverride,
+  envStr,
   getCurrentTurn,
   parseSkillFrontmatter,
+  wantsDetail,
 } from '../lib';
 
 interface PromptInput {
@@ -105,16 +108,35 @@ function main(): void {
       const sessionId = input.session_id ?? 'unknown';
       const prompt = input.prompt ?? '';
 
+      // (H5-04) 간결-우선 지시(소프트 규칙 — 모델 유도용). 상세 요청 신호가 있으면 주입하지 않는다.
+      //   env VCF_CONCISE_DEFAULT=on|off (기본 on). 슬래시/일반 프롬프트 모두에 적용.
+      const conciseContext =
+        envStr('VCF_CONCISE_DEFAULT', 'on') !== 'off' && !wantsDetail(prompt)
+          ? CONCISE_INSTRUCTION
+          : '';
+      const emitConcise = (): void => {
+        if (conciseContext) {
+          emit({
+            hookSpecificOutput: {
+              hookEventName: 'UserPromptSubmit',
+              additionalContext: conciseContext,
+            },
+          });
+        } else {
+          emit({});
+        }
+      };
+
       // (A) 슬래시 커맨드 감지
       const m = prompt.match(SLASH_REGEX);
       if (!m) {
-        emit({});
+        emitConcise();
         return;
       }
       const cmd = m[1] ?? '';
       const args = m[2] ?? '';
       if (!KNOWN_CATEGORIES.has(cmd)) {
-        emit({});
+        emitConcise();
         return;
       }
 
@@ -173,11 +195,15 @@ function main(): void {
         process.stderr.write(`[vcf user-prompt-submit] state write error: ${String(err)}\n`);
       }
 
+      // 체크리스트(있으면)와 H5-04 간결-우선 지시를 합쳐 additionalContext로 내보낸다.
+      const combined = [additionalContext, conciseContext]
+        .filter((x) => x !== undefined && x !== '')
+        .join('\n\n');
       const out: HookOutput = {};
-      if (additionalContext !== undefined && additionalContext !== '') {
+      if (combined !== '') {
         out.hookSpecificOutput = {
           hookEventName: 'UserPromptSubmit',
-          additionalContext,
+          additionalContext: combined,
         };
       }
       emit(out);

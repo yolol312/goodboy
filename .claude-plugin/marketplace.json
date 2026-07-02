@@ -1,5 +1,9 @@
 {
   "name": "vcf",
+  "owner": {
+    "name": "seongmo",
+    "url": "https://github.com/seongmo/vcf"
+  },
   "description": "Single-plugin marketplace for vcf",
   "plugins": [
     {

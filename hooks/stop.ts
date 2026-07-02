@@ -4,16 +4,23 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import {
+  compactMessageForStage,
+  compactStages,
+  envInt,
   findRecentReviewFile,
   getContextUsage,
   getCurrentTurn,
   getEditsSince,
   getLatestEditTimestampSince,
   highSeverityFindings,
+  highestStageReached,
   incrementTurn,
+  isStrongCompactStage,
+  readHabitState,
   readReviewCursor,
   requiredDimensionsFor,
   validateReview,
+  writeHabitState,
   writeReviewCursor,
 } from '../lib';
 
@@ -38,14 +45,10 @@ interface HookOutput {
 
 const MAX_RETRIES = 3;
 
-// auto-compact 권고 임계치(%). 컨텍스트 점유율이 이 값을 넘으면 /compact 권고를 띄운다.
-// Claude Code hook은 /compact를 직접 실행할 수 없으므로 "정보성 systemMessage"가 최선의 폴백이다.
-const COMPACT_WARN_PCT = 50;
-
-// 이번 Stop 실행에서 사용자에게 보일 compact 경고(없으면 null).
-// emit()이 모든 출력 경로(block/pass)의 systemMessage에 이 경고를 덧붙인다 —
-// compact 권고는 리뷰 통과/차단과 독립적이어야 하기 때문.
-let compactWarning: string | null = null;
+// 이번 Stop 실행에서 사용자에게 보일 토큰-습관 경고들(H1-03 compact 단계 경고, H1-01 긴 세션 경고).
+// emit()이 모든 출력 경로(block/pass)의 systemMessage에 이 경고들을 덧붙인다 —
+// 이 권고들은 리뷰 통과/차단과 독립적이어야 하기 때문.
+const habitWarnings: string[] = [];
 
 async function readStdin(): Promise<string> {
   let data = '';
@@ -55,29 +58,80 @@ async function readStdin(): Promise<string> {
   return data;
 }
 
-/** 측정 가능하면 컨텍스트 점유율을 계산해 임계치 초과 시 compactWarning을 세팅한다.
- *  측정 실패(null)면 조용히 통과(경고 없음). 절대 throw 하지 않는다. */
-function maybeSetCompactWarning(transcriptPath: string | undefined): void {
-  if (!transcriptPath) return;
-  let usage: ReturnType<typeof getContextUsage> = null;
+/** H1-03(다단계 compact 경고) + H1-01(긴 세션 경고)을 계산해 habitWarnings에 채운다.
+ *  - fail-open: 예외/측정불가면 조용히 통과(경고 없음). 절대 throw 하지 않는다.
+ *  - 스팸 억제: compact 경고는 같은 단계 세션당 1회(더 높은 단계로 올라갈 때만 재경고).
+ *    긴 세션 경고는 세션당 1회.
+ *  - 중복 방지: H1-03가 이번 Stop에 강한 경고(70%+)를 냈으면 H1-01은 생략한다. */
+function maybeSetHabitWarnings(transcriptPath: string | undefined, sessionId: string): void {
   try {
-    usage = getContextUsage(transcriptPath);
+    const state = readHabitState(sessionId);
+    let dirty = false;
+
+    // (H1-01) 세션 시작 시각 최초 1회 기록. 첫 Stop에선 경과시간 ~0이라 경고가 뜨지 않는다.
+    const nowMs = Date.now();
+    if (!state.sessionStartTs) {
+      state.sessionStartTs = new Date(nowMs).toISOString();
+      dirty = true;
+    }
+
+    // 컨텍스트 사용량(측정 실패 시 null → compact/token 경고 생략).
+    let usage: ReturnType<typeof getContextUsage> = null;
+    if (transcriptPath) {
+      try {
+        usage = getContextUsage(transcriptPath);
+      } catch {
+        usage = null;
+      }
+    }
+
+    // --- H1-03: 다단계 compact 경고 (50/70/85, 최저 임계는 VCF_COMPACT_WARN_PCT) ---
+    let strongCompactThisRun = false;
+    if (usage) {
+      const stages = compactStages();
+      const reached = highestStageReached(usage.percent, stages);
+      const lastStage = typeof state.compactWarnStage === 'number' ? state.compactWarnStage : 0;
+      if (reached > 0 && reached > lastStage) {
+        // 더 높은 단계로 처음 올라감 → 경고.
+        habitWarnings.push(compactMessageForStage(reached, usage.percent));
+        state.compactWarnStage = reached;
+        dirty = true;
+      }
+      // 현재 강한 단계(70%+)에 있으면 H1-01 중복 억제 판단에 반영(이미 경고했든 아니든).
+      if (reached > 0 && isStrongCompactStage(reached)) strongCompactThisRun = true;
+    }
+
+    // --- H1-01: 긴 세션(경과시간/절대토큰) 경고 ---
+    // H1-03가 이번 Stop에 강한 경고를 냈으면 스팸 방지를 위해 생략. 세션당 1회.
+    if (!strongCompactThisRun && !state.longSessionWarned) {
+      const timeWarnMin = envInt('VCF_SESSION_TIME_WARN_MIN', 35);
+      const tokenWarn = envInt('VCF_TOKEN_WARN', 50_000);
+      const startMs = state.sessionStartTs ? Date.parse(state.sessionStartTs) : NaN;
+      const elapsedMin = Number.isFinite(startMs) ? (nowMs - startMs) / 60000 : 0;
+      const timeExceeded = elapsedMin > timeWarnMin;
+      const tokenExceeded = usage ? usage.tokens > tokenWarn : false;
+      if (timeExceeded || tokenExceeded) {
+        // ⚠️ 문구에 '/compact' 문자열을 넣지 않는다(compact 경고와 구분 + 기존 테스트 보존).
+        habitWarnings.push(
+          '긴 세션이 감지되었습니다 — 새 세션 시작 또는 대화 압축을 권장합니다. (긴 세션 경고, H1-01)',
+        );
+        state.longSessionWarned = true;
+        dirty = true;
+      }
+    }
+
+    if (dirty) writeHabitState(sessionId, state);
   } catch {
-    usage = null;
-  }
-  if (!usage) return; // 측정 실패 → 경고 없이 통과
-  if (usage.percent > COMPACT_WARN_PCT) {
-    compactWarning = `⚠️ 컨텍스트 사용량 ${Math.round(usage.percent)}% (임계치 ${COMPACT_WARN_PCT}%) — /compact 실행을 강력히 권장합니다.`;
+    // fail-open — 경고 계산 실패해도 Stop 흐름을 막지 않는다.
   }
 }
 
 function emit(out: HookOutput): void {
-  // compact 경고를 systemMessage에 덧붙인다(기존 systemMessage가 있으면 줄바꿈 append).
+  // 토큰-습관 경고들을 systemMessage에 덧붙인다(기존 systemMessage가 있으면 줄바꿈 append).
   // 리뷰 block/pass 어느 경로로 emit하든 사용자에게 보이도록 출력 단계에서 합친다.
-  if (compactWarning) {
-    out.systemMessage = out.systemMessage
-      ? `${out.systemMessage}\n${compactWarning}`
-      : compactWarning;
+  if (habitWarnings.length > 0) {
+    const joined = habitWarnings.join('\n');
+    out.systemMessage = out.systemMessage ? `${out.systemMessage}\n${joined}` : joined;
   }
   try {
     process.stdout.write(JSON.stringify(out));
@@ -157,7 +211,7 @@ function main(): void {
       //   준비한다. emit()이 이후 모든 출력 경로(리뷰 block/pass)의 systemMessage에
       //   이 경고를 덧붙이므로, 리뷰 통과/차단과 독립적으로 사용자에게 노출된다.
       //   (B)의 무한루프 early-return은 이 위에서 끝나므로 그 경로엔 경고가 붙지 않는다.
-      maybeSetCompactWarning(input.transcript_path);
+      maybeSetHabitWarnings(input.transcript_path, sessionId);
 
       // (C) 변경 검사 — 마지막으로 수락된 리뷰(커서) 이후 편집된 파일만 본다.
       //   커서 부재(첫 리뷰) → turn 0 = 세션 시작 이후 모든 편집.

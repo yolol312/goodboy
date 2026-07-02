@@ -1,10 +1,14 @@
 #!/usr/bin/env bun
 // PreToolUse hook — 도구 강제 위임, Read-before-edit, 추론 게이트, 위험도 게이트
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import {
+  checkRecursionGuard,
+  envInt,
+  envStr,
   getCurrentTurn,
+  getRecentReadMtime,
   hasReasoningSection,
   wasFileEditedRecently,
   wasFileReadRecently,
@@ -159,6 +163,31 @@ function main(): void {
       const toolName = input.tool_name ?? '';
       const toolInput = input.tool_input ?? {};
 
+      // 비차단 사전 경고 누적기(현재 H2-01 warn 모드 전용). deny가 아닌 allow 경로에서
+      //   hookSpecificOutput.additionalContext로 최종 emit에 실어 보낸다.
+      //   ⚠️ systemMessage는 사용자 UI에만 노출되고 도구를 호출한 (서브)에이전트 컨텍스트에는
+      //   주입되지 않는다. additionalContext는 에이전트에 확실히 도달하는 채널이다.
+      //   호환/가시성을 위해 systemMessage도 함께 실어 준다. 위험도 게이트(D) deny가 나면 드롭된다.
+      //   NOTE: H2-02(Bash 대량출력)는 사전 경고로는 에이전트에 닿지 않아(PreToolUse additionalContext
+      //   미주입) PostToolUse 사후 경고로 이동함. 여기서는 더 이상 다루지 않는다.
+      const preWarnings: string[] = [];
+
+      // (A0) 재귀 폭주 방어 — Agent/Task 호출에 한해, 60초 슬라이딩 윈도우로
+      //   총 호출 상한/동일 프롬프트 반복을 검사한다. agent_type 존재 여부와
+      //   무관하게 적용한다(서브에이전트가 또 서브에이전트를 부르는 폭주를 막기 위함).
+      //   내부 오류는 삼키고 통과(fail-open)하므로 정상 작업을 막지 않는다.
+      if (toolName === 'Agent' || toolName === 'Task') {
+        const promptText =
+          typeof toolInput.prompt === 'string'
+            ? (toolInput.prompt as string)
+            : JSON.stringify(toolInput);
+        const guard = checkRecursionGuard(sessionId, promptText);
+        if (guard.blocked && guard.reason) {
+          emit(deny(guard.reason));
+          return;
+        }
+      }
+
       // (A) 도구 강제 위임. 서브에이전트(agent_type 존재)면 면제.
       //   VCF_DISABLE_DELEGATION=1 이면 위임 자체를 끈다.
       if (!input.agent_type && process.env.VCF_DISABLE_DELEGATION !== '1') {
@@ -169,6 +198,58 @@ function main(): void {
             ),
           );
           return;
+        }
+      }
+
+      // (A2) H2-01 — 같은 파일 재-Read 게이트.
+      //   최근 N턴 내 같은 파일을, 그 사이 mtime 변경도 편집도 없이 다시 Read하면 불필요한 재-Read로 본다.
+      //   오탐 방지 예외(허용): 부분읽기(offset/limit), mtime 변경됨, 마지막 read 이후 편집됨.
+      //   모든 판정은 fail-open(내부 오류/불확실 → 허용). env VCF_REREAD_GATE=deny|warn|off (기본 deny).
+      if (toolName === 'Read') {
+        const gate = envStr('VCF_REREAD_GATE', 'deny'); // deny | warn | off
+        const filePath = (toolInput.file_path as string | undefined) ?? '';
+        // 부분 읽기(offset/limit)는 정당한 재-Read → 예외.
+        const isPartial = toolInput.offset !== undefined || toolInput.limit !== undefined;
+        if (gate !== 'off' && filePath && !isPartial) {
+          const rereadMsg =
+            '이미 최근에 읽었고 파일이 안 바뀌었습니다. 앞서 읽은 내용을 참조하세요. (재-Read 방지, H2-01)';
+          const blockReread = (() => {
+            try {
+              const absPath = resolvePath(cwd, filePath);
+              const turn = getCurrentTurn(sessionId);
+              const withinTurns = envInt('VCF_REREAD_WINDOW', 3);
+              // 최근에 읽지 않았으면 통과.
+              if (!wasFileReadRecently(sessionId, absPath, turn, withinTurns)) return false;
+              // 마지막 read 이후 편집됐으면 통과(내용이 바뀌었을 수 있음).
+              if (wasFileEditedRecently(sessionId, absPath, turn, withinTurns)) return false;
+              // 이전 read 시점 mtime을 모르면 비교 불가 → 통과(fail-open).
+              const prevMtime = getRecentReadMtime(sessionId, absPath, turn, withinTurns);
+              if (prevMtime === null) return false;
+              // 현재 mtime을 못 구하면 통과(fail-open).
+              let curMtime: number | null = null;
+              try {
+                curMtime = statSync(absPath).mtimeMs;
+              } catch {
+                curMtime = null;
+              }
+              if (curMtime === null) return false;
+              // mtime이 바뀌었으면 파일 변경 → 통과.
+              if (curMtime !== prevMtime) return false;
+              // 여기까지 오면 불필요한 재-Read.
+              return true;
+            } catch {
+              return false; // 내부 오류는 통과(fail-open)
+            }
+          })();
+          if (blockReread) {
+            if (gate === 'warn') {
+              // warn 모드: deny 대신 allow + systemMessage.
+              preWarnings.push(rereadMsg);
+            } else {
+              emit(deny(rereadMsg));
+              return;
+            }
+          }
         }
       }
 
@@ -243,7 +324,21 @@ function main(): void {
         }
       }
 
-      emit({});
+      if (preWarnings.length > 0) {
+        const joined = preWarnings.join('\n');
+        // additionalContext = 에이전트(서브에이전트 포함) 컨텍스트에 확실히 주입되는 채널.
+        //   permissionDecision은 설정하지 않아 정상 권한 흐름을 유지한다(비차단).
+        //   systemMessage는 사용자 UI 표시용으로 함께 남긴다.
+        emit({
+          systemMessage: joined,
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            additionalContext: joined,
+          },
+        });
+      } else {
+        emit({});
+      }
     })
     .catch((err) => {
       process.stderr.write(`[vcf pre-tool-use] fatal: ${String(err)}\n`);
