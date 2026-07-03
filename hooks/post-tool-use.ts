@@ -151,11 +151,36 @@ function detectFailureFromResponse(response: unknown): boolean {
   return false;
 }
 
-function autoValidate(projectCwd: string): RunResult[] {
+// autoValidate 총 실행 예산. hooks.json PostToolUse 타임아웃(60s)보다 작게 잡아,
+//   여러 명령 합산이 타임아웃을 넘겨 훅이 강제종료(검증 컨텍스트 유실)되는 것을 막는다.
+const AUTOVALIDATE_TOTAL_BUDGET_MS = 45_000;
+const AUTOVALIDATE_PER_CMD_MS = 30_000;
+
+/** autoValidate 모드. 매 편집마다 test 전체를 돌리면 (1) 훅 타임아웃 초과(3×30s>60s),
+ *  (2) 미신뢰 repo의 package.json test/lint 스크립트 자동 실행(임의 코드 실행 벡터) 위험이 있어
+ *  기본은 가장 싼 검사(typecheck류)만 수행한다.
+ *  env VCF_AUTOVALIDATE=typecheck(기본) | all(typecheck+lint+test 등 전부) | off(검증 안 함). */
+export function autoValidateMode(): 'typecheck' | 'all' | 'off' {
+  const v = envStr('VCF_AUTOVALIDATE', 'typecheck');
+  if (v === 'all' || v === 'off') return v;
+  return 'typecheck';
+}
+
+export function autoValidate(projectCwd: string): RunResult[] {
+  const mode = autoValidateMode();
+  if (mode === 'off') return [];
   const proj = findProjectRoot(projectCwd);
   if (!proj) return [];
   const results: RunResult[] = [];
-  const timeoutMs = 30000;
+
+  // 총 예산 내에서만 각 명령을 실행한다. 예산이 소진되면 나머지 검증은 조용히 건너뛴다(비차단).
+  //   per-command 타임아웃은 30s와 남은 예산 중 작은 값으로 제한한다.
+  const startedAt = Date.now();
+  const runWithBudget = (cmd: string): void => {
+    const remaining = AUTOVALIDATE_TOTAL_BUDGET_MS - (Date.now() - startedAt);
+    if (remaining <= 0) return; // 예산 소진 → 나머지 건너뜀
+    results.push(runCmd(cmd, proj.root, Math.min(AUTOVALIDATE_PER_CMD_MS, remaining)));
+  };
 
   if (proj.marker === 'package.json') {
     let pkg: Record<string, unknown> = {};
@@ -166,27 +191,21 @@ function autoValidate(projectCwd: string): RunResult[] {
     }
     const scripts = (pkg.scripts ?? {}) as Record<string, string>;
     const runner = hasBin('bun') ? 'bun run' : 'npm run';
-    const order = ['typecheck', 'lint', 'test'];
+    // 기본(typecheck): typecheck만. all: typecheck→lint→test.
+    const order = mode === 'all' ? ['typecheck', 'lint', 'test'] : ['typecheck'];
     for (const scriptName of order) {
       if (typeof scripts[scriptName] === 'string') {
-        results.push(runCmd(`${runner} ${scriptName}`, proj.root, timeoutMs));
+        runWithBudget(`${runner} ${scriptName}`);
       }
     }
   } else if (proj.marker === 'pyproject.toml') {
-    if (hasBin('ruff')) {
-      results.push(runCmd('ruff check .', proj.root, timeoutMs));
-    }
-    if (hasBin('pytest')) {
-      results.push(runCmd('pytest', proj.root, timeoutMs));
-    }
+    // 기본: 가장 싼 검사(ruff)만. all: ruff + pytest.
+    if (hasBin('ruff')) runWithBudget('ruff check .');
+    if (mode === 'all' && hasBin('pytest')) runWithBudget('pytest');
   } else if (proj.marker === 'Cargo.toml') {
-    if (hasBin('cargo')) {
-      results.push(runCmd('cargo check', proj.root, timeoutMs));
-    }
+    if (hasBin('cargo')) runWithBudget('cargo check');
   } else if (proj.marker === 'go.mod') {
-    if (hasBin('go')) {
-      results.push(runCmd('go build ./...', proj.root, timeoutMs));
-    }
+    if (hasBin('go')) runWithBudget('go build ./...');
   }
   return results;
 }

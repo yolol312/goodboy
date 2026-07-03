@@ -46,6 +46,10 @@ const REASONING_GATE_WINDOW = 3;
 // 도구 강제 위임 대상 — 이 도구들은 메인이 직접 쓰지 않고 서브에이전트에게 위임한다.
 const DELEGATED_TOOLS = new Set(['WebSearch', 'WebFetch', 'Grep', 'Glob']);
 
+// 위험도 게이트(2-B) 대상 — 변경(부작용) 도구에만 위험 게이트를 적용한다.
+//   read-only/조회 도구(Read/Grep/Glob 등)는 통과시켜, 커밋된 risky state로 인한 전체 차단 DoS를 막는다.
+const RISK_GATED_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'Bash']);
+
 async function readStdin(): Promise<string> {
   let data = '';
   for await (const chunk of process.stdin) {
@@ -133,6 +137,8 @@ interface SessionState {
   category?: string;
   risk?: string;
   turn?: number;
+  /** 2-B: 이 state를 기록한 세션 ID. 현재 세션과 다르면(다른 세션/리포에 커밋된 잔재) 무시한다. */
+  sessionId?: string;
 }
 
 function readSessionState(cwd: string): SessionState | null {
@@ -313,17 +319,24 @@ function main(): void {
         }
       }
 
-      // (D) 위험도 게이트
-      const state = readSessionState(cwd);
-      if (state && state.risk === 'risky') {
-        const approvedPath = resolvePath(cwd, '.claude', '.vcf-risk-approved.txt');
-        if (!existsSync(approvedPath)) {
-          emit(
-            deny(
-              `이 작업은 위험도가 '위험'으로 분류되었습니다(${state.category ?? '미상'}). 사용자에게 진행 승인을 받은 후, .claude/.vcf-risk-approved.txt 파일을 만들고 다시 시도하세요.`,
-            ),
-          );
-          return;
+      // (D) 위험도 게이트 — 변경 도구에만, 그리고 현재 세션에서 기록된 state에만 적용(2-B).
+      //   ⚠️ 위험 게이트가 read-only 도구까지 막으면, 리포에 커밋된/오래된 risky state 하나로
+      //   클론 시 모든 도구가 차단되는 DoS가 된다. 그래서:
+      //     - 변경 도구(Edit/Write/MultiEdit/Bash)에만 건다(탐색/조회는 통과).
+      //     - state.sessionId가 현재 세션과 일치할 때만 신뢰한다(다른 세션/커밋된 잔재는 무시).
+      //       정상 흐름은 user-prompt-submit이 같은 세션에 state를 쓰므로 항상 일치한다.
+      if (RISK_GATED_TOOLS.has(toolName)) {
+        const state = readSessionState(cwd);
+        if (state && state.risk === 'risky' && state.sessionId === sessionId) {
+          const approvedPath = resolvePath(cwd, '.claude', '.vcf-risk-approved.txt');
+          if (!existsSync(approvedPath)) {
+            emit(
+              deny(
+                `이 작업은 위험도가 '위험'으로 분류되었습니다(${state.category ?? '미상'}). 사용자에게 진행 승인을 받은 후, .claude/.vcf-risk-approved.txt 파일을 만들고 다시 시도하세요.`,
+              ),
+            );
+            return;
+          }
         }
       }
 

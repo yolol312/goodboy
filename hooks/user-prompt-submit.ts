@@ -60,14 +60,21 @@ function emit(out: HookOutput): void {
   }
 }
 
-function resolveSkillPath(cmd: string, cwd: string): string | null {
+/** cwd/skills 후보를 신뢰할지 여부(2-C). 미신뢰 repo가 skills/<cmd>/SKILL.md의 frontmatter
+ *  (risk_default 등)로 위험 게이트를 낮추는 것을 막기 위해 기본적으로 신뢰하지 않는다.
+ *  개발 중 cwd가 곧 plugin root인 경우를 위해 opt-in env로만 허용한다(1/on/true/yes). */
+function allowCwdSkills(): boolean {
+  const v = (process.env.VCF_ALLOW_CWD_SKILLS ?? '').trim().toLowerCase();
+  return v === '1' || v === 'on' || v === 'true' || v === 'yes';
+}
+
+export function resolveSkillPath(cmd: string, cwd: string): string | null {
   const candidates: string[] = [];
+  // 신뢰 소스 1: 플러그인 설치 루트.
   if (process.env.CLAUDE_PLUGIN_ROOT) {
     candidates.push(resolvePath(process.env.CLAUDE_PLUGIN_ROOT, 'skills', cmd, 'SKILL.md'));
   }
-  // cwd 자체가 plugin root이거나, 그 위에 있을 수도 있음 (개발 중)
-  candidates.push(resolvePath(cwd, 'skills', cmd, 'SKILL.md'));
-  // 이 hook 스크립트의 ../skills/ — bun으로 실행 시 import.meta.dir
+  // 신뢰 소스 2: 이 hook 스크립트의 ../skills/ (설치 경로 — bun 실행 시 import.meta.dir).
   try {
     const here = import.meta.dir;
     if (here) {
@@ -75,6 +82,10 @@ function resolveSkillPath(cmd: string, cwd: string): string | null {
     }
   } catch {
     // ignore
+  }
+  // 미신뢰 소스: cwd/skills — opt-in(VCF_ALLOW_CWD_SKILLS)일 때만 후보에 추가한다.
+  if (allowCwdSkills()) {
+    candidates.push(resolvePath(cwd, 'skills', cmd, 'SKILL.md'));
   }
   for (const p of candidates) {
     if (existsSync(p)) return p;
@@ -174,6 +185,8 @@ function main(): void {
           category: cmd,
           risk,
           turn,
+          // 2-B: 세션 바인딩. pre-tool-use 위험 게이트가 다른 세션/커밋된 잔재 state를 무시하게 한다.
+          sessionId,
           updatedAt: new Date().toISOString(),
         };
         writeFileSync(stateFile, JSON.stringify(state, null, 2), 'utf8');

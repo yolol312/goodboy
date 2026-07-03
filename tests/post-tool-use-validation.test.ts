@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { buildValidationContext, looksUnavailable } from '../hooks/post-tool-use';
+import { autoValidateMode, buildValidationContext, looksUnavailable } from '../hooks/post-tool-use';
 
 const HOOK = resolve(import.meta.dir, '..', 'hooks', 'post-tool-use.ts');
 const tmpDirs: string[] = [];
@@ -76,7 +76,10 @@ describe('buildValidationContext (#5)', () => {
 
 // --- 통합: 실제 hook 프로세스로 실행 ---
 
-async function runHook(projectCwd: string): Promise<string> {
+async function runHook(
+  projectCwd: string,
+  extraEnv: Record<string, string> = {},
+): Promise<string> {
   const payload = JSON.stringify({
     session_id: 'test',
     cwd: projectCwd,
@@ -86,6 +89,8 @@ async function runHook(projectCwd: string): Promise<string> {
   });
   const proc = Bun.spawn(['bun', HOOK], {
     cwd: projectCwd,
+    // 기본 모드(typecheck-only)를 명시해 부모 프로세스의 잔여 VCF_AUTOVALIDATE 오염을 차단.
+    env: { ...process.env, VCF_AUTOVALIDATE: 'typecheck', ...extraEnv },
     stdin: new TextEncoder().encode(payload),
     stdout: 'pipe',
     stderr: 'pipe',
@@ -135,5 +140,54 @@ describe('post-tool-use integration (#5)', () => {
     expect(ctx).toBeDefined();
     expect(ctx).toContain('수정이 필요합니다');
     expect(ctx).toContain('error TS2322');
+  });
+});
+
+describe('autoValidate mode (2-A)', () => {
+  // typecheck는 통과, test는 실패하는 프로젝트. 어떤 명령이 실제로 실행됐는지로 모드를 판별한다.
+  const scriptsTcOkTestFail = {
+    typecheck: 'sh -c "exit 0"',
+    test: 'sh -c \'echo "test failure" >&2; exit 1\'',
+  };
+
+  test('default(typecheck) mode: test는 실행 안 함 → 블로킹 없음', async () => {
+    const cwd = makeProject(scriptsTcOkTestFail);
+    const ctx = additionalContext(await runHook(cwd));
+    // test가 돌지 않으므로 "수정이 필요합니다"가 없어야 한다.
+    expect(ctx === undefined || !ctx.includes('수정이 필요합니다')).toBe(true);
+  });
+
+  test('VCF_AUTOVALIDATE=all: test까지 실행 → test 실패로 블로킹', async () => {
+    const cwd = makeProject(scriptsTcOkTestFail);
+    const ctx = additionalContext(await runHook(cwd, { VCF_AUTOVALIDATE: 'all' }));
+    expect(ctx).toBeDefined();
+    expect(ctx).toContain('수정이 필요합니다');
+  });
+
+  test('VCF_AUTOVALIDATE=off: 아무것도 실행 안 함 → 실패 typecheck여도 블로킹 없음', async () => {
+    const cwd = makeProject({
+      typecheck: 'sh -c \'echo "tc error" >&2; exit 2\'',
+    });
+    const ctx = additionalContext(await runHook(cwd, { VCF_AUTOVALIDATE: 'off' }));
+    expect(ctx === undefined || !ctx.includes('수정이 필요합니다')).toBe(true);
+  });
+});
+
+describe('autoValidateMode (2-A unit)', () => {
+  test('기본은 typecheck, all/off는 그대로, 그 외는 typecheck로 폴백', () => {
+    const saved = process.env.VCF_AUTOVALIDATE;
+    try {
+      delete process.env.VCF_AUTOVALIDATE;
+      expect(autoValidateMode()).toBe('typecheck');
+      process.env.VCF_AUTOVALIDATE = 'all';
+      expect(autoValidateMode()).toBe('all');
+      process.env.VCF_AUTOVALIDATE = 'off';
+      expect(autoValidateMode()).toBe('off');
+      process.env.VCF_AUTOVALIDATE = 'bogus';
+      expect(autoValidateMode()).toBe('typecheck');
+    } finally {
+      if (saved === undefined) delete process.env.VCF_AUTOVALIDATE;
+      else process.env.VCF_AUTOVALIDATE = saved;
+    }
   });
 });

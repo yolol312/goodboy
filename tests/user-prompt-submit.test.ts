@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { resolveSkillPath } from '../hooks/user-prompt-submit';
 
 // 통합 테스트: user-prompt-submit hook을 실제 프로세스로 실행하여
 // (1) 알려진 스킬 커맨드 감지 시 self-attestation 체크리스트를 additionalContext로 내보내고
@@ -104,5 +105,52 @@ describe('user-prompt-submit self-attestation checklist (#3)', () => {
       stateExists = false;
     }
     expect(stateExists).toBe(false);
+  });
+});
+
+describe('resolveSkillPath cwd opt-in (2-C)', () => {
+  // vcf/skills 에 존재하지 않는 이름 → import.meta.dir(../skills) 후보가 배제되어 cwd 판정만 남는다.
+  const FAKE = 'zzz-fake-skill-vcf';
+
+  function seedCwdSkill(): string {
+    const cwd = mkdtempSync(join(tmpdir(), 'vcf-skill-'));
+    tmpDirs.push(cwd);
+    mkdirSync(join(cwd, 'skills', FAKE), { recursive: true });
+    writeFileSync(join(cwd, 'skills', FAKE, 'SKILL.md'), '---\nrisk_default: simple\n---\n', 'utf8');
+    return cwd;
+  }
+
+  test('default: cwd/skills는 신뢰하지 않음 → null', () => {
+    const savedRoot = process.env.CLAUDE_PLUGIN_ROOT;
+    const savedAllow = process.env.VCF_ALLOW_CWD_SKILLS;
+    try {
+      delete process.env.CLAUDE_PLUGIN_ROOT;
+      delete process.env.VCF_ALLOW_CWD_SKILLS;
+      const cwd = seedCwdSkill();
+      expect(resolveSkillPath(FAKE, cwd)).toBeNull();
+    } finally {
+      if (savedRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+      else process.env.CLAUDE_PLUGIN_ROOT = savedRoot;
+      if (savedAllow === undefined) delete process.env.VCF_ALLOW_CWD_SKILLS;
+      else process.env.VCF_ALLOW_CWD_SKILLS = savedAllow;
+    }
+  });
+
+  test('VCF_ALLOW_CWD_SKILLS=1: cwd/skills를 후보로 인정 → 경로 반환', () => {
+    const savedRoot = process.env.CLAUDE_PLUGIN_ROOT;
+    const savedAllow = process.env.VCF_ALLOW_CWD_SKILLS;
+    try {
+      delete process.env.CLAUDE_PLUGIN_ROOT;
+      process.env.VCF_ALLOW_CWD_SKILLS = '1';
+      const cwd = seedCwdSkill();
+      const p = resolveSkillPath(FAKE, cwd);
+      expect(p).not.toBeNull();
+      expect(p!).toContain(join('skills', FAKE, 'SKILL.md'));
+    } finally {
+      if (savedRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+      else process.env.CLAUDE_PLUGIN_ROOT = savedRoot;
+      if (savedAllow === undefined) delete process.env.VCF_ALLOW_CWD_SKILLS;
+      else process.env.VCF_ALLOW_CWD_SKILLS = savedAllow;
+    }
   });
 });
