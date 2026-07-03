@@ -4,7 +4,9 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import {
+  BASH_SEARCH_MESSAGE,
   checkRecursionGuard,
+  classifyBashSearch,
   envInt,
   envStr,
   getCurrentTurn,
@@ -204,6 +206,29 @@ function main(): void {
             ),
           );
           return;
+        }
+      }
+
+      // (A1) H2-03 — Bash 재귀 코드베이스 탐색 강제 위임. 서브에이전트(agent_type)는 면제.
+      //   위임 게이트(A)는 Grep/Glob만 막아 Bash의 grep -r/rg/find로 우회된다. 이를 막는다.
+      //   env VCF_BASH_SEARCH_GATE=deny|warn|off (기본 deny).
+      //   ⚠️ warn은 PreToolUse additionalContext가 에이전트에 닿지 않아 효과가 약하다(사용자 UI만).
+      //   확실히 유도하려면 deny를 쓴다(deny의 permissionDecisionReason은 에이전트에 도달).
+      if (!input.agent_type && toolName === 'Bash') {
+        const gate = envStr('VCF_BASH_SEARCH_GATE', 'deny'); // deny | warn | off
+        if (gate !== 'off') {
+          const command =
+            typeof toolInput.command === 'string' ? (toolInput.command as string) : '';
+          const hit = classifyBashSearch(command);
+          if (hit) {
+            const msg = `${BASH_SEARCH_MESSAGE} (감지: ${hit})`;
+            if (gate === 'warn') {
+              preWarnings.push(msg);
+            } else {
+              emit(deny(msg));
+              return;
+            }
+          }
         }
       }
 

@@ -26,8 +26,8 @@ afterEach(() => {
 });
 
 describe('token-habits catalog', () => {
-  test('catalog includes all five habit IDs', () => {
-    for (const id of ['H1-01', 'H1-03', 'H2-01', 'H2-02', 'H5-04']) {
+  test('catalog includes all habit IDs', () => {
+    for (const id of ['H1-01', 'H1-03', 'H2-01', 'H2-02', 'H2-03', 'H5-04']) {
       expect(TOKEN_HABITS[id]).toBeDefined();
       expect(TOKEN_HABITS[id]!.id).toBe(id);
       expect(Array.isArray(TOKEN_HABITS[id]!.envVars)).toBe(true);

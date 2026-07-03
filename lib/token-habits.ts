@@ -81,6 +81,17 @@ export const TOKEN_HABITS: Record<string, TokenHabit> = {
       'additionalContext로 비차단 경고(사후 교정, 세션당 1회, 실제 필터링은 rtk 담당). ' +
       'classifyBashFlood 패턴은 보조 신호로 함께 표기.',
   },
+  'H2-03': {
+    id: 'H2-03',
+    title: 'Bash 검색 강제 위임',
+    envVars: ['VCF_BASH_SEARCH_GATE'],
+    defaults: { VCF_BASH_SEARCH_GATE: 'deny' },
+    description:
+      '메인 세션에서 Bash로 수행하는 재귀 코드베이스 탐색(grep -r/rg/ag/ack/git grep/find -name)을 ' +
+      '감지해 차단하고 서브에이전트 위임을 유도(도구 위임 게이트가 Bash로 우회되는 것을 막음). ' +
+      '파이프 뒤 필터(... | grep)·단일 파일 grep은 예외. 서브에이전트(agent_type)는 면제. ' +
+      'VCF_BASH_SEARCH_GATE=deny|warn|off (기본 deny).',
+  },
   'H5-04': {
     id: 'H5-04',
     title: '요약 먼저 / 요청 시 상세',
@@ -262,6 +273,68 @@ export function bashOutputFloodMessage(
     '(로그 flood 방지, H2-02) [실제 필터링은 rtk가 일부 수행]'
   );
 }
+
+// --- H2-03: Bash 재귀 코드베이스 탐색 감지(강제 위임) --------------------------
+
+/** 메인 세션에서 Bash로 수행하는 "재귀 코드베이스 탐색"을 감지한다(서브에이전트 위임 유도용).
+ *  매칭되면 감지된 검색 도구 라벨(예: 'grep -r', 'rg', 'find'), 아니면 null.
+ *  보수적 판정(오탐 최소화):
+ *   - 첫 세그먼트(선행 명령)만 본다 — 파이프/논리연산 뒤의 grep 등(필터링)은 대상 아님.
+ *   - grep은 재귀 플래그(-r/-R/--recursive/--include)가 있을 때만 — 단일 파일 grep은 통과.
+ *   - rg/ag/ack는 기본 재귀라 선행 명령이면 매칭. git grep 매칭.
+ *   - find는 -name/-path/-regex/-type 등 탐색 술어가 있을 때 매칭.
+ *   - 선행 환경변수 할당(FOO=bar) 및 래퍼(sudo/time/nice/nohup/command)는 건너뛴다.
+ *   - --version/--help/-V는 제외.
+ *  fail-safe: 비문자열/예외는 null(게이트 미발동). */
+export function classifyBashSearch(command: string): string | null {
+  try {
+    if (typeof command !== 'string') return null;
+    const trimmed = command.trim();
+    if (trimmed === '') return null;
+
+    // 첫 세그먼트만(파이프/;/&& 이전). 뒤쪽 grep은 필터링이므로 대상 아님.
+    const firstSeg = (trimmed.split(/\||;|&&|\n/)[0] ?? '').trim();
+    if (firstSeg === '') return null;
+
+    // 선행 환경변수 할당 + 래퍼 명령 제거.
+    let seg = firstSeg.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+/, '');
+    seg = seg.replace(/^(?:sudo|time|nice|nohup|command)\s+/, '');
+    const tokens = seg.split(/\s+/).filter(Boolean);
+    const bin = tokens[0] ?? '';
+
+    if (/(^|\s)(--version|--help|-V)(\s|$)/.test(seg)) return null;
+
+    if (bin === 'rg' || bin === 'ripgrep') return 'rg';
+    if (bin === 'ag') return 'ag';
+    if (bin === 'ack') return 'ack';
+    if (bin === 'git' && tokens[1] === 'grep') return 'git grep';
+
+    if (bin === 'grep' || bin === 'egrep' || bin === 'fgrep' || bin === 'rgrep') {
+      if (bin === 'rgrep') return 'grep -r';
+      // 재귀 플래그가 있을 때만. 단일 파일 grep(재귀 아님)은 통과.
+      const recursive =
+        /(^|\s)-[a-z]*[rR][a-z]*(\s|=|$)/i.test(seg) ||
+        /--recursive\b/.test(seg) ||
+        /--include\b/.test(seg);
+      return recursive ? 'grep -r' : null;
+    }
+
+    if (bin === 'find') {
+      // 탐색 술어(-name/-path/-regex/-type 등)가 있을 때만. 단순 디렉터리 지정은 통과.
+      if (/(^|\s)-(i?name|i?path|i?regex|type)\b/.test(seg)) return 'find';
+      return null;
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export const BASH_SEARCH_MESSAGE =
+  'Bash로 코드베이스를 직접 재귀 탐색하지 마세요(도구 위임 게이트 우회). ' +
+  "이런 검색은 서브에이전트에 위임하세요: Agent 도구로 'general-purpose'/'Explore' 서브에이전트를 " +
+  '호출해 검색을 수행하게 하고 결과만 받으세요. (Bash 검색 강제 위임, H2-03) [끄려면 VCF_BASH_SEARCH_GATE=off]';
 
 // --- H5-04: 요약 먼저 / 요청 시 상세 ----------------------------------------
 
