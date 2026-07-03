@@ -4,6 +4,7 @@ import {
   bashOutputWarnThresholds,
   classifyBashFlood,
   compactForcePct,
+  envInt,
   extractBashOutput,
   measureOutput,
   TOKEN_HABITS,
@@ -48,6 +49,35 @@ describe('H1-03 compact force threshold', () => {
   test('catalog H1-03 exposes VCF_COMPACT_FORCE_PCT default 50', () => {
     expect(TOKEN_HABITS['H1-03']!.envVars).toContain('VCF_COMPACT_FORCE_PCT');
     expect(TOKEN_HABITS['H1-03']!.defaults.VCF_COMPACT_FORCE_PCT).toBe(50);
+  });
+
+  // 4-3: 오용 방어 클램프 [0,100].
+  test('clamps VCF_COMPACT_FORCE_PCT below 0 to 0', () => {
+    setEnv('VCF_COMPACT_FORCE_PCT', '-5');
+    expect(compactForcePct()).toBe(0);
+  });
+  test('clamps VCF_COMPACT_FORCE_PCT above 100 to 100', () => {
+    setEnv('VCF_COMPACT_FORCE_PCT', '250');
+    expect(compactForcePct()).toBe(100);
+  });
+});
+
+describe('envInt clamp (4-3)', () => {
+  test('clamps to [min, max] when provided', () => {
+    setEnv('VCF_TEST_CLAMP', '-10');
+    expect(envInt('VCF_TEST_CLAMP', 5, 0, 100)).toBe(0);
+    setEnv('VCF_TEST_CLAMP', '999');
+    expect(envInt('VCF_TEST_CLAMP', 5, 0, 100)).toBe(100);
+    setEnv('VCF_TEST_CLAMP', '42');
+    expect(envInt('VCF_TEST_CLAMP', 5, 0, 100)).toBe(42);
+  });
+  test('no clamp args → raw finite value; unset/garbage → default (not clamped)', () => {
+    setEnv('VCF_TEST_CLAMP', '-10');
+    expect(envInt('VCF_TEST_CLAMP', 5)).toBe(-10);
+    setEnv('VCF_TEST_CLAMP', undefined);
+    expect(envInt('VCF_TEST_CLAMP', 5, 0, 100)).toBe(5);
+    setEnv('VCF_TEST_CLAMP', 'abc');
+    expect(envInt('VCF_TEST_CLAMP', 5, 0, 100)).toBe(5);
   });
 });
 

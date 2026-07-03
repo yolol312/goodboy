@@ -253,10 +253,13 @@ function modelFromObject(obj: Record<string, unknown>): string | null {
 function limitForModel(model: string | null): number {
   if (!model || typeof model !== 'string') return DEFAULT_CONTEXT_LIMIT;
   const m = model.toLowerCase();
-  // 1M extended context 표식들. `[1m]`(예: claude-opus-4-8[1m]) 또는 1m/1-million/1000k 등.
+  // 1M extended context 표식들. `[1m]`(예: claude-opus-4-8[1m]) 또는 -1m 등.
+  //   4-4: bare '1m'을 includes로 보면 임의 문자열(날짜/해시)에 우연히 섞인 '1m'을 1M로 오판할 수 있어,
+  //   앞뒤가 영숫자가 아닌 "경계 있는" 1m만 인정한다(예: [1m], -1m). `41m`/`1mb` 같은 건 매칭 안 함.
+  const bounded1m = /(^|[^a-z0-9])1m([^a-z0-9]|$)/.test(m);
   if (
     m.includes('[1m]') ||
-    m.includes('1m') ||
+    bounded1m ||
     m.includes('1-million') ||
     m.includes('1million') ||
     m.includes('1000k')

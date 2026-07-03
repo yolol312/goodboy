@@ -539,3 +539,25 @@ describe('getContextUsage confident (3-A)', () => {
     expect(u!.confident).toBe(true);
   });
 });
+
+describe('limitForModel bounded 1m matching (4-4)', () => {
+  test('영숫자에 인접한 "1m"(예: 41m)은 1M로 오판하지 않는다', () => {
+    delete process.env.VCF_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({ message: { model: 'claude-weird-41m-x', usage: { input_tokens: 120_000 } } }),
+    ]);
+    expect(getContextUsage(path)!.limit).toBe(200_000);
+  });
+
+  test('경계 있는 -1m / [1m]은 1M로 인식한다', () => {
+    delete process.env.VCF_CONTEXT_LIMIT;
+    const dash = writeTranscript([
+      JSON.stringify({ message: { model: 'claude-opus-4-8-1m', usage: { input_tokens: 150_000 } } }),
+    ]);
+    expect(getContextUsage(dash)!.limit).toBe(1_000_000);
+    const bracket = writeTranscript([
+      JSON.stringify({ message: { model: 'claude-opus-4-8[1m]', usage: { input_tokens: 150_000 } } }),
+    ]);
+    expect(getContextUsage(bracket)!.limit).toBe(1_000_000);
+  });
+});

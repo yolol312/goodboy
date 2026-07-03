@@ -93,13 +93,19 @@ export const TOKEN_HABITS: Record<string, TokenHabit> = {
 
 // --- env 헬퍼 ---------------------------------------------------------------
 
-/** env 정수. 미설정/빈값/파싱실패 → dflt. */
-export function envInt(name: string, dflt: number): number {
+/** env 정수. 미설정/빈값/파싱실패 → dflt.
+ *  4-3: min/max를 주면 [min, max]로 클램프한다(설정 오용으로 음수/거대값이 게이트를 무력화하거나
+ *  상시 발동시키는 것을 막는다). 파싱된 값이 유한할 때만 클램프하고, 실패 시 dflt는 클램프하지 않는다. */
+export function envInt(name: string, dflt: number, min?: number, max?: number): number {
   try {
     const v = process.env[name];
     if (v === undefined || v.trim() === '') return dflt;
     const n = parseInt(v, 10);
-    return Number.isFinite(n) ? n : dflt;
+    if (!Number.isFinite(n)) return dflt;
+    let clamped = n;
+    if (typeof min === 'number' && clamped < min) clamped = min;
+    if (typeof max === 'number' && clamped > max) clamped = max;
+    return clamped;
   } catch {
     return dflt;
   }
@@ -160,7 +166,8 @@ export function writeHabitState(sessionId: string, state: HabitState): void {
 /** 강제 자동 compact 임계(%). 컨텍스트 점유율이 이 값 이상이면 Stop 훅이 compact를 강제한다.
  *  VCF_COMPACT_FORCE_PCT로 조정, 기본 50. (하위 경고 단계 없이 전부 "강제"로 통일) */
 export function compactForcePct(): number {
-  return envInt('VCF_COMPACT_FORCE_PCT', 50);
+  // 4-3: [0, 100]으로 클램프. 음수면 상시 강제, 100 초과면 사실상 비활성 되던 오용을 막는다.
+  return envInt('VCF_COMPACT_FORCE_PCT', 50, 0, 100);
 }
 
 // --- H2-02: Bash 대량출력 패턴 판정 -----------------------------------------
@@ -171,7 +178,8 @@ export function compactForcePct(): number {
  *  ⚠️ rtk가 Bash 토큰 필터링을 이미 수행하므로 vcf는 "경고"만 담당한다(deny 안 함). */
 export function classifyBashFlood(command: string): string | null {
   if (typeof command !== 'string') return null;
-  const cmd = command.trim();
+  // 4-2: 정규식 백트래킹 시간을 상한하려 앞 8KB만 검사한다(초대형 command 방어). 판정 신호로 충분.
+  const cmd = command.trim().slice(0, 8192);
   if (cmd === '') return null;
 
   // 출력 제한/스트리밍 축소가 이미 있으면 정상 명령으로 간주하고 경고하지 않는다.
@@ -184,8 +192,9 @@ export function classifyBashFlood(command: string): string | null {
   // 고위험 패턴(보수적):
   //  - cat 으로 .log 파일 출력
   const catLog = /\bcat\b[^|&;]*\.log\b/.test(cmd);
-  //  - cat 으로 glob(*) 다중 파일 출력
-  const catGlob = /\bcat\b\s+[^|&;]*\*/.test(cmd);
+  //  - cat 으로 glob(*) 다중 파일 출력. (4-2: `\s+`와 `[^|&;]*`가 공백에서 겹쳐 준2차 백트래킹을
+  //    유발하던 것을 단일 `[^|&;]*`(공백 포함)로 단순화해 모호성 제거.)
+  const catGlob = /\bcat\b[^|&;]*\*/.test(cmd);
   //  - 루트/광범위 find (find / ...)
   const findBroad = /\bfind\s+\/(\s|$)/.test(cmd);
   //  - 전체 로그 스트리밍(journalctl / dmesg 전체 등)

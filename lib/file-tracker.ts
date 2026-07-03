@@ -27,7 +27,9 @@ function sessionDir(sessionId: string): string {
 export function ensureSessionDir(sessionId: string): string {
   const dir = sessionDir(sessionId);
   try {
-    mkdirSync(dir, { recursive: true });
+    // mode 0700: 세션 상태 파일(편집 중 파일 경로 등)이 같은 호스트의 다른 로컬 사용자에게
+    //   노출되지 않도록 소유자 전용 권한으로 생성한다(4-1). 이미 존재하면 권한은 유지된다.
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
   } catch {
     // best-effort
   }
