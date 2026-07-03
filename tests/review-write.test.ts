@@ -1,9 +1,17 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { findRecentReviewFile, validateReview } from '../lib/review-validator';
-import { validateReviewResultInput } from '../lib/cli';
+import { timestampToFilename, validateReviewResultInput } from '../lib/cli';
 
 const CLI = resolve(import.meta.dir, '..', 'lib', 'cli.ts');
 const tmpDirs: string[] = [];
@@ -274,5 +282,39 @@ describe('validateReviewResultInput (unit)', () => {
     const r = validateReviewResultInput({ category: 5, verdict: 'nope' });
     expect(r.ok).toBe(false);
     expect(r.errors.length).toBeGreaterThan(1);
+  });
+});
+
+describe('review-write path traversal hardening (1-B)', () => {
+  test('malicious ../ timestamp cannot escape reviews dir', async () => {
+    const cwd = newCwd();
+    const malicious = { ...validReview, timestamp: '../../../evil' };
+    const { code, stdout } = await runReviewWrite(cwd, JSON.stringify(malicious));
+    expect(code).toBe(0);
+    const out = JSON.parse(stdout) as { path: string };
+    // macOS $TMPDIR은 /private로 심링크되어 자식의 process.cwd()가 realpath로 해석된다.
+    //   양쪽을 realpathSync로 정규화해 심링크 차이 없이 컨테인먼트를 검증한다.
+    const reviewsDir = realpathSync(join(cwd, '.claude', 'reviews'));
+    expect(realpathSync(out.path).startsWith(reviewsDir + sep)).toBe(true);
+    // 정확히 한 파일, 파일명에 경로 구분자/선행 점 없음.
+    const files = readdirSync(join(cwd, '.claude', 'reviews'));
+    expect(files.length).toBe(1);
+    expect(files[0]).not.toContain('/');
+    expect(files[0]!.startsWith('.')).toBe(false);
+    // reviews 밖으로 새어나간 파일이 없어야 한다.
+    expect(existsSync(join(cwd, 'evil.json'))).toBe(false);
+    expect(existsSync(join(cwd, '.claude', 'evil.json'))).toBe(false);
+  });
+
+  test('timestamp with slashes flattens to underscores (unit)', () => {
+    expect(timestampToFilename('a/b/c')).toBe('a_b_c');
+    expect(timestampToFilename('../x')).toBe('_x');
+    expect(timestampToFilename('2026-05-11T14:23:00Z')).toBe('2026-05-11T14-23-00Z');
+  });
+
+  test('all-dot / empty timestamp falls back to a safe name (unit)', () => {
+    expect(timestampToFilename('...')).toBe('review');
+    expect(timestampToFilename('')).toBe('review');
+    expect(timestampToFilename('/')).toBe('_');
   });
 });

@@ -8,7 +8,7 @@
 //   review-write [file]   (없으면 stdin에서 ReviewResult JSON을 읽음)
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import type { ReviewFinding, ReviewResult, Severity, Verdict } from './types';
 
 // ---- 유틸 ----
@@ -148,9 +148,17 @@ export function validateReviewResultInput(parsed: unknown): {
   return { ok: true, errors: [], value };
 }
 
-/** ISO timestamp의 콜론을 대시로 치환해 안전한 파일명으로. */
-function timestampToFilename(ts: string): string {
-  return ts.replace(/:/g, '-');
+/** ISO timestamp를 안전한 파일명으로 변환한다.
+ *  ⚠️ timestamp는 리뷰 서브에이전트가 넣는 값(신뢰 불가)일 수 있다. 콜론만 치환하면
+ *     `../`·`/` 같은 경로 문자가 통과해 reviews 디렉터리 밖으로 파일을 쓸 수 있다.
+ *     → 콜론을 대시로 바꾼 뒤, 파일명에 안전한 화이트리스트([0-9A-Za-z._-]) 외 문자는 전부 '_'로 치환하고,
+ *       선행 점(., .., ...)을 제거해 상위경로/숨김파일화를 막는다. 빈 값이면 안전한 기본값. */
+export function timestampToFilename(ts: string): string {
+  const safe = (typeof ts === 'string' ? ts : '')
+    .replace(/:/g, '-')
+    .replace(/[^0-9A-Za-z._-]/g, '_')
+    .replace(/^\.+/, '');
+  return safe === '' ? 'review' : safe;
 }
 
 async function cmdReviewWrite(cwd: string, args: string[]): Promise<void> {
@@ -191,6 +199,13 @@ async function cmdReviewWrite(cwd: string, args: string[]): Promise<void> {
   ensureDir(reviewsDir);
   const filename = `${timestampToFilename(result.timestamp)}.json`;
   const outPath = join(reviewsDir, filename);
+  // 방어적 컨테인먼트: 소독을 우회하는 특이 케이스 대비, 최종 경로가 reviewsDir 하위인지 확인.
+  //   (timestampToFilename이 경로 구분자를 제거하므로 정상적으로는 항상 통과한다.)
+  const resolvedReviews = resolve(reviewsDir);
+  const resolvedOut = resolve(outPath);
+  if (resolvedOut !== resolvedReviews && !resolvedOut.startsWith(resolvedReviews + sep)) {
+    fail(`출력 경로가 reviews 디렉터리를 벗어납니다: ${resolvedOut}`);
+  }
   writeJson(outPath, result);
 
   process.stdout.write(

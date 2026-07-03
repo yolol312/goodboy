@@ -205,7 +205,10 @@ function main(): void {
       //   최근 N턴 내 같은 파일을, 그 사이 mtime 변경도 편집도 없이 다시 Read하면 불필요한 재-Read로 본다.
       //   오탐 방지 예외(허용): 부분읽기(offset/limit), mtime 변경됨, 마지막 read 이후 편집됨.
       //   모든 판정은 fail-open(내부 오류/불확실 → 허용). env VCF_REREAD_GATE=deny|warn|off (기본 deny).
-      if (toolName === 'Read') {
+      //   ⚠️ 서브에이전트(agent_type 존재)는 면제한다(delegation 게이트와 동일 정책).
+      //   read 기록은 session_id로만 스코프되어 메인과 서브에이전트가 공유되므로, 서브에이전트가
+      //   "자신은 처음 읽는" 파일도 메인이 이미 읽었다는 이유로 오차단된다. 서브에이전트는 통과시킨다.
+      if (toolName === 'Read' && !input.agent_type) {
         const gate = envStr('VCF_REREAD_GATE', 'deny'); // deny | warn | off
         const filePath = (toolInput.file_path as string | undefined) ?? '';
         // 부분 읽기(offset/limit)는 정당한 재-Read → 예외.

@@ -66,12 +66,14 @@ async function runRead(
   sessionId: string,
   toolInput: Record<string, unknown>,
   extraEnv: Record<string, string> = {},
+  agentType?: string,
 ): Promise<Out> {
   const payload = JSON.stringify({
     session_id: sessionId,
     cwd,
     tool_name: 'Read',
     tool_input: toolInput,
+    ...(agentType ? { agent_type: agentType } : {}),
   });
   const proc = Bun.spawn(['bun', HOOK], {
     cwd,
@@ -101,6 +103,16 @@ describe('pre-tool-use H2-01 re-read gate', () => {
     const out = await runRead(tmp, cwd, sessionId, { file_path: path });
     expect(isDenied(out)).toBe(true);
     expect(out.hookSpecificOutput?.permissionDecisionReason).toContain('H2-01');
+  });
+
+  test('ALLOW: subagent (agent_type present) is exempt (1-A)', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    const { path, mtime } = makeFile(cwd, 'a.ts');
+    // 메인이라면 deny 되는 상황(같은 파일·mtime 동일·미편집)을 seed.
+    seedRead(tmp, sessionId, path, 0, mtime);
+    // 서브에이전트(agent_type 존재)는 자기 세션 read 공유로 오차단되면 안 되므로 통과해야 한다.
+    const out = await runRead(tmp, cwd, sessionId, { file_path: path }, {}, 'general-purpose');
+    expect(isDenied(out)).toBe(false);
   });
 
   test('ALLOW: partial read (offset present) is exempt', async () => {

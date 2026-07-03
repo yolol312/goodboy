@@ -63,7 +63,9 @@ export const TOKEN_HABITS: Record<string, TokenHabit> = {
     envVars: ['VCF_REREAD_GATE', 'VCF_REREAD_WINDOW'],
     defaults: { VCF_REREAD_GATE: 'deny', VCF_REREAD_WINDOW: 3 },
     description:
-      '최근 N턴 내 같은 파일을 mtime 변경 없이 재-Read하면 차단(부분읽기/변경/편집은 예외).',
+      '최근 N턴 내 같은 파일을 mtime 변경 없이 재-Read하면 차단(부분읽기/변경/편집은 예외). ' +
+      '서브에이전트(agent_type 존재)는 면제 — read 기록이 session_id로만 스코프되어 메인과 공유되므로 ' +
+      '서브에이전트가 처음 읽는 파일도 오차단되던 문제를 막는다.',
   },
   'H2-02': {
     id: 'H2-02',
