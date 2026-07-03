@@ -25,13 +25,13 @@ LLM이 코드 작성 시 자주 발생하는 4가지 약점과 Good Boy의 해�
 ### 로컬 개발 모드 (지금 권장)
 
 ```bash
-claude --plugin-dir /Users/seongmo/workspace/goodboy
+claude --plugin-dir /path/to/goodboy
 ```
 
 ### Marketplace 설치 (배포 후)
 
 ```bash
-/plugin marketplace add seongmo/goodboy
+/plugin marketplace add yolol312/goodboy
 /plugin install goodboy@goodboy --scope project   # 또는 user | local. 기본은 user(글로벌)
 ```
 
