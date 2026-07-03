@@ -28,7 +28,7 @@ afterEach(() => {
 });
 
 function newCwd(): string {
-  const cwd = mkdtempSync(join(tmpdir(), 'vcf-rw-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'goodboy-rw-'));
   tmpDirs.push(cwd);
   return cwd;
 }

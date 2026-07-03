@@ -18,7 +18,7 @@ export interface ContextUsage {
   /** transcript에서 읽은 모델명(없으면 null) */
   model: string | null;
   /** 3-A: limit을 신뢰할 수 있는지. false면 강제 compact를 하지 않는다(모호한 200K 가정 회피).
-   *  true 조건: VCF_CONTEXT_LIMIT 명시 / 1M로 확정(표식·안전상향) / 1M 미지원 세대의 확정 200K.
+   *  true 조건: GOODBOY_CONTEXT_LIMIT 명시 / 1M로 확정(표식·안전상향) / 1M 미지원 세대의 확정 200K.
    *  false: 1M 지원 세대(opus/sonnet 4+)인데 [1m] 표식 없음, 또는 미지 모델. */
   confident: boolean;
 }
@@ -33,15 +33,15 @@ const EXTENDED_CONTEXT_LIMIT = 1_000_000;
 const DEFAULT_CONTEXT_LIMIT = STANDARD_CONTEXT_LIMIT;
 
 /** env override로 강제할 컨텍스트 한도(토큰수)를 읽는다.
- *  VCF_CONTEXT_LIMIT이 양의 정수로 설정돼 있으면 그 값을 반환, 아니면 null.
+ *  GOODBOY_CONTEXT_LIMIT이 양의 정수로 설정돼 있으면 그 값을 반환, 아니면 null.
  *
  *  ⚠️ 왜 필요한가: transcript usage 줄에 찍히는 실제 모델 ID(예: `claude-opus-4-8`)에는
  *  1M 확장 컨텍스트 표식(`[1m]` 등)이 없다. 1M은 세션 토글이라 모델 ID로는 200K/1M을
  *  구분할 수 없다. 따라서 1M 창을 쓰는 사용자는 이 env로 한도를 명시하는 것이 가장 정확하다.
- *  (예: `VCF_CONTEXT_LIMIT=1000000`) 파싱 실패/음수/0/비수치 → null(무시). */
+ *  (예: `GOODBOY_CONTEXT_LIMIT=1000000`) 파싱 실패/음수/0/비수치 → null(무시). */
 function envContextLimitOverride(): number | null {
   try {
-    const v = process.env.VCF_CONTEXT_LIMIT;
+    const v = process.env.GOODBOY_CONTEXT_LIMIT;
     if (v === undefined || v.trim() === '') return null;
     const n = parseInt(v.trim(), 10);
     if (!Number.isFinite(n) || n <= 0) return null;
@@ -116,7 +116,7 @@ interface LimitInputs {
 }
 
 /** 최종 컨텍스트 한도를 결정한다(우선순위 명확).
- *   1) VCF_CONTEXT_LIMIT env override — 최우선(모델 판별 무시).
+ *   1) GOODBOY_CONTEXT_LIMIT env override — 최우선(모델 판별 무시).
  *   2) 런타임 동적 감지 — 신뢰 순서대로:
  *        (a) 훅 입력의 model 필드에 1M 표식 → 1M (있으면 가장 신뢰; 현재 CC 훅엔 대개 없음).
  *        (b) transcript 구조적 모델 필드(resolvedModel 등)에 1M 표식 → 1M (실측 가능·신뢰).

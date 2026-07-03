@@ -77,7 +77,7 @@ required_inputs:
 
 - 단순(simple): 자동 진행 게이트 — 추론 가시화만 필수
 - 중간(medium): 추측 카테고리에 항목이 있으면 사용자 확인 게이트
-- 위험(risky): 항상 사용자 승인 마커(`.claude/.vcf-risk-approved.txt`)가 있어야 편집 가능. 사용자에게 "진행 승인" 명시 요청.
+- 위험(risky): 항상 사용자 승인 마커(`.claude/.goodboy-risk-approved.txt`)가 있어야 편집 가능. 사용자에게 "진행 승인" 명시 요청.
 
 `--risk <level>` 인자로 override 가능. 예: `/fix-bug --risk risky <설명>`
 

@@ -5,7 +5,7 @@
 //   - 다음 Stop 검사에서 "리뷰 필요 파일" = 커서 턴 이후 편집된 파일.
 //   - 수락되는 리뷰는 그 편집들 중 가장 최근 편집보다 더 나중이어야 한다(staleness).
 //
-// 저장 위치: <project>/.claude/.vcf-last-review.json
+// 저장 위치: <project>/.claude/.goodboy-last-review.json
 //   { turn: number, timestamp: string }  // turn = 수락 시점의 현재 턴, timestamp = 수락 ISO
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -17,7 +17,7 @@ export interface ReviewCursor {
 }
 
 function cursorPath(cwd: string): string {
-  return resolvePath(cwd, '.claude', '.vcf-last-review.json');
+  return resolvePath(cwd, '.claude', '.goodboy-last-review.json');
 }
 
 /** 마지막으로 수락된 리뷰 커서를 읽는다. 없거나 손상 시 null (커서 부재 = 첫 리뷰처럼 동작). */

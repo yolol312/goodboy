@@ -1,4 +1,4 @@
-// 공통 타입 정의 — vcf 전체에서 import
+// 공통 타입 정의 — goodboy 전체에서 import
 
 export type RiskLevel = 'simple' | 'medium' | 'risky';
 export type Severity = 'high' | 'medium' | 'low';

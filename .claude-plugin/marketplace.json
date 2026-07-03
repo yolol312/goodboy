@@ -1,15 +1,15 @@
 {
-  "name": "vcf",
+  "name": "goodboy",
   "owner": {
     "name": "seongmo",
-    "url": "https://github.com/seongmo/vcf"
+    "url": "https://github.com/seongmo/goodboy"
   },
-  "description": "Single-plugin marketplace for vcf",
+  "description": "Single-plugin marketplace for Good Boy",
   "plugins": [
     {
-      "name": "vcf",
+      "name": "goodboy",
       "source": "./",
-      "description": "Vibe Coding Framework"
+      "description": "Good Boy — 세상에 나쁜 AI는 없다(There Are No Bad Agents)"
     }
   ]
 }

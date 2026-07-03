@@ -1,7 +1,7 @@
 {
-  "name": "vcf",
+  "name": "goodboy",
   "version": "0.1.0",
-  "description": "Vibe Coding Framework",
+  "description": "Good Boy — agentic LLM-CLI 가드레일",
   "type": "module",
   "private": true,
   "scripts": {

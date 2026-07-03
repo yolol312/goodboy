@@ -25,7 +25,7 @@ afterEach(() => {
     const id = sessions.pop()!;
     const safe = id.replace(/[^a-zA-Z0-9_\-]/g, '_');
     try {
-      rmSync(join(tmpdir(), `vcf-session-${safe}`), { recursive: true, force: true });
+      rmSync(join(tmpdir(), `goodboy-session-${safe}`), { recursive: true, force: true });
     } catch {
       // best-effort
     }
@@ -134,7 +134,7 @@ describe('recursion-guard via pre-tool-use hook', () => {
 
   async function runHook(payload: Record<string, unknown>): Promise<string> {
     const proc = Bun.spawn(['bun', HOOK], {
-      env: { ...process.env, VCF_DISABLE_DELEGATION: '1' },
+      env: { ...process.env, GOODBOY_DISABLE_DELEGATION: '1' },
       stdin: new TextEncoder().encode(JSON.stringify(payload)),
       stdout: 'pipe',
       stderr: 'pipe',
@@ -196,7 +196,7 @@ describe('recursion-guard via pre-tool-use hook', () => {
 describe('recursion-guard prune (3-B: append-only + 원자적)', () => {
   function guardFile(sessionId: string): string {
     const safe = sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_');
-    return join(tmpdir(), `vcf-session-${safe}`, 'recursion-guard.jsonl');
+    return join(tmpdir(), `goodboy-session-${safe}`, 'recursion-guard.jsonl');
   }
 
   test('임계(PRUNE_WHEN_LINES) 이하에서는 재작성/축소 없이 append-only', () => {

@@ -64,7 +64,7 @@ function emit(out: HookOutput): void {
  *  (risk_default 등)로 위험 게이트를 낮추는 것을 막기 위해 기본적으로 신뢰하지 않는다.
  *  개발 중 cwd가 곧 plugin root인 경우를 위해 opt-in env로만 허용한다(1/on/true/yes). */
 function allowCwdSkills(): boolean {
-  const v = (process.env.VCF_ALLOW_CWD_SKILLS ?? '').trim().toLowerCase();
+  const v = (process.env.GOODBOY_ALLOW_CWD_SKILLS ?? '').trim().toLowerCase();
   return v === '1' || v === 'on' || v === 'true' || v === 'yes';
 }
 
@@ -83,7 +83,7 @@ export function resolveSkillPath(cmd: string, cwd: string): string | null {
   } catch {
     // ignore
   }
-  // 미신뢰 소스: cwd/skills — opt-in(VCF_ALLOW_CWD_SKILLS)일 때만 후보에 추가한다.
+  // 미신뢰 소스: cwd/skills — opt-in(GOODBOY_ALLOW_CWD_SKILLS)일 때만 후보에 추가한다.
   if (allowCwdSkills()) {
     candidates.push(resolvePath(cwd, 'skills', cmd, 'SKILL.md'));
   }
@@ -110,7 +110,7 @@ function main(): void {
       try {
         input = raw.trim() === '' ? {} : (JSON.parse(raw) as PromptInput);
       } catch (err) {
-        process.stderr.write(`[vcf user-prompt-submit] stdin parse error: ${String(err)}\n`);
+        process.stderr.write(`[goodboy user-prompt-submit] stdin parse error: ${String(err)}\n`);
         emit({});
         return;
       }
@@ -120,9 +120,9 @@ function main(): void {
       const prompt = input.prompt ?? '';
 
       // (H5-04) 간결-우선 지시(소프트 규칙 — 모델 유도용). 상세 요청 신호가 있으면 주입하지 않는다.
-      //   env VCF_CONCISE_DEFAULT=on|off (기본 on). 슬래시/일반 프롬프트 모두에 적용.
+      //   env GOODBOY_CONCISE_DEFAULT=on|off (기본 on). 슬래시/일반 프롬프트 모두에 적용.
       const conciseContext =
-        envStr('VCF_CONCISE_DEFAULT', 'on') !== 'off' && !wantsDetail(prompt)
+        envStr('GOODBOY_CONCISE_DEFAULT', 'on') !== 'off' && !wantsDetail(prompt)
           ? CONCISE_INSTRUCTION
           : '';
       const emitConcise = (): void => {
@@ -179,7 +179,7 @@ function main(): void {
           userOverride,
         });
         const claudeDir = ensureClaudeDir(cwd);
-        const stateFile = resolvePath(claudeDir, '.vcf-session-state.json');
+        const stateFile = resolvePath(claudeDir, '.goodboy-session-state.json');
         const turn = getCurrentTurn(sessionId);
         const state = {
           category: cmd,
@@ -191,21 +191,21 @@ function main(): void {
         };
         writeFileSync(stateFile, JSON.stringify(state, null, 2), 'utf8');
         // 새 작업 시작 → 이전 risk 승인 마커 삭제
-        const approvedPath = resolvePath(claudeDir, '.vcf-risk-approved.txt');
+        const approvedPath = resolvePath(claudeDir, '.goodboy-risk-approved.txt');
         try {
           if (existsSync(approvedPath)) unlinkSync(approvedPath);
         } catch {
           // best-effort
         }
         // 재시도 카운터도 리셋
-        const retryPath = resolvePath(claudeDir, '.vcf-retry-count.txt');
+        const retryPath = resolvePath(claudeDir, '.goodboy-retry-count.txt');
         try {
           if (existsSync(retryPath)) unlinkSync(retryPath);
         } catch {
           // best-effort
         }
       } catch (err) {
-        process.stderr.write(`[vcf user-prompt-submit] state write error: ${String(err)}\n`);
+        process.stderr.write(`[goodboy user-prompt-submit] state write error: ${String(err)}\n`);
       }
 
       // 체크리스트(있으면)와 H5-04 간결-우선 지시를 합쳐 additionalContext로 내보낸다.
@@ -222,7 +222,7 @@ function main(): void {
       emit(out);
     })
     .catch((err) => {
-      process.stderr.write(`[vcf user-prompt-submit] fatal: ${String(err)}\n`);
+      process.stderr.write(`[goodboy user-prompt-submit] fatal: ${String(err)}\n`);
       emit({});
     });
 }

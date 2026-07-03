@@ -19,9 +19,9 @@ afterEach(() => {
 });
 
 function newSandbox(): { tmp: string; cwd: string; sessionId: string } {
-  const tmp = mkdtempSync(join(tmpdir(), 'vcf-stop-habit-tmp-'));
+  const tmp = mkdtempSync(join(tmpdir(), 'goodboy-stop-habit-tmp-'));
   tmpDirs.push(tmp);
-  const cwd = mkdtempSync(join(tmpdir(), 'vcf-stop-habit-cwd-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'goodboy-stop-habit-cwd-'));
   tmpDirs.push(cwd);
   const sessionId = `sess-${Math.random().toString(36).slice(2)}`;
   return { tmp, cwd, sessionId };
@@ -29,7 +29,7 @@ function newSandbox(): { tmp: string; cwd: string; sessionId: string } {
 
 function sessionDir(tmp: string, sessionId: string): string {
   const safe = sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_');
-  const dir = join(tmp, `vcf-session-${safe}`);
+  const dir = join(tmp, `goodboy-session-${safe}`);
   mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -126,7 +126,7 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
 });
 
 describe('Stop hook — H1-01 long-session warning', () => {
-  test('token-based: tokens over VCF_TOKEN_WARN but below force % → long-session warning, no force', async () => {
+  test('token-based: tokens over GOODBOY_TOKEN_WARN but below force % → long-session warning, no force', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, [CODE_FILE]);
     // 60k tokens = 30% (below 50% force) but above default token warn 50k.

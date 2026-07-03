@@ -37,47 +37,47 @@ describe('token-habits catalog', () => {
 
 describe('H1-03 compact force threshold', () => {
   test('default force threshold is 50%', () => {
-    setEnv('VCF_COMPACT_FORCE_PCT', undefined);
+    setEnv('GOODBOY_COMPACT_FORCE_PCT', undefined);
     expect(compactForcePct()).toBe(50);
   });
 
-  test('VCF_COMPACT_FORCE_PCT overrides the force threshold', () => {
-    setEnv('VCF_COMPACT_FORCE_PCT', '65');
+  test('GOODBOY_COMPACT_FORCE_PCT overrides the force threshold', () => {
+    setEnv('GOODBOY_COMPACT_FORCE_PCT', '65');
     expect(compactForcePct()).toBe(65);
   });
 
-  test('catalog H1-03 exposes VCF_COMPACT_FORCE_PCT default 50', () => {
-    expect(TOKEN_HABITS['H1-03']!.envVars).toContain('VCF_COMPACT_FORCE_PCT');
-    expect(TOKEN_HABITS['H1-03']!.defaults.VCF_COMPACT_FORCE_PCT).toBe(50);
+  test('catalog H1-03 exposes GOODBOY_COMPACT_FORCE_PCT default 50', () => {
+    expect(TOKEN_HABITS['H1-03']!.envVars).toContain('GOODBOY_COMPACT_FORCE_PCT');
+    expect(TOKEN_HABITS['H1-03']!.defaults.GOODBOY_COMPACT_FORCE_PCT).toBe(50);
   });
 
   // 4-3: 오용 방어 클램프 [0,100].
-  test('clamps VCF_COMPACT_FORCE_PCT below 0 to 0', () => {
-    setEnv('VCF_COMPACT_FORCE_PCT', '-5');
+  test('clamps GOODBOY_COMPACT_FORCE_PCT below 0 to 0', () => {
+    setEnv('GOODBOY_COMPACT_FORCE_PCT', '-5');
     expect(compactForcePct()).toBe(0);
   });
-  test('clamps VCF_COMPACT_FORCE_PCT above 100 to 100', () => {
-    setEnv('VCF_COMPACT_FORCE_PCT', '250');
+  test('clamps GOODBOY_COMPACT_FORCE_PCT above 100 to 100', () => {
+    setEnv('GOODBOY_COMPACT_FORCE_PCT', '250');
     expect(compactForcePct()).toBe(100);
   });
 });
 
 describe('envInt clamp (4-3)', () => {
   test('clamps to [min, max] when provided', () => {
-    setEnv('VCF_TEST_CLAMP', '-10');
-    expect(envInt('VCF_TEST_CLAMP', 5, 0, 100)).toBe(0);
-    setEnv('VCF_TEST_CLAMP', '999');
-    expect(envInt('VCF_TEST_CLAMP', 5, 0, 100)).toBe(100);
-    setEnv('VCF_TEST_CLAMP', '42');
-    expect(envInt('VCF_TEST_CLAMP', 5, 0, 100)).toBe(42);
+    setEnv('GOODBOY_TEST_CLAMP', '-10');
+    expect(envInt('GOODBOY_TEST_CLAMP', 5, 0, 100)).toBe(0);
+    setEnv('GOODBOY_TEST_CLAMP', '999');
+    expect(envInt('GOODBOY_TEST_CLAMP', 5, 0, 100)).toBe(100);
+    setEnv('GOODBOY_TEST_CLAMP', '42');
+    expect(envInt('GOODBOY_TEST_CLAMP', 5, 0, 100)).toBe(42);
   });
   test('no clamp args → raw finite value; unset/garbage → default (not clamped)', () => {
-    setEnv('VCF_TEST_CLAMP', '-10');
-    expect(envInt('VCF_TEST_CLAMP', 5)).toBe(-10);
-    setEnv('VCF_TEST_CLAMP', undefined);
-    expect(envInt('VCF_TEST_CLAMP', 5, 0, 100)).toBe(5);
-    setEnv('VCF_TEST_CLAMP', 'abc');
-    expect(envInt('VCF_TEST_CLAMP', 5, 0, 100)).toBe(5);
+    setEnv('GOODBOY_TEST_CLAMP', '-10');
+    expect(envInt('GOODBOY_TEST_CLAMP', 5)).toBe(-10);
+    setEnv('GOODBOY_TEST_CLAMP', undefined);
+    expect(envInt('GOODBOY_TEST_CLAMP', 5, 0, 100)).toBe(5);
+    setEnv('GOODBOY_TEST_CLAMP', 'abc');
+    expect(envInt('GOODBOY_TEST_CLAMP', 5, 0, 100)).toBe(5);
   });
 });
 
@@ -97,7 +97,7 @@ describe('H2-02 classifyBashFlood', () => {
 
   // 라이브에서 실제로 놓쳤던 형태: 경로 + glob + 리다이렉트 + `|| echo`.
   test('flags cat of path/*.log even with redirect and || echo', () => {
-    expect(classifyBashFlood('cat /Users/x/workspace/vcf/*.log 2>/dev/null || echo NO_LOG')).toBe(
+    expect(classifyBashFlood('cat /Users/x/workspace/goodboy/*.log 2>/dev/null || echo NO_LOG')).toBe(
       'cat-log',
     );
   });
@@ -147,14 +147,14 @@ describe('H5-04 wantsDetail', () => {
 
 describe('H2-02 output-size helpers', () => {
   test('bashOutputWarnThresholds defaults to 10000 chars / 200 lines', () => {
-    setEnv('VCF_BASH_OUTPUT_WARN_CHARS', undefined);
-    setEnv('VCF_BASH_OUTPUT_WARN_LINES', undefined);
+    setEnv('GOODBOY_BASH_OUTPUT_WARN_CHARS', undefined);
+    setEnv('GOODBOY_BASH_OUTPUT_WARN_LINES', undefined);
     expect(bashOutputWarnThresholds()).toEqual({ chars: 10_000, lines: 200 });
   });
 
   test('bashOutputWarnThresholds honors env overrides', () => {
-    setEnv('VCF_BASH_OUTPUT_WARN_CHARS', '5');
-    setEnv('VCF_BASH_OUTPUT_WARN_LINES', '9');
+    setEnv('GOODBOY_BASH_OUTPUT_WARN_CHARS', '5');
+    setEnv('GOODBOY_BASH_OUTPUT_WARN_LINES', '9');
     expect(bashOutputWarnThresholds()).toEqual({ chars: 5, lines: 9 });
   });
 

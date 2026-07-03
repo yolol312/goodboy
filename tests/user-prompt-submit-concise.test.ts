@@ -22,7 +22,7 @@ async function runHook(
   prompt: string,
   extraEnv: Record<string, string> = {},
 ): Promise<string> {
-  const cwd = mkdtempSync(join(tmpdir(), 'vcf-concise-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'goodboy-concise-'));
   tmpDirs.push(cwd);
   const payload = JSON.stringify({ session_id: 'test-session', cwd, prompt });
   const proc = Bun.spawn(['bun', HOOK], {
@@ -56,8 +56,8 @@ describe('user-prompt-submit H5-04 concise-first', () => {
     expect(ctx(out)).not.toContain('H5-04');
   });
 
-  test('VCF_CONCISE_DEFAULT=off disables injection', async () => {
-    const out = await runHook('fix the login bug', { VCF_CONCISE_DEFAULT: 'off' });
+  test('GOODBOY_CONCISE_DEFAULT=off disables injection', async () => {
+    const out = await runHook('fix the login bug', { GOODBOY_CONCISE_DEFAULT: 'off' });
     expect(ctx(out)).not.toContain('H5-04');
   });
 

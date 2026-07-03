@@ -7,7 +7,7 @@ import { parseTokensFromTranscript } from '../lib/transcript-parser';
 const tmpDirs: string[] = [];
 
 function writeTranscript(lines: string[]): string {
-  const dir = mkdtempSync(join(tmpdir(), 'vcf-transcript-'));
+  const dir = mkdtempSync(join(tmpdir(), 'goodboy-transcript-'));
   tmpDirs.push(dir);
   const path = join(dir, 'transcript.jsonl');
   writeFileSync(path, lines.join('\n') + '\n', 'utf8');

@@ -18,9 +18,9 @@ afterEach(() => {
 });
 
 function newSandbox(): { tmp: string; cwd: string; sessionId: string } {
-  const tmp = mkdtempSync(join(tmpdir(), 'vcf-reread-tmp-'));
+  const tmp = mkdtempSync(join(tmpdir(), 'goodboy-reread-tmp-'));
   tmpDirs.push(tmp);
-  const cwd = mkdtempSync(join(tmpdir(), 'vcf-reread-cwd-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'goodboy-reread-cwd-'));
   tmpDirs.push(cwd);
   const sessionId = `sess-${Math.random().toString(36).slice(2)}`;
   return { tmp, cwd, sessionId };
@@ -36,7 +36,7 @@ function makeFile(cwd: string, name: string, content = 'hello'): { path: string;
 /** Seed a read record (optionally with mtime) at a given turn. */
 function seedRead(tmp: string, sessionId: string, file: string, turn: number, mtime?: number): void {
   const safe = sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_');
-  const dir = join(tmp, `vcf-session-${safe}`);
+  const dir = join(tmp, `goodboy-session-${safe}`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'turn.txt'), String(turn), 'utf8');
   const rec: Record<string, unknown> = { file: resolve(file), turn, timestamp: new Date().toISOString() };
@@ -46,7 +46,7 @@ function seedRead(tmp: string, sessionId: string, file: string, turn: number, mt
 
 function seedEdit(tmp: string, sessionId: string, file: string, turn: number): void {
   const safe = sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_');
-  const dir = join(tmp, `vcf-session-${safe}`);
+  const dir = join(tmp, `goodboy-session-${safe}`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(
     join(dir, 'edits.jsonl'),
@@ -77,7 +77,7 @@ async function runRead(
   });
   const proc = Bun.spawn(['bun', HOOK], {
     cwd,
-    env: { ...process.env, TMPDIR: tmp, VCF_DISABLE_DELEGATION: '1', ...extraEnv },
+    env: { ...process.env, TMPDIR: tmp, GOODBOY_DISABLE_DELEGATION: '1', ...extraEnv },
     stdin: new TextEncoder().encode(payload),
     stdout: 'pipe',
     stderr: 'pipe',
@@ -160,7 +160,7 @@ describe('pre-tool-use H2-01 re-read gate', () => {
     const { tmp, cwd, sessionId } = newSandbox();
     const { path, mtime } = makeFile(cwd, 'a.ts');
     seedRead(tmp, sessionId, path, 0, mtime);
-    const out = await runRead(tmp, cwd, sessionId, { file_path: path }, { VCF_REREAD_GATE: 'warn' });
+    const out = await runRead(tmp, cwd, sessionId, { file_path: path }, { GOODBOY_REREAD_GATE: 'warn' });
     expect(isDenied(out)).toBe(false);
     expect(out.systemMessage ?? '').toContain('H2-01');
   });
@@ -169,7 +169,7 @@ describe('pre-tool-use H2-01 re-read gate', () => {
     const { tmp, cwd, sessionId } = newSandbox();
     const { path, mtime } = makeFile(cwd, 'a.ts');
     seedRead(tmp, sessionId, path, 0, mtime);
-    const out = await runRead(tmp, cwd, sessionId, { file_path: path }, { VCF_REREAD_GATE: 'off' });
+    const out = await runRead(tmp, cwd, sessionId, { file_path: path }, { GOODBOY_REREAD_GATE: 'off' });
     expect(isDenied(out)).toBe(false);
     expect(out.systemMessage ?? '').not.toContain('H2-01');
   });

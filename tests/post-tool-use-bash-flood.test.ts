@@ -22,9 +22,9 @@ afterEach(() => {
 });
 
 function newSandbox(): { tmp: string; cwd: string; sessionId: string } {
-  const tmp = mkdtempSync(join(tmpdir(), 'vcf-ptu-flood-tmp-'));
+  const tmp = mkdtempSync(join(tmpdir(), 'goodboy-ptu-flood-tmp-'));
   tmpDirs.push(tmp);
-  const cwd = mkdtempSync(join(tmpdir(), 'vcf-ptu-flood-cwd-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'goodboy-ptu-flood-cwd-'));
   tmpDirs.push(cwd);
   const sessionId = `sess-${Math.random().toString(36).slice(2)}`;
   return { tmp, cwd, sessionId };
@@ -124,19 +124,19 @@ describe('post-tool-use H2-02 integration', () => {
     expect(second.hookSpecificOutput?.additionalContext ?? '').not.toContain('H2-02');
   });
 
-  test('VCF_BASH_FLOOD_WARN=off disables the warning', async () => {
+  test('GOODBOY_BASH_FLOOD_WARN=off disables the warning', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     const out = await runBash(tmp, cwd, sessionId, 'cat /var/log/app.log', { stdout: bigStdout }, {
-      VCF_BASH_FLOOD_WARN: 'off',
+      GOODBOY_BASH_FLOOD_WARN: 'off',
     });
     expect(out.hookSpecificOutput?.additionalContext ?? '').not.toContain('H2-02');
   });
 
-  test('env thresholds are adjustable (VCF_BASH_OUTPUT_WARN_CHARS)', async () => {
+  test('env thresholds are adjustable (GOODBOY_BASH_OUTPUT_WARN_CHARS)', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     // Lower the char threshold so even small output triggers.
     const out = await runBash(tmp, cwd, sessionId, 'echo hi', { stdout: 'hello' }, {
-      VCF_BASH_OUTPUT_WARN_CHARS: '3',
+      GOODBOY_BASH_OUTPUT_WARN_CHARS: '3',
     });
     expect(out.hookSpecificOutput?.additionalContext ?? '').toContain('H2-02');
   });

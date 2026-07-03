@@ -1,13 +1,13 @@
 // 토큰 낭비 습관(token-waste habit) 카탈로그 + 공통 헬퍼.
 //
-// tokenhabit이 식별한 "토큰을 낭비하는 작업 습관"을 vcf hook이 막기 위한 중앙 카탈로그다.
+// tokenhabit이 식별한 "토큰을 낭비하는 작업 습관"을 goodboy hook이 막기 위한 중앙 카탈로그다.
 // 새 습관을 추가할 때도 같은 틀(id / envVars / defaults / description)을 그대로 쓴다.
 // 각 게이트/경고는 자신의 habit ID를 메시지/주석에 표기한다.
 //
 // 설계 원칙(엄수):
 //   - fail-open: 모든 헬퍼는 예외를 삼키고 안전한 기본값을 반환. 정상 작업을 막지 않는다.
 //   - 스팸 금지: 경고는 세션당/단계당 1회. "이미 경고함"을 habit-state.json에 기록한다.
-//   - env 토글: 각 기능은 VCF_ 접두사 env로 끄거나 임계값을 조정할 수 있다.
+//   - env 토글: 각 기능은 GOODBOY_ 접두사 env로 끄거나 임계값을 조정할 수 있다.
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -15,7 +15,7 @@ import { ensureSessionDir } from './file-tracker';
 
 // --- H2-02 임계 기본값(출력 크기 기반) --------------------------------------
 // Bash 실행 후 실제 출력이 이 크기를 넘으면 사후 경고한다(사후 교정).
-// env로 조정: VCF_BASH_OUTPUT_WARN_CHARS / VCF_BASH_OUTPUT_WARN_LINES.
+// env로 조정: GOODBOY_BASH_OUTPUT_WARN_CHARS / GOODBOY_BASH_OUTPUT_WARN_LINES.
 export const BASH_OUTPUT_WARN_CHARS_DEFAULT = 10_000;
 export const BASH_OUTPUT_WARN_LINES_DEFAULT = 200;
 
@@ -26,7 +26,7 @@ export interface TokenHabit {
   id: string;
   /** 짧은 제목. */
   title: string;
-  /** 이 습관을 제어하는 VCF_ env 이름들. */
+  /** 이 습관을 제어하는 GOODBOY_ env 이름들. */
   envVars: string[];
   /** env 기본값(토글/임계값). */
   defaults: Record<string, number | string | boolean>;
@@ -38,30 +38,30 @@ export const TOKEN_HABITS: Record<string, TokenHabit> = {
   'H1-01': {
     id: 'H1-01',
     title: '긴 세션(시간/절대토큰) 경고',
-    envVars: ['VCF_SESSION_TIME_WARN_MIN', 'VCF_TOKEN_WARN'],
-    defaults: { VCF_SESSION_TIME_WARN_MIN: 35, VCF_TOKEN_WARN: 50_000 },
+    envVars: ['GOODBOY_SESSION_TIME_WARN_MIN', 'GOODBOY_TOKEN_WARN'],
+    defaults: { GOODBOY_SESSION_TIME_WARN_MIN: 35, GOODBOY_TOKEN_WARN: 50_000 },
     description:
       '세션 경과시간 또는 절대 컨텍스트 토큰이 크면 새 세션/압축을 권장(비차단, 세션당 1회).',
   },
   'H1-03': {
     id: 'H1-03',
     title: '컨텍스트 자동 compact 강제',
-    envVars: ['VCF_COMPACT_FORCE_PCT', 'VCF_CONTEXT_LIMIT'],
-    defaults: { VCF_COMPACT_FORCE_PCT: 50 },
+    envVars: ['GOODBOY_COMPACT_FORCE_PCT', 'GOODBOY_CONTEXT_LIMIT'],
+    defaults: { GOODBOY_COMPACT_FORCE_PCT: 50 },
     description:
       '컨텍스트 점유율이 강제 임계(기본 50%) 이상이면 자동 compact 신호(stopReason: compact_needed)와 ' +
       'decision:block으로 턴 종료를 막아 compact를 강제(공격적). ' +
       'MAX_RETRIES 초과 시 통과+경고(무한 block 방지). 임계 미만이면 아무 동작 없음. ' +
       '점유율은 (현재 입력 토큰 / 컨텍스트 한도)로 계산하는데, 한도는 모델 ID의 1M 표식으로 판별한다. ' +
       '⚠️ 1M 확장 컨텍스트는 세션 토글이라 실제 모델 ID(예: claude-opus-4-8)에는 표식이 없어 200K로 오판될 수 있다 ' +
-      '(percent가 수 배로 부풀어 오탐 강제 발생). 1M 창을 쓰면 VCF_CONTEXT_LIMIT=1000000처럼 한도를 명시하면 정확하다 ' +
+      '(percent가 수 배로 부풀어 오탐 강제 발생). 1M 창을 쓰면 GOODBOY_CONTEXT_LIMIT=1000000처럼 한도를 명시하면 정확하다 ' +
       '(env가 모델 판별보다 최우선). env 미설정이어도 관측 토큰이 200K를 넘으면 자동으로 최소 1M 창으로 간주해 오탐을 회피한다.',
   },
   'H2-01': {
     id: 'H2-01',
     title: '같은 파일 재-Read 게이트',
-    envVars: ['VCF_REREAD_GATE', 'VCF_REREAD_WINDOW'],
-    defaults: { VCF_REREAD_GATE: 'deny', VCF_REREAD_WINDOW: 3 },
+    envVars: ['GOODBOY_REREAD_GATE', 'GOODBOY_REREAD_WINDOW'],
+    defaults: { GOODBOY_REREAD_GATE: 'deny', GOODBOY_REREAD_WINDOW: 3 },
     description:
       '최근 N턴 내 같은 파일을 mtime 변경 없이 재-Read하면 차단(부분읽기/변경/편집은 예외). ' +
       '서브에이전트(agent_type 존재)는 면제 — read 기록이 session_id로만 스코프되어 메인과 공유되므로 ' +
@@ -70,11 +70,11 @@ export const TOKEN_HABITS: Record<string, TokenHabit> = {
   'H2-02': {
     id: 'H2-02',
     title: 'Bash 대량출력 사후 경고(출력 크기 기반)',
-    envVars: ['VCF_BASH_FLOOD_WARN', 'VCF_BASH_OUTPUT_WARN_CHARS', 'VCF_BASH_OUTPUT_WARN_LINES'],
+    envVars: ['GOODBOY_BASH_FLOOD_WARN', 'GOODBOY_BASH_OUTPUT_WARN_CHARS', 'GOODBOY_BASH_OUTPUT_WARN_LINES'],
     defaults: {
-      VCF_BASH_FLOOD_WARN: 'on',
-      VCF_BASH_OUTPUT_WARN_CHARS: BASH_OUTPUT_WARN_CHARS_DEFAULT,
-      VCF_BASH_OUTPUT_WARN_LINES: BASH_OUTPUT_WARN_LINES_DEFAULT,
+      GOODBOY_BASH_FLOOD_WARN: 'on',
+      GOODBOY_BASH_OUTPUT_WARN_CHARS: BASH_OUTPUT_WARN_CHARS_DEFAULT,
+      GOODBOY_BASH_OUTPUT_WARN_LINES: BASH_OUTPUT_WARN_LINES_DEFAULT,
     },
     description:
       'Bash 실행 후 실제 출력(tool_response)이 임계(문자수/줄수)를 넘으면 PostToolUse에서 ' +
@@ -84,19 +84,19 @@ export const TOKEN_HABITS: Record<string, TokenHabit> = {
   'H2-03': {
     id: 'H2-03',
     title: 'Bash 검색 강제 위임',
-    envVars: ['VCF_BASH_SEARCH_GATE'],
-    defaults: { VCF_BASH_SEARCH_GATE: 'deny' },
+    envVars: ['GOODBOY_BASH_SEARCH_GATE'],
+    defaults: { GOODBOY_BASH_SEARCH_GATE: 'deny' },
     description:
       '메인 세션에서 Bash로 수행하는 재귀 코드베이스 탐색(grep -r/rg/ag/ack/git grep/find -name)을 ' +
       '감지해 차단하고 서브에이전트 위임을 유도(도구 위임 게이트가 Bash로 우회되는 것을 막음). ' +
       '파이프 뒤 필터(... | grep)·단일 파일 grep은 예외. 서브에이전트(agent_type)는 면제. ' +
-      'VCF_BASH_SEARCH_GATE=deny|warn|off (기본 deny).',
+      'GOODBOY_BASH_SEARCH_GATE=deny|warn|off (기본 deny).',
   },
   'H5-04': {
     id: 'H5-04',
     title: '요약 먼저 / 요청 시 상세',
-    envVars: ['VCF_CONCISE_DEFAULT'],
-    defaults: { VCF_CONCISE_DEFAULT: 'on' },
+    envVars: ['GOODBOY_CONCISE_DEFAULT'],
+    defaults: { GOODBOY_CONCISE_DEFAULT: 'on' },
     description:
       '일반 프롬프트에 간결-우선 지시를 주입. 상세 요청 신호가 있으면 주입하지 않음(소프트 규칙).',
   },
@@ -175,10 +175,10 @@ export function writeHabitState(sessionId: string, state: HabitState): void {
 // --- H1-03: 컨텍스트 자동 compact 강제 --------------------------------------
 
 /** 강제 자동 compact 임계(%). 컨텍스트 점유율이 이 값 이상이면 Stop 훅이 compact를 강제한다.
- *  VCF_COMPACT_FORCE_PCT로 조정, 기본 50. (하위 경고 단계 없이 전부 "강제"로 통일) */
+ *  GOODBOY_COMPACT_FORCE_PCT로 조정, 기본 50. (하위 경고 단계 없이 전부 "강제"로 통일) */
 export function compactForcePct(): number {
   // 4-3: [0, 100]으로 클램프. 음수면 상시 강제, 100 초과면 사실상 비활성 되던 오용을 막는다.
-  return envInt('VCF_COMPACT_FORCE_PCT', 50, 0, 100);
+  return envInt('GOODBOY_COMPACT_FORCE_PCT', 50, 0, 100);
 }
 
 // --- H2-02: Bash 대량출력 패턴 판정 -----------------------------------------
@@ -186,7 +186,7 @@ export function compactForcePct(): number {
 /** 명령이 대량출력을 유발할 위험이 높은 패턴인지 보수적으로 분류.
  *  매칭되면 패턴 키(스팸 억제용), 아니면 null.
  *  출력 제한(head/tail/grep/wc/less | -n)이 이미 있으면 경고하지 않는다.
- *  ⚠️ rtk가 Bash 토큰 필터링을 이미 수행하므로 vcf는 "경고"만 담당한다(deny 안 함). */
+ *  ⚠️ rtk가 Bash 토큰 필터링을 이미 수행하므로 Good Boy는 "경고"만 담당한다(deny 안 함). */
 export function classifyBashFlood(command: string): string | null {
   if (typeof command !== 'string') return null;
   // 4-2: 정규식 백트래킹 시간을 상한하려 앞 8KB만 검사한다(초대형 command 방어). 판정 신호로 충분.
@@ -230,8 +230,8 @@ export const BASH_FLOOD_MESSAGE =
 /** H2-02 사후 경고 임계값(env로 조정). chars/lines 둘 중 하나만 넘어도 트리거. */
 export function bashOutputWarnThresholds(): { chars: number; lines: number } {
   return {
-    chars: envInt('VCF_BASH_OUTPUT_WARN_CHARS', BASH_OUTPUT_WARN_CHARS_DEFAULT),
-    lines: envInt('VCF_BASH_OUTPUT_WARN_LINES', BASH_OUTPUT_WARN_LINES_DEFAULT),
+    chars: envInt('GOODBOY_BASH_OUTPUT_WARN_CHARS', BASH_OUTPUT_WARN_CHARS_DEFAULT),
+    lines: envInt('GOODBOY_BASH_OUTPUT_WARN_LINES', BASH_OUTPUT_WARN_LINES_DEFAULT),
   };
 }
 
@@ -334,7 +334,7 @@ export function classifyBashSearch(command: string): string | null {
 export const BASH_SEARCH_MESSAGE =
   'Bash로 코드베이스를 직접 재귀 탐색하지 마세요(도구 위임 게이트 우회). ' +
   "이런 검색은 서브에이전트에 위임하세요: Agent 도구로 'general-purpose'/'Explore' 서브에이전트를 " +
-  '호출해 검색을 수행하게 하고 결과만 받으세요. (Bash 검색 강제 위임, H2-03) [끄려면 VCF_BASH_SEARCH_GATE=off]';
+  '호출해 검색을 수행하게 하고 결과만 받으세요. (Bash 검색 강제 위임, H2-03) [끄려면 GOODBOY_BASH_SEARCH_GATE=off]';
 
 // --- H5-04: 요약 먼저 / 요청 시 상세 ----------------------------------------
 

@@ -61,9 +61,9 @@ function settingsJsonPath(): string | null {
   }
 }
 
-// H1-03 강제 자동 compact 재시도 카운터 파일. review 재시도(.vcf-retry-count.txt)와
+// H1-03 강제 자동 compact 재시도 카운터 파일. review 재시도(.goodboy-retry-count.txt)와
 // 간섭하지 않도록 별도 파일에 동일 escape 패턴(MAX_RETRIES)으로 관리한다.
-const COMPACT_FORCE_COUNT_FILE = '.vcf-compact-force-count.txt';
+const COMPACT_FORCE_COUNT_FILE = '.goodboy-compact-force-count.txt';
 
 // 이번 Stop 실행에서 사용자에게 보일 토큰-습관 경고들(H1-01 긴 세션 경고, H1-03 강제 escape 통지).
 // emit()이 모든 출력 경로(block/pass)의 systemMessage에 이 경고들을 덧붙인다 —
@@ -100,8 +100,8 @@ function maybeSetLongSessionWarning(
 
     // H1-03 강제가 이번 Stop에 발동했으면 스팸 방지를 위해 H1-01 생략. 세션당 1회.
     if (!forceActive && !state.longSessionWarned) {
-      const timeWarnMin = envInt('VCF_SESSION_TIME_WARN_MIN', 35);
-      const tokenWarn = envInt('VCF_TOKEN_WARN', 50_000);
+      const timeWarnMin = envInt('GOODBOY_SESSION_TIME_WARN_MIN', 35);
+      const tokenWarn = envInt('GOODBOY_TOKEN_WARN', 50_000);
       const startMs = state.sessionStartTs ? Date.parse(state.sessionStartTs) : NaN;
       const elapsedMin = Number.isFinite(startMs) ? (nowMs - startMs) / 60000 : 0;
       const timeExceeded = elapsedMin > timeWarnMin;
@@ -123,12 +123,12 @@ function maybeSetLongSessionWarning(
 }
 
 /** (H1-03) 컨텍스트 자동 compact 강제 판정.
- *  컨텍스트 점유율이 VCF_COMPACT_FORCE_PCT(기본 50) 이상이면:
+ *  컨텍스트 점유율이 GOODBOY_COMPACT_FORCE_PCT(기본 50) 이상이면:
  *   1) context-watchdog.sh와 동일한 자동 compact 유도 신호
  *      (top-level stopReason: 'compact_needed' + additionalContext)를 실어 하네스 compact를 유도하고,
  *   2) decision:'block' + reason으로 턴 종료를 막아 확실히 compact를 강제한다.
  *  무한 block 방지: stop_hook_active(main B단계에서 조기 return)와 MAX_RETRIES escape를 재사용한다.
- *   - 별도 카운터 파일(.vcf-compact-force-count.txt)을 사용해 review 재시도와 간섭하지 않는다.
+ *   - 별도 카운터 파일(.goodboy-compact-force-count.txt)을 사용해 review 재시도와 간섭하지 않는다.
  *   - 강제가 MAX_RETRIES회 이상 지속되면 통과시키고 경고만 남긴다(영구 정지 방지).
  *   - 임계 미만이면 카운터를 리셋하고 아무 동작도 하지 않는다.
  *  fail-open: 측정 불가/예외 시 강제하지 않는다(null 반환).
@@ -153,7 +153,7 @@ function maybeForceCompact(
 
     // (3-A) 한도가 확정적이지 않으면(1M 지원 모델인데 [1m] 표식 없음 / 미지 모델 → 200K/1M 구분 불가)
     //   강제 block을 보류한다. 표식 없는 1M 세션이 200K로 오판되어 저토큰인데도 오탐 강제되던 문제 방지.
-    //   H1-01(절대 토큰 경고)이 안전망 역할을 하며, 하드 강제는 VCF_CONTEXT_LIMIT 명시로 복구할 수 있다.
+    //   H1-01(절대 토큰 경고)이 안전망 역할을 하며, 하드 강제는 GOODBOY_CONTEXT_LIMIT 명시로 복구할 수 있다.
     if (!usage.confident) {
       resetRetryCount(claudeDir, COMPACT_FORCE_COUNT_FILE);
       return { output: null, forced: false };
@@ -216,7 +216,7 @@ function ensureClaudeDir(cwd: string): string {
   return dir;
 }
 
-function readRetryCount(claudeDir: string, file: string = '.vcf-retry-count.txt'): number {
+function readRetryCount(claudeDir: string, file: string = '.goodboy-retry-count.txt'): number {
   try {
     const path = resolvePath(claudeDir, file);
     if (!existsSync(path)) return 0;
@@ -228,7 +228,7 @@ function readRetryCount(claudeDir: string, file: string = '.vcf-retry-count.txt'
   }
 }
 
-function writeRetryCount(claudeDir: string, n: number, file: string = '.vcf-retry-count.txt'): void {
+function writeRetryCount(claudeDir: string, n: number, file: string = '.goodboy-retry-count.txt'): void {
   try {
     writeFileSync(resolvePath(claudeDir, file), String(n), 'utf8');
   } catch {
@@ -236,7 +236,7 @@ function writeRetryCount(claudeDir: string, n: number, file: string = '.vcf-retr
   }
 }
 
-function resetRetryCount(claudeDir: string, file: string = '.vcf-retry-count.txt'): void {
+function resetRetryCount(claudeDir: string, file: string = '.goodboy-retry-count.txt'): void {
   try {
     const path = resolvePath(claudeDir, file);
     if (existsSync(path)) unlinkSync(path);
@@ -252,7 +252,7 @@ function main(): void {
       try {
         input = raw.trim() === '' ? {} : (JSON.parse(raw) as StopInput);
       } catch (err) {
-        process.stderr.write(`[vcf stop] stdin parse error: ${String(err)}\n`);
+        process.stderr.write(`[goodboy stop] stdin parse error: ${String(err)}\n`);
         emit({});
         return;
       }
@@ -264,7 +264,7 @@ function main(): void {
       try {
         incrementTurn(sessionId);
       } catch (err) {
-        process.stderr.write(`[vcf stop] incrementTurn error: ${String(err)}\n`);
+        process.stderr.write(`[goodboy stop] incrementTurn error: ${String(err)}\n`);
       }
 
       // (B) 무한루프 방지
@@ -457,7 +457,7 @@ function main(): void {
       emit(out);
     })
     .catch((err) => {
-      process.stderr.write(`[vcf stop] fatal: ${String(err)}\n`);
+      process.stderr.write(`[goodboy stop] fatal: ${String(err)}\n`);
       emit({});
     });
 }

@@ -1,5 +1,5 @@
 {
-  "description": "vcf — Vibe Coding Framework hook 강제 레이어",
+  "description": "Good Boy — hook 강제 레이어",
   "hooks": {
     "PreToolUse": [
       {

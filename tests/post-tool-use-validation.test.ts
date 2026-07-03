@@ -89,8 +89,8 @@ async function runHook(
   });
   const proc = Bun.spawn(['bun', HOOK], {
     cwd: projectCwd,
-    // 기본 모드(typecheck-only)를 명시해 부모 프로세스의 잔여 VCF_AUTOVALIDATE 오염을 차단.
-    env: { ...process.env, VCF_AUTOVALIDATE: 'typecheck', ...extraEnv },
+    // 기본 모드(typecheck-only)를 명시해 부모 프로세스의 잔여 GOODBOY_AUTOVALIDATE 오염을 차단.
+    env: { ...process.env, GOODBOY_AUTOVALIDATE: 'typecheck', ...extraEnv },
     stdin: new TextEncoder().encode(payload),
     stdout: 'pipe',
     stderr: 'pipe',
@@ -108,7 +108,7 @@ function additionalContext(stdout: string): string | undefined {
 }
 
 function makeProject(scripts: Record<string, string>): string {
-  const cwd = mkdtempSync(join(tmpdir(), 'vcf-ptu-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'goodboy-ptu-'));
   tmpDirs.push(cwd);
   writeFileSync(
     join(cwd, 'package.json'),
@@ -121,7 +121,7 @@ function makeProject(scripts: Record<string, string>): string {
 describe('post-tool-use integration (#5)', () => {
   test('missing binary in typecheck script => NO blocking', async () => {
     const cwd = makeProject({
-      typecheck: 'this-binary-definitely-does-not-exist-vcf --noEmit',
+      typecheck: 'this-binary-definitely-does-not-exist-goodboy --noEmit',
     });
     const ctx = additionalContext(await runHook(cwd));
     // Either no context at all, or only an informational skip note — never blocking.
@@ -157,37 +157,37 @@ describe('autoValidate mode (2-A)', () => {
     expect(ctx === undefined || !ctx.includes('수정이 필요합니다')).toBe(true);
   });
 
-  test('VCF_AUTOVALIDATE=all: test까지 실행 → test 실패로 블로킹', async () => {
+  test('GOODBOY_AUTOVALIDATE=all: test까지 실행 → test 실패로 블로킹', async () => {
     const cwd = makeProject(scriptsTcOkTestFail);
-    const ctx = additionalContext(await runHook(cwd, { VCF_AUTOVALIDATE: 'all' }));
+    const ctx = additionalContext(await runHook(cwd, { GOODBOY_AUTOVALIDATE: 'all' }));
     expect(ctx).toBeDefined();
     expect(ctx).toContain('수정이 필요합니다');
   });
 
-  test('VCF_AUTOVALIDATE=off: 아무것도 실행 안 함 → 실패 typecheck여도 블로킹 없음', async () => {
+  test('GOODBOY_AUTOVALIDATE=off: 아무것도 실행 안 함 → 실패 typecheck여도 블로킹 없음', async () => {
     const cwd = makeProject({
       typecheck: 'sh -c \'echo "tc error" >&2; exit 2\'',
     });
-    const ctx = additionalContext(await runHook(cwd, { VCF_AUTOVALIDATE: 'off' }));
+    const ctx = additionalContext(await runHook(cwd, { GOODBOY_AUTOVALIDATE: 'off' }));
     expect(ctx === undefined || !ctx.includes('수정이 필요합니다')).toBe(true);
   });
 });
 
 describe('autoValidateMode (2-A unit)', () => {
   test('기본은 typecheck, all/off는 그대로, 그 외는 typecheck로 폴백', () => {
-    const saved = process.env.VCF_AUTOVALIDATE;
+    const saved = process.env.GOODBOY_AUTOVALIDATE;
     try {
-      delete process.env.VCF_AUTOVALIDATE;
+      delete process.env.GOODBOY_AUTOVALIDATE;
       expect(autoValidateMode()).toBe('typecheck');
-      process.env.VCF_AUTOVALIDATE = 'all';
+      process.env.GOODBOY_AUTOVALIDATE = 'all';
       expect(autoValidateMode()).toBe('all');
-      process.env.VCF_AUTOVALIDATE = 'off';
+      process.env.GOODBOY_AUTOVALIDATE = 'off';
       expect(autoValidateMode()).toBe('off');
-      process.env.VCF_AUTOVALIDATE = 'bogus';
+      process.env.GOODBOY_AUTOVALIDATE = 'bogus';
       expect(autoValidateMode()).toBe('typecheck');
     } finally {
-      if (saved === undefined) delete process.env.VCF_AUTOVALIDATE;
-      else process.env.VCF_AUTOVALIDATE = saved;
+      if (saved === undefined) delete process.env.GOODBOY_AUTOVALIDATE;
+      else process.env.GOODBOY_AUTOVALIDATE = saved;
     }
   });
 });

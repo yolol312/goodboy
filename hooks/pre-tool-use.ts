@@ -145,7 +145,7 @@ interface SessionState {
 
 function readSessionState(cwd: string): SessionState | null {
   try {
-    const path = resolvePath(cwd, '.claude', '.vcf-session-state.json');
+    const path = resolvePath(cwd, '.claude', '.goodboy-session-state.json');
     if (!existsSync(path)) return null;
     const raw = readFileSync(path, 'utf8');
     return JSON.parse(raw) as SessionState;
@@ -161,7 +161,7 @@ function main(): void {
       try {
         input = raw.trim() === '' ? {} : (JSON.parse(raw) as PreToolInput);
       } catch (err) {
-        process.stderr.write(`[vcf pre-tool-use] stdin parse error: ${String(err)}\n`);
+        process.stderr.write(`[goodboy pre-tool-use] stdin parse error: ${String(err)}\n`);
         emit({});
         return;
       }
@@ -197,8 +197,8 @@ function main(): void {
       }
 
       // (A) 도구 강제 위임. 서브에이전트(agent_type 존재)면 면제.
-      //   VCF_DISABLE_DELEGATION=1 이면 위임 자체를 끈다.
-      if (!input.agent_type && process.env.VCF_DISABLE_DELEGATION !== '1') {
+      //   GOODBOY_DISABLE_DELEGATION=1 이면 위임 자체를 끈다.
+      if (!input.agent_type && process.env.GOODBOY_DISABLE_DELEGATION !== '1') {
         if (DELEGATED_TOOLS.has(toolName)) {
           emit(
             deny(
@@ -211,11 +211,11 @@ function main(): void {
 
       // (A1) H2-03 — Bash 재귀 코드베이스 탐색 강제 위임. 서브에이전트(agent_type)는 면제.
       //   위임 게이트(A)는 Grep/Glob만 막아 Bash의 grep -r/rg/find로 우회된다. 이를 막는다.
-      //   env VCF_BASH_SEARCH_GATE=deny|warn|off (기본 deny).
+      //   env GOODBOY_BASH_SEARCH_GATE=deny|warn|off (기본 deny).
       //   ⚠️ warn은 PreToolUse additionalContext가 에이전트에 닿지 않아 효과가 약하다(사용자 UI만).
       //   확실히 유도하려면 deny를 쓴다(deny의 permissionDecisionReason은 에이전트에 도달).
       if (!input.agent_type && toolName === 'Bash') {
-        const gate = envStr('VCF_BASH_SEARCH_GATE', 'deny'); // deny | warn | off
+        const gate = envStr('GOODBOY_BASH_SEARCH_GATE', 'deny'); // deny | warn | off
         if (gate !== 'off') {
           const command =
             typeof toolInput.command === 'string' ? (toolInput.command as string) : '';
@@ -235,12 +235,12 @@ function main(): void {
       // (A2) H2-01 — 같은 파일 재-Read 게이트.
       //   최근 N턴 내 같은 파일을, 그 사이 mtime 변경도 편집도 없이 다시 Read하면 불필요한 재-Read로 본다.
       //   오탐 방지 예외(허용): 부분읽기(offset/limit), mtime 변경됨, 마지막 read 이후 편집됨.
-      //   모든 판정은 fail-open(내부 오류/불확실 → 허용). env VCF_REREAD_GATE=deny|warn|off (기본 deny).
+      //   모든 판정은 fail-open(내부 오류/불확실 → 허용). env GOODBOY_REREAD_GATE=deny|warn|off (기본 deny).
       //   ⚠️ 서브에이전트(agent_type 존재)는 면제한다(delegation 게이트와 동일 정책).
       //   read 기록은 session_id로만 스코프되어 메인과 서브에이전트가 공유되므로, 서브에이전트가
       //   "자신은 처음 읽는" 파일도 메인이 이미 읽었다는 이유로 오차단된다. 서브에이전트는 통과시킨다.
       if (toolName === 'Read' && !input.agent_type) {
-        const gate = envStr('VCF_REREAD_GATE', 'deny'); // deny | warn | off
+        const gate = envStr('GOODBOY_REREAD_GATE', 'deny'); // deny | warn | off
         const filePath = (toolInput.file_path as string | undefined) ?? '';
         // 부분 읽기(offset/limit)는 정당한 재-Read → 예외.
         const isPartial = toolInput.offset !== undefined || toolInput.limit !== undefined;
@@ -251,7 +251,7 @@ function main(): void {
             try {
               const absPath = resolvePath(cwd, filePath);
               const turn = getCurrentTurn(sessionId);
-              const withinTurns = envInt('VCF_REREAD_WINDOW', 3);
+              const withinTurns = envInt('GOODBOY_REREAD_WINDOW', 3);
               // 최근에 읽지 않았으면 통과.
               if (!wasFileReadRecently(sessionId, absPath, turn, withinTurns)) return false;
               // 마지막 read 이후 편집됐으면 통과(내용이 바뀌었을 수 있음).
@@ -353,11 +353,11 @@ function main(): void {
       if (RISK_GATED_TOOLS.has(toolName)) {
         const state = readSessionState(cwd);
         if (state && state.risk === 'risky' && state.sessionId === sessionId) {
-          const approvedPath = resolvePath(cwd, '.claude', '.vcf-risk-approved.txt');
+          const approvedPath = resolvePath(cwd, '.claude', '.goodboy-risk-approved.txt');
           if (!existsSync(approvedPath)) {
             emit(
               deny(
-                `이 작업은 위험도가 '위험'으로 분류되었습니다(${state.category ?? '미상'}). 사용자에게 진행 승인을 받은 후, .claude/.vcf-risk-approved.txt 파일을 만들고 다시 시도하세요.`,
+                `이 작업은 위험도가 '위험'으로 분류되었습니다(${state.category ?? '미상'}). 사용자에게 진행 승인을 받은 후, .claude/.goodboy-risk-approved.txt 파일을 만들고 다시 시도하세요.`,
               ),
             );
             return;
@@ -382,7 +382,7 @@ function main(): void {
       }
     })
     .catch((err) => {
-      process.stderr.write(`[vcf pre-tool-use] fatal: ${String(err)}\n`);
+      process.stderr.write(`[goodboy pre-tool-use] fatal: ${String(err)}\n`);
       emit({});
     });
 }

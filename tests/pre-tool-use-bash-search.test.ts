@@ -57,7 +57,7 @@ async function runBash(
   command: string,
   opts: { agentType?: string; env?: Record<string, string> } = {},
 ): Promise<Out> {
-  const cwd = mkdtempSync(join(tmpdir(), 'vcf-bsearch-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'goodboy-bsearch-'));
   tmpDirs.push(cwd);
   const payload = JSON.stringify({
     session_id: 'sess-bsearch',
@@ -109,12 +109,12 @@ describe('pre-tool-use H2-03 Bash search gate (integration)', () => {
   });
 
   test('OFF 모드: 게이트 미발동', async () => {
-    const out = await runBash('grep -r foo .', { env: { VCF_BASH_SEARCH_GATE: 'off' } });
+    const out = await runBash('grep -r foo .', { env: { GOODBOY_BASH_SEARCH_GATE: 'off' } });
     expect(isDenied(out)).toBe(false);
   });
 
   test('WARN 모드: 차단하지 않고 경고(systemMessage)에 H2-03', async () => {
-    const out = await runBash('grep -r foo .', { env: { VCF_BASH_SEARCH_GATE: 'warn' } });
+    const out = await runBash('grep -r foo .', { env: { GOODBOY_BASH_SEARCH_GATE: 'warn' } });
     expect(isDenied(out)).toBe(false);
     expect(out.systemMessage ?? '').toContain('H2-03');
   });

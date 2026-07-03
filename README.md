@@ -1,6 +1,8 @@
-# vcf — Vibe Coding Framework
+# Good Boy
 
-Claude Code 환경에서 LLM의 4대 약점을 hook + skill 조합으로 결정적으로 강제하는 메타 레이어.
+> 세상에 나쁜 AI는 없다 — There Are No Bad Agents
+
+Claude Code 등 agentic LLM-CLI 환경에서 LLM의 약점(컨텍스트 오염·환각·부족한 프롬프트·검증 부재)과 토큰 낭비를 hook + skill 조합으로 결정적으로 억제하는 가드레일 레이어.
 
 ## 핵심 원칙
 
@@ -11,7 +13,7 @@ Claude Code 환경에서 LLM의 4대 약점을 hook + skill 조합으로 결정�
 
 ## 어떤 문제를 푸나
 
-LLM이 코드 작성 시 자주 발생하는 4가지 약점과 vcf의 해결책:
+LLM이 코드 작성 시 자주 발생하는 4가지 약점과 Good Boy의 해결책:
 
 1. **컨텍스트 오염** → 넓게 훑는 탐색 도구를 서브에이전트로 위임 강제 (PreToolUse hook)
 2. **환각** → 추론 4분류 가시화 + Read-before-edit + 자동 검증 + 리뷰 강제
@@ -23,14 +25,14 @@ LLM이 코드 작성 시 자주 발생하는 4가지 약점과 vcf의 해결책:
 ### 로컬 개발 모드 (지금 권장)
 
 ```bash
-claude --plugin-dir /Users/seongmo/workspace/vcf
+claude --plugin-dir /Users/seongmo/workspace/goodboy
 ```
 
 ### Marketplace 설치 (배포 후)
 
 ```bash
-/plugin marketplace add seongmo/vcf
-/plugin install vcf@vcf --scope project   # 또는 user | local. 기본은 user(글로벌)
+/plugin marketplace add seongmo/goodboy
+/plugin install goodboy@goodboy --scope project   # 또는 user | local. 기본은 user(글로벌)
 ```
 
 설치 범위(user/project/local/session)와 이미 설치된 플러그인의 범위 전환은
@@ -101,7 +103,7 @@ Stop hook 재검사:
 PreToolUse hook이 메인에서 탐색 도구 4종 호출을 차단하고 서브에이전트 위임을 유도한다.
 (서브에이전트 내부에서는 면제 — 서브가 직접 Grep/Glob 등을 쓴다.)
 
-위임 강제 비활성화 (디버깅용): `VCF_DISABLE_DELEGATION=1`
+위임 강제 비활성화 (디버깅용): `GOODBOY_DISABLE_DELEGATION=1`
 
 ## 추론 4분류
 
@@ -135,18 +137,18 @@ PreToolUse hook이 메인에서 탐색 도구 4종 호출을 차단하고 서브
 
 - **단순(simple)**: 자동 진행 — 추론 가시화만 필수
 - **중간(medium)**: 추측 카테고리에 항목 있으면 사용자 확인 권장
-- **위험(risky)**: 항상 사용자 승인 마커 (`.claude/.vcf-risk-approved.txt`) 확인
+- **위험(risky)**: 항상 사용자 승인 마커 (`.claude/.goodboy-risk-approved.txt`) 확인
 
 사용자가 위험 작업 승인하려면:
 
 ```bash
-touch .claude/.vcf-risk-approved.txt
+touch .claude/.goodboy-risk-approved.txt
 # 또는 모델에게 "진행 승인" 명시 후 모델이 마커 생성
 ```
 
 ## 설치 범위와 전환
 
-vcf는 표준 플러그인 설치 범위를 따른다.
+Good Boy는 표준 플러그인 설치 범위를 따른다.
 
 | 범위 | 위치 | 적용 대상 |
 |---|---|---|
@@ -158,10 +160,10 @@ vcf는 표준 플러그인 설치 범위를 따른다.
 설치:
 
 ```bash
-/plugin install vcf@vcf --scope project   # 또는 user | local. 기본은 user(글로벌)
+/plugin install goodboy@goodboy --scope project   # 또는 user | local. 기본은 user(글로벌)
 ```
 
-> vcf는 모든 편집마다 추론·리뷰 게이트가 끼어드는 무거운 플러그인이다.
+> Good Boy는 모든 편집마다 추론·리뷰 게이트가 끼어드는 무거운 플러그인이다.
 > **글로벌(user)보다 project / local / session 범위를 권장한다.**
 
 ### 범위 전환 (이미 설치된 플러그인의 범위 변경)
@@ -169,23 +171,23 @@ vcf는 표준 플러그인 설치 범위를 따른다.
 **범위만 바꾸는 단일 명령은 없다.** 재설치 패턴을 쓴다:
 
 ```bash
-claude plugin uninstall vcf@vcf --scope <기존>
-claude plugin install   vcf@vcf --scope <새범위>
+claude plugin uninstall goodboy@goodboy --scope <기존>
+claude plugin install   goodboy@goodboy --scope <새범위>
 /reload-plugins
 ```
 
 UI로:
 
 ```
-/plugin → Installed 탭(User/Project/Local로 그룹화) → vcf 선택 → Uninstall
+/plugin → Installed 탭(User/Project/Local로 그룹화) → goodboy 선택 → Uninstall
         → Discover 탭에서 원하는 scope로 재설치
 ```
 
 제거 없이 잠깐 끄려면(비활성화/재활성화):
 
 ```bash
-claude plugin disable vcf@vcf
-claude plugin enable  vcf@vcf
+claude plugin disable goodboy@goodboy
+claude plugin enable  goodboy@goodboy
 ```
 
 주의:
@@ -196,7 +198,7 @@ claude plugin enable  vcf@vcf
 
 ## 컨텍스트 자동 관리 (auto-compact)
 
-긴 세션에서 컨텍스트가 가득 차는 것을 막기 위해, vcf의 **Stop hook이 매 턴 transcript에서
+긴 세션에서 컨텍스트가 가득 차는 것을 막기 위해, Good Boy의 **Stop hook이 매 턴 transcript에서
 컨텍스트 점유율을 계산**한다.
 
 - 점유율이 **50%를 초과하면 `/compact` 실행을 권고하는 경고를 `systemMessage`로 띄운다.**
@@ -218,7 +220,7 @@ export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50   # 기본 발동은 ~83%
 ## 디렉터리 구조
 
 ```
-vcf/                                    # 플러그인 루트
+goodboy/                                    # 플러그인 루트
 ├── .claude-plugin/
 │   ├── plugin.json
 │   └── marketplace.json
@@ -260,8 +262,8 @@ vcf/                                    # 플러그인 루트
 ```
 <project>/.claude/
 ├── reviews/                            # review-changes 결과 JSON
-└── (마커 파일들 — .vcf-session-state.json, .vcf-risk-approved.txt,
-    .vcf-retry-count.txt, .vcf-review-cursor.json 등)
+└── (마커 파일들 — .goodboy-session-state.json, .goodboy-risk-approved.txt,
+    .goodboy-retry-count.txt, .goodboy-review-cursor.json 등)
 ```
 
 ## 트러블슈팅
@@ -292,7 +294,7 @@ Agent(general-purpose, "review-changes 스킬에 따라 다음 파일을 리뷰:
 
 ### "위험 작업이 차단됩니다"
 
-사용자 승인이 필요합니다. `touch .claude/.vcf-risk-approved.txt`
+사용자 승인이 필요합니다. `touch .claude/.goodboy-risk-approved.txt`
 
 ### 자동 검증 실행 안 됨
 

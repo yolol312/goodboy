@@ -1,4 +1,4 @@
-// vcf lib 통합 re-export
+// goodboy lib 통합 re-export
 
 export * from './types';
 export * from './required-inputs';

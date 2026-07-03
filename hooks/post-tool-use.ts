@@ -159,9 +159,9 @@ const AUTOVALIDATE_PER_CMD_MS = 30_000;
 /** autoValidate 모드. 매 편집마다 test 전체를 돌리면 (1) 훅 타임아웃 초과(3×30s>60s),
  *  (2) 미신뢰 repo의 package.json test/lint 스크립트 자동 실행(임의 코드 실행 벡터) 위험이 있어
  *  기본은 가장 싼 검사(typecheck류)만 수행한다.
- *  env VCF_AUTOVALIDATE=typecheck(기본) | all(typecheck+lint+test 등 전부) | off(검증 안 함). */
+ *  env GOODBOY_AUTOVALIDATE=typecheck(기본) | all(typecheck+lint+test 등 전부) | off(검증 안 함). */
 export function autoValidateMode(): 'typecheck' | 'all' | 'off' {
-  const v = envStr('VCF_AUTOVALIDATE', 'typecheck');
+  const v = envStr('GOODBOY_AUTOVALIDATE', 'typecheck');
   if (v === 'all' || v === 'off') return v;
   return 'typecheck';
 }
@@ -276,7 +276,7 @@ function main(): void {
       try {
         input = raw.trim() === '' ? {} : (JSON.parse(raw) as PostToolInput);
       } catch (err) {
-        process.stderr.write(`[vcf post-tool-use] stdin parse error: ${String(err)}\n`);
+        process.stderr.write(`[goodboy post-tool-use] stdin parse error: ${String(err)}\n`);
         emit({});
         return;
       }
@@ -322,7 +322,7 @@ function main(): void {
           }
         }
       } catch (err) {
-        process.stderr.write(`[vcf post-tool-use] track error: ${String(err)}\n`);
+        process.stderr.write(`[goodboy post-tool-use] track error: ${String(err)}\n`);
       }
 
       // (B) 자동 검증
@@ -335,16 +335,16 @@ function main(): void {
           const { context } = buildValidationContext(results);
           additionalContext = context;
         } catch (err) {
-          process.stderr.write(`[vcf post-tool-use] validation error: ${String(err)}\n`);
+          process.stderr.write(`[goodboy post-tool-use] validation error: ${String(err)}\n`);
         }
       }
 
       // (C) H2-02 — Bash 대량출력 사후 경고(비차단, 세션당 1회).
       //   실제 tool_response 출력 크기가 임계를 넘을 때만 경고한다(사후 교정).
       //   에이전트에 확실히 도달하는 hookSpecificOutput.additionalContext로 전달.
-      //   ⚠️ rtk가 실제 Bash 토큰 필터링을 이미 하므로 vcf는 "경고"만 담당한다.
-      //   fail-open — 파싱/측정 실패 시 조용히 통과. env VCF_BASH_FLOOD_WARN=on|off(기본 on).
-      if (toolName === 'Bash' && envStr('VCF_BASH_FLOOD_WARN', 'on') !== 'off') {
+      //   ⚠️ rtk가 실제 Bash 토큰 필터링을 이미 하므로 Good Boy는 "경고"만 담당한다.
+      //   fail-open — 파싱/측정 실패 시 조용히 통과. env GOODBOY_BASH_FLOOD_WARN=on|off(기본 on).
+      if (toolName === 'Bash' && envStr('GOODBOY_BASH_FLOOD_WARN', 'on') !== 'off') {
         try {
           const command = (toolInput.command as string | undefined) ?? '';
           const warning = buildBashOutputWarning(toolResponse, command);
@@ -357,7 +357,7 @@ function main(): void {
           }
         } catch (err) {
           // fail-open — 경고 실패해도 도구 흐름을 막지 않는다.
-          process.stderr.write(`[vcf post-tool-use] bash-flood warn error: ${String(err)}\n`);
+          process.stderr.write(`[goodboy post-tool-use] bash-flood warn error: ${String(err)}\n`);
         }
       }
 
@@ -371,7 +371,7 @@ function main(): void {
       emit(out);
     })
     .catch((err) => {
-      process.stderr.write(`[vcf post-tool-use] fatal: ${String(err)}\n`);
+      process.stderr.write(`[goodboy post-tool-use] fatal: ${String(err)}\n`);
       emit({});
     });
 }

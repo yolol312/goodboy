@@ -2,7 +2,7 @@
 //
 // 배경: 2026-06-14~15 한 프로젝트에서 "pytest 실행" 작업이 약 9시간 동안
 //       6,000여 개 서브에이전트로 무한 재위임되어 폭주한 사고가 있었다.
-//       이 모듈은 vcf의 마지막 안전망으로, Agent/Task 도구 호출에 한해
+//       이 모듈은 Good Boy의 마지막 안전망으로, Agent/Task 도구 호출에 한해
 //       "가볍고 보수적인" 방어선만 둔다.
 //
 // 역할:
@@ -15,7 +15,7 @@
 //     통과시킨다. 재귀 가드 자체가 정상 작업을 막으면 안 된다.
 //
 // 상태 저장:
-//   file-tracker 와 동일한 세션 디렉터리(/tmp/vcf-session-<sessionId>/)에
+//   file-tracker 와 동일한 세션 디렉터리(/tmp/goodboy-session-<sessionId>/)에
 //   recursion-guard.jsonl 로 기록. 각 줄: { t: number(epoch ms), h: string(prompt hash) }.
 
 import { createHash } from 'node:crypto';

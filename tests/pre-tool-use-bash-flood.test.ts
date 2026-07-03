@@ -23,9 +23,9 @@ afterEach(() => {
 });
 
 function newSandbox(): { tmp: string; cwd: string; sessionId: string } {
-  const tmp = mkdtempSync(join(tmpdir(), 'vcf-flood-tmp-'));
+  const tmp = mkdtempSync(join(tmpdir(), 'goodboy-flood-tmp-'));
   tmpDirs.push(tmp);
-  const cwd = mkdtempSync(join(tmpdir(), 'vcf-flood-cwd-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'goodboy-flood-cwd-'));
   tmpDirs.push(cwd);
   const sessionId = `sess-${Math.random().toString(36).slice(2)}`;
   return { tmp, cwd, sessionId };
@@ -51,7 +51,7 @@ async function runBash(
   });
   const proc = Bun.spawn(['bun', HOOK], {
     cwd,
-    env: { ...process.env, TMPDIR: tmp, VCF_DISABLE_DELEGATION: '1', ...extraEnv },
+    env: { ...process.env, TMPDIR: tmp, GOODBOY_DISABLE_DELEGATION: '1', ...extraEnv },
     stdin: new TextEncoder().encode(payload),
     stdout: 'pipe',
     stderr: 'pipe',
@@ -80,7 +80,7 @@ describe('pre-tool-use no longer emits H2-02 (moved to PostToolUse)', () => {
       tmp,
       cwd,
       sessionId,
-      'cat /Users/x/workspace/vcf/*.log 2>/dev/null || echo NO_LOG',
+      'cat /Users/x/workspace/goodboy/*.log 2>/dev/null || echo NO_LOG',
     );
     expect(out.hookSpecificOutput?.permissionDecision).not.toBe('deny');
     expect(out.hookSpecificOutput?.additionalContext ?? '').not.toContain('H2-02');

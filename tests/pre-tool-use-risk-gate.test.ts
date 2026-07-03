@@ -23,7 +23,7 @@ afterEach(() => {
 });
 
 function newCwd(): string {
-  const cwd = mkdtempSync(join(tmpdir(), 'vcf-risk-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'goodboy-risk-'));
   tmpDirs.push(cwd);
   return cwd;
 }
@@ -32,12 +32,12 @@ function seedRiskyState(cwd: string, sessionId: string, opts: { approved?: boole
   const dir = join(cwd, '.claude');
   mkdirSync(dir, { recursive: true });
   writeFileSync(
-    join(dir, '.vcf-session-state.json'),
+    join(dir, '.goodboy-session-state.json'),
     JSON.stringify({ category: 'migrate', risk: 'risky', turn: 0, sessionId }),
     'utf8',
   );
   if (opts.approved) {
-    writeFileSync(join(dir, '.vcf-risk-approved.txt'), 'ok', 'utf8');
+    writeFileSync(join(dir, '.goodboy-risk-approved.txt'), 'ok', 'utf8');
   }
 }
 
@@ -59,7 +59,7 @@ async function runTool(
   });
   const proc = Bun.spawn(['bun', HOOK], {
     cwd,
-    env: { ...process.env, VCF_DISABLE_DELEGATION: '1' },
+    env: { ...process.env, GOODBOY_DISABLE_DELEGATION: '1' },
     stdin: new TextEncoder().encode(payload),
     stdout: 'pipe',
     stderr: 'pipe',
@@ -102,7 +102,7 @@ describe('pre-tool-use risk gate (2-B)', () => {
     expect(isDenied(out)).toBe(false);
   });
 
-  test('ALLOW: 같은 세션 risky여도 승인 파일(.vcf-risk-approved.txt) 있으면 통과', async () => {
+  test('ALLOW: 같은 세션 risky여도 승인 파일(.goodboy-risk-approved.txt) 있으면 통과', async () => {
     const cwd = newCwd();
     seedRiskyState(cwd, 'sess-A', { approved: true });
     const out = await runTool(cwd, 'sess-A', 'Bash', { command: 'echo hi' });

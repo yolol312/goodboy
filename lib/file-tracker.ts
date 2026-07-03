@@ -20,10 +20,10 @@ interface TrackRecord {
 function sessionDir(sessionId: string): string {
   // sessionId에 path traversal 위험 문자가 있을 수 있으니 소독
   const safe = (sessionId ?? 'unknown').replace(/[^a-zA-Z0-9_\-]/g, '_');
-  return join(tmpdir(), `vcf-session-${safe}`);
+  return join(tmpdir(), `goodboy-session-${safe}`);
 }
 
-/** 세션별 상태 디렉터리 보장. /tmp/vcf-session-<sessionId>/ */
+/** 세션별 상태 디렉터리 보장. /tmp/goodboy-session-<sessionId>/ */
 export function ensureSessionDir(sessionId: string): string {
   const dir = sessionDir(sessionId);
   try {

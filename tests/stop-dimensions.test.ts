@@ -19,16 +19,16 @@ afterEach(() => {
 
 /** Isolated TMPDIR so file-tracker session state lives in its own sandbox. */
 function newSandbox(): { tmp: string; cwd: string; sessionId: string } {
-  const tmp = mkdtempSync(join(tmpdir(), 'vcf-stop-tmp-'));
+  const tmp = mkdtempSync(join(tmpdir(), 'goodboy-stop-tmp-'));
   tmpDirs.push(tmp);
-  const cwd = mkdtempSync(join(tmpdir(), 'vcf-stop-cwd-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'goodboy-stop-cwd-'));
   tmpDirs.push(cwd);
   const sessionId = `sess-${Math.random().toString(36).slice(2)}`;
   return { tmp, cwd, sessionId };
 }
 
 /** Seed file-tracker session state inside the sandboxed TMPDIR.
- *  Mirrors file-tracker.ts layout: tmp/vcf-session-<sanitized>/ {turn.txt, edits.jsonl} */
+ *  Mirrors file-tracker.ts layout: tmp/goodboy-session-<sanitized>/ {turn.txt, edits.jsonl} */
 function seedSession(
   tmp: string,
   sessionId: string,
@@ -36,7 +36,7 @@ function seedSession(
   editFiles: string[],
 ): void {
   const safe = sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_');
-  const dir = join(tmp, `vcf-session-${safe}`);
+  const dir = join(tmp, `goodboy-session-${safe}`);
   mkdirSync(dir, { recursive: true });
   // Stop increments turn first, so write turn-1 so it lands on `turn` after increment.
   writeFileSync(join(dir, 'turn.txt'), String(turn - 1), 'utf8');
@@ -126,7 +126,7 @@ describe('Stop hook — dimension coverage enforcement', () => {
     // Pre-seed retry counter at 2 so the next attempt (count=3) hits the cap.
     const claudeDir = join(cwd, '.claude');
     mkdirSync(claudeDir, { recursive: true });
-    writeFileSync(join(claudeDir, '.vcf-retry-count.txt'), '2', 'utf8');
+    writeFileSync(join(claudeDir, '.goodboy-retry-count.txt'), '2', 'utf8');
     writeReview(cwd, baseReview(cwd, ['plan-completeness'])); // still missing ui-ux
     const out = await runStop(tmp, cwd, sessionId);
     expect(out.decision).toBeUndefined();

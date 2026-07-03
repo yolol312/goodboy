@@ -17,7 +17,7 @@ model: inherit
 - 메인 에이전트의 `## 추론` 섹션 내용 (있다면) — 사실/추론/가정/추측 4분류
 
 명시되지 않으면 다음으로 추출:
-- 변경된 파일: `cwd/.claude/.vcf-session-state.json` 또는 git diff 결과
+- 변경된 파일: `cwd/.claude/.goodboy-session-state.json` 또는 git diff 결과
 - 카테고리: 같은 파일에서
 
 ## 워크플로우 (이 순서로 수행)

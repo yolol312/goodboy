@@ -19,7 +19,7 @@ import type { ReviewResult } from '../lib/types';
 // 각 테스트는 고유한 sessionId를 써서 tmpdir 세션 디렉터리 충돌을 피한다.
 const sessions: string[] = [];
 function newSession(): string {
-  const id = `vcf-test-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const id = `goodboy-test-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   sessions.push(id);
   return id;
 }
@@ -37,7 +37,7 @@ afterEach(() => {
 
 const cwds: string[] = [];
 function newCwd(): string {
-  const d = mkdtempSync(join(tmpdir(), 'vcf-cursor-'));
+  const d = mkdtempSync(join(tmpdir(), 'goodboy-cursor-'));
   cwds.push(d);
   return d;
 }

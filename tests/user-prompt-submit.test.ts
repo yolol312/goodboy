@@ -6,7 +6,7 @@ import { resolveSkillPath } from '../hooks/user-prompt-submit';
 
 // 통합 테스트: user-prompt-submit hook을 실제 프로세스로 실행하여
 // (1) 알려진 스킬 커맨드 감지 시 self-attestation 체크리스트를 additionalContext로 내보내고
-// (2) .claude/.vcf-session-state.json에 risk 분류를 그대로 기록하는지 검증.
+// (2) .claude/.goodboy-session-state.json에 risk 분류를 그대로 기록하는지 검증.
 
 const HOOK = resolve(import.meta.dir, '..', 'hooks', 'user-prompt-submit.ts');
 const PLUGIN_ROOT = resolve(import.meta.dir, '..');
@@ -25,7 +25,7 @@ afterEach(() => {
 });
 
 async function runHook(prompt: string): Promise<{ stdout: string; cwd: string }> {
-  const cwd = mkdtempSync(join(tmpdir(), 'vcf-ups-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'goodboy-ups-'));
   tmpDirs.push(cwd);
   const payload = JSON.stringify({
     session_id: 'test-session',
@@ -39,7 +39,7 @@ async function runHook(prompt: string): Promise<{ stdout: string; cwd: string }>
     stdout: 'pipe',
     stderr: 'pipe',
     // H5-04 간결-우선 주입은 별도 테스트에서 검증. 여기선 꺼서 체크리스트/세션상태 동작만 격리 검증.
-    env: { ...process.env, CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT, VCF_CONCISE_DEFAULT: 'off' },
+    env: { ...process.env, CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT, GOODBOY_CONCISE_DEFAULT: 'off' },
   });
   const stdout = await new Response(proc.stdout).text();
   await proc.exited;
@@ -68,7 +68,7 @@ describe('user-prompt-submit self-attestation checklist (#3)', () => {
 
     // session-state must still be written with the risk classification.
     const state = JSON.parse(
-      readFileSync(join(cwd, '.claude', '.vcf-session-state.json'), 'utf8'),
+      readFileSync(join(cwd, '.claude', '.goodboy-session-state.json'), 'utf8'),
     ) as { category: string; risk: string };
     expect(state.category).toBe('add-feature');
     expect(['simple', 'medium', 'risky']).toContain(state.risk);
@@ -100,7 +100,7 @@ describe('user-prompt-submit self-attestation checklist (#3)', () => {
     expect(out.hookSpecificOutput).toBeUndefined();
     let stateExists = true;
     try {
-      readFileSync(join(cwd, '.claude', '.vcf-session-state.json'), 'utf8');
+      readFileSync(join(cwd, '.claude', '.goodboy-session-state.json'), 'utf8');
     } catch {
       stateExists = false;
     }
@@ -109,11 +109,11 @@ describe('user-prompt-submit self-attestation checklist (#3)', () => {
 });
 
 describe('resolveSkillPath cwd opt-in (2-C)', () => {
-  // vcf/skills 에 존재하지 않는 이름 → import.meta.dir(../skills) 후보가 배제되어 cwd 판정만 남는다.
-  const FAKE = 'zzz-fake-skill-vcf';
+  // goodboy/skills 에 존재하지 않는 이름 → import.meta.dir(../skills) 후보가 배제되어 cwd 판정만 남는다.
+  const FAKE = 'zzz-fake-skill-goodboy';
 
   function seedCwdSkill(): string {
-    const cwd = mkdtempSync(join(tmpdir(), 'vcf-skill-'));
+    const cwd = mkdtempSync(join(tmpdir(), 'goodboy-skill-'));
     tmpDirs.push(cwd);
     mkdirSync(join(cwd, 'skills', FAKE), { recursive: true });
     writeFileSync(join(cwd, 'skills', FAKE, 'SKILL.md'), '---\nrisk_default: simple\n---\n', 'utf8');
@@ -122,26 +122,26 @@ describe('resolveSkillPath cwd opt-in (2-C)', () => {
 
   test('default: cwd/skills는 신뢰하지 않음 → null', () => {
     const savedRoot = process.env.CLAUDE_PLUGIN_ROOT;
-    const savedAllow = process.env.VCF_ALLOW_CWD_SKILLS;
+    const savedAllow = process.env.GOODBOY_ALLOW_CWD_SKILLS;
     try {
       delete process.env.CLAUDE_PLUGIN_ROOT;
-      delete process.env.VCF_ALLOW_CWD_SKILLS;
+      delete process.env.GOODBOY_ALLOW_CWD_SKILLS;
       const cwd = seedCwdSkill();
       expect(resolveSkillPath(FAKE, cwd)).toBeNull();
     } finally {
       if (savedRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
       else process.env.CLAUDE_PLUGIN_ROOT = savedRoot;
-      if (savedAllow === undefined) delete process.env.VCF_ALLOW_CWD_SKILLS;
-      else process.env.VCF_ALLOW_CWD_SKILLS = savedAllow;
+      if (savedAllow === undefined) delete process.env.GOODBOY_ALLOW_CWD_SKILLS;
+      else process.env.GOODBOY_ALLOW_CWD_SKILLS = savedAllow;
     }
   });
 
-  test('VCF_ALLOW_CWD_SKILLS=1: cwd/skills를 후보로 인정 → 경로 반환', () => {
+  test('GOODBOY_ALLOW_CWD_SKILLS=1: cwd/skills를 후보로 인정 → 경로 반환', () => {
     const savedRoot = process.env.CLAUDE_PLUGIN_ROOT;
-    const savedAllow = process.env.VCF_ALLOW_CWD_SKILLS;
+    const savedAllow = process.env.GOODBOY_ALLOW_CWD_SKILLS;
     try {
       delete process.env.CLAUDE_PLUGIN_ROOT;
-      process.env.VCF_ALLOW_CWD_SKILLS = '1';
+      process.env.GOODBOY_ALLOW_CWD_SKILLS = '1';
       const cwd = seedCwdSkill();
       const p = resolveSkillPath(FAKE, cwd);
       expect(p).not.toBeNull();
@@ -149,8 +149,8 @@ describe('resolveSkillPath cwd opt-in (2-C)', () => {
     } finally {
       if (savedRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
       else process.env.CLAUDE_PLUGIN_ROOT = savedRoot;
-      if (savedAllow === undefined) delete process.env.VCF_ALLOW_CWD_SKILLS;
-      else process.env.VCF_ALLOW_CWD_SKILLS = savedAllow;
+      if (savedAllow === undefined) delete process.env.GOODBOY_ALLOW_CWD_SKILLS;
+      else process.env.GOODBOY_ALLOW_CWD_SKILLS = savedAllow;
     }
   });
 });

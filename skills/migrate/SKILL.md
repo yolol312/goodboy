@@ -57,7 +57,7 @@ required_inputs:
 
 ## 카테고리별 세부 단계
 
-1. ⚠️ **위험도 위험**: 편집 전에 사용자 승인 마커(`.claude/.vcf-risk-approved.txt`) 존재 여부를 확인하세요. 없으면 다음과 같이 사용자에게 명시적 진행 승인을 요청하고, 사용자가 승인하면 본인이 직접 마커 파일을 만들도록 안내하세요:
+1. ⚠️ **위험도 위험**: 편집 전에 사용자 승인 마커(`.claude/.goodboy-risk-approved.txt`) 존재 여부를 확인하세요. 없으면 다음과 같이 사용자에게 명시적 진행 승인을 요청하고, 사용자가 승인하면 본인이 직접 마커 파일을 만들도록 안내하세요:
 
    ```
    이 작업은 위험(risky) 카테고리입니다. 다음 절차를 확인하고 승인해 주세요:
@@ -66,7 +66,7 @@ required_inputs:
    - 위험 데이터/스키마: ...
    - 허용 다운타임: ...
 
-   진행 승인하시면 `.claude/.vcf-risk-approved.txt` 파일을 생성해 주세요.
+   진행 승인하시면 `.claude/.goodboy-risk-approved.txt` 파일을 생성해 주세요.
    ```
 
 2. 롤백 계획을 `## 추론 > 사실`에 명시 (말로만 적지 말고 구체 명령/SQL/스냅샷 ID 수준)
@@ -89,7 +89,7 @@ required_inputs:
 
 - 단순(simple): 자동 진행 게이트 — 추론 가시화만 필수
 - 중간(medium): 추측 카테고리에 항목이 있으면 사용자 확인 게이트
-- 위험(risky): 항상 사용자 승인 마커(`.claude/.vcf-risk-approved.txt`)가 있어야 편집 가능. 사용자에게 "진행 승인" 명시 요청.
+- 위험(risky): 항상 사용자 승인 마커(`.claude/.goodboy-risk-approved.txt`)가 있어야 편집 가능. 사용자에게 "진행 승인" 명시 요청.
 
 `--risk <level>` 인자로 override 가능. 예: `/migrate --risk medium <설명>` (단, 마이그레이션의 위험도를 낮춰 부르는 일은 신중히)
 

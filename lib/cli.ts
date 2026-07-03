@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// vcf 보조 CLI — review-changes 슬래시 커맨드/서브에이전트가 Bash로 호출
+// goodboy 보조 CLI — review-changes 슬래시 커맨드/서브에이전트가 Bash로 호출
 //
 // 사용법:
 //   bun ${CLAUDE_PLUGIN_ROOT}/lib/cli.ts <command> [args...]

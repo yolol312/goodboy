@@ -7,7 +7,7 @@ import { getContextUsage } from '../lib/context-usage';
 const tmpDirs: string[] = [];
 
 function writeTranscript(lines: string[]): string {
-  const dir = mkdtempSync(join(tmpdir(), 'vcf-ctxusage-'));
+  const dir = mkdtempSync(join(tmpdir(), 'goodboy-ctxusage-'));
   tmpDirs.push(dir);
   const path = join(dir, 'transcript.jsonl');
   writeFileSync(path, lines.join('\n') + '\n', 'utf8');
@@ -233,15 +233,15 @@ describe('getContextUsage', () => {
   });
 });
 
-describe('getContextUsage — VCF_CONTEXT_LIMIT env override & safe 1M defaulting', () => {
-  const ORIG = process.env.VCF_CONTEXT_LIMIT;
+describe('getContextUsage — GOODBOY_CONTEXT_LIMIT env override & safe 1M defaulting', () => {
+  const ORIG = process.env.GOODBOY_CONTEXT_LIMIT;
   afterEach(() => {
-    if (ORIG === undefined) delete process.env.VCF_CONTEXT_LIMIT;
-    else process.env.VCF_CONTEXT_LIMIT = ORIG;
+    if (ORIG === undefined) delete process.env.GOODBOY_CONTEXT_LIMIT;
+    else process.env.GOODBOY_CONTEXT_LIMIT = ORIG;
   });
 
-  test('VCF_CONTEXT_LIMIT sets the limit used for percent', () => {
-    process.env.VCF_CONTEXT_LIMIT = '1000000';
+  test('GOODBOY_CONTEXT_LIMIT sets the limit used for percent', () => {
+    process.env.GOODBOY_CONTEXT_LIMIT = '1000000';
     const path = writeTranscript([
       JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 310_000 } } }),
     ]);
@@ -253,7 +253,7 @@ describe('getContextUsage — VCF_CONTEXT_LIMIT env override & safe 1M defaultin
 
   test('real-world bug case: ~310K tokens on a 1M window computes ~31% (not ~155%)', () => {
     // 실제 모델 ID(claude-opus-4-8)에는 1m 표식이 없다. env로 1M을 명시하면 정확.
-    process.env.VCF_CONTEXT_LIMIT = '1000000';
+    process.env.GOODBOY_CONTEXT_LIMIT = '1000000';
     const path = writeTranscript([
       JSON.stringify({
         message: {
@@ -277,7 +277,7 @@ describe('getContextUsage — VCF_CONTEXT_LIMIT env override & safe 1M defaultin
 
   test('env override takes priority over model [1m] marker', () => {
     // 모델 표식은 1M이지만 env로 500K를 강제하면 env가 이긴다.
-    process.env.VCF_CONTEXT_LIMIT = '500000';
+    process.env.GOODBOY_CONTEXT_LIMIT = '500000';
     const path = writeTranscript([
       JSON.stringify({ message: { model: 'claude-opus-4-8[1m]', usage: { input_tokens: 250_000 } } }),
     ]);
@@ -287,9 +287,9 @@ describe('getContextUsage — VCF_CONTEXT_LIMIT env override & safe 1M defaultin
     expect(u!.percent).toBeCloseTo(50, 5);
   });
 
-  test('invalid/zero/negative VCF_CONTEXT_LIMIT is ignored (falls back to detection)', () => {
+  test('invalid/zero/negative GOODBOY_CONTEXT_LIMIT is ignored (falls back to detection)', () => {
     for (const bad of ['0', '-100', 'abc', '   ']) {
-      process.env.VCF_CONTEXT_LIMIT = bad;
+      process.env.GOODBOY_CONTEXT_LIMIT = bad;
       const path = writeTranscript([
         JSON.stringify({ message: { model: 'claude-3-5-sonnet', usage: { input_tokens: 100_000 } } }),
       ]);
@@ -301,7 +301,7 @@ describe('getContextUsage — VCF_CONTEXT_LIMIT env override & safe 1M defaultin
 
   test('safe defaulting: tokens exceeding 200K (no marker, no env) bump limit to at least 1M', () => {
     // env 없음 + 표식 없는 모델. 관측 토큰이 200K를 넘으면 200K 창일 수 없으므로 1M으로 상향.
-    delete process.env.VCF_CONTEXT_LIMIT;
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
     const path = writeTranscript([
       JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 310_000 } } }),
     ]);
@@ -314,7 +314,7 @@ describe('getContextUsage — VCF_CONTEXT_LIMIT env override & safe 1M defaultin
 
   test('safe defaulting does NOT fire below 200K (normal 200K sessions keep H1-03)', () => {
     // 표식 없는 정상 200K 세션이 150K이면 여전히 200K 한도(75%)로 남아 H1-03가 작동해야 한다.
-    delete process.env.VCF_CONTEXT_LIMIT;
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
     const path = writeTranscript([
       JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 150_000 } } }),
     ]);
@@ -325,7 +325,7 @@ describe('getContextUsage — VCF_CONTEXT_LIMIT env override & safe 1M defaultin
   });
 
   test('tokens exceeding even 1M yield legitimate >100% (real overflow, not false positive)', () => {
-    delete process.env.VCF_CONTEXT_LIMIT;
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
     const path = writeTranscript([
       JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 1_200_000 } } }),
     ]);
@@ -338,15 +338,15 @@ describe('getContextUsage — VCF_CONTEXT_LIMIT env override & safe 1M defaultin
 
 
 describe('getContextUsage — runtime dynamic 1M detection (low-token false-positive fix)', () => {
-  const ORIG = process.env.VCF_CONTEXT_LIMIT;
+  const ORIG = process.env.GOODBOY_CONTEXT_LIMIT;
   afterEach(() => {
-    if (ORIG === undefined) delete process.env.VCF_CONTEXT_LIMIT;
-    else process.env.VCF_CONTEXT_LIMIT = ORIG;
+    if (ORIG === undefined) delete process.env.GOODBOY_CONTEXT_LIMIT;
+    else process.env.GOODBOY_CONTEXT_LIMIT = ORIG;
   });
 
   /** Write a settings.json in a fresh temp dir and return its path (cleaned via shared tmpDirs). */
   function writeSettings(model: unknown): string {
-    const dir = mkdtempSync(join(tmpdir(), 'vcf-ctx-settings-'));
+    const dir = mkdtempSync(join(tmpdir(), 'goodboy-ctx-settings-'));
     tmpDirs.push(dir);
     const path = join(dir, 'settings.json');
     writeFileSync(path, JSON.stringify({ model }), 'utf8');
@@ -355,7 +355,7 @@ describe('getContextUsage — runtime dynamic 1M detection (low-token false-posi
 
   test('KEY SCENARIO: 1M session at 150K tokens → 15% (no false 75% force) via transcript resolvedModel', () => {
     // usage 줄 model엔 표식이 없지만(claude-opus-4-8), Task 결과 resolvedModel엔 [1m]이 있다.
-    delete process.env.VCF_CONTEXT_LIMIT;
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
     const path = writeTranscript([
       JSON.stringify({
         type: 'user',
@@ -374,7 +374,7 @@ describe('getContextUsage — runtime dynamic 1M detection (low-token false-posi
   });
 
   test('structural resolvedModel [1m] anywhere (even after the usage line) is detected', () => {
-    delete process.env.VCF_CONTEXT_LIMIT;
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
     const path = writeTranscript([
       JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 120_000 } } }),
       JSON.stringify({ toolUseResult: { resolvedModel: 'claude-sonnet-4-5[1m]' } }),
@@ -384,7 +384,7 @@ describe('getContextUsage — runtime dynamic 1M detection (low-token false-posi
   });
 
   test('hook input model with [1m] forces 1M even at low tokens', () => {
-    delete process.env.VCF_CONTEXT_LIMIT;
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
     const path = writeTranscript([
       JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 100_000 } } }),
     ]);
@@ -394,7 +394,7 @@ describe('getContextUsage — runtime dynamic 1M detection (low-token false-posi
   });
 
   test('hook input model WITHOUT marker → existing 200K logic preserved', () => {
-    delete process.env.VCF_CONTEXT_LIMIT;
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
     const path = writeTranscript([
       JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 150_000 } } }),
     ]);
@@ -404,7 +404,7 @@ describe('getContextUsage — runtime dynamic 1M detection (low-token false-posi
   });
 
   test('env override still wins over hook/transcript/settings dynamic signals', () => {
-    process.env.VCF_CONTEXT_LIMIT = '500000';
+    process.env.GOODBOY_CONTEXT_LIMIT = '500000';
     const path = writeTranscript([
       JSON.stringify({ toolUseResult: { resolvedModel: 'claude-opus-4-8[1m]' } }),
       JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 250_000 } } }),
@@ -418,7 +418,7 @@ describe('getContextUsage — runtime dynamic 1M detection (low-token false-posi
   });
 
   test('settings.json fallback: model [1m] → 1M when no higher-priority signal', () => {
-    delete process.env.VCF_CONTEXT_LIMIT;
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
     const path = writeTranscript([
       JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 150_000 } } }),
     ]);
@@ -428,7 +428,7 @@ describe('getContextUsage — runtime dynamic 1M detection (low-token false-posi
   });
 
   test('settings.json without marker does NOT force 1M', () => {
-    delete process.env.VCF_CONTEXT_LIMIT;
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
     const path = writeTranscript([
       JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 150_000 } } }),
     ]);
@@ -437,14 +437,14 @@ describe('getContextUsage — runtime dynamic 1M detection (low-token false-posi
   });
 
   test('fail-open: missing/garbage settings path never throws, falls through to default', () => {
-    delete process.env.VCF_CONTEXT_LIMIT;
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
     const path = writeTranscript([
       JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 150_000 } } }),
     ]);
     const missing = getContextUsage(path, { settingsPath: '/nonexistent/x/settings.json' });
     expect(missing!.limit).toBe(200_000);
 
-    const garbageDir = mkdtempSync(join(tmpdir(), 'vcf-ctx-badsettings-'));
+    const garbageDir = mkdtempSync(join(tmpdir(), 'goodboy-ctx-badsettings-'));
     tmpDirs.push(garbageDir);
     const garbagePath = join(garbageDir, 'settings.json');
     writeFileSync(garbagePath, '{ not json', 'utf8');
@@ -453,7 +453,7 @@ describe('getContextUsage — runtime dynamic 1M detection (low-token false-posi
   });
 
   test('false-positive guard: "[1m]" only in message CONTENT text (not a model field) → still 200K', () => {
-    delete process.env.VCF_CONTEXT_LIMIT;
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
     const path = writeTranscript([
       JSON.stringify({
         type: 'assistant',
@@ -472,7 +472,7 @@ describe('getContextUsage — runtime dynamic 1M detection (low-token false-posi
 
 describe('getContextUsage confident (3-A)', () => {
   test('confirmed 200K-only model (3.5-sonnet) → confident true', () => {
-    delete process.env.VCF_CONTEXT_LIMIT;
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
     const path = writeTranscript([
       JSON.stringify({
         message: { model: 'claude-3-5-sonnet-20241022', usage: { input_tokens: 120_000 } },
@@ -484,7 +484,7 @@ describe('getContextUsage confident (3-A)', () => {
   });
 
   test('1M-capable model without marker (opus-4-8) → confident false', () => {
-    delete process.env.VCF_CONTEXT_LIMIT;
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
     const path = writeTranscript([
       JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 150_000 } } }),
     ]);
@@ -494,7 +494,7 @@ describe('getContextUsage confident (3-A)', () => {
   });
 
   test('1M marker present (resolvedModel) → limit 1M and confident true', () => {
-    delete process.env.VCF_CONTEXT_LIMIT;
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
     const path = writeTranscript([
       JSON.stringify({
         toolUseResult: { resolvedModel: 'claude-opus-4-8[1m]' },
@@ -506,22 +506,22 @@ describe('getContextUsage confident (3-A)', () => {
     expect(u!.confident).toBe(true);
   });
 
-  test('VCF_CONTEXT_LIMIT env → confident true even for ambiguous model', () => {
+  test('GOODBOY_CONTEXT_LIMIT env → confident true even for ambiguous model', () => {
     const path = writeTranscript([
       JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 150_000 } } }),
     ]);
-    process.env.VCF_CONTEXT_LIMIT = '200000';
+    process.env.GOODBOY_CONTEXT_LIMIT = '200000';
     try {
       const u = getContextUsage(path);
       expect(u!.limit).toBe(200_000);
       expect(u!.confident).toBe(true);
     } finally {
-      delete process.env.VCF_CONTEXT_LIMIT;
+      delete process.env.GOODBOY_CONTEXT_LIMIT;
     }
   });
 
   test('unknown (non-Claude) model → confident false (conservative)', () => {
-    delete process.env.VCF_CONTEXT_LIMIT;
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
     const path = writeTranscript([
       JSON.stringify({ message: { model: 'some-random-model-x', usage: { input_tokens: 120_000 } } }),
     ]);
@@ -530,7 +530,7 @@ describe('getContextUsage confident (3-A)', () => {
   });
 
   test('tokens over 200K → safe-upgrade to 1M and confident true', () => {
-    delete process.env.VCF_CONTEXT_LIMIT;
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
     const path = writeTranscript([
       JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 250_000 } } }),
     ]);
@@ -542,7 +542,7 @@ describe('getContextUsage confident (3-A)', () => {
 
 describe('limitForModel bounded 1m matching (4-4)', () => {
   test('영숫자에 인접한 "1m"(예: 41m)은 1M로 오판하지 않는다', () => {
-    delete process.env.VCF_CONTEXT_LIMIT;
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
     const path = writeTranscript([
       JSON.stringify({ message: { model: 'claude-weird-41m-x', usage: { input_tokens: 120_000 } } }),
     ]);
@@ -550,7 +550,7 @@ describe('limitForModel bounded 1m matching (4-4)', () => {
   });
 
   test('경계 있는 -1m / [1m]은 1M로 인식한다', () => {
-    delete process.env.VCF_CONTEXT_LIMIT;
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
     const dash = writeTranscript([
       JSON.stringify({ message: { model: 'claude-opus-4-8-1m', usage: { input_tokens: 150_000 } } }),
     ]);

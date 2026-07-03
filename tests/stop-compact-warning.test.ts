@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-// H1-03 강제 자동 compact(force >= VCF_COMPACT_FORCE_PCT, 기본 50%)의 Stop hook 통합 테스트.
+// H1-03 강제 자동 compact(force >= GOODBOY_COMPACT_FORCE_PCT, 기본 50%)의 Stop hook 통합 테스트.
 const STOP_HOOK = resolve(import.meta.dir, '..', 'hooks', 'stop.ts');
 const tmpDirs: string[] = [];
 
@@ -20,9 +20,9 @@ afterEach(() => {
 
 /** Isolated TMPDIR so file-tracker session state lives in its own sandbox. */
 function newSandbox(): { tmp: string; cwd: string; sessionId: string } {
-  const tmp = mkdtempSync(join(tmpdir(), 'vcf-stop-compact-tmp-'));
+  const tmp = mkdtempSync(join(tmpdir(), 'goodboy-stop-compact-tmp-'));
   tmpDirs.push(tmp);
-  const cwd = mkdtempSync(join(tmpdir(), 'vcf-stop-compact-cwd-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'goodboy-stop-compact-cwd-'));
   tmpDirs.push(cwd);
   const sessionId = `sess-${Math.random().toString(36).slice(2)}`;
   return { tmp, cwd, sessionId };
@@ -31,7 +31,7 @@ function newSandbox(): { tmp: string; cwd: string; sessionId: string } {
 /** Seed file-tracker session state (mirrors file-tracker.ts layout). */
 function seedSession(tmp: string, sessionId: string, turn: number, editFiles: string[]): void {
   const safe = sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_');
-  const dir = join(tmp, `vcf-session-${safe}`);
+  const dir = join(tmp, `goodboy-session-${safe}`);
   mkdirSync(dir, { recursive: true });
   // Stop increments turn first, so write turn-1 so it lands on `turn` after increment.
   writeFileSync(join(dir, 'turn.txt'), String(turn - 1), 'utf8');
@@ -227,13 +227,13 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
     expect(out.reason ?? '').not.toContain('강제');
   });
 
-  // (3-A) 같은 모호 모델이라도 VCF_CONTEXT_LIMIT으로 한도를 명시하면 강제가 복구된다.
-  test('ambiguous model but VCF_CONTEXT_LIMIT set → force applies', async () => {
+  // (3-A) 같은 모호 모델이라도 GOODBOY_CONTEXT_LIMIT으로 한도를 명시하면 강제가 복구된다.
+  test('ambiguous model but GOODBOY_CONTEXT_LIMIT set → force applies', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, [CODE_FILE]);
     writeReview(cwd, passingReview());
     const transcript = writeTranscriptWithModel(cwd, 150_000, 'claude-opus-4-8');
-    const out = await runStop(tmp, cwd, sessionId, transcript, { VCF_CONTEXT_LIMIT: '200000' });
+    const out = await runStop(tmp, cwd, sessionId, transcript, { GOODBOY_CONTEXT_LIMIT: '200000' });
     // 200K로 확정 → 75% → 강제 block.
     expect(out.decision).toBe('block');
     expect(out.reason).toContain('강제');

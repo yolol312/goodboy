@@ -1,9 +1,9 @@
 {
-  "name": "vcf",
-  "version": "0.8.0",
-  "description": "Vibe Coding Framework — hook + skill 기반 LLM 약점 강제 레이어",
+  "name": "goodboy",
+  "version": "0.9.0",
+  "description": "Good Boy — 세상에 나쁜 AI는 없다(There Are No Bad Agents). agentic LLM-CLI 가드레일(도구 위임·재읽기 방지·컨텍스트 관리·재귀 폭주 방어·토큰 낭비 억제)",
   "author": {
     "name": "seongmo"
   },
-  "homepage": "https://github.com/seongmo/vcf"
+  "homepage": "https://github.com/seongmo/goodboy"
 }

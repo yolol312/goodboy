@@ -45,7 +45,7 @@ function makeTranscript(cwd: string, texts: string[]): string {
 }
 
 function makeCwd(): string {
-  const cwd = mkdtempSync(join(tmpdir(), 'vcf-ptu-reason-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'goodboy-ptu-reason-'));
   tmpDirs.push(cwd);
   return cwd;
 }
@@ -61,7 +61,7 @@ async function runHook(cwd: string, transcriptPath: string | null): Promise<stri
   });
   const proc = Bun.spawn(['bun', HOOK], {
     cwd,
-    env: { ...process.env, VCF_DISABLE_DELEGATION: '1' },
+    env: { ...process.env, GOODBOY_DISABLE_DELEGATION: '1' },
     stdin: new TextEncoder().encode(payload),
     stdout: 'pipe',
     stderr: 'pipe',
