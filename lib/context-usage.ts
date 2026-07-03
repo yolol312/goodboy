@@ -17,6 +17,10 @@ export interface ContextUsage {
   limit: number;
   /** transcript에서 읽은 모델명(없으면 null) */
   model: string | null;
+  /** 3-A: limit을 신뢰할 수 있는지. false면 강제 compact를 하지 않는다(모호한 200K 가정 회피).
+   *  true 조건: VCF_CONTEXT_LIMIT 명시 / 1M로 확정(표식·안전상향) / 1M 미지원 세대의 확정 200K.
+   *  false: 1M 지원 세대(opus/sonnet 4+)인데 [1m] 표식 없음, 또는 미지 모델. */
+  confident: boolean;
 }
 
 // --- 모델 컨텍스트 한도 상수 -------------------------------------------------
@@ -263,6 +267,17 @@ function limitForModel(model: string | null): number {
   return STANDARD_CONTEXT_LIMIT;
 }
 
+/** 모델 ID가 "1M 확장 컨텍스트를 지원하는 세대"인지 대략 판별한다(휴리스틱, 3-A).
+ *  1M 창은 세션 토글이라, 지원 세대(opus/sonnet 4.x+)는 [1m] 표식 없이는 200K/1M을 구분할 수 없다.
+ *  → 표식이 없을 때 이 함수가 true면 한도를 "미확정"으로 보고 강제 compact를 보류한다.
+ *  매칭: opus-4-8 / sonnet-4-5 / sonnet-5 등. 불매칭: claude-3-5-sonnet-YYYYMMDD(날짜의 두 자리
+ *  오매칭을 막으려 버전 첫 자리를 4-9로 강제), 3-opus, haiku 등(1M 미지원 → 확정 200K).
+ *  미지/미래 ID는 여기선 false지만, confident 계산에서 "Claude 계열로 안 보이면 미확정"으로 처리한다. */
+export function modelIsExtendedCapable(model: string | null | undefined): boolean {
+  if (!model || typeof model !== 'string') return false;
+  return /(opus|sonnet)-[4-9]\d?(?:[-.]|\b)/.test(model.toLowerCase());
+}
+
 /** transcript(JSONL)에서 "현재 컨텍스트 점유율"을 계산한다.
  *
  *  현재 점유 = 가장 최근 assistant usage의 (input + cache_read + cache_creation).
@@ -381,5 +396,18 @@ export function getContextUsage(
   });
   const percent = limit > 0 ? (lastTokens / limit) * 100 : 0;
 
-  return { percent, tokens: lastTokens, limit, model };
+  // 3-A: limit 신뢰도 계산. 강제 compact는 confident일 때만 수행한다(모호한 200K 오탐 방지).
+  //   - env 명시 또는 1M로 확정(표식/안전상향) → 신뢰.
+  //   - limit=200K이고 모델이 "Claude 계열이면서 1M 미지원 세대"(예: 3.5-sonnet, haiku) → 확정 200K.
+  //   - 1M 지원 세대(opus/sonnet 4+)인데 표식 없음, 또는 Claude 계열로 안 보이는 미지 ID → 미확정.
+  const anyModel = model ?? hookModel ?? null;
+  const looksClaude =
+    typeof anyModel === 'string' && /claude|opus|sonnet|haiku/.test(anyModel.toLowerCase());
+  const extendedCapable = modelIsExtendedCapable(anyModel) || modelIsExtendedCapable(hookModel);
+  const confident =
+    envContextLimitOverride() !== null ||
+    limit === EXTENDED_CONTEXT_LIMIT ||
+    (looksClaude && !extendedCapable);
+
+  return { percent, tokens: lastTokens, limit, model, confident };
 }

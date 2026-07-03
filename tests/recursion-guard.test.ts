@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import {
   MAX_SAME_PROMPT,
   MAX_TOTAL,
+  PRUNE_WHEN_LINES,
   WINDOW_MS,
   checkRecursionGuard,
   hashPrompt,
@@ -189,5 +190,37 @@ describe('recursion-guard via pre-tool-use hook', () => {
       blocked = isBlocked(await runHook(payload));
     }
     expect(blocked).toBe(true);
+  });
+});
+
+describe('recursion-guard prune (3-B: append-only + 원자적)', () => {
+  function guardFile(sessionId: string): string {
+    const safe = sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_');
+    return join(tmpdir(), `vcf-session-${safe}`, 'recursion-guard.jsonl');
+  }
+
+  test('임계(PRUNE_WHEN_LINES) 이하에서는 재작성/축소 없이 append-only', () => {
+    const sid = newSession();
+    const now = 10_000_000;
+    for (let i = 0; i < 20; i++) checkRecursionGuard(sid, `t-${i}`, now + i);
+    const lines = readFileSync(guardFile(sid), 'utf8').trim().split('\n').filter(Boolean);
+    // 20개가 모두 남아있어야 한다(중간 손실/축소 없음).
+    expect(lines.length).toBe(20);
+  });
+
+  test('파일이 커지고 stale 레코드가 있을 때만 원자적으로 prune (카운트는 정상)', () => {
+    const sid = newSession();
+    const path = guardFile(sid);
+    mkdirSync(dirname(path), { recursive: true });
+    // PRUNE_WHEN_LINES 초과 stale 레코드(아주 과거) seed.
+    const stale: string[] = [];
+    for (let i = 0; i < PRUNE_WHEN_LINES + 5; i++) stale.push(JSON.stringify({ t: 1000 + i, h: `h${i}` }));
+    writeFileSync(path, stale.join('\n') + '\n', 'utf8');
+    // 한참 뒤 fresh 호출 → stale 전부 윈도우 밖 → prune 트리거.
+    const r = checkRecursionGuard(sid, 'fresh', 100_000_000);
+    expect(r.blocked).toBe(false);
+    expect(r.total).toBe(1); // fresh 1개만 in-window
+    const lines = readFileSync(path, 'utf8').trim().split('\n').filter(Boolean);
+    expect(lines.length).toBe(1); // prune 후 in-window 레코드만 남음
   });
 });

@@ -151,6 +151,14 @@ function maybeForceCompact(
       return { output: null, forced: false };
     }
 
+    // (3-A) 한도가 확정적이지 않으면(1M 지원 모델인데 [1m] 표식 없음 / 미지 모델 → 200K/1M 구분 불가)
+    //   강제 block을 보류한다. 표식 없는 1M 세션이 200K로 오판되어 저토큰인데도 오탐 강제되던 문제 방지.
+    //   H1-01(절대 토큰 경고)이 안전망 역할을 하며, 하드 강제는 VCF_CONTEXT_LIMIT 명시로 복구할 수 있다.
+    if (!usage.confident) {
+      resetRetryCount(claudeDir, COMPACT_FORCE_COUNT_FILE);
+      return { output: null, forced: false };
+    }
+
     const count = readRetryCount(claudeDir, COMPACT_FORCE_COUNT_FILE) + 1;
 
     // MAX_RETRIES escape — 강제를 반복했는데도 해소되지 않음 → 통과 + 경고(무한 block 방지).

@@ -62,6 +62,17 @@ function writeTranscript(cwd: string, tokens: number): string {
   return path;
 }
 
+/** Write a transcript whose most-recent usage occupies `tokens` against a given model id. */
+function writeTranscriptWithModel(cwd: string, tokens: number, model: string): string {
+  const path = join(cwd, 'transcript.jsonl');
+  writeFileSync(
+    path,
+    JSON.stringify({ message: { model, usage: { input_tokens: tokens } } }) + '\n',
+    'utf8',
+  );
+  return path;
+}
+
 interface StopOut {
   decision?: string;
   reason?: string;
@@ -75,6 +86,7 @@ async function runStop(
   cwd: string,
   sessionId: string,
   transcriptPath?: string,
+  extraEnv: Record<string, string> = {},
 ): Promise<StopOut> {
   const input = JSON.stringify({
     session_id: sessionId,
@@ -86,7 +98,7 @@ async function runStop(
     cwd,
     // HOME도 격리: 실제 ~/.claude/settings.json(개발자 머신의 [1m] 모델 등)이
     // 컨텍스트 창 판별에 새어들어와 200K 기준 단정을 뒤집지 않게 한다.
-    env: { ...process.env, TMPDIR: tmp, HOME: tmp },
+    env: { ...process.env, TMPDIR: tmp, HOME: tmp, ...extraEnv },
     stdin: new TextEncoder().encode(input),
     stdout: 'pipe',
     stderr: 'pipe',
@@ -200,5 +212,31 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
     expect(out.decision).toBe('block');
     expect(out.reason).toContain('리뷰');
     expect(out.stopReason).toBeUndefined();
+  });
+
+  // (3-A) 1M 지원 세대(opus-4-8)인데 [1m] 표식이 없으면 200K/1M 구분 불가 → 강제 보류.
+  test('ambiguous 1M-capable model without marker (opus-4-8) → NO force', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 1, [CODE_FILE]);
+    writeReview(cwd, passingReview()); // 강제가 없으면 passing review로 clean pass 되어야 함
+    // 150K tokens: 200K 가정 시 75%(강제 대상)이지만, opus-4-8은 1M일 수 있어 미확정 → 강제 안 함.
+    const transcript = writeTranscriptWithModel(cwd, 150_000, 'claude-opus-4-8');
+    const out = await runStop(tmp, cwd, sessionId, transcript);
+    expect(out.stopReason).toBeUndefined();
+    expect(out.decision).toBeUndefined(); // 강제도, 리뷰 block도 아님(passing review)
+    expect(out.reason ?? '').not.toContain('강제');
+  });
+
+  // (3-A) 같은 모호 모델이라도 VCF_CONTEXT_LIMIT으로 한도를 명시하면 강제가 복구된다.
+  test('ambiguous model but VCF_CONTEXT_LIMIT set → force applies', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 1, [CODE_FILE]);
+    writeReview(cwd, passingReview());
+    const transcript = writeTranscriptWithModel(cwd, 150_000, 'claude-opus-4-8');
+    const out = await runStop(tmp, cwd, sessionId, transcript, { VCF_CONTEXT_LIMIT: '200000' });
+    // 200K로 확정 → 75% → 강제 block.
+    expect(out.decision).toBe('block');
+    expect(out.reason).toContain('강제');
+    expect(out.stopReason).toBe('compact_needed');
   });
 });

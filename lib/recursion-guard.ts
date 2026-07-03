@@ -19,7 +19,7 @@
 //   recursion-guard.jsonl 로 기록. 각 줄: { t: number(epoch ms), h: string(prompt hash) }.
 
 import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
 
@@ -30,6 +30,10 @@ export const WINDOW_MS = 60_000;
 export const MAX_TOTAL = 30;
 /** 윈도우 내 동일 프롬프트 해시 반복 임계. 이 값 이상(>=)이면 차단. (강화: 12→5) */
 export const MAX_SAME_PROMPT = 5;
+/** 파일 정리(prune) 트리거 라인 수(3-B). 파일이 이 값을 넘고 윈도우 밖 레코드가 있을 때만
+ *  원자적으로 정리한다. 매 호출 재작성이 동시 append를 덮어써 가드를 약화시키던 문제를 막기 위해,
+ *  MAX_TOTAL(30)보다 훨씬 크게 잡아 정상 동작(버스트 포함)에선 거의 트리거되지 않게 한다. */
+export const PRUNE_WHEN_LINES = 200;
 // -----------------------------------------------------------------------------
 
 const STATE_FILE = 'recursion-guard.jsonl';
@@ -142,11 +146,21 @@ export function checkRecursionGuard(
       same = 1;
     }
 
-    // 오래된 라인 제거해 파일 무한 증가 방지 (실패해도 판정엔 영향 없음)
-    try {
-      writeFileSync(path, kept.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8');
-    } catch {
-      // best-effort
+    // 오래된 라인 제거해 파일 무한 증가 방지.
+    //   ⚠️ 매 호출 전체 재작성(비원자적 read-modify-write)은 이 가드가 막으려는 "동시 다발 폭주"에서
+    //   다른 호출의 append를 덮어써(lost update) 카운트를 낮추고 가드를 약화시킨다. 그래서:
+    //     - 평상시엔 append-only(재작성 안 함). 버스트는 전부 윈도우 내라 제거할 것도 없다.
+    //     - 파일이 충분히 커졌고(PRUNE_WHEN_LINES 초과, 정상 동작에선 거의 없음) 실제로 제거할
+    //       윈도우 밖 레코드가 있을 때만, 원자적으로(temp→rename) 정리한다.
+    //   torn write 방지를 위해 temp 파일에 쓴 뒤 renameSync로 교체한다. 실패해도 판정엔 영향 없다.
+    if (records.length > PRUNE_WHEN_LINES && kept.length < records.length) {
+      try {
+        const tmp = `${path}.tmp`;
+        writeFileSync(tmp, kept.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+        renameSync(tmp, path);
+      } catch {
+        // best-effort — 정리 실패해도 append-only로 계속 정상 동작한다.
+      }
     }
 
     if (same >= MAX_SAME_PROMPT) {

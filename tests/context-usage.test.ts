@@ -469,3 +469,73 @@ describe('getContextUsage — runtime dynamic 1M detection (low-token false-posi
     expect(u!.percent).toBeCloseTo(75, 5);
   });
 });
+
+describe('getContextUsage confident (3-A)', () => {
+  test('confirmed 200K-only model (3.5-sonnet) → confident true', () => {
+    delete process.env.VCF_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({
+        message: { model: 'claude-3-5-sonnet-20241022', usage: { input_tokens: 120_000 } },
+      }),
+    ]);
+    const u = getContextUsage(path);
+    expect(u!.limit).toBe(200_000);
+    expect(u!.confident).toBe(true);
+  });
+
+  test('1M-capable model without marker (opus-4-8) → confident false', () => {
+    delete process.env.VCF_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 150_000 } } }),
+    ]);
+    const u = getContextUsage(path);
+    expect(u!.limit).toBe(200_000);
+    expect(u!.confident).toBe(false);
+  });
+
+  test('1M marker present (resolvedModel) → limit 1M and confident true', () => {
+    delete process.env.VCF_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({
+        toolUseResult: { resolvedModel: 'claude-opus-4-8[1m]' },
+        message: { model: 'claude-opus-4-8', usage: { input_tokens: 150_000 } },
+      }),
+    ]);
+    const u = getContextUsage(path);
+    expect(u!.limit).toBe(1_000_000);
+    expect(u!.confident).toBe(true);
+  });
+
+  test('VCF_CONTEXT_LIMIT env → confident true even for ambiguous model', () => {
+    const path = writeTranscript([
+      JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 150_000 } } }),
+    ]);
+    process.env.VCF_CONTEXT_LIMIT = '200000';
+    try {
+      const u = getContextUsage(path);
+      expect(u!.limit).toBe(200_000);
+      expect(u!.confident).toBe(true);
+    } finally {
+      delete process.env.VCF_CONTEXT_LIMIT;
+    }
+  });
+
+  test('unknown (non-Claude) model → confident false (conservative)', () => {
+    delete process.env.VCF_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({ message: { model: 'some-random-model-x', usage: { input_tokens: 120_000 } } }),
+    ]);
+    const u = getContextUsage(path);
+    expect(u!.confident).toBe(false);
+  });
+
+  test('tokens over 200K → safe-upgrade to 1M and confident true', () => {
+    delete process.env.VCF_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 250_000 } } }),
+    ]);
+    const u = getContextUsage(path);
+    expect(u!.limit).toBe(1_000_000);
+    expect(u!.confident).toBe(true);
+  });
+});
