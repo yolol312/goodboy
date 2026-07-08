@@ -14,5 +14,5 @@
     "forceConsistentCasingInFileNames": true,
     "verbatimModuleSyntax": true
   },
-  "include": ["lib/**/*.ts", "hooks/**/*.ts", "tests/**/*.ts"]
+  "include": ["lib/**/*.ts", "hooks/**/*.ts", "tests/**/*.ts", "statusline/**/*.ts"]
 }
