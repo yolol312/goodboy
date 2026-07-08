@@ -290,6 +290,10 @@ function main(): void {
       const toolResponse = input.tool_response;
 
       // (A) Read/Edit 추적
+      //   D2: agent_id가 있으면(서브에이전트) 기록에 태깅해, 재-Read 게이트가
+      //   에이전트별 스코프로 판정할 수 있게 한다. 메인은 태깅 없음(='main' 스코프, 하위호환).
+      const agentId =
+        typeof input.agent_id === 'string' && input.agent_id !== '' ? input.agent_id : undefined;
       try {
         const turn = getCurrentTurn(sessionId);
         if (toolName === 'Read') {
@@ -304,21 +308,21 @@ function main(): void {
             } catch {
               mtime = undefined;
             }
-            recordRead(sessionId, absFp, turn, mtime);
+            recordRead(sessionId, absFp, turn, mtime, agentId);
           }
         } else if (toolName === 'Edit' || toolName === 'Write') {
           const fp = (toolInput.file_path as string | undefined) ?? '';
-          if (fp) recordEdit(sessionId, resolvePath(cwd, fp), turn);
+          if (fp) recordEdit(sessionId, resolvePath(cwd, fp), turn, agentId);
         } else if (toolName === 'MultiEdit') {
           // MultiEdit는 file_path가 단일 (edits 배열)이거나, 일부 클라이언트에서 다중일 수 있음.
           const fp = (toolInput.file_path as string | undefined) ?? '';
-          if (fp) recordEdit(sessionId, resolvePath(cwd, fp), turn);
+          if (fp) recordEdit(sessionId, resolvePath(cwd, fp), turn, agentId);
           const edits = (toolInput.edits as unknown[] | undefined) ?? [];
           if (Array.isArray(edits)) {
             for (const e of edits) {
               if (e && typeof e === 'object') {
                 const fp2 = (e as Record<string, unknown>).file_path as string | undefined;
-                if (fp2) recordEdit(sessionId, resolvePath(cwd, fp2), turn);
+                if (fp2) recordEdit(sessionId, resolvePath(cwd, fp2), turn, agentId);
               }
             }
           }

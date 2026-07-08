@@ -33,14 +33,22 @@ function makeFile(cwd: string, name: string, content = 'hello'): { path: string;
   return { path, mtime: statSync(path).mtimeMs };
 }
 
-/** Seed a read record (optionally with mtime) at a given turn. */
-function seedRead(tmp: string, sessionId: string, file: string, turn: number, mtime?: number): void {
+/** Seed a read record (optionally with mtime/agent) at a given turn. */
+function seedRead(
+  tmp: string,
+  sessionId: string,
+  file: string,
+  turn: number,
+  mtime?: number,
+  agent?: string,
+): void {
   const safe = sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_');
   const dir = join(tmp, `goodboy-session-${safe}`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'turn.txt'), String(turn), 'utf8');
   const rec: Record<string, unknown> = { file: resolve(file), turn, timestamp: new Date().toISOString() };
   if (mtime !== undefined) rec.mtime = mtime;
+  if (agent !== undefined) rec.agent = agent;
   writeFileSync(join(dir, 'reads.jsonl'), JSON.stringify(rec) + '\n', 'utf8');
 }
 
@@ -67,6 +75,7 @@ async function runRead(
   toolInput: Record<string, unknown>,
   extraEnv: Record<string, string> = {},
   agentType?: string,
+  agentId?: string,
 ): Promise<Out> {
   const payload = JSON.stringify({
     session_id: sessionId,
@@ -74,6 +83,7 @@ async function runRead(
     tool_name: 'Read',
     tool_input: toolInput,
     ...(agentType ? { agent_type: agentType } : {}),
+    ...(agentId ? { agent_id: agentId } : {}),
   });
   const proc = Bun.spawn(['bun', HOOK], {
     cwd,
@@ -105,14 +115,59 @@ describe('pre-tool-use H2-01 re-read gate', () => {
     expect(out.hookSpecificOutput?.permissionDecisionReason).toContain('H2-01');
   });
 
-  test('ALLOW: subagent (agent_type present) is exempt (1-A)', async () => {
+  test('ALLOW: agent_id 없는 서브에이전트(agent_type만)는 면제 유지 (식별 불가)', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     const { path, mtime } = makeFile(cwd, 'a.ts');
     // 메인이라면 deny 되는 상황(같은 파일·mtime 동일·미편집)을 seed.
     seedRead(tmp, sessionId, path, 0, mtime);
-    // 서브에이전트(agent_type 존재)는 자기 세션 read 공유로 오차단되면 안 되므로 통과해야 한다.
+    // agent_id가 없어 스코프를 식별할 수 없는 서브에이전트는 교차 오차단 방지를 위해 통과.
     const out = await runRead(tmp, cwd, sessionId, { file_path: path }, {}, 'general-purpose');
     expect(isDenied(out)).toBe(false);
+  });
+
+  test('D2 DENY: agent_id 있는 서브에이전트가 자기 read를 재-Read', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    const { path, mtime } = makeFile(cwd, 'a.ts');
+    seedRead(tmp, sessionId, path, 0, mtime, 'agent-42');
+    const out = await runRead(
+      tmp, cwd, sessionId, { file_path: path }, {}, 'general-purpose', 'agent-42',
+    );
+    expect(isDenied(out)).toBe(true);
+  });
+
+  test('D2 ALLOW: 서브에이전트가 "메인만 읽은" 파일을 처음 읽음 (교차 스코프 무시)', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    const { path, mtime } = makeFile(cwd, 'a.ts');
+    seedRead(tmp, sessionId, path, 0, mtime); // 메인 기록(agent 태그 없음)
+    const out = await runRead(
+      tmp, cwd, sessionId, { file_path: path }, {}, 'general-purpose', 'agent-42',
+    );
+    expect(isDenied(out)).toBe(false);
+  });
+
+  test('D2 ALLOW: 메인이 "서브만 읽은" 파일을 처음 읽음 (역방향 교차 무시)', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    const { path, mtime } = makeFile(cwd, 'a.ts');
+    seedRead(tmp, sessionId, path, 0, mtime, 'agent-42'); // 서브 기록
+    const out = await runRead(tmp, cwd, sessionId, { file_path: path });
+    expect(isDenied(out)).toBe(false);
+  });
+
+  test('D2: 윈도우 기본 10턴 — 5턴 전 read도 deny 대상', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    const { path, mtime } = makeFile(cwd, 'a.ts');
+    const safe = sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_');
+    const dir = join(tmp, `goodboy-session-${safe}`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'turn.txt'), '5', 'utf8'); // 현재 5턴
+    writeFileSync(
+      join(dir, 'reads.jsonl'),
+      JSON.stringify({ file: resolve(path), turn: 0, timestamp: new Date().toISOString(), mtime }) +
+        '\n',
+      'utf8',
+    );
+    const out = await runRead(tmp, cwd, sessionId, { file_path: path });
+    expect(isDenied(out)).toBe(true); // 구 윈도우(3)라면 통과했을 케이스
   });
 
   test('ALLOW: partial read (offset present) is exempt', async () => {

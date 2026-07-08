@@ -189,10 +189,15 @@ function main(): void {
       //   최근 N턴 내 같은 파일을, 그 사이 mtime 변경도 편집도 없이 다시 Read하면 불필요한 재-Read로 본다.
       //   오탐 방지 예외(허용): 부분읽기(offset/limit), mtime 변경됨, 마지막 read 이후 편집됨.
       //   모든 판정은 fail-open(내부 오류/불확실 → 허용). env GOODBOY_REREAD_GATE=deny|warn|off (기본 deny).
-      //   ⚠️ 서브에이전트(agent_type 존재)는 면제한다(delegation 게이트와 동일 정책).
-      //   read 기록은 session_id로만 스코프되어 메인과 서브에이전트가 공유되므로, 서브에이전트가
-      //   "자신은 처음 읽는" 파일도 메인이 이미 읽었다는 이유로 오차단된다. 서브에이전트는 통과시킨다.
-      if (toolName === 'Read' && !input.agent_type) {
+      //   D2(스코프 개정): read 기록에 agent_id를 태깅하므로 서브에이전트도 "자기 기록" 기준으로
+      //   공정하게 게이트한다(전면 면제 해제). 단 agent_type만 있고 agent_id가 없으면(식별 불가)
+      //   기존 면제를 유지한다 — 동일 타입 서브 간 교차 오차단(남이 읽은 기록으로 내가 차단) 방지.
+      const rereadScope: string | null = input.agent_id
+        ? input.agent_id
+        : input.agent_type
+          ? null // 식별 불가 서브에이전트 → 면제
+          : 'main';
+      if (toolName === 'Read' && rereadScope !== null) {
         const gate = envStr('GOODBOY_REREAD_GATE', 'deny'); // deny | warn | off
         const filePath = (toolInput.file_path as string | undefined) ?? '';
         // 부분 읽기(offset/limit)는 정당한 재-Read → 예외.
@@ -204,13 +209,17 @@ function main(): void {
             try {
               const absPath = resolvePath(cwd, filePath);
               const turn = getCurrentTurn(sessionId);
-              const withinTurns = envInt('GOODBOY_REREAD_WINDOW', 3);
+              // 윈도우 기본 3→10턴 확대(D2): mtime 비교가 "그 사이 파일 변경" 오탐을
+              // 막아주므로 길게 잡아도 안전하고, 3턴 밖 재-Read가 다수 관측됨(H2-01 ×484).
+              const withinTurns = envInt('GOODBOY_REREAD_WINDOW', 10);
               // 최근에 읽지 않았으면 통과.
-              if (!wasFileReadRecently(sessionId, absPath, turn, withinTurns)) return false;
+              if (!wasFileReadRecently(sessionId, absPath, turn, withinTurns, rereadScope))
+                return false;
               // 마지막 read 이후 편집됐으면 통과(내용이 바뀌었을 수 있음).
-              if (wasFileEditedRecently(sessionId, absPath, turn, withinTurns)) return false;
+              if (wasFileEditedRecently(sessionId, absPath, turn, withinTurns, rereadScope))
+                return false;
               // 이전 read 시점 mtime을 모르면 비교 불가 → 통과(fail-open).
-              const prevMtime = getRecentReadMtime(sessionId, absPath, turn, withinTurns);
+              const prevMtime = getRecentReadMtime(sessionId, absPath, turn, withinTurns, rereadScope);
               if (prevMtime === null) return false;
               // 현재 mtime을 못 구하면 통과(fail-open).
               let curMtime: number | null = null;
