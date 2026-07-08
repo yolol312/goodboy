@@ -12,6 +12,7 @@ import {
   getCurrentTurn,
   getRecentReadMtime,
   hasReasoningSection,
+  logGate,
   wasFileEditedRecently,
   wasFileReadRecently,
 } from '../lib';
@@ -191,6 +192,7 @@ function main(): void {
             : JSON.stringify(toolInput);
         const guard = checkRecursionGuard(sessionId, promptText);
         if (guard.blocked && guard.reason) {
+          logGate(sessionId, 'recursion-guard', 'deny', guard.reason);
           emit(deny(guard.reason));
           return;
         }
@@ -200,6 +202,7 @@ function main(): void {
       //   GOODBOY_DISABLE_DELEGATION=1 이면 위임 자체를 끈다.
       if (!input.agent_type && process.env.GOODBOY_DISABLE_DELEGATION !== '1') {
         if (DELEGATED_TOOLS.has(toolName)) {
+          logGate(sessionId, 'delegation', 'deny', toolName);
           emit(
             deny(
               "이 도구는 서브에이전트에게 위임하세요. Agent 도구로 'general-purpose' 등 적합한 서브에이전트를 호출하세요.",
@@ -223,8 +226,10 @@ function main(): void {
           if (hit) {
             const msg = `${BASH_SEARCH_MESSAGE} (감지: ${hit})`;
             if (gate === 'warn') {
+              logGate(sessionId, 'bash-search', 'warn', hit);
               preWarnings.push(msg);
             } else {
+              logGate(sessionId, 'bash-search', 'deny', hit);
               emit(deny(msg));
               return;
             }
@@ -278,8 +283,10 @@ function main(): void {
           if (blockReread) {
             if (gate === 'warn') {
               // warn 모드: deny 대신 allow + systemMessage.
+              logGate(sessionId, 'reread', 'warn', filePath);
               preWarnings.push(rereadMsg);
             } else {
+              logGate(sessionId, 'reread', 'deny', filePath);
               emit(deny(rereadMsg));
               return;
             }
@@ -310,6 +317,7 @@ function main(): void {
               wasFileReadRecently(sessionId, absPath, turn, 20) ||
               wasFileEditedRecently(sessionId, absPath, turn, 20);
             if (!ok) {
+              logGate(sessionId, 'read-before-edit', 'deny', absPath);
               emit(
                 deny(
                   `이 파일을 먼저 Read 도구로 읽은 후 편집하세요: ${absPath}. (Read-before-edit 정책)`,
@@ -331,9 +339,15 @@ function main(): void {
           REASONING_GATE_WINDOW,
         );
         // recentTexts가 비면 파싱 실패/transcript 없음 → 통과 (fail-open, 안전 옵션)
-        if (recentTexts.length > 0) {
+        if (recentTexts.length === 0) {
+          // E1: transcript가 주어졌는데 assistant 텍스트를 하나도 못 뽑았으면 무력화 신호.
+          if (input.transcript_path) {
+            logGate(sessionId, 'reasoning', 'fail-open', 'transcript-unparsed');
+          }
+        } else {
           const hasReasoning = recentTexts.some((t) => hasReasoningSection(t));
           if (!hasReasoning) {
+            logGate(sessionId, 'reasoning', 'deny');
             emit(
               deny(
                 "편집 전에 '## 추론' 섹션을 출력하세요. 4분류로: ### 사실 / ### 추론 / ### 가정 / ### 추측 ⚠️ . (추론 가시화 정책)",
@@ -355,6 +369,7 @@ function main(): void {
         if (state && state.risk === 'risky' && state.sessionId === sessionId) {
           const approvedPath = resolvePath(cwd, '.claude', '.goodboy-risk-approved.txt');
           if (!existsSync(approvedPath)) {
+            logGate(sessionId, 'risk', 'deny', state.category ?? 'unknown');
             emit(
               deny(
                 `이 작업은 위험도가 '위험'으로 분류되었습니다(${state.category ?? '미상'}). 사용자에게 진행 승인을 받은 후, .claude/.goodboy-risk-approved.txt 파일을 만들고 다시 시도하세요.`,

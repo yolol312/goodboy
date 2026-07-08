@@ -3,6 +3,7 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
+import type { StatusSnapshot } from '../lib';
 import {
   clearValidationFailure,
   compactForcePct,
@@ -14,6 +15,8 @@ import {
   getLatestEditTimestampSince,
   highSeverityFindings,
   incrementTurn,
+  logGate,
+  readGateLog,
   readHabitState,
   readReviewCursor,
   readValidationFailure,
@@ -21,6 +24,7 @@ import {
   validateReview,
   writeHabitState,
   writeReviewCursor,
+  writeStatusSnapshot,
 } from '../lib';
 
 interface StopInput {
@@ -75,6 +79,12 @@ const VALIDATION_COUNT_FILE = '.goodboy-validation-retry-count.txt';
 // emit()이 모든 출력 경로(block/pass)의 systemMessage에 이 경고들을 덧붙인다 —
 // 이 권고들은 리뷰 통과/차단과 독립적이어야 하기 때문.
 const habitWarnings: string[] = [];
+
+// (E1) 상태 스냅샷 — main()이 진행하며 채우고, emit()이 어떤 출력 경로로 끝나든
+// 세션 디렉터리 status.json에 기록한다(상태바/외부 도구 소비용). 이 hook은 1회성
+// 프로세스이므로 모듈 전역으로 충분하다. 기록 실패는 조용히 무시(fail-open).
+let snapshotSessionId: string | null = null;
+const statusSnapshot: Partial<Omit<StatusSnapshot, 'updatedAt'>> = {};
 
 async function readStdin(): Promise<string> {
   let data = '';
@@ -144,6 +154,7 @@ function maybeSetLongSessionWarning(
 function maybeForceCompact(
   usage: ReturnType<typeof getContextUsage>,
   cwd: string,
+  sessionId: string,
 ): { output: HookOutput | null; forced: boolean } {
   try {
     if (!usage) return { output: null, forced: false };
@@ -161,6 +172,8 @@ function maybeForceCompact(
     //   강제 block을 보류한다. 표식 없는 1M 세션이 200K로 오판되어 저토큰인데도 오탐 강제되던 문제 방지.
     //   H1-01(절대 토큰 경고)이 안전망 역할을 하며, 하드 강제는 GOODBOY_CONTEXT_LIMIT 명시로 복구할 수 있다.
     if (!usage.confident) {
+      // E1: "강제했을 상황인데 한도 미확정으로 보류" — 무력화 상태의 핵심 신호라 기록한다.
+      logGate(sessionId, 'compact-force', 'fail-open', `limit-unconfident pct=${pct}`);
       resetRetryCount(claudeDir, COMPACT_FORCE_COUNT_FILE);
       return { output: null, forced: false };
     }
@@ -170,6 +183,7 @@ function maybeForceCompact(
     // MAX_RETRIES escape — 강제를 반복했는데도 해소되지 않음 → 통과 + 경고(무한 block 방지).
     if (count >= MAX_RETRIES) {
       resetRetryCount(claudeDir, COMPACT_FORCE_COUNT_FILE);
+      logGate(sessionId, 'compact-force', 'warn', `escape pct=${pct}`);
       habitWarnings.push(
         `컨텍스트 사용률 ${pct}%가 지속됩니다. 자동 압축 강제를 ${MAX_RETRIES}회 시도했으나 ` +
           '해소되지 않아 이번 턴은 통과시킵니다. 수동으로 /compact 또는 새 세션을 권장합니다. (H1-03 강제)',
@@ -178,6 +192,7 @@ function maybeForceCompact(
     }
 
     writeRetryCount(claudeDir, count, COMPACT_FORCE_COUNT_FILE);
+    logGate(sessionId, 'compact-force', 'deny', `pct=${pct} retry=${count}`);
     return {
       output: {
         decision: 'block',
@@ -204,6 +219,19 @@ function emit(out: HookOutput): void {
   if (habitWarnings.length > 0) {
     const joined = habitWarnings.join('\n');
     out.systemMessage = out.systemMessage ? `${out.systemMessage}\n${joined}` : joined;
+  }
+  // (E1) 어떤 경로로 끝나든 상태 스냅샷을 남긴다 — updatedAt이 "hook 생존" 증명이다.
+  if (snapshotSessionId) {
+    try {
+      const denies = readGateLog(snapshotSessionId).filter((e) => e.decision === 'deny').length;
+      writeStatusSnapshot(snapshotSessionId, {
+        context: null,
+        ...statusSnapshot,
+        gateDenies: denies,
+      });
+    } catch {
+      // best-effort
+    }
   }
   try {
     process.stdout.write(JSON.stringify(out));
@@ -265,12 +293,31 @@ function main(): void {
 
       const cwd = input.cwd ?? process.cwd();
       const sessionId = input.session_id ?? 'unknown';
+      snapshotSessionId = sessionId;
 
       // (A) 턴 증가
       try {
         incrementTurn(sessionId);
       } catch (err) {
         process.stderr.write(`[goodboy stop] incrementTurn error: ${String(err)}\n`);
+      }
+
+      // (E1) 스냅샷: 카테고리/위험도(session-state에서, 현재 세션 것만).
+      try {
+        const statePath = resolvePath(cwd, '.claude', '.goodboy-session-state.json');
+        if (existsSync(statePath)) {
+          const st = JSON.parse(readFileSync(statePath, 'utf8')) as {
+            category?: string;
+            risk?: string;
+            sessionId?: string;
+          };
+          if (st && st.sessionId === sessionId) {
+            statusSnapshot.category = st.category ?? null;
+            statusSnapshot.risk = st.risk ?? null;
+          }
+        }
+      } catch {
+        // best-effort
       }
 
       // (B) 무한루프 방지
@@ -290,12 +337,51 @@ function main(): void {
         } catch {
           usage = null;
         }
+        // (E1 canary) transcript가 있는데 측정이 계속 실패하면 컨텍스트 게이트가
+        //   통째로 무력화된 상태일 수 있다(비공식 포맷 변경 등). fail-open의 맹점을
+        //   가시화한다: 매 실패를 기록하고, 연속 3회부터 세션당 1회 사용자에게 알린다.
+        if (usage === null) {
+          logGate(sessionId, 'context-usage', 'fail-open', 'usage-parse-failed');
+          try {
+            const st = readHabitState(sessionId);
+            st.ctxMeasureFailStreak = (st.ctxMeasureFailStreak ?? 0) + 1;
+            if (st.ctxMeasureFailStreak >= 3 && !st.ctxParseWarned) {
+              st.ctxParseWarned = true;
+              habitWarnings.push(
+                '컨텍스트 사용량 측정이 계속 실패하고 있습니다(transcript 포맷 변경 가능성). ' +
+                  '컨텍스트 자동 관리(경고/강제 compact)가 비활성 상태일 수 있습니다. (계측 canary, E1)',
+              );
+            }
+            writeHabitState(sessionId, st);
+          } catch {
+            // fail-open
+          }
+        } else {
+          try {
+            const st = readHabitState(sessionId);
+            if ((st.ctxMeasureFailStreak ?? 0) !== 0) {
+              st.ctxMeasureFailStreak = 0;
+              writeHabitState(sessionId, st);
+            }
+          } catch {
+            // fail-open
+          }
+        }
       }
+      // (E1) 스냅샷: 게이트가 실제로 쓰는 컨텍스트 계산값.
+      statusSnapshot.context = usage
+        ? {
+            percent: Math.round(usage.percent),
+            tokens: usage.tokens,
+            limit: usage.limit,
+            confident: usage.confident,
+          }
+        : null;
 
       // (B3) H1-03 강제 자동 compact — 컨텍스트 점유율이 강제 임계(기본 50%) 이상이면
       //   자동 compact 신호 + decision:block으로 턴 종료를 막아 확실히 compact를 강제한다.
       //   무한 block은 stop_hook_active(위 B)와 MAX_RETRIES escape로 방지한다.
-      const force = maybeForceCompact(usage, cwd);
+      const force = maybeForceCompact(usage, cwd, sessionId);
 
       // (B4) H1-01 긴 세션 경고 준비 — 강제가 발동했으면(force.forced) 스팸 방지로 생략.
       //   emit()이 이후 모든 출력 경로의 systemMessage에 habitWarnings를 덧붙인다.
@@ -320,11 +406,13 @@ function main(): void {
           return null;
         }
       })();
+      statusSnapshot.validationFailed = !!(vf && vf.sessionId === sessionId);
       if (vf && vf.sessionId === sessionId) {
         const cmds = vf.commands.length > 0 ? vf.commands.join(', ') : '자동 검증';
         const count = readRetryCount(claudeDir, VALIDATION_COUNT_FILE) + 1;
         if (count < MAX_RETRIES) {
           writeRetryCount(claudeDir, count, VALIDATION_COUNT_FILE);
+          logGate(sessionId, 'validation', 'deny', cmds);
           emit({
             decision: 'block',
             reason:
@@ -337,6 +425,7 @@ function main(): void {
         // 한계 초과 → 통과 + 사용자 알림 + 마커/카운터 정리(영구 차단 방지).
         resetRetryCount(claudeDir, VALIDATION_COUNT_FILE);
         clearValidationFailure(cwd);
+        logGate(sessionId, 'validation', 'warn', 'escape');
         habitWarnings.push(
           `자동 검증 실패가 ${MAX_RETRIES}회 차단 후에도 해소되지 않아 이번 턴은 통과시킵니다. ` +
             `사용자 확인이 필요합니다. (실패: ${cmds})`,
@@ -366,9 +455,11 @@ function main(): void {
         }
       })();
       if (recentEdits.length === 0) {
+        statusSnapshot.reviewPending = false;
         emit({});
         return;
       }
+      statusSnapshot.reviewPending = true;
 
       // (D) 리뷰 검사
       const reviewsDir = resolvePath(cwd, '.claude', 'reviews');
@@ -382,6 +473,7 @@ function main(): void {
       if (!result) {
         const preview = recentEdits.slice(0, 5).join(', ');
         const more = recentEdits.length > 5 ? ` 외 ${recentEdits.length - 5}개` : '';
+        logGate(sessionId, 'review', 'deny', 'no-review-file');
         emit({
           decision: 'block',
           reason: `변경된 파일에 대해 리뷰가 필요합니다. /review-changes 슬래시 커맨드 또는 review-changes 서브에이전트를 호출하여 다음 파일을 리뷰하세요: ${preview}${more}`,
@@ -406,6 +498,7 @@ function main(): void {
         }
       })();
       if (!v.ok) {
+        logGate(sessionId, 'review', 'deny', v.reason ?? 'invalid');
         emit({
           decision: 'block',
           reason: `리뷰 검증 실패: ${v.reason ?? '알 수 없는 이유'}. /review-changes 를 다시 실행하세요.`,
@@ -424,6 +517,7 @@ function main(): void {
           .join('; ');
         const more = highSev.length > 3 ? ` (외 ${highSev.length - 3}개)` : '';
         if (count < MAX_RETRIES) {
+          logGate(sessionId, 'review', 'deny', 'high-severity');
           emit({
             decision: 'block',
             reason: `high severity 발견사항을 수정하세요: ${issues}${more}. (재시도 ${count}/${MAX_RETRIES})`,
@@ -458,6 +552,7 @@ function main(): void {
         const dimList = missingDims.join(', ');
         if (count < MAX_RETRIES) {
           writeRetryCount(claudeDir, count);
+          logGate(sessionId, 'review', 'deny', `missing-dimensions: ${dimList}`);
           emit({
             decision: 'block',
             reason:
@@ -494,6 +589,7 @@ function main(): void {
       //   이후 Stop에서는 이 턴 이후 편집만 리뷰 필요 대상이 된다.
       resetRetryCount(claudeDir);
       writeReviewCursor(cwd, getCurrentTurn(sessionId));
+      statusSnapshot.reviewPending = false;
 
       const out: HookOutput = {};
       if (systemMessage) out.systemMessage = systemMessage;

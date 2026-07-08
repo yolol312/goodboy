@@ -144,6 +144,10 @@ export interface HabitState {
   bashFloodPatterns?: string[];
   /** H2-02: Bash 대량출력 사후 경고를 이번 세션에 이미 냈는지(세션당 1회). */
   bashOutputWarned?: boolean;
+  /** E1 canary: 컨텍스트 사용량 측정 연속 실패 횟수(성공 시 0으로 리셋). */
+  ctxMeasureFailStreak?: number;
+  /** E1 canary: 측정 실패 지속(무력화 가능성) 경고를 이미 냈는지(세션당 1회). */
+  ctxParseWarned?: boolean;
 }
 
 const HABIT_STATE_FILE = 'habit-state.json';
