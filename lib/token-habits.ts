@@ -9,8 +9,8 @@
 //   - 스팸 금지: 경고는 세션당/단계당 1회. "이미 경고함"을 habit-state.json에 기록한다.
 //   - env 토글: 각 기능은 GOODBOY_ 접두사 env로 끄거나 임계값을 조정할 수 있다.
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
 
 // --- H2-02 임계 기본값(출력 크기 기반) --------------------------------------
@@ -275,6 +275,81 @@ export function bashOutputFloodMessage(
     `이번 Bash 출력이 컸습니다(약 ${chars.toLocaleString()}자 / ${lines}줄)${patternNote}. ` +
     '다음엔 head/grep/tail로 제한하거나 파일로 저장 후 경로를 전달하세요. ' +
     '(로그 flood 방지, H2-02) [실제 필터링은 rtk가 일부 수행]'
+  );
+}
+
+// --- H2-02 사전 차단: bare cat 대용량 통짜 출력 --------------------------------
+
+/** bare cat 사전 차단 임계(바이트). env GOODBOY_CAT_DENY_BYTES로 조정. */
+export function catDumpThresholdBytes(): number {
+  return envInt('GOODBOY_CAT_DENY_BYTES', 256_000);
+}
+
+/** 따옴표로 감싼 경로 인자에서 따옴표 제거. */
+function stripArgQuotes(raw: string): string {
+  const t = raw.trim();
+  if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) {
+    return t.slice(1, -1);
+  }
+  return t;
+}
+
+/** "후처리 없이 bare cat으로 대용량 파일을 통째로 출력"하는 명령을 감지한다(H2-02 사전 차단).
+ *
+ *  실행 전에 크기를 아는 유일한 케이스가 "파일 인자 cat"이다 — 임의 명령의 출력 크기는
+ *  실행 전 예측 불가라 사후 경고만 가능하지만, cat <file>은 statSync로 미리 알 수 있다.
+ *
+ *  오탐 방지(전부 통과):
+ *   - 파이프/리다이렉트/체이닝/서브셸/개행이 있으면 실제 출력이 작을 수 있음 → 판정 안 함
+ *     (예: `cat big.log | head -5`는 정당). heredoc(`cat <<EOF`)도 `<` 규칙으로 걸러진다.
+ *   - glob/변수 등 크기를 확정할 수 없는 인자 → 판정 안 함(사후 경고가 담당).
+ *   - stat 실패/파일 아님 → 판정 안 함(fail-open).
+ *  매칭 시 { bytes: 합계, files } 반환, 아니면 null. */
+export function classifyBareCatDump(
+  command: string,
+  cwd: string,
+  thresholdBytes: number,
+): { bytes: number; files: string[] } | null {
+  try {
+    if (typeof command !== 'string') return null;
+    const trimmed = command.trim();
+    if (trimmed === '') return null;
+    // 후처리/합성 흔적이 있으면 통과(실제 출력이 작을 수 있음).
+    if (/[|;&><`]/.test(trimmed) || /\r?\n/.test(trimmed)) return null;
+
+    let seg = trimmed.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+/, '');
+    seg = seg.replace(/^(?:sudo|time|nice|nohup|command)\s+/, '');
+    const tokens = seg.split(/\s+/).filter(Boolean);
+    if ((tokens[0] ?? '') !== 'cat') return null;
+
+    const fileArgs = tokens.slice(1).filter((t) => !t.startsWith('-'));
+    if (fileArgs.length === 0) return null; // stdin cat 등
+    // glob/변수 인자는 크기 확정 불가 → 통과(classifyBashFlood의 사후 경고가 담당).
+    if (fileArgs.some((f) => /[*?\[\]$~]/.test(f))) return null;
+
+    let total = 0;
+    const files: string[] = [];
+    for (const f of fileArgs) {
+      const abs = resolve(cwd, stripArgQuotes(f));
+      const st = statSync(abs); // 실패 → catch → null(fail-open)
+      if (!st.isFile()) return null;
+      total += st.size;
+      files.push(abs);
+    }
+    if (total <= thresholdBytes) return null;
+    return { bytes: total, files };
+  } catch {
+    return null;
+  }
+}
+
+/** bare cat 사전 차단 안내 문구. */
+export function bareCatDumpMessage(bytes: number): string {
+  const kb = Math.round(bytes / 1024);
+  return (
+    `대용량 파일(약 ${kb.toLocaleString()}KB)을 후처리 없이 통째로 출력하려 합니다. ` +
+    'Read 도구(offset/limit)로 필요한 부분만 읽거나, head/tail/rg로 범위를 제한하세요. ' +
+    '(출력 홍수 사전 차단, H2-02)'
   );
 }
 

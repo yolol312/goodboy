@@ -116,12 +116,24 @@ describe('post-tool-use H2-02 integration', () => {
     expect(out.hookSpecificOutput?.additionalContext ?? '').not.toContain('H2-02');
   });
 
-  test('warns only once per session (spam suppression)', async () => {
+  test('같은 패턴(cat-log)은 세션당 1회만 경고 (스팸 억제)', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     const first = await runBash(tmp, cwd, sessionId, 'cat /var/log/a.log', { stdout: bigStdout });
     const second = await runBash(tmp, cwd, sessionId, 'cat /var/log/b.log', { stdout: bigStdout });
     expect(first.hookSpecificOutput?.additionalContext ?? '').toContain('H2-02');
     expect(second.hookSpecificOutput?.additionalContext ?? '').not.toContain('H2-02');
+  });
+
+  test('D3: 다른 패턴의 홍수는 다시 경고한다 (패턴별 1회)', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    const first = await runBash(tmp, cwd, sessionId, 'cat /var/log/a.log', { stdout: bigStdout });
+    // generic(분류 안 되는 명령)의 홍수 → cat-log와 다른 패턴이므로 다시 경고.
+    const second = await runBash(tmp, cwd, sessionId, 'noisy-build-cmd', { stdout: bigStdout });
+    // 같은 generic 반복 → 억제.
+    const third = await runBash(tmp, cwd, sessionId, 'another-noisy-cmd', { stdout: bigStdout });
+    expect(first.hookSpecificOutput?.additionalContext ?? '').toContain('H2-02');
+    expect(second.hookSpecificOutput?.additionalContext ?? '').toContain('H2-02');
+    expect(third.hookSpecificOutput?.additionalContext ?? '').not.toContain('H2-02');
   });
 
   test('GOODBOY_BASH_FLOOD_WARN=off disables the warning', async () => {

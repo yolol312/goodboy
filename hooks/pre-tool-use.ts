@@ -4,8 +4,11 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import {
+  bareCatDumpMessage,
   BASH_SEARCH_MESSAGE,
+  catDumpThresholdBytes,
   checkRecursionGuard,
+  classifyBareCatDump,
   classifyBashSearch,
   envInt,
   envStr,
@@ -178,6 +181,31 @@ function main(): void {
               preWarnings.push(msg);
             } else {
               logGate(sessionId, 'bash-search', 'deny', hit);
+              emit(deny(msg));
+              return;
+            }
+          }
+        }
+      }
+
+      // (A1.5) H2-02 사전 차단 — 후처리 없는 bare cat 대용량 통짜 출력.
+      //   실행 전에 출력 크기를 알 수 있는 유일한 케이스(파일 인자 cat)만 statSync로 판정.
+      //   파이프/리다이렉트가 붙은 정당한 사용(cat big | head)은 lib에서 전부 통과시킨다.
+      //   서브에이전트에도 적용 — 통짜 출력은 어느 컨텍스트에서든 낭비다.
+      //   env GOODBOY_CAT_GATE=deny|warn|off (기본 deny), 임계 GOODBOY_CAT_DENY_BYTES.
+      if (toolName === 'Bash') {
+        const gate = envStr('GOODBOY_CAT_GATE', 'deny');
+        if (gate !== 'off') {
+          const command =
+            typeof toolInput.command === 'string' ? (toolInput.command as string) : '';
+          const hit = classifyBareCatDump(command, cwd, catDumpThresholdBytes());
+          if (hit) {
+            const msg = bareCatDumpMessage(hit.bytes);
+            if (gate === 'warn') {
+              logGate(sessionId, 'cat-dump', 'warn', `${hit.bytes}B`);
+              preWarnings.push(msg);
+            } else {
+              logGate(sessionId, 'cat-dump', 'deny', `${hit.bytes}B`);
               emit(deny(msg));
               return;
             }

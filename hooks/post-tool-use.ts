@@ -354,8 +354,10 @@ function main(): void {
         }
       }
 
-      // (C) H2-02 — Bash 대량출력 사후 경고(비차단, 세션당 1회).
+      // (C) H2-02 — Bash 대량출력 사후 경고(비차단, 패턴별 세션당 1회).
       //   실제 tool_response 출력 크기가 임계를 넘을 때만 경고한다(사후 교정).
+      //   D3 개정: 세션당 딱 1회 → 홍수 "유형(cat-log/cat-glob/find-broad/whole-log/generic)"별
+      //   1회로 확대. 다른 유형의 낭비가 이어지면 다시 교정 기회를 준다(스팸은 여전히 억제).
       //   에이전트에 확실히 도달하는 hookSpecificOutput.additionalContext로 전달.
       //   ⚠️ rtk가 실제 Bash 토큰 필터링을 이미 하므로 Good Boy는 "경고"만 담당한다.
       //   fail-open — 파싱/측정 실패 시 조용히 통과. env GOODBOY_BASH_FLOOD_WARN=on|off(기본 on).
@@ -364,9 +366,27 @@ function main(): void {
           const command = (toolInput.command as string | undefined) ?? '';
           const warning = buildBashOutputWarning(toolResponse, command);
           if (warning) {
+            const patternKey = (() => {
+              try {
+                return classifyBashFlood(command) ?? 'generic';
+              } catch {
+                return 'generic';
+              }
+            })();
             const state = readHabitState(sessionId);
-            if (!state.bashOutputWarned) {
-              writeHabitState(sessionId, { ...state, bashOutputWarned: true });
+            const warned = new Set(state.bashFloodPatterns ?? []);
+            // 하위호환: 구 포맷(패턴 목록 없이 boolean만) 세션은 generic을 이미 경고한 것으로
+            // 간주한다. 신 포맷(목록 존재)에서는 목록만 신뢰한다.
+            if (state.bashFloodPatterns === undefined && state.bashOutputWarned) {
+              warned.add('generic');
+            }
+            if (!warned.has(patternKey)) {
+              warned.add(patternKey);
+              writeHabitState(sessionId, {
+                ...state,
+                bashOutputWarned: true,
+                bashFloodPatterns: Array.from(warned),
+              });
               additionalContext = warning;
             }
           }
