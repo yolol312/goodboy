@@ -64,18 +64,22 @@ claude --plugin-dir /path/to/goodboy
 ```
 사용자: /fix-bug 로그인 후 401 떨어짐
    ↓
-UserPromptSubmit hook이 필수 요소 누락 검출 → AskUserQuestion으로 묶어 질문
-"재현 방법?", "기대 동작?", "현재 동작?", "관련 파일?" (각 "확인 필요" 옵션 포함)
+UserPromptSubmit hook:
+   - 인자가 아예 없으면(/fix-bug만) 차단하고 필수 질문 목록 안내 (결정적 차단)
+   - 인자가 있으면 필수 입력 체크리스트를 모델에게 주입 → 모델이 자기점검(self-assessment)
+     후 실제로 부족한 항목만 AskUserQuestion으로 질문 ("확인 필요" 옵션 포함)
    ↓
-모델: ## 추론 섹션 출력 (사실/추론/가정/추측 4분류) ⚠️ 필수
+모델: ## 추론 섹션 출력 (사실/추론/가정/추측 4분류) ⚠️ 필수 — 내용까지 검사(빈 섹션 차단)
    ↓
 위험도 게이트 (PreToolUse hook): 위험도 risky면 사용자 승인 마커 확인
    ↓
 모델 작업: Read → Edit/Write
    - Read-before-edit hook이 Edit/Write 시 같은 파일 Read 이력 검증
-   - 추론 게이트가 ## 추론 섹션 존재 검증
+   - 추론 게이트가 ## 추론 섹션 존재 + 실질 내용 검증
    ↓
-PostToolUse hook이 자동 검증 (타입체크/린트/테스트) 실행
+PostToolUse hook이 자동 검증 실행 — 기본은 타입체크만 (GOODBOY_AUTOVALIDATE=all이면
+린트/테스트까지). 실패 시 실패 마커를 남기고, 마커가 해소될 때까지 Stop hook이
+턴 종료를 차단한다(재검증 통과 시 자동 해제).
    ↓
 모델이 작업 완료 시도 → Stop hook이 리뷰 결과 파일 검사
    - 없음 → 차단, "review-changes 서브에이전트 호출하세요"
@@ -86,6 +90,7 @@ review-changes 서브에이전트가 깊은 리뷰 (변경 파일 Read + 환각 
 Stop hook 재검사:
    - verdict=pass → 통과
    - high severity finding → 자동 수정 시도 (재시도 3회 cap)
+   - 추론 섹션에 추측/가정을 선언했는데 리뷰가 가정 검증을 안 했으면 → 차단
    - medium/low → 사용자에게 표시 후 결정 위임
 ```
 
@@ -104,6 +109,18 @@ PreToolUse hook이 메인에서 탐색 도구 4종 호출을 차단하고 서브
 (서브에이전트 내부에서는 면제 — 서브가 직접 Grep/Glob 등을 쓴다.)
 
 위임 강제 비활성화 (디버깅용): `GOODBOY_DISABLE_DELEGATION=1`
+
+### 토큰 낭비 게이트 (tokenhabit 카탈로그 기반)
+
+| 습관 | 제어 | 기본 |
+|---|---|---|
+| H2-01 같은 파일 재-Read | deny (에이전트별 스코프, 10턴 윈도우, mtime 비교) | `GOODBOY_REREAD_GATE=deny` |
+| H2-02 출력 홍수 | bare `cat <대용량>` 사전 deny + 사후 경고(패턴별 1회) | `GOODBOY_CAT_GATE=deny`, 임계 `GOODBOY_CAT_DENY_BYTES=256000` |
+| H2-03 Bash 재귀 탐색 | deny (rg/grep -r/find → 위임 유도) | `GOODBOY_BASH_SEARCH_GATE=deny` |
+| H2-04 웹 재페치 | 동일 URL 재페치 warn (세션 스코프) | `GOODBOY_WEBFETCH_REFETCH_WARN=on` |
+| H1-01 컨텍스트 성장 | 30%부터 +10%p마다 반복 경고 | `GOODBOY_CTX_WARN_START_PCT=30`, `GOODBOY_CTX_WARN_STEP_PCT=10` |
+| H1-03 compact 막차 | 50% 초과 시 턴 종료 차단 + compact 유도 | `GOODBOY_COMPACT_FORCE_PCT=50` |
+| H4-03 모델 전환(캐시 킬) | 세션 내 메인 모델 전환 감지 시 1회 경고 | 상시 |
 
 ## 추론 4분류
 
@@ -230,10 +247,34 @@ export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50   # 기본 발동은 ~83%
 > (이슈 #53801), `settings.json`의 `env` 블록도 무시되므로(이슈 #63186) **셸 export로 설정**해야
 > 하며, 그래도 동작이 불확실하다. 그래서 **위 Stop hook 경고가 신뢰할 수 있는 기본 메커니즘**이다.
 
+## 상태바 (선택 설치)
+
+Good Boy의 상태는 3층으로 노출된다:
+
+1. **대화 내 경고 (기본)** — 컨텍스트 성장/긴 세션/게이트 차단 사유. 아무 설정 없이 작동.
+2. **상태 파일 (공용 원천)** — Stop hook이 매 턴 `$TMPDIR/goodboy-session-<id>/status.json`에
+   스냅샷 기록: 컨텍스트 %(게이트가 쓰는 계산값 그대로), 카테고리/위험도, 리뷰 대기,
+   검증 실패, 게이트 deny 누계. 같은 디렉터리의 `gate-log.jsonl`에 게이트 발동/판단불가 이력.
+3. **상태바 (선택)** — `/setup-statusline` 스킬로 동봉 상태바를 설치하거나,
+   **이미 상태바가 있다면** 그 스크립트가 위 status.json을 읽어 한 칸 추가하면 된다
+   (설치 스킬이 두 경우를 모두 안내하며, 기존 상태바를 덮어쓰지 않는다).
+
+동봉 상태바 표시 예: `🐶 🧠 16% | 🟡fix-bug | 📋 리뷰대기 | 🚧 3`
+`🧠 N%?`처럼 물음표가 붙으면 모델 한도 미확정(강제 compact 보류 중) — `GOODBOY_CONTEXT_LIMIT`을 설정하라.
+
+## 계측 (게이트 무력화 감지)
+
+모든 게이트는 fail-open(불확실하면 조용히 통과)이라, 게이트가 죽어도 겉으로 티가 나지 않는다.
+이를 가시화하기 위해:
+
+- 게이트의 deny/warn/판단불가(fail-open)를 세션 디렉터리 `gate-log.jsonl`에 기록한다.
+- 컨텍스트 측정이 연속 3회 실패하면 "컨텍스트 자동 관리가 비활성일 수 있다"는 canary 경고를
+  세션당 1회 띄운다 (transcript 포맷 변경 등으로 인한 소리 없는 무력화 감지).
+
 ## 디렉터리 구조
 
 ```
-goodboy/                                    # 플러그인 루트
+goodboy/                                # 플러그인 루트
 ├── .claude-plugin/
 │   ├── plugin.json
 │   └── marketplace.json
@@ -243,16 +284,19 @@ goodboy/                                    # 플러그인 루트
 │   ├── post-tool-use.ts
 │   ├── user-prompt-submit.ts
 │   └── stop.ts
-├── skills/                             # 작업 카테고리 7종
+├── skills/                             # 작업 카테고리 7종 + 설치 스킬
 │   ├── fix-bug/SKILL.md
 │   ├── add-feature/SKILL.md
 │   ├── refactor/SKILL.md
 │   ├── migrate/SKILL.md
 │   ├── debug/SKILL.md
 │   ├── write-doc/SKILL.md
-│   └── request-review/SKILL.md
+│   ├── request-review/SKILL.md
+│   └── setup-statusline/SKILL.md       # 상태바 설치/연동
 ├── agents/
 │   └── review-changes.md
+├── statusline/
+│   └── statusline.ts                   # 동봉 상태바 (선택 설치)
 ├── lib/
 │   ├── index.ts
 │   ├── types.ts
@@ -262,9 +306,13 @@ goodboy/                                    # 플러그인 루트
 │   ├── review-validator.ts
 │   ├── review-cursor.ts
 │   ├── review-dimensions.ts
-│   ├── context-usage.ts                # auto-compact 점유율 계산
+│   ├── context-usage.ts                # auto-compact 점유율 계산 (게이트/상태바 공용)
 │   ├── transcript-parser.ts
 │   ├── file-tracker.ts
+│   ├── validation-state.ts             # 자동 검증 실패 마커 (Stop 게이트용)
+│   ├── gate-log.ts                     # 게이트 발동 로그 + 상태 스냅샷
+│   ├── token-habits.ts                 # 토큰 낭비 습관 카탈로그 + 게이트 헬퍼
+│   ├── recursion-guard.ts
 │   └── cli.ts
 ├── package.json
 └── README.md
@@ -311,9 +359,23 @@ Agent(general-purpose, "review-changes 스킬에 따라 다음 파일을 리뷰:
 
 ### 자동 검증 실행 안 됨
 
-- `package.json`에 `typecheck` / `lint` / `test` 스크립트가 있어야 자동 실행됨
-- `pyproject.toml`은 `ruff`, `pytest`가 PATH에 있어야 함
+- **기본 모드는 typecheck만 실행한다** (`GOODBOY_AUTOVALIDATE=typecheck` 기본).
+  린트/테스트까지 돌리려면 `GOODBOY_AUTOVALIDATE=all` (미신뢰 repo의 스크립트 자동 실행
+  위험이 있어 기본에서 제외). `off`면 검증 안 함.
+- `package.json`에 해당 스크립트(`typecheck`/`lint`/`test`)가 있어야 실행됨
+- `pyproject.toml`은 `ruff`(all이면 `pytest`)가 PATH에 있어야 함
 - 없으면 검증 스킵 (실패 아님)
+
+### "Stop이 차단됩니다 — 검증 게이트"
+
+자동 검증이 실패한 상태입니다. 실패한 검증(타입 에러 등)을 수정하세요 — 파일을 편집하면
+검증이 자동 재실행되고, 통과하면 차단이 해제됩니다. 3회 차단 후에는 사용자 확인 안내와 함께
+통과됩니다.
+
+### "Edit가 차단됩니다 — 추론 섹션이 비어 있습니다"
+
+`## 추론` 제목만 출력하고 내용이 없으면 차단됩니다. 4분류 각각에 실제 항목을 쓰세요
+(해당 없는 분류는 `- 없음`으로 명시).
 
 ### auto-compact 경고가 안 뜸
 
@@ -323,12 +385,12 @@ Stop hook은 transcript의 토큰 usage를 best-effort로 파싱합니다. Claud
 
 ## 개발 상태
 
-🚧 v0.1.0 — 개발 중.
+v0.18.0 — 배포 준비 중. 버전은 `.claude-plugin/plugin.json` / `package.json`과 동기화된다.
 
 ## 라이센스
 
-(미정 — 추후 결정)
+MIT — [LICENSE](LICENSE) 참고.
 
 ## 기여
 
-이슈/PR: (저장소 URL 추후)
+이슈/PR: https://github.com/yolol312/goodboy
