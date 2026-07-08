@@ -4,6 +4,7 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import {
+  clearValidationFailure,
   compactForcePct,
   envInt,
   findRecentReviewFile,
@@ -15,6 +16,7 @@ import {
   incrementTurn,
   readHabitState,
   readReviewCursor,
+  readValidationFailure,
   requiredDimensionsFor,
   validateReview,
   writeHabitState,
@@ -64,6 +66,10 @@ function settingsJsonPath(): string | null {
 // H1-03 강제 자동 compact 재시도 카운터 파일. review 재시도(.goodboy-retry-count.txt)와
 // 간섭하지 않도록 별도 파일에 동일 escape 패턴(MAX_RETRIES)으로 관리한다.
 const COMPACT_FORCE_COUNT_FILE = '.goodboy-compact-force-count.txt';
+
+// (C1) 자동 검증 실패 게이트 재시도 카운터 파일. 게이트마다 카운터를 분리해
+// 서로의 재시도 기회를 깎지 않게 한다(리뷰/compact 카운터와 독립).
+const VALIDATION_COUNT_FILE = '.goodboy-validation-retry-count.txt';
 
 // 이번 Stop 실행에서 사용자에게 보일 토큰-습관 경고들(H1-01 긴 세션 경고, H1-03 강제 escape 통지).
 // emit()이 모든 출력 경로(block/pass)의 systemMessage에 이 경고들을 덧붙인다 —
@@ -302,6 +308,44 @@ function main(): void {
         return;
       }
 
+      // (B5) C1 — 자동 검증 실패 게이트. PostToolUse가 남긴 실패 마커가 살아 있으면
+      //   턴 종료를 차단한다(편집→재검증 통과 시 PostToolUse가 마커를 지워 해제됨).
+      //   - 세션 바인딩: 현재 세션이 남긴 마커만 신뢰(이월/커밋 잔재로 인한 오차단 방지).
+      //   - 무한 block 방지: 전용 카운터 + MAX_RETRIES escape(초과 시 통과 + 사용자 알림).
+      const claudeDir = ensureClaudeDir(cwd);
+      const vf = (() => {
+        try {
+          return readValidationFailure(cwd);
+        } catch {
+          return null;
+        }
+      })();
+      if (vf && vf.sessionId === sessionId) {
+        const cmds = vf.commands.length > 0 ? vf.commands.join(', ') : '자동 검증';
+        const count = readRetryCount(claudeDir, VALIDATION_COUNT_FILE) + 1;
+        if (count < MAX_RETRIES) {
+          writeRetryCount(claudeDir, count, VALIDATION_COUNT_FILE);
+          emit({
+            decision: 'block',
+            reason:
+              `자동 검증이 실패한 상태입니다: ${cmds}. 원인을 수정하세요 — ` +
+              `파일을 편집하면 검증이 자동 재실행되고, 통과하면 이 차단이 해제됩니다. ` +
+              `(검증 게이트, 재시도 ${count}/${MAX_RETRIES})`,
+          });
+          return;
+        }
+        // 한계 초과 → 통과 + 사용자 알림 + 마커/카운터 정리(영구 차단 방지).
+        resetRetryCount(claudeDir, VALIDATION_COUNT_FILE);
+        clearValidationFailure(cwd);
+        habitWarnings.push(
+          `자동 검증 실패가 ${MAX_RETRIES}회 차단 후에도 해소되지 않아 이번 턴은 통과시킵니다. ` +
+            `사용자 확인이 필요합니다. (실패: ${cmds})`,
+        );
+      } else {
+        // 마커 없음/타 세션 마커 → 카운터 리셋(다음 실패는 새로 3회 기회).
+        resetRetryCount(claudeDir, VALIDATION_COUNT_FILE);
+      }
+
       // (C) 변경 검사 — 마지막으로 수락된 리뷰(커서) 이후 편집된 파일만 본다.
       //   커서 부재(첫 리뷰) → turn 0 = 세션 시작 이후 모든 편집.
       //   고정 5턴 윈도우(BUG #2) 대신 커서 기반으로 정확한 per-feature 스코프를 얻는다.
@@ -369,8 +413,7 @@ function main(): void {
         return;
       }
 
-      // (F) 재시도 카운터 (high severity)
-      const claudeDir = ensureClaudeDir(cwd);
+      // (F) 재시도 카운터 (high severity) — claudeDir은 (B5)에서 확보됨.
       const highSev = highSeverityFindings(result);
       if (highSev.length > 0) {
         const count = readRetryCount(claudeDir) + 1;

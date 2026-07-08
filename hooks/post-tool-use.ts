@@ -8,6 +8,7 @@ import {
   bashOutputFloodMessage,
   bashOutputWarnThresholds,
   classifyBashFlood,
+  clearValidationFailure,
   envStr,
   extractBashOutput,
   getCurrentTurn,
@@ -16,6 +17,7 @@ import {
   recordEdit,
   recordRead,
   writeHabitState,
+  writeValidationFailure,
 } from '../lib';
 
 interface PostToolInput {
@@ -332,8 +334,17 @@ function main(): void {
       if (isEditTool && !failureFromResponse) {
         try {
           const results = autoValidate(cwd);
-          const { context } = buildValidationContext(results);
+          const { context, blocked } = buildValidationContext(results);
           additionalContext = context;
+          // (C1) 검증 실패를 Stop 게이트로 승격 — 실패 시 세션 바인딩 마커를 남기고,
+          //   재검증이 통과하면 해제한다. 검증이 아예 안 돈 경우(results 비어있음)는
+          //   마커를 건드리지 않는다(통과 확인 없이 해제하는 오해제 방지).
+          if (blocked) {
+            const failedCmds = results.filter((r) => !r.ok && !r.unavailable).map((r) => r.cmd);
+            writeValidationFailure(cwd, sessionId, failedCmds);
+          } else if (results.length > 0) {
+            clearValidationFailure(cwd);
+          }
         } catch (err) {
           process.stderr.write(`[goodboy post-tool-use] validation error: ${String(err)}\n`);
         }

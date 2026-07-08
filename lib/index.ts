@@ -12,3 +12,4 @@ export * from './context-usage';
 export * from './file-tracker';
 export * from './recursion-guard';
 export * from './token-habits';
+export * from './validation-state';
