@@ -135,6 +135,24 @@ function maybeSetLongSessionWarning(
       }
     }
 
+    // (D4) 컨텍스트 성장 반복 경고 — 1회성이 아니라 점유율이 +step%p 오를 때마다 다시 알린다.
+    //   상태바가 없는 사용자에게는 이것이 컨텍스트 상태를 알 유일한 기본 채널이다
+    //   (상태바가 있으면 GOODBOY_CTX_WARN_STEP_PCT를 크게 잡아 줄일 수 있다).
+    //   강제(H1-03)가 발동한 턴은 생략(스팸 방지). ⚠️ 문구에 '/compact'/'강제'를 넣지 않는다.
+    if (!forceActive && usage) {
+      const startPct = envInt('GOODBOY_CTX_WARN_START_PCT', 30);
+      const stepPct = envInt('GOODBOY_CTX_WARN_STEP_PCT', 10);
+      const last = state.lastCtxWarnPct ?? 0;
+      if (usage.percent >= startPct && usage.percent >= last + stepPct) {
+        habitWarnings.push(
+          `컨텍스트 사용률이 ${Math.round(usage.percent)}%입니다. ` +
+            '불필요한 맥락이 쌓였다면 대화 압축 또는 새 세션을 고려하세요. (컨텍스트 경고, H1-01)',
+        );
+        state.lastCtxWarnPct = Math.floor(usage.percent);
+        dirty = true;
+      }
+    }
+
     if (dirty) writeHabitState(sessionId, state);
   } catch {
     // fail-open — 경고 계산 실패해도 Stop 흐름을 막지 않는다.
@@ -389,6 +407,25 @@ function main(): void {
       // (B4) H1-01 긴 세션 경고 준비 — 강제가 발동했으면(force.forced) 스팸 방지로 생략.
       //   emit()이 이후 모든 출력 경로의 systemMessage에 habitWarnings를 덧붙인다.
       maybeSetLongSessionWarning(usage, sessionId, force.forced);
+
+      // (B4.5) H4-03 — 세션 내 메인 모델 전환 감지(세션당 1회 경고).
+      //   usage 줄의 모델만 비교하므로 서브에이전트의 다른 모델(정상 패턴)은 오탐하지 않는다.
+      //   전환 자체를 막을 수는 없다(사용자 행동) — 캐시 무효화 비용을 알리는 권고까지가 상한.
+      if (usage && usage.modelsSeen.length > 1) {
+        try {
+          const st = readHabitState(sessionId);
+          if (!st.modelSwitchWarned) {
+            st.modelSwitchWarned = true;
+            writeHabitState(sessionId, st);
+            habitWarnings.push(
+              `이 세션에서 모델 전환이 감지되었습니다(${usage.modelsSeen.join(' → ')}). ` +
+                '모델 전환은 프롬프트 캐시를 무효화해 비용을 높입니다 — 전환이 필요하면 새 세션을 권장합니다. (캐시 킬 방지, H4-03)',
+            );
+          }
+        } catch {
+          // fail-open
+        }
+      }
 
       // 강제 block이 결정되면 리뷰 검사보다 우선해 즉시 emit하고 종료한다.
       //   (B)의 무한루프 early-return은 위에서 끝나므로 강제/경고가 붙지 않는다.

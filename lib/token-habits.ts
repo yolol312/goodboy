@@ -9,7 +9,7 @@
 //   - 스팸 금지: 경고는 세션당/단계당 1회. "이미 경고함"을 habit-state.json에 기록한다.
 //   - env 토글: 각 기능은 GOODBOY_ 접두사 env로 끄거나 임계값을 조정할 수 있다.
 
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
 
@@ -148,6 +148,10 @@ export interface HabitState {
   ctxMeasureFailStreak?: number;
   /** E1 canary: 측정 실패 지속(무력화 가능성) 경고를 이미 냈는지(세션당 1회). */
   ctxParseWarned?: boolean;
+  /** D4: 컨텍스트 성장 반복 경고를 마지막으로 낸 시점의 점유율(%). 다음 경고는 +step 이상일 때. */
+  lastCtxWarnPct?: number;
+  /** H4-03: 세션 내 모델 전환 경고를 이미 냈는지(세션당 1회). */
+  modelSwitchWarned?: boolean;
 }
 
 const HABIT_STATE_FILE = 'habit-state.json';
@@ -350,6 +354,61 @@ export function bareCatDumpMessage(bytes: number): string {
     `대용량 파일(약 ${kb.toLocaleString()}KB)을 후처리 없이 통째로 출력하려 합니다. ` +
     'Read 도구(offset/limit)로 필요한 부분만 읽거나, head/tail/rg로 범위를 제한하세요. ' +
     '(출력 홍수 사전 차단, H2-02)'
+  );
+}
+
+// --- H2-04: 동일 URL 재페치 경고 -----------------------------------------------
+
+const WEBFETCH_LOG_FILE = 'webfetch.jsonl';
+
+/** URL 정규화: 공백 제거 + fragment(#...) 제거(같은 문서) + 후행 슬래시 제거. */
+function normalizeUrl(url: string): string {
+  let u = url.trim();
+  const hashIdx = u.indexOf('#');
+  if (hashIdx >= 0) u = u.slice(0, hashIdx);
+  if (u.endsWith('/')) u = u.slice(0, -1);
+  return u;
+}
+
+/** WebFetch URL 기록(세션 스코프). 서브에이전트 포함 — 세션 전체에서 같은 페이지
+ *  재페치를 감지하기 위해 일부러 에이전트 스코프를 두지 않는다. */
+export function recordWebFetch(sessionId: string, url: string): void {
+  try {
+    const dir = ensureSessionDir(sessionId);
+    const record = { url: normalizeUrl(url), timestamp: new Date().toISOString() };
+    appendFileSync(join(dir, WEBFETCH_LOG_FILE), JSON.stringify(record) + '\n', 'utf8');
+  } catch {
+    // best-effort
+  }
+}
+
+/** 이 세션에서 같은 URL을 이미 가져왔는지. 실패 시 false(fail-open). */
+export function wasUrlFetched(sessionId: string, url: string): boolean {
+  try {
+    const path = join(ensureSessionDir(sessionId), WEBFETCH_LOG_FILE);
+    if (!existsSync(path)) return false;
+    const target = normalizeUrl(url);
+    for (const line of readFileSync(path, 'utf8').split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (trimmed === '') continue;
+      try {
+        const parsed = JSON.parse(trimmed) as { url?: unknown };
+        if (typeof parsed.url === 'string' && parsed.url === target) return true;
+      } catch {
+        continue;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/** H2-04 재페치 경고 문구. */
+export function webRefetchMessage(url: string): string {
+  return (
+    `이 URL은 이번 세션에서 이미 가져왔습니다: ${url} — 앞선 결과를 참조하세요. ` +
+    '원격 내용이 바뀌었을 근거가 있을 때만 다시 가져오세요. (웹 재페치 방지, H2-04)'
   );
 }
 

@@ -21,6 +21,10 @@ export interface ContextUsage {
    *  true 조건: GOODBOY_CONTEXT_LIMIT 명시 / 1M로 확정(표식·안전상향) / 1M 미지원 세대의 확정 200K.
    *  false: 1M 지원 세대(opus/sonnet 4+)인데 [1m] 표식 없음, 또는 미지 모델. */
   confident: boolean;
+  /** H4-03: usage 줄에서 관측된 상이한 모델 ID들(등장 순서 유지).
+   *  usage 줄은 메인 루프 요청에서만 나오므로(서브에이전트 usage는 별도 transcript),
+   *  2개 이상이면 세션 내 메인 모델 전환(캐시 무효화)으로 본다. */
+  modelsSeen: string[];
 }
 
 // --- 모델 컨텍스트 한도 상수 -------------------------------------------------
@@ -333,6 +337,8 @@ export function getContextUsage(
   // 모델은 usage를 가진 마지막 줄의 model을 우선하고, 없으면 가장 최근에 본 어떤 model이라도 사용.
   let lastModel: string | null = null;
   let lastModelAny: string | null = null;
+  // H4-03: usage 줄에서 관측된 상이한 모델들(등장 순서).
+  const modelsSeen: string[] = [];
   // transcript 어느 줄이든 구조적 모델 필드에 1M 표식이 있었으면 true(런타임 동적 감지 핵심 소스).
   let sawExtendedMarker = false;
 
@@ -385,6 +391,8 @@ export function getContextUsage(
       } catch {
         lastModel = null;
       }
+      // H4-03: usage 줄의 모델을 관측 목록에 추가(중복 제외, 순서 유지).
+      if (lastModel && !modelsSeen.includes(lastModel)) modelsSeen.push(lastModel);
     }
   }
 
@@ -421,5 +429,5 @@ export function getContextUsage(
   const confident =
     envContextLimitOverride() !== null || limit === EXTENDED_CONTEXT_LIMIT || knownStandard;
 
-  return { percent, tokens: lastTokens, limit, model, confident };
+  return { percent, tokens: lastTokens, limit, model, confident, modelsSeen };
 }

@@ -16,6 +16,9 @@ import {
   readHabitState,
   recordEdit,
   recordRead,
+  recordWebFetch,
+  wasUrlFetched,
+  webRefetchMessage,
   writeHabitState,
   writeValidationFailure,
 } from '../lib';
@@ -393,6 +396,25 @@ function main(): void {
         } catch (err) {
           // fail-open — 경고 실패해도 도구 흐름을 막지 않는다.
           process.stderr.write(`[goodboy post-tool-use] bash-flood warn error: ${String(err)}\n`);
+        }
+      }
+
+      // (D) H2-04 — 동일 URL 재페치 경고(비차단). 세션 전체 스코프(서브에이전트 포함) —
+      //   메인이 위임한 서브가 같은 페이지를 또 가져오는 낭비까지 잡는다.
+      //   원격 내용 변경은 감지할 수 없으므로 deny가 아닌 warn 고정.
+      //   env GOODBOY_WEBFETCH_REFETCH_WARN=on|off (기본 on).
+      if (toolName === 'WebFetch' && envStr('GOODBOY_WEBFETCH_REFETCH_WARN', 'on') !== 'off') {
+        try {
+          const url = typeof toolInput.url === 'string' ? (toolInput.url as string) : '';
+          if (url) {
+            if (wasUrlFetched(sessionId, url)) {
+              additionalContext = webRefetchMessage(url);
+            }
+            recordWebFetch(sessionId, url);
+          }
+        } catch (err) {
+          // fail-open
+          process.stderr.write(`[goodboy post-tool-use] webfetch warn error: ${String(err)}\n`);
         }
       }
 
