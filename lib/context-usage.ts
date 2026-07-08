@@ -270,15 +270,27 @@ function limitForModel(model: string | null): number {
   return STANDARD_CONTEXT_LIMIT;
 }
 
-/** 모델 ID가 "1M 확장 컨텍스트를 지원하는 세대"인지 대략 판별한다(휴리스틱, 3-A).
- *  1M 창은 세션 토글이라, 지원 세대(opus/sonnet 4.x+)는 [1m] 표식 없이는 200K/1M을 구분할 수 없다.
- *  → 표식이 없을 때 이 함수가 true면 한도를 "미확정"으로 보고 강제 compact를 보류한다.
- *  매칭: opus-4-8 / sonnet-4-5 / sonnet-5 등. 불매칭: claude-3-5-sonnet-YYYYMMDD(날짜의 두 자리
- *  오매칭을 막으려 버전 첫 자리를 4-9로 강제), 3-opus, haiku 등(1M 미지원 → 확정 200K).
- *  미지/미래 ID는 여기선 false지만, confident 계산에서 "Claude 계열로 안 보이면 미확정"으로 처리한다. */
-export function modelIsExtendedCapable(model: string | null | undefined): boolean {
+/** 모델 ID가 "확정적으로 200K 표준 컨텍스트만 지원하는 것으로 아는 모델"인지 판별한다(3-A 개정).
+ *
+ *  ⚠️ 설계 전환(v0.10): 이전에는 "1M 지원 세대(opus/sonnet 4+)"를 나열하고 나머지 Claude 계열을
+ *  확정 200K로 간주했다. 이 방식은 새 모델 패밀리(예: claude-fable-5)가 나올 때마다
+ *  자동으로 "확정 200K"로 오판되어, 실제 1M 세션에서 저토큰인데도 compact가 오강제되는
+ *  구멍을 만든다(오판 목록이 아니라 오판 기본값이 문제). → 반대로 뒤집어
+ *  "확정 200K로 아는 모델만" 화이트리스트로 나열하고, 그 외 모든 미지/신규 Claude 패밀리는
+ *  "미확정"으로 처리해 강제 compact를 보류한다(H1-01 경고는 유지, GOODBOY_CONTEXT_LIMIT으로 복구).
+ *
+ *  확정 200K 목록: haiku 전 세대(1M 미지원), claude-2.x, claude-3.x(3-opus/3-5-sonnet 등).
+ *  불매칭(→미확정): opus/sonnet 4+ 표식 없음, fable/mythos 등 신규 패밀리, 미래 ID 전부. */
+export function modelIsKnownStandard(model: string | null | undefined): boolean {
   if (!model || typeof model !== 'string') return false;
-  return /(opus|sonnet)-[4-9]\d?(?:[-.]|\b)/.test(model.toLowerCase());
+  const m = model.toLowerCase();
+  // haiku 계열: 현재까지 전 세대 200K. (미래 haiku가 1M을 지원하게 되면 이 줄을 갱신할 것)
+  if (m.includes('haiku')) return true;
+  // claude-2.x / claude-3.x 세대: 1M 미지원 확정. 버전 첫 자리를 2-3으로 강제해
+  // 날짜(YYYYMMDD)나 다른 숫자와의 오매칭을 막는다. 예: claude-3-5-sonnet-20241022, claude-3-opus.
+  if (/claude[-_]?[23]([-._]|\b)/.test(m)) return true;
+  if (/(^|[^0-9.])3[-.]5?[-.]?(opus|sonnet)/.test(m)) return true;
+  return false;
 }
 
 /** transcript(JSONL)에서 "현재 컨텍스트 점유율"을 계산한다.
@@ -399,18 +411,15 @@ export function getContextUsage(
   });
   const percent = limit > 0 ? (lastTokens / limit) * 100 : 0;
 
-  // 3-A: limit 신뢰도 계산. 강제 compact는 confident일 때만 수행한다(모호한 200K 오탐 방지).
+  // 3-A(개정): limit 신뢰도 계산. 강제 compact는 confident일 때만 수행한다(모호한 200K 오탐 방지).
   //   - env 명시 또는 1M로 확정(표식/안전상향) → 신뢰.
-  //   - limit=200K이고 모델이 "Claude 계열이면서 1M 미지원 세대"(예: 3.5-sonnet, haiku) → 확정 200K.
-  //   - 1M 지원 세대(opus/sonnet 4+)인데 표식 없음, 또는 Claude 계열로 안 보이는 미지 ID → 미확정.
+  //   - limit=200K이고 모델이 "확정 200K 화이트리스트"(haiku, claude-2/3 세대) → 확정 200K.
+  //   - 그 외 전부(opus/sonnet 4+ 표식 없음, fable 등 신규 패밀리, 비 Claude 미지 ID) → 미확정.
+  //     미확정이어도 H1-01 절대 토큰 경고는 유지되고, GOODBOY_CONTEXT_LIMIT 명시로 강제를 복구한다.
   const anyModel = model ?? hookModel ?? null;
-  const looksClaude =
-    typeof anyModel === 'string' && /claude|opus|sonnet|haiku/.test(anyModel.toLowerCase());
-  const extendedCapable = modelIsExtendedCapable(anyModel) || modelIsExtendedCapable(hookModel);
+  const knownStandard = modelIsKnownStandard(anyModel) || modelIsKnownStandard(hookModel);
   const confident =
-    envContextLimitOverride() !== null ||
-    limit === EXTENDED_CONTEXT_LIMIT ||
-    (looksClaude && !extendedCapable);
+    envContextLimitOverride() !== null || limit === EXTENDED_CONTEXT_LIMIT || knownStandard;
 
   return { percent, tokens: lastTokens, limit, model, confident };
 }

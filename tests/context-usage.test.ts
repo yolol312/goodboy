@@ -538,6 +538,46 @@ describe('getContextUsage confident (3-A)', () => {
     expect(u!.limit).toBe(1_000_000);
     expect(u!.confident).toBe(true);
   });
+
+  // v0.10 개정: 미지/신규 Claude 패밀리는 "확정 200K"가 아니라 "미확정"이어야 한다.
+  //   이전 로직은 looksClaude && !extendedCapable 로 fable 같은 신규 패밀리를 확정 200K로
+  //   오판했다 — 실제 1M 세션이면 저토큰에서 compact가 오강제되는 구멍(발견 ④).
+  test('unknown NEW Claude family (claude-fable-5) → confident false (미확정)', () => {
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({ message: { model: 'claude-fable-5', usage: { input_tokens: 120_000 } } }),
+    ]);
+    const u = getContextUsage(path);
+    expect(u!.limit).toBe(200_000); // 한도 추정 자체는 보수적 200K 유지
+    expect(u!.confident).toBe(false); // 그러나 강제 compact는 보류
+  });
+
+  test('haiku 계열 → 확정 200K로 confident true', () => {
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({
+        message: { model: 'claude-haiku-4-5-20251001', usage: { input_tokens: 120_000 } },
+      }),
+    ]);
+    const u = getContextUsage(path);
+    expect(u!.limit).toBe(200_000);
+    expect(u!.confident).toBe(true);
+  });
+
+  test('claude-fable-5 + GOODBOY_CONTEXT_LIMIT env → 강제 복구 (confident true)', () => {
+    const path = writeTranscript([
+      JSON.stringify({ message: { model: 'claude-fable-5', usage: { input_tokens: 120_000 } } }),
+    ]);
+    process.env.GOODBOY_CONTEXT_LIMIT = '1000000';
+    try {
+      const u = getContextUsage(path);
+      expect(u!.limit).toBe(1_000_000);
+      expect(u!.confident).toBe(true);
+      expect(u!.percent).toBeCloseTo(12, 5);
+    } finally {
+      delete process.env.GOODBOY_CONTEXT_LIMIT;
+    }
+  });
 });
 
 describe('limitForModel bounded 1m matching (4-4)', () => {

@@ -207,6 +207,19 @@ claude plugin enable  goodboy@goodboy
 - 임계치는 `hooks/stop.ts`의 `COMPACT_WARN_PCT` 상수(기본 `50`)로 조정한다.
 - **단 hook은 `/compact`를 자동 실행하지 못한다(강한 권고일 뿐).** 실제 압축은 사용자가 실행한다.
 
+### ⚠️ 컨텍스트 한도 명시 권장 (`GOODBOY_CONTEXT_LIMIT`)
+
+강제 compact는 **모델의 컨텍스트 한도를 확신할 수 있을 때만** 발동한다(오탐 방지).
+확정 200K로 아는 모델(haiku, claude-2/3 세대)과 1M 표식이 확인된 세션 외의
+**미지/신규 모델 패밀리(예: Fable)는 한도 미확정으로 간주되어 강제가 보류된다.**
+
+새 모델을 쓴다면 셸에서 한도를 명시해 강제를 복구하는 것을 권장한다
+(세션에서 `/context`를 실행하면 창 크기를 확인할 수 있다):
+
+```bash
+export GOODBOY_CONTEXT_LIMIT=200000    # 또는 1000000 (1M 세션)
+```
+
 (선택) 네이티브 auto-compact도 함께 낮추려면 셸에서:
 
 ```bash
