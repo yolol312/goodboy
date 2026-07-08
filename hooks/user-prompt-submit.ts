@@ -26,6 +26,10 @@ interface PromptInput {
 interface HookOutput {
   continue?: boolean;
   systemMessage?: string;
+  // B1: 인자 없는 카테고리 커맨드 차단. decision:'block'이면 프롬프트가 처리되지 않고
+  // reason이 사용자에게 표시된다(UserPromptSubmit hook 공식 스키마).
+  decision?: 'block';
+  reason?: string;
   hookSpecificOutput?: {
     hookEventName: 'UserPromptSubmit';
     additionalContext?: string;
@@ -154,17 +158,33 @@ function main(): void {
       // (B) 필수요소 검증
       let additionalContext: string | undefined;
       const skillPath = resolveSkillPath(cmd, cwd);
-      let fmRiskDefault: 'simple' | 'medium' | 'risky' = 'medium';
-      if (skillPath) {
-        const fm = parseSkillFrontmatter(skillPath);
-        if (fm) {
-          fmRiskDefault = fm.risk_default;
-          // 키워드 매칭으로 "누락"을 판정하지 않는다. required_inputs 전체를 self-attestation
-          // 체크리스트로 모델에게 제시하고, 각 항목 충족 여부는 모델이 직접 판단하게 한다.
-          const checklist = buildRequiredInputsChecklist(fm.required_inputs);
-          if (checklist !== '') {
-            additionalContext = checklist;
-          }
+      const fm = skillPath ? parseSkillFrontmatter(skillPath) : null;
+      const fmRiskDefault: 'simple' | 'medium' | 'risky' = fm ? fm.risk_default : 'medium';
+
+      // (B0) B1 — 인자 없는 카테고리 커맨드 차단(유일하게 오탐 없는 결정적 케이스).
+      //   옵션(--risk ...)을 걷어낸 뒤 내용이 비어 있으면 필수 질문 목록과 함께 되돌려보낸다.
+      //   내용이 조금이라도 있으면 판정하지 않는다 — 충족 여부의 의미 판정은 모델 몫이다
+      //   (키워드 매칭 방식은 오탐/우회 문제로 의도적으로 폐기됨, required-inputs.ts 참고).
+      const contentArgs = args.replace(/--risk[=:\s]+(simple|medium|risky)\b/gi, '').trim();
+      if (contentArgs === '') {
+        const questions = (fm?.required_inputs ?? [])
+          .map((i) => `- ${(i.question ?? '').trim() || i.name}`)
+          .join('\n');
+        emit({
+          decision: 'block',
+          reason:
+            `/${cmd} 커맨드에 작업 설명이 없습니다. 다음 내용을 포함해 다시 입력하세요:\n` +
+            (questions || '- 무엇을 할지 구체적으로 설명하세요'),
+        });
+        return;
+      }
+
+      if (fm) {
+        // 키워드 매칭으로 "누락"을 판정하지 않는다. required_inputs 전체를 self-attestation
+        // 체크리스트로 모델에게 제시하고, 각 항목 충족 여부는 모델이 직접 판단하게 한다.
+        const checklist = buildRequiredInputsChecklist(fm.required_inputs);
+        if (checklist !== '') {
+          additionalContext = checklist;
         }
       }
 

@@ -53,6 +53,44 @@ function parseAdditionalContext(stdout: string): string {
   return out.hookSpecificOutput?.additionalContext ?? '';
 }
 
+describe('user-prompt-submit 빈 카테고리 커맨드 차단 (B1)', () => {
+  function parseBlock(stdout: string): { decision?: string; reason?: string } {
+    return JSON.parse(stdout) as { decision?: string; reason?: string };
+  }
+
+  test('인자 없는 /fix-bug → block + 필수 질문 안내', async () => {
+    const { stdout } = await runHook('/fix-bug');
+    const out = parseBlock(stdout);
+    expect(out.decision).toBe('block');
+    expect(out.reason ?? '').toContain('/fix-bug');
+    expect(out.reason ?? '').toContain('다시 입력');
+  });
+
+  test('옵션만 있는 /fix-bug --risk risky → block (내용 없음)', async () => {
+    const { stdout } = await runHook('/fix-bug --risk risky');
+    const out = parseBlock(stdout);
+    expect(out.decision).toBe('block');
+  });
+
+  test('내용이 있으면 차단하지 않는다 (의미 판정은 모델 몫)', async () => {
+    const { stdout } = await runHook('/fix-bug 로그인 후 401');
+    const out = parseBlock(stdout);
+    expect(out.decision).toBeUndefined();
+  });
+
+  test('빈 커맨드로는 session-state를 기록하지 않는다', async () => {
+    const { cwd } = await runHook('/migrate');
+    const { existsSync } = await import('node:fs');
+    expect(existsSync(join(cwd, '.claude', '.goodboy-session-state.json'))).toBe(false);
+  });
+
+  test('알려지지 않은 커맨드(/unknown)는 차단 대상 아님', async () => {
+    const { stdout } = await runHook('/unknown');
+    const out = parseBlock(stdout);
+    expect(out.decision).toBeUndefined();
+  });
+});
+
 describe('user-prompt-submit self-attestation checklist (#3)', () => {
   test('clear prompt still gets the full checklist (no false "N missing")', async () => {
     const { stdout, cwd } = await runHook('/add-feature add and list todo tasks in a CLI');
