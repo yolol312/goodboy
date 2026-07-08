@@ -133,3 +133,36 @@ describe('pre-tool-use reasoning gate (recent-window)', () => {
     expect(isBlocked(out)).toBe(false);
   });
 });
+
+describe('pre-tool-use reasoning gate — 실질 검사 (A1)', () => {
+  test('제목만 있는 빈 추론 섹션 => block (시늉 추론 차단)', async () => {
+    const cwd = makeCwd();
+    const tp = makeTranscript(cwd, ['## 추론']);
+    const out = await runHook(cwd, tp);
+    expect(isBlocked(out)).toBe(true);
+    expect(out).toContain('비어');
+  });
+
+  test('서브헤딩만 있고 항목이 없는 섹션 => block', async () => {
+    const cwd = makeCwd();
+    const empty = ['## 추론', '### 사실', '### 추론', '### 가정', '### 추측'].join('\n');
+    const tp = makeTranscript(cwd, [empty]);
+    const out = await runHook(cwd, tp);
+    expect(isBlocked(out)).toBe(true);
+  });
+
+  test('한 분류라도 실제 항목이 있으면 => allow', async () => {
+    const cwd = makeCwd();
+    const minimal = ['## 추론', '### 사실', '- 대상 파일을 Read로 확인함'].join('\n');
+    const tp = makeTranscript(cwd, [minimal]);
+    const out = await runHook(cwd, tp);
+    expect(isBlocked(out)).toBe(false);
+  });
+
+  test('빈 섹션 + 윈도우 내 다른 메시지에 내용 있는 섹션 => allow (ANY 규칙)', async () => {
+    const cwd = makeCwd();
+    const tp = makeTranscript(cwd, [REASONING_TEXT, '## 추론']);
+    const out = await runHook(cwd, tp);
+    expect(isBlocked(out)).toBe(false);
+  });
+});

@@ -9,10 +9,12 @@ import {
   classifyBashSearch,
   envInt,
   envStr,
+  extractRecentAssistantTexts,
   getCurrentTurn,
   getRecentReadMtime,
   hasReasoningSection,
   logGate,
+  parseReasoningSection,
   wasFileEditedRecently,
   wasFileReadRecently,
 } from '../lib';
@@ -79,62 +81,8 @@ function deny(reason: string): HookOutput {
   };
 }
 
-/** 한 transcript 줄(JSON 객체)이 assistant message면 그 텍스트를 추출, 아니면 null. */
-function assistantTextFromLine(line: string): string | null {
-  const trimmed = line.trim();
-  if (trimmed === '') return null;
-  let obj: Record<string, unknown>;
-  try {
-    obj = JSON.parse(trimmed) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-  // 후보 1: { type: "assistant", message: { content: [...] } }
-  const type = obj.type as string | undefined;
-  const role = (obj.role ?? (obj.message && (obj.message as Record<string, unknown>).role)) as
-    | string
-    | undefined;
-  if (type !== 'assistant' && role !== 'assistant') return null;
-
-  // content 추출
-  const msg = (obj.message ?? obj) as Record<string, unknown>;
-  const content = msg.content;
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    const parts: string[] = [];
-    for (const c of content) {
-      if (c && typeof c === 'object') {
-        const cc = c as Record<string, unknown>;
-        if (cc.type === 'text' && typeof cc.text === 'string') {
-          parts.push(cc.text);
-        }
-      } else if (typeof c === 'string') {
-        parts.push(c);
-      }
-    }
-    if (parts.length > 0) return parts.join('\n');
-  }
-  return null;
-}
-
-/** 마지막(가장 최근) 최대 n개의 assistant message 텍스트를 최신순으로 반환.
- *  파싱 실패/없음이면 빈 배열. 게이트는 fail-open을 위해 길이 0을 별도 처리한다. */
-function extractRecentAssistantTexts(transcriptPath: string, n: number): string[] {
-  try {
-    if (!transcriptPath || !existsSync(transcriptPath)) return [];
-    const raw = readFileSync(transcriptPath, 'utf8');
-    const lines = raw.split(/\r?\n/);
-    const texts: string[] = [];
-    // 뒤에서부터 훑어 최근 n개의 assistant message 텍스트 수집
-    for (let i = lines.length - 1; i >= 0 && texts.length < n; i--) {
-      const text = assistantTextFromLine(lines[i] ?? '');
-      if (text !== null) texts.push(text);
-    }
-    return texts;
-  } catch {
-    return [];
-  }
-}
+// assistantTextFromLine / extractRecentAssistantTexts는 lib/transcript-parser.ts로
+// 승격되었다(Stop hook의 추측-리뷰 연동 A2도 사용). 여기서는 import해서 쓴다.
 
 interface SessionState {
   category?: string;
@@ -354,6 +302,30 @@ function main(): void {
               ),
             );
             return;
+          }
+          // (A1) 실질 검사: 제목만 찍고 내용이 텅 빈 '시늉 추론'은 통과 불가.
+          //   윈도우 내 추론 섹션 중 하나라도 4분류에 실제 항목이 있으면 통과.
+          //   파싱이 전부 실패(null)하면 헤딩 존재만으로 통과(fail-open 유지).
+          const parsed = recentTexts
+            .filter((t) => hasReasoningSection(t))
+            .map((t) => parseReasoningSection(t))
+            .filter((s): s is NonNullable<typeof s> => s !== null);
+          if (parsed.length > 0) {
+            const hasContent = parsed.some(
+              (s) =>
+                s.facts.length + s.inferences.length + s.assumptions.length + s.speculations.length >
+                0,
+            );
+            if (!hasContent) {
+              logGate(sessionId, 'reasoning', 'deny', 'empty-section');
+              emit(
+                deny(
+                  "'## 추론' 섹션이 비어 있습니다. 4분류(### 사실 / ### 추론 / ### 가정 / ### 추측 ⚠️)에 " +
+                    "실제 내용을 작성하세요. 해당 없는 분류는 '- 없음'으로 명시합니다. (추론 실질화, A1)",
+                ),
+              );
+              return;
+            }
           }
         }
       }

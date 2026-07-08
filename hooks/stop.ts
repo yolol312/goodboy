@@ -8,14 +8,17 @@ import {
   clearValidationFailure,
   compactForcePct,
   envInt,
+  extractRecentAssistantTexts,
   findRecentReviewFile,
   getContextUsage,
   getCurrentTurn,
   getEditsSince,
   getLatestEditTimestampSince,
+  hasReasoningSection,
   highSeverityFindings,
   incrementTurn,
   logGate,
+  parseReasoningSection,
   readGateLog,
   readHabitState,
   readReviewCursor,
@@ -529,6 +532,58 @@ function main(): void {
         writeReviewCursor(cwd, getCurrentTurn(sessionId));
         emit({
           systemMessage: `재시도 ${MAX_RETRIES}회를 초과했습니다. 사용자 확인이 필요합니다. (high severity: ${issues}${more})`,
+        });
+        return;
+      }
+
+      // (F1.5) A2 — 추측/가정 리뷰 연동. 메인 에이전트가 최근 '## 추론' 섹션에서
+      //   추측(### 추측)이나 가정(### 가정)을 선언했다면, 리뷰가 가정 검증
+      //   (unknown_assumptions_checked)을 실제로 수행했어야 한다. 필드/CLI 스키마/리뷰 지시는
+      //   이미 갖춰져 있고(발견 ②) 여기가 마지막 강제 연결이다.
+      //   추론 섹션 탐색: 최근 assistant 텍스트에서 가장 최근 섹션 1개(현재 작업의 것으로 근사 —
+      //   추론 게이트가 편집마다 최근 3턴 내 섹션을 요구하므로 최신 섹션이 현재 작업에 해당).
+      //   fail-open: transcript 파싱 실패/섹션 없음 → 검사 생략.
+      const declaredUnknowns = (() => {
+        try {
+          if (!input.transcript_path) return 0;
+          const texts = extractRecentAssistantTexts(input.transcript_path, 50);
+          for (const t of texts) {
+            if (hasReasoningSection(t)) {
+              const sec = parseReasoningSection(t);
+              return sec ? sec.speculations.length + sec.assumptions.length : 0;
+            }
+          }
+          return 0;
+        } catch {
+          return 0;
+        }
+      })();
+      const checkedAssumptions = Array.isArray(result.unknown_assumptions_checked)
+        ? result.unknown_assumptions_checked.length
+        : 0;
+      if (declaredUnknowns > 0 && checkedAssumptions === 0) {
+        const count = readRetryCount(claudeDir) + 1;
+        if (count < MAX_RETRIES) {
+          writeRetryCount(claudeDir, count);
+          logGate(sessionId, 'review', 'deny', 'assumptions-unchecked');
+          emit({
+            decision: 'block',
+            reason:
+              `메인 에이전트가 추론 섹션에서 추측/가정 ${declaredUnknowns}건을 선언했지만, ` +
+              `리뷰가 가정 검증을 수행하지 않았습니다(unknown_assumptions_checked 비어 있음). ` +
+              `review-changes 서브에이전트로 각 추측/가정을 검증해 결과에 기록한 뒤 다시 리뷰하세요. ` +
+              `(추측-리뷰 연동, 재시도 ${count}/${MAX_RETRIES})`,
+          });
+          return;
+        }
+        // 한계 초과 → 통과 + 사용자에게 알림. 리뷰 수락 → 커서 전진.
+        resetRetryCount(claudeDir);
+        writeReviewCursor(cwd, getCurrentTurn(sessionId));
+        statusSnapshot.reviewPending = false;
+        emit({
+          systemMessage:
+            `재시도 ${MAX_RETRIES}회를 초과했습니다. 사용자 확인이 필요합니다. ` +
+            `(추측/가정 ${declaredUnknowns}건이 리뷰에서 검증되지 않음)`,
         });
         return;
       }

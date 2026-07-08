@@ -1,6 +1,6 @@
 // best-effort transcript 파싱. 공식 스키마 없음 — try/catch로 안전하게.
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 export interface TokenUsage {
   input: number;
@@ -148,4 +148,65 @@ export function parseTokensFromTranscript(transcriptPath: string): TokenUsage | 
 
   if (!foundAny) return null;
   return acc;
+}
+
+// --- assistant 텍스트 추출 (추론 게이트/추측-리뷰 연동 공용) --------------------
+//   원래 pre-tool-use.ts 내부 헬퍼였으나, Stop hook(A2 추측-리뷰 연동)도 필요해져
+//   lib으로 승격했다. best-effort: 파싱 실패는 조용히 건너뛴다.
+
+/** 한 transcript 줄(JSON 객체)이 assistant message면 그 텍스트를 추출, 아니면 null. */
+export function assistantTextFromLine(line: string): string | null {
+  const trimmed = line.trim();
+  if (trimmed === '') return null;
+  let obj: Record<string, unknown>;
+  try {
+    obj = JSON.parse(trimmed) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  // 후보 1: { type: "assistant", message: { content: [...] } }
+  const type = obj.type as string | undefined;
+  const role = (obj.role ?? (obj.message && (obj.message as Record<string, unknown>).role)) as
+    | string
+    | undefined;
+  if (type !== 'assistant' && role !== 'assistant') return null;
+
+  // content 추출
+  const msg = (obj.message ?? obj) as Record<string, unknown>;
+  const content = msg.content;
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    const parts: string[] = [];
+    for (const c of content) {
+      if (c && typeof c === 'object') {
+        const cc = c as Record<string, unknown>;
+        if (cc.type === 'text' && typeof cc.text === 'string') {
+          parts.push(cc.text);
+        }
+      } else if (typeof c === 'string') {
+        parts.push(c);
+      }
+    }
+    if (parts.length > 0) return parts.join('\n');
+  }
+  return null;
+}
+
+/** 마지막(가장 최근) 최대 n개의 assistant message 텍스트를 최신순으로 반환.
+ *  파싱 실패/없음이면 빈 배열. 게이트는 fail-open을 위해 길이 0을 별도 처리한다. */
+export function extractRecentAssistantTexts(transcriptPath: string, n: number): string[] {
+  try {
+    if (!transcriptPath || !existsSync(transcriptPath)) return [];
+    const raw = readFileSync(transcriptPath, 'utf8');
+    const lines = raw.split(/\r?\n/);
+    const texts: string[] = [];
+    // 뒤에서부터 훑어 최근 n개의 assistant message 텍스트 수집
+    for (let i = lines.length - 1; i >= 0 && texts.length < n; i--) {
+      const text = assistantTextFromLine(lines[i] ?? '');
+      if (text !== null) texts.push(text);
+    }
+    return texts;
+  } catch {
+    return [];
+  }
 }
