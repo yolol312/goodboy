@@ -61,6 +61,21 @@ function modelHasExtendedMarker(model: string | null | undefined): boolean {
   return limitForModel(model) === EXTENDED_CONTEXT_LIMIT;
 }
 
+/** 모델 ID가 "1M이 기본값이자 최대인 패밀리"인지 판별한다(모델별 확정 테이블).
+ *
+ *  Opus/Sonnet 4.6+는 1M이 세션 토글이라 모델 ID만으로 창을 확정할 수 없지만,
+ *  Fable/Mythos 패밀리는 토글이 아니라 **1M이 기본값이자 최대**다(공식 모델 카탈로그 기준,
+ *  Models API `max_input_tokens`로도 확인 가능). 즉 ID만으로 창이 확정된다 →
+ *  표식 없이도 1M로 신뢰하고 강제 compact를 정상 작동시킨다.
+ *
+ *  유지보수: 새 "항상 1M" 패밀리가 나오면 여기에 추가한다. 목록에 없는 신규 패밀리는
+ *  기존 원칙대로 미확정 처리되며(GOODBOY_CONTEXT_LIMIT으로 복구), 완전 동적 조회
+ *  (Models API GET /v1/models/{id})는 hook 환경의 네트워크/인증 제약으로 채택하지 않았다. */
+export function modelIsAlwaysExtended(model: string | null | undefined): boolean {
+  if (!model || typeof model !== 'string') return false;
+  return /fable|mythos/.test(model.toLowerCase());
+}
+
 /** settings.json(주어진 경로)의 `model` 필드에 1M 표식이 있으면 true.
  *  신뢰도 중간: CLI `--model` 오버라이드로 실제 세션 모델과 다를 수 있어 폴백으로만 쓴다.
  *  경로 미제공/읽기 실패/파싱 실패 → 조용히 false(fail-open). 경로는 호출측이
@@ -141,6 +156,12 @@ function resolveContextLimit(inp: LimitInputs): number {
   if (modelHasExtendedMarker(inp.hookModel)) return EXTENDED_CONTEXT_LIMIT;
   if (inp.transcriptExtended === true) return EXTENDED_CONTEXT_LIMIT;
   if (settingsModelHasExtended(inp.settingsPath)) return EXTENDED_CONTEXT_LIMIT;
+
+  // 2.5) 모델별 확정 테이블: 1M이 기본값이자 최대인 패밀리(Fable/Mythos)는
+  //      표식 없이도 모델 ID만으로 1M 확정(세션 토글이 아니므로 모호함이 없다).
+  if (modelIsAlwaysExtended(inp.usageLineModel) || modelIsAlwaysExtended(inp.hookModel)) {
+    return EXTENDED_CONTEXT_LIMIT;
+  }
 
   // 3) 기존 usage-줄 모델 표식 판별
   const modelLimit = limitForModel(inp.usageLineModel);

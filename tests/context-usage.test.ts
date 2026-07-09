@@ -539,13 +539,34 @@ describe('getContextUsage confident (3-A)', () => {
     expect(u!.confident).toBe(true);
   });
 
-  // v0.10 개정: 미지/신규 Claude 패밀리는 "확정 200K"가 아니라 "미확정"이어야 한다.
-  //   이전 로직은 looksClaude && !extendedCapable 로 fable 같은 신규 패밀리를 확정 200K로
-  //   오판했다 — 실제 1M 세션이면 저토큰에서 compact가 오강제되는 구멍(발견 ④).
-  test('unknown NEW Claude family (claude-fable-5) → confident false (미확정)', () => {
+  // v0.19: Fable/Mythos는 "1M이 기본값이자 최대"인 패밀리(공식 카탈로그) →
+  //   모델 ID만으로 창이 확정된다. 표식/env 없이 1M + confident로 강제가 정상 작동해야 한다.
+  test('claude-fable-5 → 확정 테이블로 1M + confident true (설정 불필요)', () => {
     delete process.env.GOODBOY_CONTEXT_LIMIT;
     const path = writeTranscript([
       JSON.stringify({ message: { model: 'claude-fable-5', usage: { input_tokens: 120_000 } } }),
+    ]);
+    const u = getContextUsage(path);
+    expect(u!.limit).toBe(1_000_000);
+    expect(u!.confident).toBe(true);
+    expect(u!.percent).toBeCloseTo(12, 5);
+  });
+
+  test('claude-mythos-5 → 확정 테이블로 1M + confident true', () => {
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({ message: { model: 'claude-mythos-5', usage: { input_tokens: 500_000 } } }),
+    ]);
+    const u = getContextUsage(path);
+    expect(u!.limit).toBe(1_000_000);
+    expect(u!.confident).toBe(true);
+  });
+
+  // v0.10 개정 유지: 확정 테이블에도 없는 진짜 미지 Claude 패밀리는 "미확정"으로 강제 보류.
+  test('unknown NEW Claude family (claude-newfam-6) → confident false (미확정)', () => {
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({ message: { model: 'claude-newfam-6', usage: { input_tokens: 120_000 } } }),
     ]);
     const u = getContextUsage(path);
     expect(u!.limit).toBe(200_000); // 한도 추정 자체는 보수적 200K 유지
@@ -564,9 +585,9 @@ describe('getContextUsage confident (3-A)', () => {
     expect(u!.confident).toBe(true);
   });
 
-  test('claude-fable-5 + GOODBOY_CONTEXT_LIMIT env → 강제 복구 (confident true)', () => {
+  test('미지 모델 + GOODBOY_CONTEXT_LIMIT env → 강제 복구 (confident true)', () => {
     const path = writeTranscript([
-      JSON.stringify({ message: { model: 'claude-fable-5', usage: { input_tokens: 120_000 } } }),
+      JSON.stringify({ message: { model: 'claude-newfam-6', usage: { input_tokens: 120_000 } } }),
     ]);
     process.env.GOODBOY_CONTEXT_LIMIT = '1000000';
     try {

@@ -79,12 +79,30 @@ describe('goodboy statusline', () => {
     expect(out).not.toContain('40%?');
   });
 
-  test('미확정 모델(fable)은 %에 ? 표기 (강제 보류 상태 가시화)', async () => {
+  test('fable은 확정 테이블로 1M 기준 % 표시 (물음표 없음, 설정 불필요)', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     const transcript = join(cwd, 't.jsonl');
     writeFileSync(
       transcript,
       JSON.stringify({ message: { model: 'claude-fable-5', usage: { input_tokens: 80_000 } } }) +
+        '\n',
+      'utf8',
+    );
+    const out = await runStatusline(tmp, cwd, {
+      session_id: sessionId,
+      transcript_path: transcript,
+      cwd,
+    });
+    expect(out).toContain('🧠 8%'); // 80K / 1M
+    expect(out).not.toContain('%?');
+  });
+
+  test('미확정 모델(미지 패밀리)은 %에 ? 표기 (강제 보류 상태 가시화)', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    const transcript = join(cwd, 't.jsonl');
+    writeFileSync(
+      transcript,
+      JSON.stringify({ message: { model: 'claude-newfam-6', usage: { input_tokens: 80_000 } } }) +
         '\n',
       'utf8',
     );
