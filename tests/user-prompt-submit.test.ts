@@ -38,8 +38,13 @@ async function runHook(prompt: string): Promise<{ stdout: string; cwd: string }>
     stdin: new TextEncoder().encode(payload),
     stdout: 'pipe',
     stderr: 'pipe',
-    // H5-04 간결-우선 주입은 별도 테스트에서 검증. 여기선 꺼서 체크리스트/세션상태 동작만 격리 검증.
-    env: { ...process.env, CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT, GOODBOY_CONCISE_DEFAULT: 'off' },
+    // H5-04 간결-우선/B2 질문 유도 주입은 별도 테스트에서 검증. 여기선 꺼서 격리 검증.
+    env: {
+      ...process.env,
+      CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT,
+      GOODBOY_CONCISE_DEFAULT: 'off',
+      GOODBOY_ASK_UNCLEAR: 'off',
+    },
   });
   const stdout = await new Response(proc.stdout).text();
   await proc.exited;

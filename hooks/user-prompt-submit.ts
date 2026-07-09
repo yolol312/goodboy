@@ -4,6 +4,7 @@
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import {
+  ASK_WHEN_UNCLEAR_INSTRUCTION,
   buildRequiredInputsChecklist,
   classifyRisk,
   CONCISE_INSTRUCTION,
@@ -129,12 +130,23 @@ function main(): void {
         envStr('GOODBOY_CONCISE_DEFAULT', 'on') !== 'off' && !wantsDetail(prompt)
           ? CONCISE_INSTRUCTION
           : '';
-      const emitConcise = (): void => {
-        if (conciseContext) {
+
+      // (B2 확장) 일반 프롬프트 부족-입력 질문 유도 — 카테고리 커맨드의 self-assessment를
+      //   일반 자연어 요청으로 일반화한다. 충분한지의 의미 판정은 모델 몫(hook은 판정 불가),
+      //   무시 시에는 가정 기록 의무(A1) + 가정-리뷰 검증(A2)이 안전망으로 이어받는다.
+      //   카테고리 커맨드에는 전용 체크리스트가 붙으므로 여기서는 주입하지 않는다(중복 방지).
+      //   env GOODBOY_ASK_UNCLEAR=on|off (기본 on).
+      const askUnclearContext =
+        envStr('GOODBOY_ASK_UNCLEAR', 'on') !== 'off' ? ASK_WHEN_UNCLEAR_INSTRUCTION : '';
+      const emitGeneral = (): void => {
+        const combined = [askUnclearContext, conciseContext]
+          .filter((x) => x !== '')
+          .join('\n\n');
+        if (combined !== '') {
           emit({
             hookSpecificOutput: {
               hookEventName: 'UserPromptSubmit',
-              additionalContext: conciseContext,
+              additionalContext: combined,
             },
           });
         } else {
@@ -145,13 +157,13 @@ function main(): void {
       // (A) 슬래시 커맨드 감지
       const m = prompt.match(SLASH_REGEX);
       if (!m) {
-        emitConcise();
+        emitGeneral();
         return;
       }
       const cmd = m[1] ?? '';
       const args = m[2] ?? '';
       if (!KNOWN_CATEGORIES.has(cmd)) {
-        emitConcise();
+        emitGeneral();
         return;
       }
 
