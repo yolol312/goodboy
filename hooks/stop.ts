@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from '
 import { resolve as resolvePath } from 'node:path';
 import type { StatusSnapshot } from '../lib';
 import {
+  clearReadRecords,
   clearValidationFailure,
   compactForcePct,
   envInt,
@@ -398,6 +399,25 @@ function main(): void {
             confident: usage.confident,
           }
         : null;
+
+      // (B2.5) H2-01 epoch 리셋 — 세션 내 컨텍스트 점유율은 원래 단조 증가하므로,
+      //   큰 폭의 하락은 압축(/compact, auto-compact)이 일어났다는 신호다. 압축 후에는
+      //   앞서 읽은 파일 내용이 모델 컨텍스트에서 사라졌으므로 재-Read 차단의 전제가 깨진다
+      //   → read 기록을 비워 "압축 이후"를 새 기준으로 삼는다. 이 리셋이 있어 재-Read
+      //   윈도우를 길게(기본 30턴) 잡아도 압축 직후 오차단이 없다. fail-open.
+      try {
+        if (usage) {
+          const st = readHabitState(sessionId);
+          const dropPct = envInt('GOODBOY_COMPACT_DETECT_DROP_PCT', 15);
+          if (typeof st.lastCtxPercent === 'number' && usage.percent < st.lastCtxPercent - dropPct) {
+            clearReadRecords(sessionId);
+          }
+          st.lastCtxPercent = usage.percent;
+          writeHabitState(sessionId, st);
+        }
+      } catch {
+        // fail-open
+      }
 
       // (B3) H1-03 강제 자동 compact — 컨텍스트 점유율이 강제 임계(기본 50%) 이상이면
       //   자동 compact 신호 + decision:block으로 턴 종료를 막아 확실히 compact를 강제한다.

@@ -5,7 +5,14 @@
 //   edits.jsonl  — 같은 형식
 //   turn.txt     — 현재 턴 번호 (정수)
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -225,6 +232,19 @@ export function incrementTurn(sessionId: string): number {
     return next;
   } catch {
     return getCurrentTurn(sessionId);
+  }
+}
+
+/** H2-01 epoch 리셋: 세션의 read 기록 전체 삭제(컨텍스트 압축 감지 시).
+ *  압축 후에는 앞서 읽은 내용이 모델 컨텍스트에 없으므로, 재-Read 차단의 전제
+ *  ("앞서 읽은 내용을 참조할 수 있다")가 깨진다 → 기록을 비워 압축 이후를 새 기준으로 한다.
+ *  ⚠️ edits.jsonl은 지우지 않는다 — 리뷰 커서/검증 스코프가 의존한다. */
+export function clearReadRecords(sessionId: string): void {
+  try {
+    const path = join(ensureSessionDir(sessionId), 'reads.jsonl');
+    if (existsSync(path)) unlinkSync(path);
+  } catch {
+    // best-effort
   }
 }
 

@@ -122,7 +122,7 @@ PreToolUse hook이 메인에서 탐색 도구 4종 호출을 차단하고 서브
 
 | 습관 | 제어 | 기본 |
 |---|---|---|
-| H2-01 같은 파일 재-Read | deny (에이전트별 스코프, 10턴 윈도우, mtime 비교) | `GOODBOY_REREAD_GATE=deny` |
+| H2-01 같은 파일 재-Read | deny (에이전트별 스코프, 30턴 윈도우 + 압축 감지 시 기록 리셋, mtime 비교) + 위임 프롬프트에 기독 파일 포함 시 warn | `GOODBOY_REREAD_GATE=deny`, `GOODBOY_DELEGATED_REREAD_WARN=on` |
 | H2-02 출력 홍수 | bare `cat <대용량>` 사전 deny + 사후 경고(패턴별 1회) | `GOODBOY_CAT_GATE=deny`, 임계 `GOODBOY_CAT_DENY_BYTES=256000` |
 | H2-03 Bash 재귀 탐색 | deny (rg/grep -r/find → 위임 유도) | `GOODBOY_BASH_SEARCH_GATE=deny` |
 | H2-04 웹 재페치 | 동일 URL 재페치 warn (세션 스코프) | `GOODBOY_WEBFETCH_REFETCH_WARN=on` |

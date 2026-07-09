@@ -153,13 +153,13 @@ describe('pre-tool-use H2-01 re-read gate', () => {
     expect(isDenied(out)).toBe(false);
   });
 
-  test('D2: 윈도우 기본 10턴 — 5턴 전 read도 deny 대상', async () => {
+  test('D2: 윈도우 기본 30턴 — 25턴 전 read도 deny 대상', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     const { path, mtime } = makeFile(cwd, 'a.ts');
     const safe = sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_');
     const dir = join(tmp, `goodboy-session-${safe}`);
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, 'turn.txt'), '5', 'utf8'); // 현재 5턴
+    writeFileSync(join(dir, 'turn.txt'), '25', 'utf8'); // 현재 25턴
     writeFileSync(
       join(dir, 'reads.jsonl'),
       JSON.stringify({ file: resolve(path), turn: 0, timestamp: new Date().toISOString(), mtime }) +
@@ -167,7 +167,7 @@ describe('pre-tool-use H2-01 re-read gate', () => {
       'utf8',
     );
     const out = await runRead(tmp, cwd, sessionId, { file_path: path });
-    expect(isDenied(out)).toBe(true); // 구 윈도우(3)라면 통과했을 케이스
+    expect(isDenied(out)).toBe(true); // 구 윈도우(3/10)라면 통과했을 케이스
   });
 
   test('ALLOW: partial read (offset present) is exempt', async () => {

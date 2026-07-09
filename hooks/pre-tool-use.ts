@@ -149,6 +149,45 @@ function main(): void {
         }
       }
 
+      // (A0.5) 위임 재독 주의 (비차단) — 메인이 최근 읽은 파일 경로가 위임 프롬프트에
+      //   들어 있으면, 서브에이전트가 같은 파일을 다시 읽게 될 가능성이 높다.
+      //   서브의 재독은 필요비용일 수 있어(서브 컨텍스트엔 그 내용이 없다) 차단하지 않고,
+      //   "직접 처리할 수 있는 작업인지 / 필요한 부분만 프롬프트에 담을 수 있는지"의
+      //   판단을 유도하는 주의만 준다. env GOODBOY_DELEGATED_REREAD_WARN=on|off (기본 on).
+      if (
+        (toolName === 'Agent' || toolName === 'Task') &&
+        !input.agent_type &&
+        envStr('GOODBOY_DELEGATED_REREAD_WARN', 'on') !== 'off'
+      ) {
+        try {
+          const promptText = typeof toolInput.prompt === 'string' ? toolInput.prompt : '';
+          // 경로처럼 생긴 토큰(슬래시 + 확장자)만 후보로 본다. URL 등 오매칭은
+          //   read 기록 대조에서 걸러진다(기록에 없으면 무시).
+          const candidates = promptText.match(/[\w.~-]*\/[\w./-]+\.\w{1,8}/g) ?? [];
+          if (candidates.length > 0) {
+            const turn = getCurrentTurn(sessionId);
+            const withinTurns = envInt('GOODBOY_REREAD_WINDOW', 30);
+            const hits: string[] = [];
+            for (const c of new Set(candidates)) {
+              const abs = resolvePath(cwd, c);
+              if (wasFileReadRecently(sessionId, abs, turn, withinTurns, 'main')) {
+                hits.push(c);
+                if (hits.length >= 3) break;
+              }
+            }
+            if (hits.length > 0) {
+              preWarnings.push(
+                `위임 프롬프트에 메인이 이미 읽은 파일이 포함되어 있습니다: ${hits.join(', ')}. ` +
+                  '서브에이전트는 그 내용을 모르므로 다시 읽게 됩니다 — 직접 처리할 수 있는 작업인지, ' +
+                  '필요한 부분만 프롬프트에 담아 전달할 수 있는지 먼저 판단하세요. (위임 재독 주의, H2-01)',
+              );
+            }
+          }
+        } catch {
+          // fail-open — 주의 계산 실패는 위임을 막지 않는다.
+        }
+      }
+
       // (A) 도구 강제 위임. 서브에이전트(agent_type 존재)면 면제.
       //   GOODBOY_DISABLE_DELEGATION=1 이면 위임 자체를 끈다.
       if (!input.agent_type && process.env.GOODBOY_DISABLE_DELEGATION !== '1') {
@@ -237,9 +276,11 @@ function main(): void {
             try {
               const absPath = resolvePath(cwd, filePath);
               const turn = getCurrentTurn(sessionId);
-              // 윈도우 기본 3→10턴 확대(D2): mtime 비교가 "그 사이 파일 변경" 오탐을
-              // 막아주므로 길게 잡아도 안전하고, 3턴 밖 재-Read가 다수 관측됨(H2-01 ×484).
-              const withinTurns = envInt('GOODBOY_REREAD_WINDOW', 10);
+              // 윈도우 기본 30턴(D2 개정): "읽은 내용이 아직 컨텍스트에 살아있는가"의 근사치.
+              //   mtime 비교가 파일 변경 오탐을 막고, 압축(/compact) 감지 시 Stop hook이
+              //   read 기록을 리셋(epoch)하므로 길게 잡아도 압축 직후 오차단이 없다.
+              //   더 엄격하게(사실상 무제한) 하려면 env로 크게 설정한다.
+              const withinTurns = envInt('GOODBOY_REREAD_WINDOW', 30);
               // 최근에 읽지 않았으면 통과.
               if (!wasFileReadRecently(sessionId, absPath, turn, withinTurns, rereadScope))
                 return false;
