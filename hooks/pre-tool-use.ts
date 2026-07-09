@@ -15,6 +15,7 @@ import {
   extractRecentAssistantTexts,
   getCurrentTurn,
   getRecentReadMtime,
+  hasAssistantMessages,
   hasReasoningSection,
   logGate,
   parseReasoningSection,
@@ -364,9 +365,22 @@ function main(): void {
           input.transcript_path ?? '',
           REASONING_GATE_WINDOW,
         );
-        // recentTexts가 비면 파싱 실패/transcript 없음 → 통과 (fail-open, 안전 옵션)
+        // recentTexts가 비면 두 경우를 구별한다(라이브 검증 발견 — 무언 편집 우회):
+        //   (a) assistant 메시지 자체가 파싱됨(thinking/tool_use만 존재) → 모델이 아무 텍스트
+        //       없이 편집하려는 것. 추론 섹션이 없음이 확정이므로 차단한다.
+        //   (b) assistant 메시지를 하나도 못 찾음 → 파싱 실패/포맷 변경 가능성 → fail-open.
         if (recentTexts.length === 0) {
-          // E1: transcript가 주어졌는데 assistant 텍스트를 하나도 못 뽑았으면 무력화 신호.
+          if (input.transcript_path && hasAssistantMessages(input.transcript_path)) {
+            logGate(sessionId, 'reasoning', 'deny', 'silent-edit');
+            emit(
+              deny(
+                "편집 전에 '## 추론' 섹션을 텍스트로 출력하세요. 4분류로: ### 사실 / ### 추론 / ### 가정 / ### 추측 ⚠️ . " +
+                  '(추론 가시화 정책 — 텍스트 없이 도구만 호출하는 무언 편집은 허용되지 않습니다)',
+              ),
+            );
+            return;
+          }
+          // E1: transcript가 주어졌는데 assistant 메시지를 하나도 못 찾았으면 무력화 신호.
           if (input.transcript_path) {
             logGate(sessionId, 'reasoning', 'fail-open', 'transcript-unparsed');
           }

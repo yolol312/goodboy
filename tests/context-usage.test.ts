@@ -427,6 +427,32 @@ describe('getContextUsage — runtime dynamic 1M detection (low-token false-posi
     expect(u!.percent).toBeCloseTo(15, 5);
   });
 
+  // 2-D(라이브 검증 발견): settings 기본 모델의 [1m]이 `--model` 오버라이드 세션에 새면 안 된다.
+  //   실측 사고: settings=claude-fable-5[1m] + haiku 세션 → haiku가 1M/confident로 오판.
+  test('settings [1m]이라도 세션 모델 베이스가 다르면 무시 (--model 오버라이드)', () => {
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({
+        message: { model: 'claude-haiku-4-5-20251001', usage: { input_tokens: 30_000 } },
+      }),
+    ]);
+    const u = getContextUsage(path, { settingsPath: writeSettings('claude-fable-5[1m]') });
+    expect(u!.limit).toBe(200_000); // haiku 확정 200K — settings 신호 무시
+    expect(u!.confident).toBe(true);
+    expect(u!.percent).toBeCloseTo(15, 5);
+  });
+
+  test('settings [1m] + 날짜 접미사 차이는 같은 베이스로 인정', () => {
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({
+        message: { model: 'claude-opus-4-8-20260101', usage: { input_tokens: 150_000 } },
+      }),
+    ]);
+    const u = getContextUsage(path, { settingsPath: writeSettings('claude-opus-4-8[1m]') });
+    expect(u!.limit).toBe(1_000_000);
+  });
+
   test('settings.json without marker does NOT force 1M', () => {
     delete process.env.GOODBOY_CONTEXT_LIMIT;
     const path = writeTranscript([

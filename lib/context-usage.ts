@@ -76,22 +76,34 @@ export function modelIsAlwaysExtended(model: string | null | undefined): boolean
   return /fable|mythos/.test(model.toLowerCase());
 }
 
-/** settings.json(주어진 경로)의 `model` 필드에 1M 표식이 있으면 true.
+/** settings.json(주어진 경로)의 `model` 문자열. 없거나 읽기/파싱 실패면 null.
  *  신뢰도 중간: CLI `--model` 오버라이드로 실제 세션 모델과 다를 수 있어 폴백으로만 쓴다.
- *  경로 미제공/읽기 실패/파싱 실패 → 조용히 false(fail-open). 경로는 호출측이
- *  `$HOME/.claude/settings.json`처럼 HOME 기반으로 넘긴다(여기서 하드코딩하지 않음). */
-function settingsModelHasExtended(settingsPath: string | null | undefined): boolean {
-  if (!settingsPath || typeof settingsPath !== 'string') return false;
+ *  경로는 호출측이 `$HOME/.claude/settings.json`처럼 HOME 기반으로 넘긴다(하드코딩 금지). */
+function settingsModelString(settingsPath: string | null | undefined): string | null {
+  if (!settingsPath || typeof settingsPath !== 'string') return null;
   try {
     const raw = readFileSync(settingsPath, 'utf8');
     const parsed = JSON.parse(raw) as { model?: unknown };
     if (parsed && typeof parsed === 'object' && typeof parsed.model === 'string') {
-      return modelHasExtendedMarker(parsed.model);
+      return parsed.model;
     }
   } catch {
     // 조용히 skip (파일 없음/권한/깨진 JSON 등)
   }
-  return false;
+  return null;
+}
+
+/** 모델 ID의 베이스(표식 `[...]` 제거 + 소문자). */
+function modelBase(m: string): string {
+  return m.toLowerCase().replace(/\[[^\]]*\]/g, '').trim();
+}
+
+/** 두 모델 ID가 같은 베이스인지(한쪽이 다른 쪽의 접두 — 날짜 접미사 허용). */
+function sameModelBase(a: string, b: string): boolean {
+  const x = modelBase(a);
+  const y = modelBase(b);
+  if (x === '' || y === '') return false;
+  return x.startsWith(y) || y.startsWith(x);
 }
 
 /** 한 transcript 줄(객체)에서 "구조적(파싱된) 모델 필드"에 1M 표식이 있는지 검사한다.
@@ -155,7 +167,16 @@ function resolveContextLimit(inp: LimitInputs): number {
   // 2) 런타임 동적 감지: 훅 모델 → transcript 구조적 표식 → settings.json
   if (modelHasExtendedMarker(inp.hookModel)) return EXTENDED_CONTEXT_LIMIT;
   if (inp.transcriptExtended === true) return EXTENDED_CONTEXT_LIMIT;
-  if (settingsModelHasExtended(inp.settingsPath)) return EXTENDED_CONTEXT_LIMIT;
+  // 2c) settings.json 폴백 — 단, 관측된 세션 모델과 충돌하면 무시한다(2-D, 라이브 검증 발견).
+  //   settings의 기본 모델에 [1m]이 있어도, 이 세션이 `--model`로 다른 모델을 쓰고 있다면
+  //   (usage 줄/훅 모델의 베이스가 settings 모델과 다름) 그 표식은 이 세션의 신호가 아니다.
+  //   실측 사고: settings에 claude-fable-5[1m] + `--model haiku` 세션 → haiku가 1M로
+  //   오판되어 compact 강제가 사실상 비활성화됐다.
+  const settingsModel = settingsModelString(inp.settingsPath);
+  if (settingsModel && modelHasExtendedMarker(settingsModel)) {
+    const observed = inp.usageLineModel ?? inp.hookModel ?? null;
+    if (!observed || sameModelBase(observed, settingsModel)) return EXTENDED_CONTEXT_LIMIT;
+  }
 
   // 2.5) 모델별 확정 테이블: 1M이 기본값이자 최대인 패밀리(Fable/Mythos)는
   //      표식 없이도 모델 ID만으로 1M 확정(세션 토글이 아니므로 모호함이 없다).

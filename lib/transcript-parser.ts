@@ -210,3 +210,28 @@ export function extractRecentAssistantTexts(transcriptPath: string, n: number): 
     return [];
   }
 }
+
+/** transcript에 assistant 메시지가 하나라도 있는지(텍스트 유무 무관 — thinking/tool_use만 있어도 true).
+ *  추론 게이트가 "파싱 실패(fail-open 대상)"와 "모델이 아무 텍스트 없이 편집 시도(차단 대상)"를
+ *  구별하는 데 쓴다(라이브 검증에서 발견된 무언 편집 우회 대응). 실패는 false. */
+export function hasAssistantMessages(transcriptPath: string): boolean {
+  try {
+    if (!transcriptPath || !existsSync(transcriptPath)) return false;
+    for (const line of readFileSync(transcriptPath, 'utf8').split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (trimmed === '') continue;
+      try {
+        const obj = JSON.parse(trimmed) as Record<string, unknown>;
+        const type = obj.type as string | undefined;
+        const role = (obj.role ??
+          (obj.message && (obj.message as Record<string, unknown>).role)) as string | undefined;
+        if (type === 'assistant' || role === 'assistant') return true;
+      } catch {
+        continue;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}

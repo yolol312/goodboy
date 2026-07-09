@@ -166,3 +166,49 @@ describe('pre-tool-use reasoning gate — 실질 검사 (A1)', () => {
     expect(isBlocked(out)).toBe(false);
   });
 });
+
+describe('pre-tool-use reasoning gate — 무언 편집 차단 (라이브 검증 발견)', () => {
+  /** thinking/tool_use만 있고 text 블록이 없는 assistant 줄 — 실전에서 관측된 형태. */
+  function silentAssistantLine(): string {
+    return JSON.stringify({
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'thinking', thinking: '파일을 만들어야겠다' }],
+      },
+    });
+  }
+
+  test('assistant 메시지가 thinking만 있고 텍스트가 없으면 => block (무언 편집)', async () => {
+    const cwd = makeCwd();
+    const path = join(cwd, 'transcript.jsonl');
+    writeFileSync(path, silentAssistantLine() + '\n', 'utf8');
+    const out = await runHook(cwd, path);
+    expect(isBlocked(out)).toBe(true);
+    expect(out).toContain('무언 편집');
+  });
+
+  test('thinking-only 뒤에 추론 텍스트가 있으면 => allow', async () => {
+    const cwd = makeCwd();
+    const path = join(cwd, 'transcript.jsonl');
+    const textLine = JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'text', text: REASONING_TEXT }] },
+    });
+    writeFileSync(path, silentAssistantLine() + '\n' + textLine + '\n', 'utf8');
+    const out = await runHook(cwd, path);
+    expect(isBlocked(out)).toBe(false);
+  });
+
+  test('assistant 메시지가 아예 없으면(파싱 실패/신규) => allow (fail-open 유지)', async () => {
+    const cwd = makeCwd();
+    const path = join(cwd, 'transcript.jsonl');
+    writeFileSync(
+      path,
+      JSON.stringify({ type: 'user', message: { role: 'user', content: 'hi' } }) + '\n',
+      'utf8',
+    );
+    const out = await runHook(cwd, path);
+    expect(isBlocked(out)).toBe(false);
+  });
+});
