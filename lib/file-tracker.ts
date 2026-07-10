@@ -292,27 +292,45 @@ export function getRecentEdits(sessionId: string, withinTurns: number): string[]
  *  올린 뒤 리뷰를 수락하고 커서를 N으로 기록한다. 그 다음 에이전트가 만드는 편집은
  *  PostToolUse에서 getCurrentTurn()==N 으로 기록된다. 따라서 "커서 이후의 편집"은
  *  turn >= N 이어야 그 편집들을 포함한다. 이전 피처(turn < N)는 자연히 제외된다.
- *  커서 부재(첫 리뷰)는 cursorTurn=0 으로 호출 → 모든 편집 포함. */
-export function getEditsSince(sessionId: string, cursorTurn: number): string[] {
+ *  커서 부재(첫 리뷰)는 cursorTurn=0 으로 호출 → 모든 편집 포함.
+ *
+ *  mainOnly=true(리뷰 스코프 기본): 서브에이전트가 만든 편집은 제외한다.
+ *  ⚠️ 라이브 검증에서 발견된 자기참조 루프 때문이다 — 리뷰 서브에이전트가 성능 검토용
+ *  임시 파일을 만들면 그 파일이 다시 "리뷰되지 않은 변경 파일"로 잡혀 리뷰가 무한히
+ *  재요구된다. goodboy 설계상 편집·판단은 메인의 몫이고 서브에이전트는 탐색/검증용이므로,
+ *  리뷰 대상은 메인 스코프 편집으로 한정하는 것이 옳다. */
+export function getEditsSince(
+  sessionId: string,
+  cursorTurn: number,
+  mainOnly = false,
+): string[] {
   const dir = ensureSessionDir(sessionId);
   const records = readRecords(dir, 'edits.jsonl');
   const out = new Set<string>();
   for (const r of records) {
-    if (r.turn >= cursorTurn) out.add(r.file);
+    if (r.turn < cursorTurn) continue;
+    if (mainOnly && recordScope(r) !== MAIN_SCOPE) continue;
+    out.add(r.file);
   }
   return Array.from(out);
 }
 
 /** getEditsSince 대상 파일 중 가장 최근 편집의 ISO 타임스탬프. 없으면 null.
- *  리뷰 staleness 판정에 사용: 리뷰가 이 시각보다 더 나중이어야 한다. */
-export function getLatestEditTimestampSince(sessionId: string, cursorTurn: number): string | null {
+ *  리뷰 staleness 판정에 사용: 리뷰가 이 시각보다 더 나중이어야 한다.
+ *  mainOnly는 getEditsSince와 동일 의미 — 두 함수의 대상 집합이 어긋나면
+ *  "커버리지는 통과인데 staleness만 실패"하는 교착이 생기므로 반드시 같이 넘긴다. */
+export function getLatestEditTimestampSince(
+  sessionId: string,
+  cursorTurn: number,
+  mainOnly = false,
+): string | null {
   const dir = ensureSessionDir(sessionId);
   const records = readRecords(dir, 'edits.jsonl');
   let latest: string | null = null;
   for (const r of records) {
-    if (r.turn >= cursorTurn) {
-      if (latest === null || r.timestamp > latest) latest = r.timestamp;
-    }
+    if (r.turn < cursorTurn) continue;
+    if (mainOnly && recordScope(r) !== MAIN_SCOPE) continue;
+    if (latest === null || r.timestamp > latest) latest = r.timestamp;
   }
   return latest;
 }
