@@ -139,9 +139,14 @@ function tail(text: string, lines: number): string {
   return arr.slice(-lines).join('\n');
 }
 
-function hasBin(name: string): boolean {
+/** PATH에 실행 파일이 있는지. Windows에서 execSync의 기본 셸은 cmd.exe라 `command -v`가
+ *  항상 실패한다(→ bun이 있어도 npm으로 폴백하던 버그). 플랫폼별 조회 명령을 쓴다.
+ *  name은 호출부에서 상수로만 넘어오지만, 셸 주입을 막기 위해 형태를 제한한다. */
+export function hasBin(name: string): boolean {
+  if (!/^[\w.-]+$/.test(name)) return false;
+  const cmd = process.platform === 'win32' ? `where ${name}` : `command -v ${name}`;
   try {
-    execSync(`command -v ${name}`, { stdio: 'ignore' });
+    execSync(cmd, { stdio: 'ignore' });
     return true;
   } catch {
     return false;

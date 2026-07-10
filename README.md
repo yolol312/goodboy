@@ -22,13 +22,7 @@ LLM이 코드 작성 시 자주 발생하는 4가지 약점과 Good Boy의 해�
 
 ## 설치
 
-### 로컬 개발 모드 (지금 권장)
-
-```bash
-claude --plugin-dir /path/to/goodboy
-```
-
-### Marketplace 설치 (배포 후)
+### Marketplace 설치 (권장)
 
 ```bash
 /plugin marketplace add yolol312/goodboy
@@ -38,14 +32,39 @@ claude --plugin-dir /path/to/goodboy
 설치 범위(user/project/local/session)와 이미 설치된 플러그인의 범위 전환은
 [설치 범위와 전환](#설치-범위와-전환)을 참고하세요.
 
+### 로컬 개발 모드 (플러그인 자체를 수정할 때)
+
+```bash
+claude --plugin-dir /path/to/goodboy
+```
+
 ### 요구사항
 
 - Claude Code v2.1.138+
-- Bun (hook과 CLI 런타임) — **없어도 됩니다.** 설치 후 첫 프롬프트에서 자동 설치를
+- Bun (hook과 CLI 런타임) — **미리 설치할 필요는 없습니다.** 첫 프롬프트에서 자동 설치를
   안내하고, 프롬프트를 한 번 더 입력하면 플러그인 전용 폴더(`~/.claude/goodboy-runtime`)에
   자동 설치됩니다(시스템 전역을 건드리지 않음). 자세한 동작은
   [트러블슈팅 > "Bun 런타임이 필요합니다"](#bun-런타임이-필요합니다-라며-차단됩니다) 참고.
-- macOS/리눅스 (Bun 가드가 POSIX 셸 기반 — Windows 네이티브는 미지원)
+- **macOS / 리눅스**: 추가 요구사항 없음.
+- **Windows**: [Git for Windows](https://git-scm.com/downloads/win) **필수** —
+  아래 [Windows 지원](#windows-지원) 참고.
+
+### Windows 지원
+
+Claude Code는 Windows 네이티브에서 hook 명령을 **Git Bash가 설치돼 있으면 Git Bash로,
+없으면 PowerShell로** 실행합니다. goodboy의 hook 런처(`bin/goodboy-run.sh`)와 Bash 게이트는
+POSIX 셸을 전제하므로 **Git for Windows 설치가 필수**입니다. 이는 Claude Code가 Bash 도구를
+쓰기 위해 권장하는 구성과 동일합니다.
+
+| 환경 | 동작 |
+|---|---|
+| macOS / 리눅스 | 전 기능 |
+| Windows + Git for Windows | 전 기능 (Bun 자동 설치는 Git Bash에 `unzip`이 없어 실패할 수 있음 → `powershell -c "irm bun.sh/install.ps1 \| iex"` 안내로 폴백) |
+| Windows, Git Bash 없음 | **미지원.** hook이 PowerShell로 실행되어 런처가 뜨지 않고, 안전장치 전체가 동작하지 않습니다 |
+
+알려진 공백: Git Bash가 없는 Windows에서 Claude Code는 Bash 도구 대신 PowerShell 도구를
+사용합니다. goodboy의 토큰 낭비 게이트 중 Bash 명령을 검사하는 항목(재귀 탐색 차단,
+대용량 출력 차단)은 PowerShell 도구 호출에는 적용되지 않습니다.
 
 ## 사용법
 
@@ -367,9 +386,10 @@ goodboy의 hook은 Bun으로 실행됩니다. Bun이 없으면 hook 앞단의 �
 | `GOODBOY_RUNTIME_DIR` | 자동 설치 위치 변경 |
 | `GOODBOY_INSTALL_CMD` | 설치 명령 대체 (사내 미러 등; `BUN_INSTALL`이 export됨) |
 
-수동 설치를 원하면: `curl -fsSL https://bun.sh/install | bash` 후 다시 시도하면 됩니다.
-자동 설치가 실패하는 경우(네트워크 차단, `curl`/`unzip` 부재)에도 같은 수동 설치 안내가
-표시됩니다.
+수동 설치를 원하면 macOS/리눅스는 `curl -fsSL https://bun.sh/install | bash`,
+Windows(Git Bash)는 `powershell -c "irm bun.sh/install.ps1 | iex"` 후 다시 시도하면 됩니다.
+자동 설치가 실패하는 경우(네트워크 차단, `curl`/`unzip` 부재)에도 플랫폼에 맞는 수동 설치
+안내가 표시됩니다.
 
 ### "WebSearch가 차단됩니다"
 
@@ -427,7 +447,8 @@ Stop hook은 transcript의 토큰 usage를 best-effort로 파싱합니다. Claud
 
 ## 개발 상태
 
-v0.18.0 — 배포 준비 중. 버전은 `.claude-plugin/plugin.json` / `package.json`과 동기화된다.
+배포됨. 현재 버전은 `.claude-plugin/plugin.json` / `package.json`을 기준으로 한다
+(README에 버전을 하드코딩하지 않는다 — 갱신 누락으로 실제와 어긋나기 쉬움).
 
 ## 라이센스
 

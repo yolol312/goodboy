@@ -90,6 +90,32 @@ describe('bun guard — bun이 있으면 그대로 실행', () => {
   });
 });
 
+describe('bun guard — Windows(Git Bash) 대응', () => {
+  test('runtime 디렉토리의 bun.exe도 찾는다', async () => {
+    const home = makeHome();
+    const runtimeBin = join(home, '.claude', 'goodboy-runtime', 'bin');
+    mkdirSync(runtimeBin, { recursive: true });
+    const bunExe = join(runtimeBin, 'bun.exe');
+    writeFileSync(bunExe, '#!/bin/sh\necho "{}"\n', 'utf8');
+    chmodSync(bunExe, 0o755);
+    const r = await runGuard('stop', home);
+    expect(r.code).toBe(0);
+    expect(r.stdout.trim()).toBe('{}');
+  });
+
+  test('~/.bun/bin/bun.exe 폴백도 찾는다', async () => {
+    const home = makeHome();
+    const bunDir = join(home, '.bun', 'bin');
+    mkdirSync(bunDir, { recursive: true });
+    const bunExe = join(bunDir, 'bun.exe');
+    writeFileSync(bunExe, '#!/bin/sh\necho "{}"\n', 'utf8');
+    chmodSync(bunExe, 0o755);
+    const r = await runGuard('stop', home);
+    expect(r.code).toBe(0);
+    expect(r.stdout.trim()).toBe('{}');
+  });
+});
+
 describe('bun guard — bun 없음', () => {
   test('pre-tool-use => exit 2 차단 + 안내', async () => {
     const home = makeHome();

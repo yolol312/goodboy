@@ -32,13 +32,28 @@ find_bun() {
     command -v bun
     return 0
   fi
-  for c in "$RUNTIME_DIR/bin/bun" "$HOME/.bun/bin/bun"; do
+  # 표준 설치 위치 폴백. .exe는 Windows(Git Bash) 대응.
+  for c in \
+    "$RUNTIME_DIR/bin/bun" "$RUNTIME_DIR/bin/bun.exe" \
+    "$HOME/.bun/bin/bun" "$HOME/.bun/bin/bun.exe"; do
     if [ -x "$c" ]; then
       printf '%s\n' "$c"
       return 0
     fi
   done
   return 1
+}
+
+# 플랫폼별 수동 설치 명령 (Windows는 Git Bash에 unzip이 없어 자동 설치가 실패하기 쉽다)
+manual_install_hint() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW* | MSYS* | CYGWIN*)
+      printf '%s' 'powershell -c "irm bun.sh/install.ps1 | iex"'
+      ;;
+    *)
+      printf '%s' 'curl -fsSL https://bun.sh/install | bash'
+      ;;
+  esac
 }
 
 BUN_BIN=$(find_bun) && exec "$BUN_BIN" "$HOOK_FILE"
@@ -52,7 +67,7 @@ case "$HOOK" in
     exit 0
     ;;
   pre-tool-use)
-    echo "goodboy: Bun 런타임이 없어 안전장치를 실행할 수 없으므로 도구 사용을 차단합니다. 사용자에게 이렇게 안내하세요: \"goodboy 플러그인 실행에 Bun이 필요합니다. 프롬프트를 한 번 더 입력하면 자동 설치가 진행됩니다. (직접 설치: curl -fsSL https://bun.sh/install | bash)\"" >&2
+    echo "goodboy: Bun 런타임이 없어 안전장치를 실행할 수 없으므로 도구 사용을 차단합니다. 사용자에게 이렇게 안내하세요: \"goodboy 플러그인 실행에 Bun이 필요합니다. 프롬프트를 한 번 더 입력하면 자동 설치가 진행됩니다. (직접 설치: $(manual_install_hint))\"" >&2
     exit 2
     ;;
   user-prompt-submit) ;;
@@ -68,7 +83,7 @@ mkdir -p "$RUNTIME_DIR" 2>/dev/null
 if [ "${GOODBOY_AUTO_INSTALL:-on}" = "off" ]; then
   cat >&2 <<EOF
 🐶 goodboy: 이 플러그인은 Bun 런타임이 필요합니다 (미설치 감지).
-직접 설치: curl -fsSL https://bun.sh/install | bash
+직접 설치: $(manual_install_hint)
 (자동 설치는 GOODBOY_AUTO_INSTALL=off 로 꺼져 있습니다. 가드 자체를 끄려면 GOODBOY_BUN_GUARD=off)
 EOF
   exit 2
@@ -87,7 +102,7 @@ if [ -z "$CONSENTED" ]; then
 🐶 goodboy: 이 플러그인은 Bun 런타임이 필요합니다 (미설치 감지).
 방금 입력한 프롬프트를 그대로 다시 입력하면 Bun을 자동 설치한 뒤 계속 진행합니다.
   - 설치 위치: $RUNTIME_DIR (플러그인 전용 폴더 — 시스템 전역을 건드리지 않습니다)
-  - 직접 설치하려면: curl -fsSL https://bun.sh/install | bash
+  - 직접 설치하려면: $(manual_install_hint)
   - 자동 설치를 원치 않으면: 환경변수 GOODBOY_AUTO_INSTALL=off
 EOF
   exit 2
@@ -99,13 +114,14 @@ if [ -n "$GOODBOY_INSTALL_CMD" ]; then
   sh -c "$GOODBOY_INSTALL_CMD" >/dev/null 2>&1
 else
   if ! command -v curl >/dev/null 2>&1; then
-    echo "🐶 goodboy: curl이 없어 Bun을 자동 설치할 수 없습니다. 직접 설치해 주세요: https://bun.sh" >&2
+    echo "🐶 goodboy: curl이 없어 Bun을 자동 설치할 수 없습니다. 직접 설치해 주세요: $(manual_install_hint)" >&2
     exit 2
   fi
+  # Windows(Git Bash)에는 unzip이 없어 공식 설치 스크립트가 실패하기 쉽다 → 실패 시 아래 안내로 떨어진다.
   curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1
 fi
 
 BUN_BIN=$(find_bun) && exec "$BUN_BIN" "$HOOK_FILE"
 
-echo "🐶 goodboy: Bun 자동 설치에 실패했습니다. 직접 설치해 주세요: curl -fsSL https://bun.sh/install | bash — 설치 후 다시 시도하면 정상 작동합니다. (가드를 끄려면 GOODBOY_BUN_GUARD=off)" >&2
+echo "🐶 goodboy: Bun 자동 설치에 실패했습니다. 직접 설치해 주세요: $(manual_install_hint) — 설치 후 다시 시도하면 정상 작동합니다. (가드를 끄려면 GOODBOY_BUN_GUARD=off)" >&2
 exit 2
