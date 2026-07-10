@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bun ${CLAUDE_PLUGIN_ROOT}/hooks/pre-tool-use.ts",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/goodboy-run.sh\" pre-tool-use",
             "timeout": 30
           }
         ]
@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bun ${CLAUDE_PLUGIN_ROOT}/hooks/post-tool-use.ts",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/goodboy-run.sh\" post-tool-use",
             "timeout": 60
           }
         ]
@@ -30,8 +30,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bun ${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.ts",
-            "timeout": 15
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/goodboy-run.sh\" user-prompt-submit",
+            "timeout": 180
           }
         ]
       }
@@ -41,7 +41,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bun ${CLAUDE_PLUGIN_ROOT}/hooks/stop.ts",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/goodboy-run.sh\" stop",
             "timeout": 15
           }
         ]

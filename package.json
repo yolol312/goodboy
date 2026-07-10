@@ -1,6 +1,6 @@
 {
   "name": "goodboy",
-  "version": "0.22.0",
+  "version": "0.23.0",
   "description": "Good Boy — agentic LLM-CLI 가드레일",
   "license": "MIT",
   "type": "module",

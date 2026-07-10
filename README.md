@@ -41,7 +41,11 @@ claude --plugin-dir /path/to/goodboy
 ### 요구사항
 
 - Claude Code v2.1.138+
-- Bun (hook과 CLI 런타임)
+- Bun (hook과 CLI 런타임) — **없어도 됩니다.** 설치 후 첫 프롬프트에서 자동 설치를
+  안내하고, 프롬프트를 한 번 더 입력하면 플러그인 전용 폴더(`~/.claude/goodboy-runtime`)에
+  자동 설치됩니다(시스템 전역을 건드리지 않음). 자세한 동작은
+  [트러블슈팅 > "Bun 런타임이 필요합니다"](#bun-런타임이-필요합니다-라며-차단됩니다) 참고.
+- macOS/리눅스 (Bun 가드가 POSIX 셸 기반 — Windows 네이티브는 미지원)
 
 ## 사용법
 
@@ -342,6 +346,30 @@ goodboy/                                # 플러그인 루트
 ```
 
 ## 트러블슈팅
+
+### "Bun 런타임이 필요합니다" 라며 차단됩니다
+
+goodboy의 hook은 Bun으로 실행됩니다. Bun이 없으면 hook 앞단의 셸 가드(Bun 불필요)가
+개입합니다:
+
+1. **첫 프롬프트**: "다시 입력하면 자동 설치" 안내와 함께 프롬프트 반려
+2. **10분 내 재입력**: `~/.claude/goodboy-runtime`에 Bun 자동 설치(공식 설치 스크립트,
+   시스템 전역 아님) 후 그대로 정상 진행
+3. 설치 전까지 도구 사용(PreToolUse)도 차단됩니다 — 게이트가 조용히 무력화된 채
+   작동하는 척하는 것을 막기 위함
+
+관련 스위치:
+
+| env | 효과 |
+|---|---|
+| `GOODBOY_AUTO_INSTALL=off` | 자동 설치 끔 (차단 + 수동 설치 안내는 유지) |
+| `GOODBOY_BUN_GUARD=off` | 가드 전체 끔 — Bun 없으면 예전처럼 조용히 무동작 (비상용) |
+| `GOODBOY_RUNTIME_DIR` | 자동 설치 위치 변경 |
+| `GOODBOY_INSTALL_CMD` | 설치 명령 대체 (사내 미러 등; `BUN_INSTALL`이 export됨) |
+
+수동 설치를 원하면: `curl -fsSL https://bun.sh/install | bash` 후 다시 시도하면 됩니다.
+자동 설치가 실패하는 경우(네트워크 차단, `curl`/`unzip` 부재)에도 같은 수동 설치 안내가
+표시됩니다.
 
 ### "WebSearch가 차단됩니다"
 
