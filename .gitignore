@@ -6,4 +6,8 @@ node_modules/
 dist/
 build/
 .bun/
-.claude/
+
+# goodboy가 프로젝트에 남기는 런타임 산출물(리뷰 결과/마커/세션 state)은 커밋하지 않는다.
+# 단, 리포에 두고 공유해야 하는 개발용 스킬(.claude/skills/)은 예외로 추적한다.
+.claude/*
+!.claude/skills/
