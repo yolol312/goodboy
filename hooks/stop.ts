@@ -507,11 +507,12 @@ function main(): void {
       })();
       // 커서 부재(첫 리뷰) → baseline 0: getEditsSince(>=0)로 세션 전체 편집을 포함.
       const cursorTurn = cursor ? cursor.turn : 0;
-      // mainOnly=true: 서브에이전트(특히 리뷰 에이전트)가 만든 임시 파일이 리뷰 스코프를
-      //   넓혀 리뷰를 무한 재요구하는 자기참조 루프를 끊는다(라이브 검증에서 발견).
+      // withinDir=cwd: 프로젝트 안의 파일만 리뷰 대상. 리뷰 에이전트의 프로브 파일은
+      //   `mktemp -d`(프로젝트 밖)에 만들도록 강제하므로 자기참조 루프가 끊긴다.
+      //   에이전트로는 거르지 않는다 — 서브에이전트 편집도 리뷰 대상(위임 우회 차단).
       const recentEdits = (() => {
         try {
-          return getEditsSince(sessionId, cursorTurn, true);
+          return getEditsSince(sessionId, cursorTurn, cwd);
         } catch {
           return [];
         }
@@ -547,8 +548,8 @@ function main(): void {
       //   리뷰 필요 파일 중 가장 최근 편집 시각보다 리뷰가 더 나중이어야 한다.
       const latestEditTs = (() => {
         try {
-          // recentEdits와 동일 집합(mainOnly)이어야 커버리지/staleness가 어긋나지 않는다.
-          return getLatestEditTimestampSince(sessionId, cursorTurn, true);
+          // recentEdits와 동일 집합(withinDir)이어야 커버리지/staleness가 어긋나지 않는다.
+          return getLatestEditTimestampSince(sessionId, cursorTurn, cwd);
         } catch {
           return null;
         }

@@ -35,12 +35,18 @@ function sessionDir(tmp: string, sessionId: string): string {
 }
 
 /** Seed edits so recentEdits is non-empty (Stop reaches the warning + block/pass path). */
-function seedSession(tmp: string, sessionId: string, turn: number, editFiles: string[]): void {
+function seedSession(
+  tmp: string,
+  sessionId: string,
+  turn: number,
+  editFiles: string[],
+  cwd = '/repo',
+): void {
   const dir = sessionDir(tmp, sessionId);
   writeFileSync(join(dir, 'turn.txt'), String(turn - 1), 'utf8'); // Stop increments first
   const ts = new Date().toISOString();
   const lines = editFiles
-    .map((f) => JSON.stringify({ file: resolve(f), turn, timestamp: ts }))
+    .map((f) => JSON.stringify({ file: resolve(cwd, f), turn, timestamp: ts }))
     .join('\n');
   writeFileSync(join(dir, 'edits.jsonl'), lines + '\n', 'utf8');
 }
@@ -99,12 +105,12 @@ async function runStop(
   }
 }
 
-const CODE_FILE = '/repo/util.ts';
+const CODE_FILE = 'util.ts';
 
 describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
   test('context >= 50% → force block with compact-force reason + stopReason', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [CODE_FILE]);
+    seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
     const t = writeTranscript(cwd, 120_000); // 60% → force
     const out = await runStop(tmp, cwd, sessionId, t);
     expect(out.decision).toBe('block');
@@ -115,7 +121,7 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
 
   test('force suppresses H1-01 long-session warning even when tokens are high', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [CODE_FILE]);
+    seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
     // 120k tokens = 60% (>= force 50%) AND above token warn 50k → but force wins, H1-01 suppressed.
     const t = writeTranscript(cwd, 120_000);
     const out = await runStop(tmp, cwd, sessionId, t);
@@ -128,7 +134,7 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
 describe('Stop hook — H1-01 long-session warning', () => {
   test('token-based: tokens over GOODBOY_TOKEN_WARN but below force % → long-session warning, no force', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [CODE_FILE]);
+    seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
     // 60k tokens = 30% (below 50% force) but above default token warn 50k.
     const t = writeTranscript(cwd, 60_000);
     const out = await runStop(tmp, cwd, sessionId, t);
@@ -140,7 +146,7 @@ describe('Stop hook — H1-01 long-session warning', () => {
 
   test('time-based: old sessionStartTs → long-session warning', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [CODE_FILE]);
+    seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
     const old = new Date(Date.now() - 60 * 60000).toISOString(); // 60 min ago
     seedHabitState(tmp, sessionId, { sessionStartTs: old });
     const t = writeTranscript(cwd, 10_000); // 5% — nothing else triggers
@@ -151,7 +157,7 @@ describe('Stop hook — H1-01 long-session warning', () => {
 
   test('fail-open: no transcript → no habit warnings (review enforcement intact)', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [CODE_FILE]);
+    seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
     const out = await runStop(tmp, cwd, sessionId);
     expect(out.decision).toBe('block'); // review still required
     expect(out.systemMessage ?? '').not.toContain('긴 세션');

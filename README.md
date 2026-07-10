@@ -151,6 +151,7 @@ PreToolUse hook이 메인에서 탐색 도구 4종 호출을 차단하고 서브
 | H2-01 같은 파일 재-Read | deny (에이전트별 스코프, 30턴 윈도우 + 압축 감지 시 기록 리셋, mtime 비교) + 위임 프롬프트에 기독 파일 포함 시 warn | `GOODBOY_REREAD_GATE=deny`, `GOODBOY_DELEGATED_REREAD_WARN=on` |
 | H2-02 출력 홍수 | bare `cat <대용량>` 사전 deny + 사후 경고(패턴별 1회) | `GOODBOY_CAT_GATE=deny`, 임계 `GOODBOY_CAT_DENY_BYTES=256000` |
 | H2-03 Bash 재귀 탐색 | deny (rg/grep -r/find → 위임 유도) | `GOODBOY_BASH_SEARCH_GATE=deny` |
+| (우회 차단) Bash 파일 쓰기 | deny — `> >> tee sed -i dd of=`로 프로젝트 파일 쓰기 금지 (Edit/Write 도구로 유도). 산출물(`dist/ build/ node_modules/ .git/ .claude/`)·`*.log`·프로젝트 밖 경로는 허용 | `GOODBOY_BASH_WRITE_GATE=deny`, 추가 허용 `GOODBOY_BASH_WRITE_ALLOW=a,b` |
 | H2-04 웹 재페치 | 동일 URL 재페치 warn (세션 스코프) | `GOODBOY_WEBFETCH_REFETCH_WARN=on` |
 | H1-01 컨텍스트 성장 | 30%부터 +10%p마다 반복 경고 | `GOODBOY_CTX_WARN_START_PCT=30`, `GOODBOY_CTX_WARN_STEP_PCT=10` |
 | H1-03 compact 막차 | 50% 초과 시 턴 종료 차단 + compact 유도 | `GOODBOY_COMPACT_FORCE_PCT=50` |
@@ -410,6 +411,10 @@ Agent 도구로 서브에이전트 호출 (예: general-purpose)
 
 편집 전에 `## 추론` 섹션을 출력하세요 (사실/추론/가정/추측 4분류).
 
+같은 응답 안에서 추론을 쓰고 바로 편집하면 아직 인식되지 않을 수 있습니다 — 그때는 같은
+편집을 한 번 더 시도하면 통과합니다. 서브에이전트가 편집할 때는 **서브에이전트 자신이 쓴**
+추론 섹션으로 판정합니다(메인의 글이 아님).
+
 ### "Stop이 차단됩니다 — 리뷰 필요"
 
 `/review-changes` 슬래시 커맨드를 실행하거나 review-changes 서브에이전트를 호출하세요:
@@ -421,6 +426,21 @@ Agent(general-purpose, "review-changes 스킬에 따라 다음 파일을 리뷰:
 ### "위험 작업이 차단됩니다"
 
 사용자 승인이 필요합니다. `touch .claude/.goodboy-risk-approved.txt`
+
+### "Bash로 프로젝트 파일을 쓰려 합니다" 라며 차단됩니다
+
+정상 동작입니다. `cat > src/x.ts <<EOF`, `sed -i`, `tee` 같은 Bash 쓰기는 read-before-edit·
+추론 게이트를 지나치고 편집 기록에도 남지 않아 **리뷰 강제와 자동 검증까지 통째로 무력화**
+합니다(라이브 검증에서 서브에이전트가 추론 게이트에 8회 막힌 뒤 heredoc으로 우회한 사례가
+실측되었습니다). 파일 생성·수정은 Edit/Write 도구를 쓰세요.
+
+- 임시 프로브 파일은 `mktemp -d`가 만든 프로젝트 밖 디렉터리에 만드세요(허용됨).
+- 빌드 산출물(`dist/`, `build/`, `node_modules/`, `.git/`, `.claude/`)과 `*.log`는 허용됩니다.
+- 특정 경로를 더 허용하려면 `GOODBOY_BASH_WRITE_ALLOW=scratch,tmpout` (cwd 기준 상대 경로).
+- 게이트 해제: `GOODBOY_BASH_WRITE_GATE=off` (또는 `warn`으로 경고만).
+
+**한계**: `python -c "open('x','w')"` 처럼 인터프리터 내부에서 쓰는 경로는 잡지 못합니다.
+"무심코 우회"를 막는 것이 목적이며, 결심한 우회를 원천 봉쇄하지는 못합니다.
 
 ### 자동 검증 실행 안 됨
 

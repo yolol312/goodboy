@@ -34,6 +34,7 @@ function seedSession(
   sessionId: string,
   turn: number,
   editFiles: string[],
+  cwd = '/repo',
 ): void {
   const safe = sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_');
   const dir = join(tmp, `goodboy-session-${safe}`);
@@ -42,7 +43,7 @@ function seedSession(
   writeFileSync(join(dir, 'turn.txt'), String(turn - 1), 'utf8');
   const ts = new Date().toISOString();
   const lines = editFiles
-    .map((f) => JSON.stringify({ file: resolve(f), turn, timestamp: ts }))
+    .map((f) => JSON.stringify({ file: resolve(cwd, f), turn, timestamp: ts }))
     .join('\n');
   writeFileSync(join(dir, 'edits.jsonl'), lines + '\n', 'utf8');
 }
@@ -86,12 +87,12 @@ async function runStop(
   }
 }
 
-const FRONTEND_FILE = '/repo/index.html';
+const FRONTEND_FILE = 'index.html';
 
 function baseReview(cwd: string, dimensions: string[]): Record<string, unknown> {
   return {
     timestamp: new Date(Date.now() + 60000).toISOString(), // future-dated: never stale
-    reviewed_files: [resolve(FRONTEND_FILE)],
+    reviewed_files: [resolve(cwd, FRONTEND_FILE)],
     category: 'add-feature',
     findings: [],
     unknown_assumptions_checked: [],
@@ -103,7 +104,7 @@ function baseReview(cwd: string, dimensions: string[]): Record<string, unknown> 
 describe('Stop hook — dimension coverage enforcement', () => {
   test('BLOCKS when frontend changed but ui-ux-accessibility not in dimensions_checked', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [FRONTEND_FILE]);
+    seedSession(tmp, sessionId, 1, [FRONTEND_FILE], cwd);
     // dimensions omits ui-ux-accessibility
     writeReview(cwd, baseReview(cwd, ['plan-completeness']));
     const out = await runStop(tmp, cwd, sessionId);
@@ -114,7 +115,7 @@ describe('Stop hook — dimension coverage enforcement', () => {
 
   test('PASSES when all required dimensions are present', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [FRONTEND_FILE]);
+    seedSession(tmp, sessionId, 1, [FRONTEND_FILE], cwd);
     writeReview(cwd, baseReview(cwd, ['ui-ux-accessibility', 'plan-completeness']));
     const out = await runStop(tmp, cwd, sessionId);
     expect(out.decision).toBeUndefined();
@@ -122,7 +123,7 @@ describe('Stop hook — dimension coverage enforcement', () => {
 
   test('retry-cap escape: after MAX_RETRIES the missing dimension is allowed with systemMessage', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [FRONTEND_FILE]);
+    seedSession(tmp, sessionId, 1, [FRONTEND_FILE], cwd);
     // Pre-seed retry counter at 2 so the next attempt (count=3) hits the cap.
     const claudeDir = join(cwd, '.claude');
     mkdirSync(claudeDir, { recursive: true });
@@ -137,10 +138,10 @@ describe('Stop hook — dimension coverage enforcement', () => {
   test('BACKWARD COMPAT: old review (no dimensions_checked) + change requiring no dimensions → no block, no crash', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     // README.md change requires zero dimensions.
-    seedSession(tmp, sessionId, 1, ['/repo/README.md']);
+    seedSession(tmp, sessionId, 1, ['README.md'], cwd);
     const old = {
       timestamp: new Date(Date.now() + 60000).toISOString(),
-      reviewed_files: [resolve('/repo/README.md')],
+      reviewed_files: [resolve(cwd, 'README.md')],
       category: 'write-doc',
       findings: [],
       unknown_assumptions_checked: [],
@@ -155,10 +156,10 @@ describe('Stop hook — dimension coverage enforcement', () => {
 
   test('old review (no dimensions_checked) + code change requiring performance → clean block, no crash', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, ['/repo/util.ts']);
+    seedSession(tmp, sessionId, 1, ['util.ts'], cwd);
     const old = {
       timestamp: new Date(Date.now() + 60000).toISOString(),
-      reviewed_files: [resolve('/repo/util.ts')],
+      reviewed_files: [resolve(cwd, 'util.ts')],
       category: 'refactor',
       findings: [],
       unknown_assumptions_checked: [],

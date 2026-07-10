@@ -11,6 +11,7 @@ export * from './transcript-parser';
 export * from './context-usage';
 export * from './file-tracker';
 export * from './recursion-guard';
+export * from './bash-write';
 export * from './token-habits';
 export * from './validation-state';
 export * from './gate-log';

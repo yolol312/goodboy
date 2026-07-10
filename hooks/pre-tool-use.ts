@@ -5,11 +5,14 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import {
   bareCatDumpMessage,
+  agentTranscriptPath,
   BASH_SEARCH_MESSAGE,
+  bashWriteMessage,
   catDumpThresholdBytes,
   checkRecursionGuard,
   classifyBareCatDump,
   classifyBashSearch,
+  classifyBashWrite,
   envInt,
   envStr,
   extractRecentAssistantTexts,
@@ -83,6 +86,24 @@ function deny(reason: string): HookOutput {
       permissionDecisionReason: reason,
     },
   };
+}
+
+/** 통과(비차단) 출력. 경고가 있으면 함께 실어 보낸다.
+ *  additionalContext = 에이전트(서브에이전트 포함) 컨텍스트에 확실히 주입되는 채널.
+ *  permissionDecision은 설정하지 않아 정상 권한 흐름을 유지한다. systemMessage는 사용자 UI용. */
+function emitPass(warnings: string[]): void {
+  if (warnings.length === 0) {
+    emit({});
+    return;
+  }
+  const joined = warnings.join('\n');
+  emit({
+    systemMessage: joined,
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      additionalContext: joined,
+    },
+  });
 }
 
 // assistantTextFromLine / extractRecentAssistantTexts는 lib/transcript-parser.ts로
@@ -253,6 +274,31 @@ function main(): void {
         }
       }
 
+      // (A1.7) Bash 파일 쓰기 게이트 — 편집 게이트 우회 차단.
+      //   라이브 검증 실측: 추론 게이트에 8회 막힌 서브에이전트가 `cat > src/x.ts <<EOF`로
+      //   소스를 덮어썼다. Bash 쓰기는 read-before-edit·추론 게이트를 지나치고 PostToolUse의
+      //   편집 기록에도 남지 않아 리뷰 강제·자동 검증까지 통째로 무력화한다.
+      //   메인/서브에이전트 모두에 적용. env GOODBOY_BASH_WRITE_GATE=deny|warn|off (기본 deny).
+      if (toolName === 'Bash') {
+        const gate = envStr('GOODBOY_BASH_WRITE_GATE', 'deny');
+        if (gate !== 'off') {
+          const command =
+            typeof toolInput.command === 'string' ? (toolInput.command as string) : '';
+          const writes = classifyBashWrite(command, cwd);
+          if (writes.length > 0) {
+            const msg = bashWriteMessage(writes);
+            if (gate === 'warn') {
+              logGate(sessionId, 'bash-write', 'warn', `${writes.length}개`);
+              preWarnings.push(msg);
+            } else {
+              logGate(sessionId, 'bash-write', 'deny', `${writes.length}개`);
+              emit(deny(msg));
+              return;
+            }
+          }
+        }
+      }
+
       // (A2) H2-01 — 같은 파일 재-Read 게이트.
       //   최근 N턴 내 같은 파일을, 그 사이 mtime 변경도 편집도 없이 다시 Read하면 불필요한 재-Read로 본다.
       //   오탐 방지 예외(허용): 부분읽기(offset/limit), mtime 변경됨, 마지막 read 이후 편집됨.
@@ -361,16 +407,30 @@ function main(): void {
       // 다른 말("이제 파일을 수정하겠습니다")을 한 줄 더 하면 잘못 차단된다.
       // → 최근 N개 turn 중 ANY가 추론 섹션을 담고 있으면 통과시킨다.
       if (isEditTool) {
-        const recentTexts = extractRecentAssistantTexts(
-          input.transcript_path ?? '',
-          REASONING_GATE_WINDOW,
-        );
+        // 서브에이전트의 편집은 "서브에이전트가 쓴 글"로 판정해야 한다.
+        //   hook은 서브에이전트 호출에도 메인 transcript_path를 넘긴다 → 그대로 쓰면
+        //   서브가 ## 추론을 아무리 써도 메인의 글만 검사되어 영구 차단된다(실측: 9회 출력, 8회 차단).
+        //   전용 transcript를 못 찾으면 판정 불가 → fail-open(게이트 건너뜀).
+        const mainTranscript = input.transcript_path ?? '';
+        let reasoningTranscript: string | null = mainTranscript;
+        if (input.agent_id) {
+          reasoningTranscript = agentTranscriptPath(mainTranscript, input.agent_id);
+          if (reasoningTranscript === null) {
+            logGate(sessionId, 'reasoning', 'fail-open', 'subagent-transcript-not-found');
+          }
+        }
+        if (reasoningTranscript === null) {
+          // 서브에이전트 전용 기록을 찾지 못함 → 이 편집은 게이트하지 않는다.
+          emitPass(preWarnings);
+          return;
+        }
+        const recentTexts = extractRecentAssistantTexts(reasoningTranscript, REASONING_GATE_WINDOW);
         // recentTexts가 비면 두 경우를 구별한다(라이브 검증 발견 — 무언 편집 우회):
         //   (a) assistant 메시지 자체가 파싱됨(thinking/tool_use만 존재) → 모델이 아무 텍스트
         //       없이 편집하려는 것. 추론 섹션이 없음이 확정이므로 차단한다.
         //   (b) assistant 메시지를 하나도 못 찾음 → 파싱 실패/포맷 변경 가능성 → fail-open.
         if (recentTexts.length === 0) {
-          if (input.transcript_path && hasAssistantMessages(input.transcript_path)) {
+          if (hasAssistantMessages(reasoningTranscript)) {
             logGate(sessionId, 'reasoning', 'deny', 'silent-edit');
             emit(
               deny(
@@ -382,7 +442,7 @@ function main(): void {
             return;
           }
           // E1: transcript가 주어졌는데 assistant 메시지를 하나도 못 찾았으면 무력화 신호.
-          if (input.transcript_path) {
+          if (reasoningTranscript !== '') {
             logGate(sessionId, 'reasoning', 'fail-open', 'transcript-unparsed');
           }
         } else {
@@ -446,21 +506,7 @@ function main(): void {
         }
       }
 
-      if (preWarnings.length > 0) {
-        const joined = preWarnings.join('\n');
-        // additionalContext = 에이전트(서브에이전트 포함) 컨텍스트에 확실히 주입되는 채널.
-        //   permissionDecision은 설정하지 않아 정상 권한 흐름을 유지한다(비차단).
-        //   systemMessage는 사용자 UI 표시용으로 함께 남긴다.
-        emit({
-          systemMessage: joined,
-          hookSpecificOutput: {
-            hookEventName: 'PreToolUse',
-            additionalContext: joined,
-          },
-        });
-      } else {
-        emit({});
-      }
+      emitPass(preWarnings);
     })
     .catch((err) => {
       process.stderr.write(`[goodboy pre-tool-use] fatal: ${String(err)}\n`);

@@ -1,6 +1,7 @@
 // best-effort transcript 파싱. 공식 스키마 없음 — try/catch로 안전하게.
 
 import { existsSync, readFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 
 export interface TokenUsage {
   input: number;
@@ -208,6 +209,29 @@ export function extractRecentAssistantTexts(transcriptPath: string, n: number): 
     return texts;
   } catch {
     return [];
+  }
+}
+
+/** 서브에이전트의 전용 transcript 경로를 해석한다.
+ *
+ *  ⚠️ 라이브 검증에서 발견된 중대 버그 대응: hook은 서브에이전트의 도구 호출에도
+ *  메인 세션의 transcript_path를 넘겨준다. 그래서 추론 게이트가 "서브에이전트가 쓴 ## 추론"이
+ *  아니라 "메인이 쓴 글"을 검사했고, 서브에이전트는 추론 섹션을 9번 출력하고도 편집이
+ *  8번 전부 차단됐다(= 위임 편집이 원천 불가, 모델은 Bash 우회로 도피).
+ *
+ *  Claude Code 레이아웃(비공식): <proj>/<sessionUuid>.jsonl 옆에
+ *                               <proj>/<sessionUuid>/subagents/agent-<agentId>.jsonl
+ *  존재하지 않으면 null (호출부는 fail-open 하거나 게이트를 건너뛴다). */
+export function agentTranscriptPath(mainTranscript: string, agentId: string): string | null {
+  try {
+    if (!mainTranscript || !agentId) return null;
+    if (!/^[\w-]+$/.test(agentId)) return null; // path traversal 방지
+    const dir = dirname(mainTranscript);
+    const base = basename(mainTranscript).replace(/\.jsonl$/, '');
+    const p = join(dir, base, 'subagents', `agent-${agentId}.jsonl`);
+    return existsSync(p) ? p : null;
+  } catch {
+    return null;
   }
 }
 

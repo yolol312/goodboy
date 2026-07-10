@@ -30,19 +30,25 @@ function newSandbox(): { tmp: string; cwd: string; sessionId: string } {
   return { tmp, cwd, sessionId };
 }
 
-function seedSession(tmp: string, sessionId: string, turn: number, editFiles: string[]): void {
+function seedSession(
+  tmp: string,
+  sessionId: string,
+  turn: number,
+  editFiles: string[],
+  cwd = '/repo',
+): void {
   const safe = sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_');
   const dir = join(tmp, `goodboy-session-${safe}`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'turn.txt'), String(turn - 1), 'utf8');
   const ts = new Date().toISOString();
   const lines = editFiles
-    .map((f) => JSON.stringify({ file: resolve(f), turn, timestamp: ts }))
+    .map((f) => JSON.stringify({ file: resolve(cwd, f), turn, timestamp: ts }))
     .join('\n');
   writeFileSync(join(dir, 'edits.jsonl'), lines + '\n', 'utf8');
 }
 
-const DOC_FILE = '/repo/README.md'; // 필수 차원 0개 → 가정 게이트만 격리 평가
+const DOC_FILE = 'README.md'; // 필수 차원 0개 → 가정 게이트만 격리 평가
 
 function writeReview(cwd: string, unknownChecked: unknown[]): void {
   const reviewsDir = join(cwd, '.claude', 'reviews');
@@ -51,7 +57,7 @@ function writeReview(cwd: string, unknownChecked: unknown[]): void {
     join(reviewsDir, 'review.json'),
     JSON.stringify({
       timestamp: new Date(Date.now() + 60000).toISOString(),
-      reviewed_files: [resolve(DOC_FILE)],
+      reviewed_files: [resolve(cwd, DOC_FILE)],
       category: 'write-doc',
       findings: [],
       unknown_assumptions_checked: unknownChecked,
@@ -130,7 +136,7 @@ async function runStop(
 describe('Stop hook — 추측-리뷰 연동 (A2)', () => {
   test('추측 선언 + 리뷰의 가정 검증 비어 있음 → BLOCK', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [DOC_FILE]);
+    seedSession(tmp, sessionId, 1, [DOC_FILE], cwd);
     writeReview(cwd, []);
     const tp = writeTranscript(cwd, REASONING_WITH_SPECULATION);
     const out = await runStop(tmp, cwd, sessionId, tp);
@@ -141,7 +147,7 @@ describe('Stop hook — 추측-리뷰 연동 (A2)', () => {
 
   test('추측 선언 + 리뷰가 가정을 검증함 → PASS', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [DOC_FILE]);
+    seedSession(tmp, sessionId, 1, [DOC_FILE], cwd);
     writeReview(cwd, [
       { assumption: '백엔드 OAuth2 표준 응답', reasonable: true, note: '스펙 문서로 확인' },
     ]);
@@ -152,7 +158,7 @@ describe('Stop hook — 추측-리뷰 연동 (A2)', () => {
 
   test('추측/가정 없는 추론(사실만) → 가정 검증 없어도 PASS', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [DOC_FILE]);
+    seedSession(tmp, sessionId, 1, [DOC_FILE], cwd);
     writeReview(cwd, []);
     const tp = writeTranscript(cwd, REASONING_FACTS_ONLY);
     const out = await runStop(tmp, cwd, sessionId, tp);
@@ -161,7 +167,7 @@ describe('Stop hook — 추측-리뷰 연동 (A2)', () => {
 
   test('추론 섹션 자체가 없으면 → 검사 생략 (fail-open)', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [DOC_FILE]);
+    seedSession(tmp, sessionId, 1, [DOC_FILE], cwd);
     writeReview(cwd, []);
     const tp = writeTranscript(cwd, null);
     const out = await runStop(tmp, cwd, sessionId, tp);
@@ -170,7 +176,7 @@ describe('Stop hook — 추측-리뷰 연동 (A2)', () => {
 
   test('MAX_RETRIES escape: 3회째는 통과 + 사용자 알림', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [DOC_FILE]);
+    seedSession(tmp, sessionId, 1, [DOC_FILE], cwd);
     writeReview(cwd, []);
     mkdirSync(join(cwd, '.claude'), { recursive: true });
     writeFileSync(join(cwd, '.claude', '.goodboy-retry-count.txt'), '2', 'utf8');

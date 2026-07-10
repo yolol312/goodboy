@@ -29,7 +29,13 @@ function newSandbox(): { tmp: string; cwd: string; sessionId: string } {
 }
 
 /** Seed file-tracker session state (mirrors file-tracker.ts layout). */
-function seedSession(tmp: string, sessionId: string, turn: number, editFiles: string[]): void {
+function seedSession(
+  tmp: string,
+  sessionId: string,
+  turn: number,
+  editFiles: string[],
+  cwd = '/repo',
+): void {
   const safe = sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_');
   const dir = join(tmp, `goodboy-session-${safe}`);
   mkdirSync(dir, { recursive: true });
@@ -37,7 +43,7 @@ function seedSession(tmp: string, sessionId: string, turn: number, editFiles: st
   writeFileSync(join(dir, 'turn.txt'), String(turn - 1), 'utf8');
   const ts = new Date().toISOString();
   const lines = editFiles
-    .map((f) => JSON.stringify({ file: resolve(f), turn, timestamp: ts }))
+    .map((f) => JSON.stringify({ file: resolve(cwd, f), turn, timestamp: ts }))
     .join('\n');
   writeFileSync(join(dir, 'edits.jsonl'), lines + '\n', 'utf8');
 }
@@ -112,14 +118,14 @@ async function runStop(
   }
 }
 
-const CODE_FILE = '/repo/util.ts';
+const CODE_FILE = 'util.ts';
 const COMPACT_MARKER = '/compact';
 
 /** A passing review for util.ts: future-dated, covers performance dimension. */
-function passingReview(): Record<string, unknown> {
+function passingReview(cwd: string): Record<string, unknown> {
   return {
     timestamp: new Date(Date.now() + 60000).toISOString(),
-    reviewed_files: [resolve(CODE_FILE)],
+    reviewed_files: [resolve(cwd, CODE_FILE)],
     category: 'refactor',
     findings: [],
     unknown_assumptions_checked: [],
@@ -131,9 +137,9 @@ function passingReview(): Record<string, unknown> {
 describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
   test('context >= 50% → force BLOCK with auto-compact signal (stopReason + additionalContext)', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [CODE_FILE]);
+    seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
     // Even with a passing review on disk, force takes precedence.
-    writeReview(cwd, passingReview());
+    writeReview(cwd, passingReview(cwd));
     const transcript = writeTranscript(cwd, 120_000); // 60% of 200K
     const out = await runStop(tmp, cwd, sessionId, transcript);
 
@@ -149,7 +155,7 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
 
   test('force takes precedence over review-required block', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [CODE_FILE]);
+    seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
     // No review file → normally review-required block. But context >= 50% forces compact first.
     const transcript = writeTranscript(cwd, 130_000); // 65%
     const out = await runStop(tmp, cwd, sessionId, transcript);
@@ -162,7 +168,7 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
 
   test('context < 50% → NO force; review enforcement intact (review-required block)', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [CODE_FILE]);
+    seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
     const transcript = writeTranscript(cwd, 80_000); // 40% — below force threshold
     const out = await runStop(tmp, cwd, sessionId, transcript);
 
@@ -174,8 +180,8 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
 
   test('context < 50% + passing review → clean pass (no force fields)', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [CODE_FILE]);
-    writeReview(cwd, passingReview());
+    seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
+    writeReview(cwd, passingReview(cwd));
     const transcript = writeTranscript(cwd, 80_000); // 40%
     const out = await runStop(tmp, cwd, sessionId, transcript);
 
@@ -186,8 +192,8 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
 
   test('MAX_RETRIES escape: repeated force eventually passes with a warning (no infinite block)', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [CODE_FILE]);
-    writeReview(cwd, passingReview()); // so the escaped turn can actually pass review
+    seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
+    writeReview(cwd, passingReview(cwd)); // so the escaped turn can actually pass review
     const transcript = writeTranscript(cwd, 120_000); // 60% — always over threshold
 
     const out1 = await runStop(tmp, cwd, sessionId, transcript);
@@ -207,7 +213,7 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
 
   test('no transcript / unmeasurable → no force; review enforcement intact', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [CODE_FILE]);
+    seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
     const out = await runStop(tmp, cwd, sessionId); // no transcript
     expect(out.decision).toBe('block');
     expect(out.reason).toContain('리뷰');
@@ -217,8 +223,8 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
   // (3-A) 1M 지원 세대(opus-4-8)인데 [1m] 표식이 없으면 200K/1M 구분 불가 → 강제 보류.
   test('ambiguous 1M-capable model without marker (opus-4-8) → NO force', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [CODE_FILE]);
-    writeReview(cwd, passingReview()); // 강제가 없으면 passing review로 clean pass 되어야 함
+    seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
+    writeReview(cwd, passingReview(cwd)); // 강제가 없으면 passing review로 clean pass 되어야 함
     // 150K tokens: 200K 가정 시 75%(강제 대상)이지만, opus-4-8은 1M일 수 있어 미확정 → 강제 안 함.
     const transcript = writeTranscriptWithModel(cwd, 150_000, 'claude-opus-4-8');
     const out = await runStop(tmp, cwd, sessionId, transcript);
@@ -230,8 +236,8 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
   // (3-A) 같은 모호 모델이라도 GOODBOY_CONTEXT_LIMIT으로 한도를 명시하면 강제가 복구된다.
   test('ambiguous model but GOODBOY_CONTEXT_LIMIT set → force applies', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 1, [CODE_FILE]);
-    writeReview(cwd, passingReview());
+    seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
+    writeReview(cwd, passingReview(cwd));
     const transcript = writeTranscriptWithModel(cwd, 150_000, 'claude-opus-4-8');
     const out = await runStop(tmp, cwd, sessionId, transcript, { GOODBOY_CONTEXT_LIMIT: '200000' });
     // 200K로 확정 → 75% → 강제 block.

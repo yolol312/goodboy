@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 
 interface TrackRecord {
   file: string;
@@ -294,42 +294,56 @@ export function getRecentEdits(sessionId: string, withinTurns: number): string[]
  *  turn >= N 이어야 그 편집들을 포함한다. 이전 피처(turn < N)는 자연히 제외된다.
  *  커서 부재(첫 리뷰)는 cursorTurn=0 으로 호출 → 모든 편집 포함.
  *
- *  mainOnly=true(리뷰 스코프 기본): 서브에이전트가 만든 편집은 제외한다.
- *  ⚠️ 라이브 검증에서 발견된 자기참조 루프 때문이다 — 리뷰 서브에이전트가 성능 검토용
- *  임시 파일을 만들면 그 파일이 다시 "리뷰되지 않은 변경 파일"로 잡혀 리뷰가 무한히
- *  재요구된다. goodboy 설계상 편집·판단은 메인의 몫이고 서브에이전트는 탐색/검증용이므로,
- *  리뷰 대상은 메인 스코프 편집으로 한정하는 것이 옳다. */
+ *  withinDir(리뷰 스코프): 그 디렉터리 안의 파일만 센다.
+ *  ⚠️ 라이브 검증에서 발견된 자기참조 루프 대응 — 리뷰 서브에이전트가 성능 검토용
+ *  프로브 파일을 만들면 그 파일이 다시 "리뷰되지 않은 변경 파일"로 잡혀 리뷰가 무한히
+ *  재요구된다. 프로브는 `mktemp -d`(프로젝트 밖)에 만들도록 강제하므로, 리뷰 대상을
+ *  프로젝트 안으로 한정하면 루프가 끊긴다.
+ *  ⚠️ 에이전트별로 거르지 않는다 — 서브에이전트가 편집한 프로젝트 파일도 리뷰 대상이다.
+ *  (거르면 "편집을 서브에이전트에 시켜 리뷰를 건너뛰는" 우회가 생긴다.) */
 export function getEditsSince(
   sessionId: string,
   cursorTurn: number,
-  mainOnly = false,
+  withinDir?: string,
 ): string[] {
   const dir = ensureSessionDir(sessionId);
   const records = readRecords(dir, 'edits.jsonl');
   const out = new Set<string>();
   for (const r of records) {
     if (r.turn < cursorTurn) continue;
-    if (mainOnly && recordScope(r) !== MAIN_SCOPE) continue;
+    if (!isWithin(r.file, withinDir)) continue;
     out.add(r.file);
   }
   return Array.from(out);
 }
 
+/** withinDir가 주어지면 파일이 그 디렉터리 하위인지 판정. 없으면 항상 true. */
+function isWithin(file: string, withinDir?: string): boolean {
+  if (!withinDir) return true;
+  try {
+    const root = resolve(withinDir);
+    const f = resolve(file);
+    return f === root || f.startsWith(root + sep);
+  } catch {
+    return true; // 판정 불가 → 포함(fail-closed: 리뷰를 더 요구하는 쪽)
+  }
+}
+
 /** getEditsSince 대상 파일 중 가장 최근 편집의 ISO 타임스탬프. 없으면 null.
  *  리뷰 staleness 판정에 사용: 리뷰가 이 시각보다 더 나중이어야 한다.
- *  mainOnly는 getEditsSince와 동일 의미 — 두 함수의 대상 집합이 어긋나면
+ *  withinDir는 getEditsSince와 동일 의미 — 두 함수의 대상 집합이 어긋나면
  *  "커버리지는 통과인데 staleness만 실패"하는 교착이 생기므로 반드시 같이 넘긴다. */
 export function getLatestEditTimestampSince(
   sessionId: string,
   cursorTurn: number,
-  mainOnly = false,
+  withinDir?: string,
 ): string | null {
   const dir = ensureSessionDir(sessionId);
   const records = readRecords(dir, 'edits.jsonl');
   let latest: string | null = null;
   for (const r of records) {
     if (r.turn < cursorTurn) continue;
-    if (mainOnly && recordScope(r) !== MAIN_SCOPE) continue;
+    if (!isWithin(r.file, withinDir)) continue;
     if (latest === null || r.timestamp > latest) latest = r.timestamp;
   }
   return latest;
