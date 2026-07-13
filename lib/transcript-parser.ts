@@ -235,6 +235,46 @@ export function agentTranscriptPath(mainTranscript: string, agentId: string): st
   }
 }
 
+/** 한 transcript 줄이 assistant 엔트리인지(텍스트 유무 무관 — thinking/tool_use만 있어도 true). */
+function isAssistantLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (trimmed === '') return false;
+  try {
+    const obj = JSON.parse(trimmed) as Record<string, unknown>;
+    const type = obj.type as string | undefined;
+    const role = (obj.role ?? (obj.message && (obj.message as Record<string, unknown>).role)) as
+      | string
+      | undefined;
+    return type === 'assistant' || role === 'assistant';
+  } catch {
+    return false;
+  }
+}
+
+/** 마지막 "텍스트를 가진 assistant 엔트리" 이후에 나온 assistant 엔트리 수.
+ *  일부 하니스는 텍스트 블록 기록이 지연되어(thinking/tool_use는 즉시 기록)
+ *  추론 게이트가 최신 텍스트를 볼 수 없다. 이 수가 크면 "텍스트 플러시 지연 중"
+ *  신호로 보고 게이트를 fail-open 한다. 파싱 실패 시 0. */
+export function assistantEntriesAfterLastText(transcriptPath: string): number {
+  try {
+    if (!transcriptPath || !existsSync(transcriptPath)) return 0;
+    const lines = readFileSync(transcriptPath, 'utf8').split(/\r?\n/);
+    let count = 0;
+    for (const line of lines) {
+      if (!isAssistantLine(line)) continue;
+      if (assistantTextFromLine(line) !== null) {
+        // 텍스트를 가진 assistant 엔트리 → 이후 카운트를 리셋
+        count = 0;
+      } else {
+        count++;
+      }
+    }
+    return count;
+  } catch {
+    return 0;
+  }
+}
+
 /** transcript에 assistant 메시지가 하나라도 있는지(텍스트 유무 무관 — thinking/tool_use만 있어도 true).
  *  추론 게이트가 "파싱 실패(fail-open 대상)"와 "모델이 아무 텍스트 없이 편집 시도(차단 대상)"를
  *  구별하는 데 쓴다(라이브 검증에서 발견된 무언 편집 우회 대응). 실패는 false. */

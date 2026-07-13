@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
 // PreToolUse hook — 도구 강제 위임, Read-before-edit, 추론 게이트, 위험도 게이트
 
-import { existsSync, readFileSync, statSync } from 'node:fs';
-import { resolve as resolvePath } from 'node:path';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { join, resolve as resolvePath } from 'node:path';
 import {
+  assistantEntriesAfterLastText,
   bareCatDumpMessage,
   agentTranscriptPath,
   BASH_SEARCH_MESSAGE,
@@ -13,6 +14,7 @@ import {
   classifyBareCatDump,
   classifyBashSearch,
   classifyBashWrite,
+  ensureSessionDir,
   envInt,
   envStr,
   extractRecentAssistantTexts,
@@ -53,7 +55,45 @@ interface HookOutput {
 // 모델이 '## 추론' 섹션을 출력한 뒤 도구 호출 직전에 다른 말(예: "이제 파일을 수정하겠습니다")을
 // 한 줄 더 하더라도, 최근 N개 turn 안에 추론 섹션이 있으면 게이트를 통과시킨다.
 // N을 작게 유지해 한참 전의 stale 추론 섹션이 게이트를 만족시키지 못하게 한다.
-const REASONING_GATE_WINDOW = 3;
+// v0.26.1: 일부 하니스의 텍스트 플러시 지연(차단→재시도 안내 텍스트가 윈도우를 밀어냄)에
+//   대응해 기본값을 3 → 5로 올렸다. env GOODBOY_REASONING_WINDOW로 조정 가능.
+function reasoningGateWindow(): number {
+  return envInt('GOODBOY_REASONING_WINDOW', 5);
+}
+
+// 추론 게이트 escape 카운터 (v0.26.1, D 원칙 "탈출구 없는 게이트 금지"):
+//   섹션 미인식 deny가 같은 세션에서 3회 누적되면 경고와 함께 통과시킨다.
+//   transcript 텍스트 플러시가 지연되는 하니스에서 "한 번 더 시도하면 인식됩니다"가
+//   영원히 거짓이 되는 영구 차단을 끊는 탈출구다. 인식 성공 시 리셋.
+const REASONING_DENY_ESCAPE = 3;
+const REASONING_DENY_COUNT_FILE = 'reasoning-deny-count.txt';
+
+function readReasoningDenyCount(sessionId: string): number {
+  try {
+    const p = join(ensureSessionDir(sessionId), REASONING_DENY_COUNT_FILE);
+    if (!existsSync(p)) return 0;
+    const n = parseInt(readFileSync(p, 'utf8').trim(), 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writeReasoningDenyCount(sessionId: string, n: number): void {
+  try {
+    writeFileSync(join(ensureSessionDir(sessionId), REASONING_DENY_COUNT_FILE), String(n), 'utf8');
+  } catch {
+    // best-effort — 카운터 기록 실패가 게이트 동작을 막지 않는다.
+  }
+}
+
+function resetReasoningDenyCount(sessionId: string): void {
+  try {
+    if (readReasoningDenyCount(sessionId) > 0) writeReasoningDenyCount(sessionId, 0);
+  } catch {
+    // best-effort
+  }
+}
 
 // 도구 강제 위임 대상 — 이 도구들은 메인이 직접 쓰지 않고 서브에이전트에게 위임한다.
 const DELEGATED_TOOLS = new Set(['WebSearch', 'WebFetch', 'Grep', 'Glob']);
@@ -424,7 +464,18 @@ function main(): void {
           emitPass(preWarnings);
           return;
         }
-        const recentTexts = extractRecentAssistantTexts(reasoningTranscript, REASONING_GATE_WINDOW);
+        // (C-lag) 텍스트 플러시 지연 감지 (fail-open, v0.26.1) — 일부 하니스는 assistant
+        //   텍스트 블록의 transcript 기록이 수십 초~수 분 지연된다(thinking/tool_use는 즉시 기록).
+        //   그 상태에서는 모델이 '## 추론'을 아무리 출력해도 게이트가 옛 텍스트만 보게 되어
+        //   deny 메시지("한 번 더 시도하면 인식됩니다")가 거짓이 되는 영구 차단이 된다(실측).
+        //   마지막 텍스트 엔트리 이후 assistant 엔트리가 임계 이상 쌓였으면 "플러시 지연 중"으로
+        //   보고 이 게이트 블록만 건너뛴다(조기 return 없음 — 이후 위험도 게이트(D)는 유지).
+        const lagThreshold = envInt('GOODBOY_REASONING_LAG_ENTRIES', 8);
+        const lagEntries = assistantEntriesAfterLastText(reasoningTranscript);
+        if (lagEntries >= lagThreshold) {
+          logGate(sessionId, 'reasoning', 'fail-open', `text-flush-lag(${lagEntries})`);
+        } else {
+        const recentTexts = extractRecentAssistantTexts(reasoningTranscript, reasoningGateWindow());
         // recentTexts가 비면 두 경우를 구별한다(라이브 검증 발견 — 무언 편집 우회):
         //   (a) assistant 메시지 자체가 파싱됨(thinking/tool_use만 존재) → 모델이 아무 텍스트
         //       없이 편집하려는 것. 추론 섹션이 없음이 확정이므로 차단한다.
@@ -448,14 +499,32 @@ function main(): void {
         } else {
           const hasReasoning = recentTexts.some((t) => hasReasoningSection(t));
           if (!hasReasoning) {
-            logGate(sessionId, 'reasoning', 'deny');
-            emit(
-              deny(
-                "편집 전에 '## 추론' 섹션을 출력하세요. 4분류로: ### 사실 / ### 추론 / ### 가정 / ### 추측 ⚠️ . " +
-                  '주의: 지금 이 응답에서 방금 출력한 텍스트는 아직 인식되지 않습니다 — 이미 추론 섹션을 출력했다면 포기하지 말고 같은 도구 호출을 그대로 한 번 더 시도하세요(그때는 인식됩니다). (추론 가시화 정책)',
-              ),
-            );
-            return;
+            // (C-escape) 재시도 카운터 (v0.26.1, D 원칙 "탈출구 없는 게이트 금지") —
+            //   같은 세션에서 이 deny가 3회 누적되면 transcript 텍스트 기록 지연으로
+            //   판정 자체가 불가능한 상태로 보고, 경고와 함께 이번 편집을 통과시킨다.
+            const denyCount = readReasoningDenyCount(sessionId) + 1;
+            if (denyCount >= REASONING_DENY_ESCAPE) {
+              writeReasoningDenyCount(sessionId, 0);
+              logGate(sessionId, 'reasoning', 'warn', 'escape');
+              preWarnings.push(
+                '추론 게이트가 3회 차단 후에도 섹션을 인식하지 못해 이번 편집은 통과시킵니다. ' +
+                  'transcript 기록 지연 가능성 — ## 추론 섹션을 계속 출력해 주세요.',
+              );
+            } else {
+              writeReasoningDenyCount(sessionId, denyCount);
+              logGate(sessionId, 'reasoning', 'deny');
+              emit(
+                deny(
+                  "편집 전에 '## 추론' 섹션을 출력하세요. 4분류로: ### 사실 / ### 추론 / ### 가정 / ### 추측 ⚠️ . " +
+                    '주의: 지금 이 응답에서 방금 출력한 텍스트는 아직 인식되지 않습니다 — 이미 추론 섹션을 출력했다면 포기하지 말고 같은 도구 호출을 그대로 한 번 더 시도하세요(그때는 인식됩니다). ' +
+                    `(추론 가시화 정책, 재시도 ${denyCount}/${REASONING_DENY_ESCAPE})`,
+                ),
+              );
+              return;
+            }
+          } else {
+            // 섹션 인식 성공 → escape 카운터 리셋.
+            resetReasoningDenyCount(sessionId);
           }
           // (A1) 실질 검사: 제목만 찍고 내용이 텅 빈 '시늉 추론'은 통과 불가.
           //   윈도우 내 추론 섹션 중 하나라도 4분류에 실제 항목이 있으면 통과.
@@ -482,6 +551,7 @@ function main(): void {
             }
           }
         }
+        } // (C-lag) else 끝 — 플러시 지연이면 위 추론 게이트 블록 전체를 건너뛴다(위험도 게이트(D)는 계속 적용).
       }
 
       // (D) 위험도 게이트 — 변경 도구에만, 그리고 현재 세션에서 기록된 state에만 적용(2-B).

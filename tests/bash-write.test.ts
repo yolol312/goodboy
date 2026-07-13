@@ -50,6 +50,16 @@ describe('classifyBashWrite — 차단해야 하는 쓰기', () => {
     const r = denied('echo a > src/a.ts; echo b > src/b.ts');
     expect(r.sort()).toEqual(['/proj/src/a.ts', '/proj/src/b.ts']);
   });
+
+  test('따옴표로 감싼 대상 경로도 잡는다 (v0.26.1 스캐너 회귀 방지)', () => {
+    expect(denied('echo x > "src/a.ts"')).toEqual(['/proj/src/a.ts']);
+    expect(denied("echo x > 'src/a.ts'")).toEqual(['/proj/src/a.ts']);
+  });
+
+  test('heredoc이어도 같은 줄의 리다이렉션 대상은 잡는다 (본문만 제거)', () => {
+    expect(denied('cat <<EOF > src/a.ts\nif (x >= 1) y()\nEOF')).toEqual(['/proj/src/a.ts']);
+    expect(denied("cat <<'EOF' >> src/a.ts\nbody\nEOF")).toEqual(['/proj/src/a.ts']);
+  });
 });
 
 describe('classifyBashWrite — 허용해야 하는 것 (오탐 방지)', () => {
@@ -110,6 +120,39 @@ describe('classifyBashWrite — 허용해야 하는 것 (오탐 방지)', () => 
   test('빈/비문자열 입력', () => {
     expect(denied('')).toEqual([]);
     expect(classifyBashWrite(undefined as unknown as string, CWD)).toEqual([]);
+  });
+});
+
+describe('classifyBashWrite — v0.26.1 실측 오탐 4종 (전부 비차단이어야 한다)', () => {
+  test('오탐 1: 문자열 안 화살표 함수 `=>` (bun -e 인라인 스크립트)', () => {
+    expect(denied('bun -e "arr.map((x,i)=>x)"')).toEqual([]);
+    expect(denied("node -e 'items.filter(x=>x.ok)'")).toEqual([]);
+  });
+
+  test('오탐 2: heredoc 본문의 `>=` (본문은 데이터 — 명령으로 스캔 금지)', () => {
+    const cmd = "bun run check.ts <<'EOF'\nif (r.turn >= cursor) advance()\nEOF";
+    expect(denied(cmd)).toEqual([]);
+    // 인용 없는 종결자 heredoc도 동일.
+    expect(denied('cat <<EOF\nscore >= threshold\nEOF')).toEqual([]);
+  });
+
+  test('오탐 3: 작은따옴표 안 꺾쇠 (커밋 메시지의 이메일)', () => {
+    expect(denied("git commit -m 'fix: gate <noreply@anthropic.com>'")).toEqual([]);
+    expect(denied('git commit -m "fix: gate <noreply@anthropic.com>"')).toEqual([]);
+  });
+
+  test('오탐 4: heredoc 종결자를 쓰기 대상 파일로 오인', () => {
+    // 본문 마지막 줄이 `>`로 끝나면 옛 정규식은 다음 줄의 종결자(MSGEOF)를 타깃으로 봤다.
+    expect(denied('git commit -F - <<MSGEOF\nresult >\nMSGEOF')).toEqual([]);
+    expect(denied('cat <<MSGEOF\nfeat: a -> b\nMSGEOF')).toEqual([]);
+  });
+
+  test('종결자 없는 열린 heredoc은 나머지 전체를 본문으로 간주', () => {
+    expect(denied('cat <<EOF\necho x > src/a.ts')).toEqual([]);
+  });
+
+  test('herestring(<<<)은 heredoc이 아니다 — 이후 리다이렉션은 계속 잡는다', () => {
+    expect(denied('grep foo <<<"bar" > src/a.ts')).toEqual(['/proj/src/a.ts']);
   });
 });
 

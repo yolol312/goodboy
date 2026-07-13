@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 
 const HOOK = resolve(import.meta.dir, '..', 'hooks', 'pre-tool-use.ts');
 const tmpDirs: string[] = [];
@@ -14,8 +14,20 @@ afterEach(() => {
     } catch {
       // best-effort
     }
+    // escape 카운터 등 세션 상태 디렉터리도 함께 정리 (sessionIdFor 참조).
+    try {
+      rmSync(join(tmpdir(), `goodboy-session-${basename(d)}`), { recursive: true, force: true });
+    } catch {
+      // best-effort
+    }
   }
 });
+
+/** 테스트별 고유 세션 ID — escape 카운터(reasoning-deny-count.txt)가 세션 단위로
+ *  누적되므로, 세션을 공유하면 deny 테스트들이 서로 오염되어 비결정적이 된다. */
+function sessionIdFor(cwd: string): string {
+  return basename(cwd);
+}
 
 const REASONING_TEXT = [
   '## 추론',
@@ -53,7 +65,7 @@ function makeCwd(): string {
 /** Write(새 파일)로 hook 실행 → read-before-edit는 통과하고 추론 게이트만 평가됨. */
 async function runHook(cwd: string, transcriptPath: string | null): Promise<string> {
   const payload = JSON.stringify({
-    session_id: 'test',
+    session_id: sessionIdFor(cwd),
     cwd,
     transcript_path: transcriptPath ?? '',
     tool_name: 'Write',
@@ -110,12 +122,34 @@ describe('pre-tool-use reasoning gate (recent-window)', () => {
     expect(isBlocked(out)).toBe(true);
   });
 
-  test('stale reasoning OUTSIDE the window (4 back) => block', async () => {
+  test('stale reasoning OUTSIDE the window (6 back) => block', async () => {
     const cwd = makeCwd();
-    // 추론은 4번째 전 메시지 → window(N=3) 밖이므로 차단되어야 한다.
-    const tp = makeTranscript(cwd, [REASONING_TEXT, 'a', 'b', 'c']);
+    // 추론은 6번째 전 메시지 → window(기본 N=5, v0.26.1에서 3→5) 밖이므로 차단되어야 한다.
+    const tp = makeTranscript(cwd, [REASONING_TEXT, 'a', 'b', 'c', 'd', 'e']);
     const out = await runHook(cwd, tp);
     expect(isBlocked(out)).toBe(true);
+  });
+
+  test('reasoning 4 back is INSIDE the widened window (N=5) => allow (v0.26.1)', async () => {
+    const cwd = makeCwd();
+    // v0.26.0까지는 window=3이라 차단됐던 케이스 — 지연 하니스 대응으로 5로 확장.
+    const tp = makeTranscript(cwd, [REASONING_TEXT, 'a', 'b', 'c']);
+    const out = await runHook(cwd, tp);
+    expect(isBlocked(out)).toBe(false);
+  });
+
+  test('GOODBOY_REASONING_WINDOW로 윈도우 조정 가능', async () => {
+    const prev = process.env.GOODBOY_REASONING_WINDOW;
+    process.env.GOODBOY_REASONING_WINDOW = '2';
+    try {
+      const cwd = makeCwd();
+      const tp = makeTranscript(cwd, [REASONING_TEXT, 'a', 'b']);
+      const out = await runHook(cwd, tp);
+      expect(isBlocked(out)).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.GOODBOY_REASONING_WINDOW;
+      else process.env.GOODBOY_REASONING_WINDOW = prev;
+    }
   });
 
   test('unparseable / missing transcript => allow (fail-open)', async () => {
@@ -210,5 +244,106 @@ describe('pre-tool-use reasoning gate — 무언 편집 차단 (라이브 검증
     );
     const out = await runHook(cwd, path);
     expect(isBlocked(out)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v0.26.1 — 텍스트 플러시 지연 fail-open + escape 카운터 (결함 I)
+//   실측: 일부 하니스는 assistant 텍스트 블록 기록이 수십 초~수 분 지연되어
+//   (thinking/tool_use는 즉시 기록) 게이트가 옛 텍스트만 보고 영구 차단됐다.
+// ---------------------------------------------------------------------------
+
+/** thinking만 있는(텍스트 없는) assistant 줄 — 지연 하니스에서 즉시 기록되는 형태. */
+function thinkingOnlyLine(): string {
+  return JSON.stringify({
+    type: 'assistant',
+    message: { role: 'assistant', content: [{ type: 'thinking', thinking: '...' }] },
+  });
+}
+
+/** 텍스트 엔트리 1개(추론 없음) 뒤에 thinking-only 엔트리 n개가 붙은 지연형 transcript. */
+function makeLaggedTranscript(cwd: string, lagEntries: number): string {
+  const path = join(cwd, 'transcript.jsonl');
+  const lines = [assistantLine('추론 섹션이 없는 옛 텍스트')];
+  for (let i = 0; i < lagEntries; i++) lines.push(thinkingOnlyLine());
+  writeFileSync(path, lines.join('\n') + '\n', 'utf8');
+  return path;
+}
+
+describe('pre-tool-use reasoning gate — 텍스트 플러시 지연 fail-open (v0.26.1)', () => {
+  test('마지막 텍스트 뒤 assistant 엔트리 8개(기본 임계) => allow (fail-open)', async () => {
+    const cwd = makeCwd();
+    const tp = makeLaggedTranscript(cwd, 8);
+    const out = await runHook(cwd, tp);
+    expect(isBlocked(out)).toBe(false);
+  });
+
+  test('임계 미만(7개)이면 지연으로 보지 않고 정상 판정 => block', async () => {
+    const cwd = makeCwd();
+    const tp = makeLaggedTranscript(cwd, 7);
+    const out = await runHook(cwd, tp);
+    expect(isBlocked(out)).toBe(true);
+  });
+
+  test('GOODBOY_REASONING_LAG_ENTRIES로 임계 조정 가능', async () => {
+    const prev = process.env.GOODBOY_REASONING_LAG_ENTRIES;
+    process.env.GOODBOY_REASONING_LAG_ENTRIES = '4';
+    try {
+      const cwd = makeCwd();
+      const tp = makeLaggedTranscript(cwd, 4);
+      const out = await runHook(cwd, tp);
+      expect(isBlocked(out)).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.GOODBOY_REASONING_LAG_ENTRIES;
+      else process.env.GOODBOY_REASONING_LAG_ENTRIES = prev;
+    }
+  });
+});
+
+describe('pre-tool-use reasoning gate — escape 카운터 (v0.26.1, 탈출구 없는 게이트 금지)', () => {
+  test('섹션 미인식 deny 3회째에는 경고와 함께 통과, 이후 카운터 리셋', async () => {
+    const cwd = makeCwd();
+    // 지연 아님(텍스트만 존재) + 추론 섹션 없음 → 정상 deny 경로.
+    const tp = makeTranscript(cwd, ['추론 없는 텍스트']);
+
+    const first = await runHook(cwd, tp);
+    expect(isBlocked(first)).toBe(true);
+    expect(first).toContain('재시도 1/3');
+
+    const second = await runHook(cwd, tp);
+    expect(isBlocked(second)).toBe(true);
+    expect(second).toContain('재시도 2/3');
+
+    const third = await runHook(cwd, tp);
+    expect(isBlocked(third)).toBe(false);
+    expect(third).toContain('3회 차단 후에도');
+
+    // 카운터가 리셋됐으므로 4회째는 다시 1/3부터 deny.
+    const fourth = await runHook(cwd, tp);
+    expect(isBlocked(fourth)).toBe(true);
+    expect(fourth).toContain('재시도 1/3');
+  });
+
+  test('섹션 인식 성공 시 카운터 리셋 — 이후 deny는 1/3부터', async () => {
+    const cwd = makeCwd();
+    const noReason = makeTranscript(cwd, ['추론 없는 텍스트']);
+
+    const d1 = await runHook(cwd, noReason);
+    expect(isBlocked(d1)).toBe(true);
+    expect(d1).toContain('재시도 1/3');
+    const d2 = await runHook(cwd, noReason);
+    expect(isBlocked(d2)).toBe(true);
+    expect(d2).toContain('재시도 2/3');
+
+    // 섹션 인식 성공 → 리셋.
+    const okPath = join(cwd, 'ok.jsonl');
+    writeFileSync(okPath, assistantLine(REASONING_TEXT) + '\n', 'utf8');
+    const ok = await runHook(cwd, okPath);
+    expect(isBlocked(ok)).toBe(false);
+
+    // 다시 미인식 → 3회째가 아니라 1/3부터 시작해야 한다.
+    const d3 = await runHook(cwd, noReason);
+    expect(isBlocked(d3)).toBe(true);
+    expect(d3).toContain('재시도 1/3');
   });
 });

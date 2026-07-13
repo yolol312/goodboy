@@ -31,15 +31,102 @@ function unquote(t: string): string {
 
 const TOKEN = `"[^"]*"|'[^']*'|[^\\s;|&<>]+`;
 
-/** 리다이렉션(> >> &> 2>) 타깃 */
+/** heredoc 본문 제거 전처리 (v0.26.1, 실측 오탐 대응).
+ *
+ *  heredoc 본문은 데이터인데 명령으로 스캔하면 본문의 `>=`·`->` 등이 리다이렉션으로
+ *  오탐되고, 종결자(EOF 등)가 쓰기 대상 파일로 오인된다(전부 실측). `<<DELIM`을 찾아
+ *  그 지점부터 "줄 전체가 종결자와 일치하는 줄"까지를 제거한다. 단 `<<DELIM`이 있던
+ *  줄의 나머지(`cat <<EOF > src/a.ts`의 `> src/a.ts`)는 명령이므로 스캔 대상으로 남긴다.
+ *  종결자를 못 찾으면(열린 heredoc) 나머지 전체를 본문으로 간주한다.
+ *  `<<<`(herestring)는 heredoc이 아니다. `<<`는 리다이렉션 연산자로 취급하지 않는다. */
+function stripHeredocs(command: string): string {
+  const lines = command.split('\n');
+  const out: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    let line = lines[i] ?? '';
+    // 한 줄에 여러 heredoc(`cat <<A <<B`)이 있을 수 있어 반복 수집.
+    const delims: Array<{ delim: string; stripTabs: boolean }> = [];
+    let m: RegExpExecArray | null;
+    while ((m = /(?<!<)<<(?!<)(-?)\s*(['"]?)(\w+)\2/.exec(line)) !== null) {
+      delims.push({ delim: m[3] ?? '', stripTabs: m[1] === '-' });
+      // 연산자+종결자 표기를 명령 텍스트에서 제거(공백으로 치환) — 줄의 나머지는 유지.
+      line = line.slice(0, m.index) + ' ' + line.slice(m.index + m[0].length);
+    }
+    out.push(line);
+    i++;
+    // 본문 스킵: 각 heredoc 순서대로, 줄 전체가 종결자와 일치하는 줄까지 소비.
+    for (const { delim, stripTabs } of delims) {
+      while (i < lines.length) {
+        const body = lines[i] ?? '';
+        const cmp = stripTabs ? body.replace(/^\t+/, '') : body;
+        i++;
+        if (cmp === delim) break;
+      }
+    }
+  }
+  return out.join('\n');
+}
+
+/** 리다이렉션(> >> &> 2>) 타깃 — 따옴표 상태를 추적하는 문자 단위 스캐너 (v0.26.1).
+ *
+ *  기존 정규식 방식은 따옴표 안의 꺾쇠(`git commit -m '<a@b.com>'`), 화살표 함수(`=>`),
+ *  비교 연산자(`>=`)를 리다이렉션으로 오탐했다(전부 실측). 규칙:
+ *   - 작은따옴표/큰따옴표 안의 `>`는 무시한다.
+ *   - 직전 문자가 `=`인 `>`(화살표 함수 `=>`), 직후 문자가 `=`인 `>`(비교 `>=`)는 제외.
+ *   - fd 복제(`2>&1`, `>&2`)는 대상이 `&`로 시작하므로 제외.
+ *   - 대상 토큰은 따옴표를 벗겨 추출한다(따옴표로 감싼 대상 경로의 정상 탐지는 유지). */
 function redirectTargets(command: string): string[] {
   const out: string[] = [];
-  // 앞에 <나 >가 붙지 않은 > 또는 >> (2>, &> 포함). `>&2`, `2>&1`은 타깃이 &로 시작 → 제외.
-  const re = new RegExp(`(?:^|[^<>&])(?:\\d?&?>{1,2})\\s*(${TOKEN})`, 'g');
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(command)) !== null) {
-    const t = unquote(m[1] ?? '');
-    if (t !== '' && !isFdTarget(t)) out.push(t);
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (ch === '\\' && !inSingle) {
+      i++; // 백슬래시 이스케이프 — 다음 문자는 리터럴
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (inSingle || inDouble) continue;
+    if (ch !== '>') continue;
+    if (i > 0 && command[i - 1] === '=') continue; // 화살표 함수 `=>`
+    let j = i + 1;
+    if (command[j] === '>') j++; // `>>` append
+    if (command[j] === '=') {
+      i = j; // 비교 연산자 `>=`
+      continue;
+    }
+    if (command[j] === '&') {
+      i = j; // fd 복제 `>&2`, `2>&1`
+      continue;
+    }
+    while (command[j] === ' ' || command[j] === '\t' || command[j] === '\n') j++;
+    // 대상 토큰 추출(따옴표 인식)
+    let target = '';
+    const q = command[j];
+    if (q === '"' || q === "'") {
+      j++;
+      while (j < command.length && command[j] !== q) {
+        target += command[j];
+        j++;
+      }
+      j++; // 닫는 따옴표
+    } else {
+      while (j < command.length && !/[\s;|&<>]/.test(command[j] ?? '')) {
+        target += command[j];
+        j++;
+      }
+    }
+    // 프로세스 치환 `>(cmd)`은 파일 쓰기가 아니다.
+    if (target !== '' && !isFdTarget(target) && !target.startsWith('(')) out.push(target);
+    i = j - 1;
   }
   return out;
 }
@@ -127,11 +214,13 @@ export function classifyBashWrite(command: string, cwd: string): string[] {
   if (typeof command !== 'string' || command.trim() === '') return [];
   let targets: string[];
   try {
+    // heredoc 본문(데이터)을 제거한 명령 텍스트만 스캔한다 — 본문의 연산자 오탐 방지.
+    const scanned = stripHeredocs(command);
     targets = [
-      ...redirectTargets(command),
-      ...teeTargets(command),
-      ...sedInPlaceTargets(command),
-      ...ddTargets(command),
+      ...redirectTargets(scanned),
+      ...teeTargets(scanned),
+      ...sedInPlaceTargets(scanned),
+      ...ddTargets(scanned),
     ];
   } catch {
     return [];
