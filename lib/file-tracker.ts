@@ -250,6 +250,11 @@ export function clearReadRecords(sessionId: string): void {
 
 /** 이번 턴 안에 Edit/Write로 변경된 파일 기록. agent는 D2 스코프용(선택). */
 export function recordEdit(sessionId: string, filePath: string, turn: number, agent?: string): void {
+  // (B) goodboy 자체 산출물은 기록 자체를 남기지 않는다 — 리뷰 JSON을 Write 툴로
+  //   쓰면 산출물이 스스로 리뷰 대상이 되는 순환이 생긴다(라이브 데드락 재현).
+  //   프로브 패턴(C)/존재 필터(A)는 기록 시점에 적용하지 않는다 — 프로브 파일도
+  //   read-before-edit 미러(FRICTION #4) 등 리뷰 밖 소비자에게는 유효한 기록이다.
+  if (isGoodboyArtifact(filePath)) return;
   const dir = ensureSessionDir(sessionId);
   const record: TrackRecord = {
     file: normalize(filePath),
@@ -295,10 +300,14 @@ export function getRecentEdits(sessionId: string, withinTurns: number): string[]
  *  커서 부재(첫 리뷰)는 cursorTurn=0 으로 호출 → 모든 편집 포함.
  *
  *  withinDir(리뷰 스코프): 그 디렉터리 안의 파일만 센다.
- *  ⚠️ 라이브 검증에서 발견된 자기참조 루프 대응 — 리뷰 서브에이전트가 성능 검토용
- *  프로브 파일을 만들면 그 파일이 다시 "리뷰되지 않은 변경 파일"로 잡혀 리뷰가 무한히
- *  재요구된다. 프로브는 `mktemp -d`(프로젝트 밖)에 만들도록 강제하므로, 리뷰 대상을
- *  프로젝트 안으로 한정하면 루프가 끊긴다.
+ *  ⚠️ 라이브 검증에서 발견된 자기참조 루프/영구 데드락 대응은 inReviewScope의 3중
+ *  필터로 처리한다(mktemp 강제 하나에만 의존하지 않는다 — 그 불변식은 review-changes
+ *  프롬프트에만 있어 다른 서브에이전트에는 적용되지 않았다):
+ *    (A) 삭제된 파일(존재하지 않음)은 리뷰 에이전트가 읽을 수 없어 커버리지가 영구
+ *        실패하므로 제외(existsSync). (B) goodboy 자체 산출물(.claude/reviews 등)은
+ *        제외해 리뷰 JSON이 스스로 리뷰 대상이 되는 순환을 끊는다. (C) __probe* 등
+ *        프로브/생성물 패턴은 프로젝트 안에 남아도 제외(GOODBOY_REVIEW_IGNORE로 확장).
+ *  두 조회 함수가 반드시 같은 필터를 써야 "커버리지 통과/staleness 실패" 교착이 없다.
  *  ⚠️ 에이전트별로 거르지 않는다 — 서브에이전트가 편집한 프로젝트 파일도 리뷰 대상이다.
  *  (거르면 "편집을 서브에이전트에 시켜 리뷰를 건너뛰는" 우회가 생긴다.) */
 export function getEditsSince(
@@ -311,7 +320,7 @@ export function getEditsSince(
   const out = new Set<string>();
   for (const r of records) {
     if (r.turn < cursorTurn) continue;
-    if (!isWithin(r.file, withinDir)) continue;
+    if (!inReviewScope(r.file, withinDir)) continue;
     out.add(r.file);
   }
   return Array.from(out);
@@ -329,6 +338,75 @@ function isWithin(file: string, withinDir?: string): boolean {
   }
 }
 
+// ── 리뷰 스코프 제외 규칙 (라이브 데드락 대응) ─────────────────────────────
+//  실사용 세션에서 "존재하지 않는 파일이 리뷰 대상으로 남아 Stop 게이트가 영구
+//  차단되는" 데드락이 재현됐다(v0.25.0). 원인:
+//   (A) 삭제된 파일이 edits.jsonl에 남는다(단조 증가 집합) → 리뷰 에이전트가 읽을
+//       수 없어 커버리지 영구 실패.
+//   (B) 리뷰 산출물(.claude/reviews/*.json)을 Write 툴로 쓰면 그 파일이 다시 리뷰
+//       대상이 된다(자기참조 무한 후퇴).
+//   (C) 프로브 파일의 mktemp 강제는 review-changes 프롬프트에만 있는 불변식이라,
+//       다른 서브에이전트가 만든 __probe_* 파일이 프로젝트 안에 남는다.
+//  대응: 조회 함수 2개(getEditsSince/getLatestEditTimestampSince)에 동일한 필터를
+//  적용한다. 두 함수의 대상 집합이 어긋나면 "커버리지 통과/staleness 실패" 교착이
+//  생기므로 반드시 같은 필터를 양쪽에 쓴다.
+
+/** goodboy 자체 산출물 경로(자기참조 방지). 기록 시점(recordEdit)에도 제외한다. */
+const GOODBOY_ARTIFACT_SEGMENTS = [
+  `${sep}.claude${sep}reviews${sep}`,
+  `${sep}.claude${sep}.goodboy`,
+  `${sep}.claude${sep}status.json`,
+  `${sep}.claude${sep}gate-log.jsonl`,
+];
+
+export function isGoodboyArtifact(filePath: string): boolean {
+  try {
+    const f = resolve(filePath);
+    return GOODBOY_ARTIFACT_SEGMENTS.some((s) => f.includes(s));
+  } catch {
+    return false;
+  }
+}
+
+/** (C) 프로브/생성물 패턴 제외. GOODBOY_REVIEW_IGNORE(콤마 구분 부분문자열)로 확장. */
+const DEFAULT_IGNORE_RE = /(^|\/)__probe[^/]*$|\/(node_modules|\.venv|dist|build|\.git)\//;
+
+function isIgnoredPattern(filePath: string): boolean {
+  try {
+    const f = resolve(filePath).split(sep).join('/');
+    if (DEFAULT_IGNORE_RE.test(f)) return true;
+    const extra = process.env.GOODBOY_REVIEW_IGNORE;
+    if (typeof extra === 'string' && extra.trim() !== '') {
+      for (const part of extra.split(',')) {
+        const p = part.trim();
+        if (p !== '' && f.includes(p)) return true;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/** (A) 삭제된 파일 제외 — 리뷰 에이전트가 읽을 수 없어 커버리지가 영구 실패한다.
+ *  존재 검사는 git checkout/스크립트 삭제/서브에이전트 rm을 한 번에 덮는다. */
+function isReviewable(filePath: string): boolean {
+  try {
+    return existsSync(filePath);
+  } catch {
+    return false;
+  }
+}
+
+/** 리뷰 스코프 공통 필터 — 두 조회 함수가 반드시 함께 쓴다. */
+function inReviewScope(file: string, withinDir?: string): boolean {
+  if (!isWithin(file, withinDir)) return false;
+  if (isGoodboyArtifact(file)) return false; // (B)
+  if (isIgnoredPattern(file)) return false; // (C)
+  if (!isReviewable(file)) return false; // (A)
+  return true;
+}
+
 /** getEditsSince 대상 파일 중 가장 최근 편집의 ISO 타임스탬프. 없으면 null.
  *  리뷰 staleness 판정에 사용: 리뷰가 이 시각보다 더 나중이어야 한다.
  *  withinDir는 getEditsSince와 동일 의미 — 두 함수의 대상 집합이 어긋나면
@@ -343,7 +421,7 @@ export function getLatestEditTimestampSince(
   let latest: string | null = null;
   for (const r of records) {
     if (r.turn < cursorTurn) continue;
-    if (!isWithin(r.file, withinDir)) continue;
+    if (!inReviewScope(r.file, withinDir)) continue;
     if (latest === null || r.timestamp > latest) latest = r.timestamp;
   }
   return latest;

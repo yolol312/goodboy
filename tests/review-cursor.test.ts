@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
@@ -64,39 +64,53 @@ function review(partial: Partial<ReviewResult>): ReviewResult {
   };
 }
 
+/** temp cwd에 실제 파일을 만들고 절대경로를 돌려준다.
+ *  (A) 리뷰 스코프의 existsSync 필터를 통과시키기 위해 실존 파일을 전제한다. */
+function touch(cwd: string, name: string): string {
+  const abs = resolve(cwd, name);
+  writeFileSync(abs, '', 'utf8');
+  return abs;
+}
+
 describe('getEditsSince', () => {
   // Cursor semantics: getEditsSince(cursorTurn) returns edits with turn >= cursorTurn.
   // The cursor stores the turn of the accepting Stop; edits the agent makes afterward
   // are recorded at that same turn (turn only increments inside Stop), so >= is correct.
   test('returns files edited at or after the cursor turn, excluding earlier features', () => {
     const s = newSession();
+    const cwd = newCwd();
     // turn 1: feature-1 files (the accepting Stop set turn=1 and the cursor=1)
-    recordEdit(s, '/repo/tsconfig.json', 1);
-    recordEdit(s, '/repo/feature1.ts', 1);
+    recordEdit(s, touch(cwd, 'tsconfig.json'), 1);
+    recordEdit(s, touch(cwd, 'feature1.ts'), 1);
     // turn 2: feature-2 files (next accepting Stop would set cursor=2)
-    recordEdit(s, '/repo/feature2.ts', 2);
-    recordEdit(s, '/repo/feature2.test.ts', 2);
+    const f2 = touch(cwd, 'feature2.ts');
+    const f2t = touch(cwd, 'feature2.test.ts');
+    recordEdit(s, f2, 2);
+    recordEdit(s, f2t, 2);
 
     const sinceTurn2 = getEditsSince(s, 2).map((f) => resolve(f)).sort();
-    expect(sinceTurn2).toEqual(
-      [resolve('/repo/feature2.ts'), resolve('/repo/feature2.test.ts')].sort(),
-    );
+    expect(sinceTurn2).toEqual([f2, f2t].sort());
     // tsconfig.json from feature-1 is NOT included (BUG #2 scope fix)
-    expect(sinceTurn2).not.toContain(resolve('/repo/tsconfig.json'));
+    expect(sinceTurn2).not.toContain(resolve(cwd, 'tsconfig.json'));
   });
 
   test('cursorTurn 0 => all session edits (first review / cursor absent)', () => {
     const s = newSession();
-    recordEdit(s, '/repo/a.ts', 1);
-    recordEdit(s, '/repo/b.ts', 2);
+    const cwd = newCwd();
+    const a = touch(cwd, 'a.ts');
+    const b = touch(cwd, 'b.ts');
+    recordEdit(s, a, 1);
+    recordEdit(s, b, 2);
     const all = getEditsSince(s, 0).map((f) => resolve(f)).sort();
-    expect(all).toEqual([resolve('/repo/a.ts'), resolve('/repo/b.ts')].sort());
+    expect(all).toEqual([a, b].sort());
   });
 
   test('dedupes the same file edited multiple times', () => {
     const s = newSession();
-    recordEdit(s, '/repo/a.ts', 2);
-    recordEdit(s, '/repo/a.ts', 3);
+    const cwd = newCwd();
+    const a = touch(cwd, 'a.ts');
+    recordEdit(s, a, 2);
+    recordEdit(s, a, 3);
     expect(getEditsSince(s, 2)).toHaveLength(1);
   });
 });
@@ -104,16 +118,19 @@ describe('getEditsSince', () => {
 describe('getLatestEditTimestampSince', () => {
   test('returns the max timestamp among edits at/after the cursor turn', () => {
     const s = newSession();
-    recordEdit(s, '/repo/a.ts', 1); // before cursor
-    recordEdit(s, '/repo/b.ts', 2);
+    const cwd = newCwd();
+    recordEdit(s, touch(cwd, 'a.ts'), 1); // before cursor
+    const b = touch(cwd, 'b.ts');
+    recordEdit(s, b, 2);
     const ts = getLatestEditTimestampSince(s, 2);
     expect(ts).not.toBeNull();
-    expect(getEditsSince(s, 2)).toEqual([resolve('/repo/b.ts')]);
+    expect(getEditsSince(s, 2)).toEqual([b]);
   });
 
   test('null when no edits at/after the cursor turn', () => {
     const s = newSession();
-    recordEdit(s, '/repo/a.ts', 1);
+    const cwd = newCwd();
+    recordEdit(s, touch(cwd, 'a.ts'), 1);
     expect(getLatestEditTimestampSince(s, 5)).toBeNull();
   });
 });
@@ -148,18 +165,20 @@ describe('review cursor persistence', () => {
 describe('BUG #2 regression: per-feature scope', () => {
   test('review covering only feature-2 files passes when changedFiles is scoped to feature-2', () => {
     const s = newSession();
+    const cwd = newCwd();
     // feature-1 (turn 1) then feature-2 (turn 2)
-    recordEdit(s, '/repo/tsconfig.json', 1);
-    recordEdit(s, '/repo/feature2.ts', 2);
+    recordEdit(s, touch(cwd, 'tsconfig.json'), 1);
+    recordEdit(s, touch(cwd, 'feature2.ts'), 2);
 
     const changed = getEditsSince(s, 2); // cursor at turn 2 => only feature-2
     const latest = getLatestEditTimestampSince(s, 2);
 
-    // review only lists feature-2 file, written AFTER the edit
+    // review only lists feature-2 file, written AFTER the edit.
+    //   near-future(now+60s): staleness는 통과하되 미래-거부(스큐 5분) 안에 든다(E 보안).
     const r = validateReview(
       review({
         reviewed_files: changed,
-        timestamp: '2999-01-01T00:00:00Z', // definitely newer than the just-recorded edit
+        timestamp: new Date(Date.now() + 60_000).toISOString(),
       }),
       changed,
       latest,

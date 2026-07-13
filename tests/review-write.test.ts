@@ -73,14 +73,18 @@ describe('review-write CLI (#7)', () => {
     expect(code).toBe(0);
     const out = JSON.parse(stdout) as { ok: boolean; path: string; timestamp: string };
     expect(out.ok).toBe(true);
-    expect(out.timestamp).toBe('2026-05-11T14:23:00Z');
+    // (E 보안) cli는 호출자 timestamp를 무시하고 항상 서버 시각을 기록한다 →
+    //   반환 timestamp는 유효 ISO이고 제공값과 무관해야 한다(미래 시각 게이트 우회 차단).
+    expect(Number.isNaN(Date.parse(out.timestamp))).toBe(false);
+    expect(out.timestamp).not.toBe('2026-05-11T14:23:00Z');
 
-    // Filename: colons replaced by dashes
+    // Filename derives from the (server) timestamp; verify it round-trips.
     const reviewsDir = join(cwd, '.claude', 'reviews');
     const files = readdirSync(reviewsDir);
-    expect(files).toContain('2026-05-11T14-23-00Z.json');
+    const expectedName = `${timestampToFilename(out.timestamp)}.json`;
+    expect(files).toContain(expectedName);
     // macOS는 $TMPDIR을 /private로 symlink resolve할 수 있어 prefix가 다를 수 있다.
-    expect(out.path.endsWith('/.claude/reviews/2026-05-11T14-23-00Z.json')).toBe(true);
+    expect(out.path.endsWith(`/.claude/reviews/${expectedName}`)).toBe(true);
 
     // findRecentReviewFile can load it (withinMinutes large because of fixed timestamp -> use mtime, fresh)
     const loaded = findRecentReviewFile(reviewsDir, 60);

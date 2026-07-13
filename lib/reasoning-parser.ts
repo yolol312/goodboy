@@ -18,7 +18,9 @@ function emptyBucket(): Bucket {
 
 /** 서브헤딩 라벨을 4분류 키로 매핑. 한국어/영어 모두 지원. */
 function mapSubheading(label: string): keyof Bucket | null {
-  const l = label.trim().toLowerCase();
+  // 꼬리 장식 제거: 게이트 안내문이 "### 추측 ⚠️"처럼 이모지를 붙이도록 지시하므로,
+  //   라벨 비교 전 후행 비문자/비숫자(이모지·공백·기호)를 잘라 정확 매칭이 깨지지 않게 한다.
+  const l = label.trim().toLowerCase().replace(/[^\p{L}\p{N}]+$/u, '').trim();
   if (l === '사실' || l === 'facts' || l === 'fact') return 'facts';
   if (l === '추론' || l === 'inferences' || l === 'inference') return 'inferences';
   if (l === '가정' || l === 'assumptions' || l === 'assumption') return 'assumptions';

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 const STOP_HOOK = resolve(import.meta.dir, '..', 'hooks', 'stop.ts');
 const tmpDirs: string[] = [];
@@ -46,6 +46,13 @@ function seedSession(
     .map((f) => JSON.stringify({ file: resolve(cwd, f), turn, timestamp: ts }))
     .join('\n');
   writeFileSync(join(dir, 'edits.jsonl'), lines + '\n', 'utf8');
+  // (A) 리뷰 스코프는 실존 파일만 대상으로 한다 — 편집 대상 파일을 실제로 만들어
+  //   getEditsSince의 existsSync 필터를 통과시킨다(프로덕션 필터 약화 대신 픽스처를 현실화).
+  for (const f of editFiles) {
+    const abs = resolve(cwd, f);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, '', 'utf8');
+  }
 }
 
 function writeReview(cwd: string, review: Record<string, unknown>): void {

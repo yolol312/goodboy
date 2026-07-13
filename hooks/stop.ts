@@ -79,6 +79,11 @@ const COMPACT_FORCE_COUNT_FILE = '.goodboy-compact-force-count.txt';
 // 서로의 재시도 기회를 깎지 않게 한다(리뷰/compact 카운터와 독립).
 const VALIDATION_COUNT_FILE = '.goodboy-validation-retry-count.txt';
 
+// (D) validateReview 실패 게이트 재시도 카운터. 다른 게이트와 분리 관리.
+//   v0.25.0까지 이 게이트만 escape가 없어 영구 데드락을 만들었다(라이브 재현:
+//   삭제된 프로브/리뷰 산출물이 유령 파일로 남아 커버리지가 영원히 실패).
+const REVIEW_VALIDATE_COUNT_FILE = '.goodboy-review-validate-retry-count.txt';
+
 // 이번 Stop 실행에서 사용자에게 보일 토큰-습관 경고들(H1-01 긴 세션 경고, H1-03 강제 escape 통지).
 // emit()이 모든 출력 경로(block/pass)의 systemMessage에 이 경고들을 덧붙인다 —
 // 이 권고들은 리뷰 통과/차단과 독립적이어야 하기 때문.
@@ -562,13 +567,31 @@ function main(): void {
         }
       })();
       if (!v.ok) {
-        logGate(sessionId, 'review', 'deny', v.reason ?? 'invalid');
+        const count = readRetryCount(claudeDir, REVIEW_VALIDATE_COUNT_FILE) + 1;
+        if (count < MAX_RETRIES) {
+          writeRetryCount(claudeDir, count, REVIEW_VALIDATE_COUNT_FILE);
+          logGate(sessionId, 'review', 'deny', v.reason ?? 'invalid');
+          emit({
+            decision: 'block',
+            reason: `리뷰 검증 실패: ${v.reason ?? '알 수 없는 이유'}. /review-changes 를 다시 실행하세요. (재시도 ${count}/${MAX_RETRIES})`,
+          });
+          return;
+        }
+        // 한계 초과 → 통과 + 사용자 알림. 커서 전진이 핵심 — 전진 없이는 다음 턴에
+        // 같은 유령 파일 집합으로 재차단된다(v0.25.0 영구 데드락의 구조적 원인).
+        resetRetryCount(claudeDir, REVIEW_VALIDATE_COUNT_FILE);
+        writeReviewCursor(cwd, getCurrentTurn(sessionId));
+        statusSnapshot.reviewPending = false;
+        logGate(sessionId, 'review', 'warn', 'validate-escape');
         emit({
-          decision: 'block',
-          reason: `리뷰 검증 실패: ${v.reason ?? '알 수 없는 이유'}. /review-changes 를 다시 실행하세요.`,
+          systemMessage:
+            `리뷰 검증이 ${MAX_RETRIES}회 차단 후에도 실패해 이번 턴은 통과시킵니다. ` +
+            `사용자 확인이 필요합니다. (사유: ${v.reason ?? '알 수 없음'})`,
         });
         return;
       }
+      // 검증 통과 → 이 게이트의 카운터 리셋(다음 실패는 새로 3회 기회).
+      resetRetryCount(claudeDir, REVIEW_VALIDATE_COUNT_FILE);
 
       // (F) 재시도 카운터 (high severity) — claudeDir은 (B5)에서 확보됨.
       const highSev = highSeverityFindings(result);

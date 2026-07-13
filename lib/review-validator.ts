@@ -73,8 +73,12 @@ export interface ValidationResult {
  *  - changedFiles가 비어있으면 verdict만 검사
  *  - latestEditTimestamp(ISO)가 주어지면 BUG #1 방지: 리뷰가 그보다 더 나중이어야 한다.
  *    staleness 판정에는 ReviewResult.timestamp(리뷰가 자체 기록한 작성 시각)를 쓴다.
- *    이유: mtime은 복사/이동 시 보존되거나 touch로 위조되기 쉽지만, timestamp는
- *    리뷰 실행이 "이 시점의 코드를 봤다"는 의미적 선언이라 더 신뢰할 수 있다.
+ *  ⚠️ 신뢰 모델(E 보안): timestamp는 리뷰 에이전트가 쓰는 필드라 위조 가능하다.
+ *    staleness는 하한만 보므로 미래 시각을 넣으면 "앞으로 생길 편집까지 이미 리뷰됨"이
+ *    되어 게이트가 우회된다. 이를 2겹으로 막는다:
+ *      (1) 쓰기 시점 — cli.ts가 호출자 timestamp를 무시하고 항상 서버 시각을 기록한다.
+ *      (2) 검증 시점 — 여기서 timestamp가 유효한 ISO인지, 미래(+허용 스큐 초과)가
+ *          아닌지 확인하고, 미래면 게이트 우회로 간주해 거부한다.
  */
 export function validateReview(
   result: ReviewResult,
@@ -99,6 +103,20 @@ export function validateReview(
     return {
       ok: false,
       reason: `리뷰되지 않은 변경 파일 ${missing.length}개: ${missing.slice(0, 3).join(', ')}${missing.length > 3 ? ' …' : ''}`,
+    };
+  }
+  // (E 보안) timestamp 자체 검증 — staleness는 하한만 보므로, 미래 시각을 쓰면
+  //   "앞으로 생길 편집까지 이미 리뷰됨"으로 게이트가 우회된다(라이브에서 시도 관측).
+  //   쓰기 시점(cli.ts: 서버 시각 강제)과 검증 시점(여기) 두 겹으로 방어한다.
+  const SKEW_MS = 5 * 60_000; // 정상적인 시계 오차 허용치
+  const reviewMs = typeof result.timestamp === 'string' ? Date.parse(result.timestamp) : NaN;
+  if (!Number.isFinite(reviewMs)) {
+    return { ok: false, reason: `리뷰 timestamp가 유효한 ISO 시각이 아닙니다(${String(result.timestamp)}).` };
+  }
+  if (reviewMs > Date.now() + SKEW_MS) {
+    return {
+      ok: false,
+      reason: `리뷰 timestamp가 미래입니다(${result.timestamp}) — 게이트 우회로 간주해 거부합니다.`,
     };
   }
   // BUG #1: 리뷰가 최신 편집보다 더 오래되었으면(stale) 거부.

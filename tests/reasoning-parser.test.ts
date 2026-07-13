@@ -60,4 +60,22 @@ describe('parseReasoningSection', () => {
     expect(r!.facts).toEqual(['one']);
     expect(r!.assumptions).toEqual(['two']);
   });
+
+  // (결함 H) 게이트 안내문은 "### 추측 ⚠️"처럼 이모지를 붙이도록 지시한다. 라벨의
+  //   후행 장식을 제거하지 않으면 정확 매칭이 깨져 speculations가 통째로 유실되고,
+  //   시늉-추론 검사(A1)·추측-리뷰 연동(A2)이 오작동한다.
+  test('classifies "### 추측 ⚠️" (emoji-decorated label) as speculations', () => {
+    const text = [
+      '## 추론',
+      '### 사실',
+      '- f1',
+      '### 추측 ⚠️',
+      '- s1',
+      '- s2',
+    ].join('\n');
+    const r = parseReasoningSection(text);
+    expect(r).not.toBeNull();
+    expect(r!.facts).toEqual(['f1']);
+    expect(r!.speculations).toEqual(['s1', 's2']);
+  });
 });

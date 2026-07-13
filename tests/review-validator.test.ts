@@ -91,6 +91,38 @@ describe('validateReview', () => {
     );
     expect(r.ok).toBe(true);
   });
+
+  // (E 보안) 미래 timestamp 우회 차단. staleness는 하한만 보므로, 미래 시각을 넣으면
+  //   "앞으로 생길 편집까지 이미 리뷰됨"이 되어 게이트가 우회된다 → 미래는 거부한다.
+  test('REJECTS a review timestamp in the future (gate-bypass attempt)', () => {
+    const future = new Date(Date.now() + 10 * 60_000).toISOString(); // +10분(스큐 5분 초과)
+    const r = validateReview(
+      review({ reviewed_files: ['/repo/a.ts'], timestamp: future }),
+      ['/repo/a.ts'],
+      new Date().toISOString(),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain('미래');
+  });
+
+  test('REJECTS a non-ISO review timestamp', () => {
+    const r = validateReview(
+      review({ reviewed_files: ['/repo/a.ts'], timestamp: 'not-a-date' }),
+      ['/repo/a.ts'],
+      new Date().toISOString(),
+    );
+    expect(r.ok).toBe(false);
+  });
+
+  test('ACCEPTS a slightly-future timestamp within the allowed clock skew (+60s)', () => {
+    const soon = new Date(Date.now() + 60_000).toISOString(); // +60초(스큐 5분 이내)
+    const r = validateReview(
+      review({ reviewed_files: ['/repo/a.ts'], timestamp: soon }),
+      ['/repo/a.ts'],
+      new Date(Date.now() - 60_000).toISOString(), // 편집은 1분 전 → 리뷰가 더 최신(통과)
+    );
+    expect(r.ok).toBe(true);
+  });
 });
 
 describe('highSeverityFindings', () => {

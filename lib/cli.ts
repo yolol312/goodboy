@@ -123,17 +123,13 @@ export function validateReviewResultInput(parsed: unknown): {
     }
   }
 
-  // timestamp: optional string (생략/공백이면 생성)
-  if (p.timestamp !== undefined && typeof p.timestamp !== 'string') {
-    errors.push('timestamp는 문자열이어야 합니다(생략 시 현재 시각으로 채움).');
-  }
-
   if (errors.length > 0) return { ok: false, errors };
 
-  const timestamp =
-    typeof p.timestamp === 'string' && p.timestamp.trim() !== ''
-      ? p.timestamp
-      : new Date().toISOString();
+  // (E 보안) timestamp는 호출자 입력을 받지 않는다 — staleness 검사가 하한만 보므로
+  //   미래 시각을 넘기면 이후 편집까지 "리뷰됨"이 되는 게이트 우회가 성립한다.
+  //   호출자가 넘긴 값은 무시하고 항상 서버 시각을 기록한다(무시는 조용히: 리뷰
+  //   에이전트 재시도 루프를 끊지 않기 위해 에러로 만들지 않는다).
+  const timestamp = new Date().toISOString();
 
   const value: ReviewResult = {
     timestamp,

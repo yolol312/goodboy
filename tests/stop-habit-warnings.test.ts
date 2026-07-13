@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 // H1-03(강제 자동 compact) + H1-01(긴 세션 경고) 상호작용의 Stop hook 통합 테스트.
 const STOP_HOOK = resolve(import.meta.dir, '..', 'hooks', 'stop.ts');
@@ -49,6 +49,12 @@ function seedSession(
     .map((f) => JSON.stringify({ file: resolve(cwd, f), turn, timestamp: ts }))
     .join('\n');
   writeFileSync(join(dir, 'edits.jsonl'), lines + '\n', 'utf8');
+  // (A) 리뷰 스코프는 실존 파일만 대상 — 편집 대상 파일을 실제로 만든다.
+  for (const f of editFiles) {
+    const abs = resolve(cwd, f);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, '', 'utf8');
+  }
 }
 
 function seedHabitState(tmp: string, sessionId: string, state: Record<string, unknown>): void {
