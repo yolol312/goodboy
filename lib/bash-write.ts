@@ -19,17 +19,80 @@ function isFdTarget(target: string): boolean {
   return target.startsWith('&');
 }
 
-/** 따옴표 제거 */
-function unquote(t: string): string {
-  if (t.length >= 2) {
-    const a = t[0];
-    const b = t[t.length - 1];
-    if ((a === '"' && b === '"') || (a === "'" && b === "'")) return t.slice(1, -1);
-  }
-  return t;
-}
+/** 세그먼트 토큰 중 리다이렉션 연산자(> <) 자리를 표시하는 마커.
+ *  공백을 포함해 정상 토큰과 절대 충돌하지 않는다. tee/sed의 파일 인자 수집은
+ *  이 마커에서 멈춘다(`tee a.ts > /dev/null`의 /dev/null 오수집 방지). */
+const OP_TOKEN = ' op ';
 
-const TOKEN = `"[^"]*"|'[^']*'|[^\\s;|&<>]+`;
+/** 따옴표 인식 토크나이저 (v0.26.2, 실측 오탐 5호 대응).
+ *
+ *  명령을 세그먼트(따옴표 밖 ; | & 개행으로 분리)와 토큰(따옴표 밖 공백으로 분리,
+ *  따옴표는 벗겨 내용만)으로 나눈다. 따옴표 안 문자열은 공백까지 포함한 하나의 토큰이
+ *  되므로, `python3 -c 'print("... tee and sed -i ...")'` 같은 문자열 안의 tee/sed 단어가
+ *  명령 토큰과 정확 일치할 수 없다 — 정규식 \b 매칭의 따옴표 무시 오탐을 원천 차단한다.
+ *  빈 따옴표 토큰('')은 보존한다(BSD `sed -i ''`의 옵션 인자). */
+function tokenizeSegments(command: string): string[][] {
+  const segments: string[][] = [];
+  let tokens: string[] = [];
+  let cur = '';
+  let curQuoted = false; // 현재 토큰이 따옴표를 포함(빈 따옴표 토큰 보존용)
+  const pushToken = (): void => {
+    if (cur !== '' || curQuoted) tokens.push(cur);
+    cur = '';
+    curQuoted = false;
+  };
+  const pushSegment = (): void => {
+    pushToken();
+    if (tokens.length > 0) segments.push(tokens);
+    tokens = [];
+  };
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i] ?? '';
+    if (inSingle) {
+      if (ch === "'") inSingle = false;
+      else cur += ch;
+      continue;
+    }
+    if (inDouble) {
+      if (ch === '"') inDouble = false;
+      else if (ch === '\\' && i + 1 < command.length) cur += command[++i];
+      else cur += ch;
+      continue;
+    }
+    if (ch === "'") {
+      inSingle = true;
+      curQuoted = true;
+      continue;
+    }
+    if (ch === '"') {
+      inDouble = true;
+      curQuoted = true;
+      continue;
+    }
+    if (ch === '\\') {
+      if (i + 1 < command.length) cur += command[++i];
+      continue;
+    }
+    if (ch === ';' || ch === '|' || ch === '&' || ch === '\n') {
+      pushSegment();
+      continue;
+    }
+    if (ch === '>' || ch === '<') {
+      pushToken();
+      if (tokens[tokens.length - 1] !== OP_TOKEN) tokens.push(OP_TOKEN);
+      continue;
+    }
+    if (ch === ' ' || ch === '\t') {
+      pushToken();
+      continue;
+    }
+    cur += ch;
+  }
+  pushSegment();
+  return segments;
+}
 
 /** heredoc 본문 제거 전처리 (v0.26.1, 실측 오탐 대응).
  *
@@ -131,15 +194,17 @@ function redirectTargets(command: string): string[] {
   return out;
 }
 
-/** tee [-a] FILE... */
-function teeTargets(command: string): string[] {
+/** tee [-a] FILE... — 토큰 단위 매칭 (v0.26.2).
+ *  따옴표 안 문자열은 하나의 토큰이므로 그 속의 'tee' 단어는 절대 매칭되지 않는다. */
+function teeTargets(segments: string[][]): string[] {
   const out: string[] = [];
-  const re = new RegExp(`\\btee\\b((?:\\s+-\\S+)*)((?:\\s+(?:${TOKEN}))+)`, 'g');
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(command)) !== null) {
-    for (const raw of (m[2] ?? '').trim().split(/\s+/)) {
-      const t = unquote(raw);
-      if (t !== '' && !t.startsWith('-')) out.push(t);
+  for (const tokens of segments) {
+    const idx = tokens.findIndex((t) => t === 'tee' || t.endsWith('/tee'));
+    if (idx < 0) continue;
+    for (const t of tokens.slice(idx + 1)) {
+      if (t === OP_TOKEN) break; // 리다이렉션 대상은 redirectTargets 소관
+      if (t === '' || t.startsWith('-')) continue;
+      out.push(t);
     }
   }
   return out;
@@ -153,18 +218,17 @@ function looksLikeSedScript(t: string): boolean {
   return false;
 }
 
-/** sed -i ... FILE (in-place 편집) */
-function sedInPlaceTargets(command: string): string[] {
+/** sed -i ... FILE (in-place 편집) — 토큰 단위 매칭 (v0.26.2). */
+function sedInPlaceTargets(segments: string[][]): string[] {
   const out: string[] = [];
-  for (const seg of command.split(/[;|]|&&|\|\|/)) {
-    if (!/\bsed\b/.test(seg)) continue;
-    // -i, -i.bak, -i '' (BSD), 결합 옵션(-ie) 모두 in-place
-    if (!/\s-\w*i/.test(seg)) continue;
-    const tokens = seg.trim().split(/\s+/);
+  for (const tokens of segments) {
     const sedIdx = tokens.findIndex((t) => t === 'sed' || t.endsWith('/sed'));
     if (sedIdx < 0) continue;
-    for (const raw of tokens.slice(sedIdx + 1)) {
-      const t = unquote(raw);
+    const rest = tokens.slice(sedIdx + 1);
+    // -i, -i.bak, -i '' (BSD), 결합 옵션(-ie) 모두 in-place
+    if (!rest.some((t) => /^-\w*i/.test(t))) continue;
+    for (const t of rest) {
+      if (t === OP_TOKEN) break; // 리다이렉션 이후는 sed 파일 인자가 아니다
       if (t === '' || t.startsWith('-')) continue;
       if (looksLikeSedScript(t)) continue;
       out.push(t);
@@ -173,14 +237,19 @@ function sedInPlaceTargets(command: string): string[] {
   return out;
 }
 
-/** dd of=FILE */
-function ddTargets(command: string): string[] {
+/** dd of=FILE — 토큰 단위 매칭 (v0.26.2). */
+function ddTargets(segments: string[][]): string[] {
   const out: string[] = [];
-  const re = new RegExp(`\\bdd\\b[^;|]*\\bof=(${TOKEN})`, 'g');
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(command)) !== null) {
-    const t = unquote(m[1] ?? '');
-    if (t !== '') out.push(t);
+  for (const tokens of segments) {
+    const idx = tokens.findIndex((t) => t === 'dd' || t.endsWith('/dd'));
+    if (idx < 0) continue;
+    for (const t of tokens.slice(idx + 1)) {
+      if (t === OP_TOKEN) break;
+      if (t.startsWith('of=')) {
+        const target = t.slice(3);
+        if (target !== '') out.push(target);
+      }
+    }
   }
   return out;
 }
@@ -216,11 +285,13 @@ export function classifyBashWrite(command: string, cwd: string): string[] {
   try {
     // heredoc 본문(데이터)을 제거한 명령 텍스트만 스캔한다 — 본문의 연산자 오탐 방지.
     const scanned = stripHeredocs(command);
+    // tee/sed/dd는 따옴표 인식 토큰 단위로만 매칭한다 — 따옴표 안 단어 오탐(5호) 방지.
+    const segments = tokenizeSegments(scanned);
     targets = [
       ...redirectTargets(scanned),
-      ...teeTargets(scanned),
-      ...sedInPlaceTargets(scanned),
-      ...ddTargets(scanned),
+      ...teeTargets(segments),
+      ...sedInPlaceTargets(segments),
+      ...ddTargets(segments),
     ];
   } catch {
     return [];

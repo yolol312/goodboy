@@ -170,3 +170,34 @@ describe('classifyBashWrite — GOODBOY_BASH_WRITE_ALLOW', () => {
     }
   });
 });
+
+describe('classifyBashWrite — v0.26.2 실측 오탐 5호: 따옴표 안 tee/sed 단어', () => {
+  test('오탐 5: 따옴표 문자열 안의 tee / sed -i 단어는 명령이 아니다 (실측 재현 입력)', () => {
+    expect(denied(`python3 -c 'print("note about tee and sed -i inside quotes")'`)).toEqual([]);
+  });
+
+  test('커밋 메시지 안의 tee/sed 단어도 비차단', () => {
+    expect(denied("git commit -m 'fix: tee wrapper and sed -i docs update'")).toEqual([]);
+    expect(denied('git commit -m "explain tee -a usage and sed -i.bak variants"')).toEqual([]);
+  });
+
+  test('따옴표 안 dd/of= 단어도 비차단', () => {
+    expect(denied(`echo 'dd of=src/a.ts is dangerous'`)).toEqual([]);
+  });
+
+  test('정상 탐지 유지: 진짜 tee/sed -i/dd는 계속 잡는다', () => {
+    expect(denied('echo x | tee src/a.ts')).toEqual(['/proj/src/a.ts']);
+    expect(denied('echo x | tee -a src/a.ts')).toEqual(['/proj/src/a.ts']);
+    expect(denied('echo x | tee "src/a.ts"')).toEqual(['/proj/src/a.ts']);
+    expect(denied('/usr/bin/tee src/a.ts')).toEqual(['/proj/src/a.ts']);
+    expect(denied("sed -i 's/a/b/' src/app.ts")).toEqual(['/proj/src/app.ts']);
+    expect(denied("sed -i.bak 's/a/b/' 'src/app.ts'")).toEqual(['/proj/src/app.ts']);
+    expect(denied('dd if=/dev/zero of="src/app.ts" bs=1')).toEqual(['/proj/src/app.ts']);
+  });
+
+  test('tee 뒤 리다이렉션 대상은 tee 파일 인자로 오수집하지 않는다', () => {
+    // /dev/null은 항상 허용 → tee의 파일 인자 수집이 OP 마커에서 멈추는지 확인.
+    expect(denied('echo x | tee /tmp/out.txt > /dev/null')).toEqual([]);
+    expect(denied('echo x | tee src/a.ts > /dev/null')).toEqual(['/proj/src/a.ts']);
+  });
+});
