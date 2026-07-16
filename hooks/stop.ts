@@ -10,11 +10,11 @@ import {
   compactForcePct,
   envInt,
   extractRecentAssistantTexts,
-  findRecentReviewFile,
+  findRecentReviewFiles,
   getContextUsage,
   getCurrentTurn,
   getEditsSince,
-  getLatestEditTimestampSince,
+  getEditsWithLastTimestampSince,
   hasReasoningSection,
   highSeverityFindings,
   incrementTurn,
@@ -25,7 +25,7 @@ import {
   readReviewCursor,
   readValidationFailure,
   requiredDimensionsFor,
-  validateReview,
+  validateReviewCoverage,
   writeHabitState,
   writeReviewCursor,
   writeStatusSnapshot,
@@ -529,16 +529,17 @@ function main(): void {
       }
       statusSnapshot.reviewPending = true;
 
-      // (D) 리뷰 검사
+      // (D) 리뷰 검사 — 30분 유효창 내 모든 리뷰 파일(v0.26.5: 리뷰 누적 인정).
+      //   최신 1개만 보면 부분 리뷰 2개가 서로를 무효화하는 두더지잡기가 된다(실측).
       const reviewsDir = resolvePath(cwd, '.claude', 'reviews');
-      const result = (() => {
+      const reviews = (() => {
         try {
-          return findRecentReviewFile(reviewsDir, 30);
+          return findRecentReviewFiles(reviewsDir, 30);
         } catch {
-          return null;
+          return [] as ReturnType<typeof findRecentReviewFiles>;
         }
       })();
-      if (!result) {
+      if (reviews.length === 0) {
         const preview = recentEdits.slice(0, 5).join(', ');
         const more = recentEdits.length > 5 ? ` 외 ${recentEdits.length - 5}개` : '';
         logGate(sessionId, 'review', 'deny', 'no-review-file');
@@ -549,21 +550,22 @@ function main(): void {
         return;
       }
 
-      // (E) validateReview — 커버리지 + staleness(BUG #1) 동시 검사.
-      //   리뷰 필요 파일 중 가장 최근 편집 시각보다 리뷰가 더 나중이어야 한다.
-      const latestEditTs = (() => {
+      // (E) 파일별 커버리지 + staleness(v0.26.5) — 각 변경 파일은 "그 파일의 마지막
+      //   편집보다 나중인 커버 리뷰"가 있으면 된다. 전역 staleness(최신 편집 1개 시각)는
+      //   편집 안 된 파일의 유효한 리뷰까지 무효화하는 오차단이라 파일별로 판정한다.
+      const changedEdits = (() => {
         try {
-          // recentEdits와 동일 집합(withinDir)이어야 커버리지/staleness가 어긋나지 않는다.
-          return getLatestEditTimestampSince(sessionId, cursorTurn, cwd);
+          // recentEdits와 동일 필터(withinDir)여야 커버리지 집합이 어긋나지 않는다.
+          return getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd);
         } catch {
-          return null;
+          return recentEdits.map((f) => ({ file: f, lastEditTimestamp: null }));
         }
       })();
       const v = (() => {
         try {
-          return validateReview(result, recentEdits, latestEditTs);
+          return validateReviewCoverage(reviews, changedEdits);
         } catch (err) {
-          return { ok: false, reason: `validateReview 에러: ${String(err)}` };
+          return { ok: false, reason: `validateReview 에러: ${String(err)}`, effective: [] };
         }
       })();
       if (!v.ok) {
@@ -593,8 +595,13 @@ function main(): void {
       // 검증 통과 → 이 게이트의 카운터 리셋(다음 실패는 새로 3회 기회).
       resetRetryCount(claudeDir, REVIEW_VALIDATE_COUNT_FILE);
 
+      // 후속 검사(F/F1.5/F2/G)는 커버리지를 실제 구성한 리뷰들(effective) 기준으로
+      //   평가한다 — 파일별 최신 리뷰가 이전 리뷰를 대체하는 의미론. 빈 경우(변경
+      //   파일 없음 등)는 최신 리뷰 1개로 폴백.
+      const effectiveReviews = v.effective.length > 0 ? v.effective : reviews.slice(0, 1);
+
       // (F) 재시도 카운터 (high severity) — claudeDir은 (B5)에서 확보됨.
-      const highSev = highSeverityFindings(result);
+      const highSev = effectiveReviews.flatMap((r) => highSeverityFindings(r));
       if (highSev.length > 0) {
         const count = readRetryCount(claudeDir) + 1;
         writeRetryCount(claudeDir, count);
@@ -642,9 +649,11 @@ function main(): void {
           return 0;
         }
       })();
-      const checkedAssumptions = Array.isArray(result.unknown_assumptions_checked)
-        ? result.unknown_assumptions_checked.length
-        : 0;
+      const checkedAssumptions = effectiveReviews.reduce(
+        (sum, r) =>
+          sum + (Array.isArray(r.unknown_assumptions_checked) ? r.unknown_assumptions_checked.length : 0),
+        0,
+      );
       if (declaredUnknowns > 0 && checkedAssumptions === 0) {
         const count = readRetryCount(claudeDir) + 1;
         if (count < MAX_RETRIES) {
@@ -683,7 +692,7 @@ function main(): void {
         }
       })();
       const checkedDims = new Set(
-        Array.isArray(result.dimensions_checked) ? result.dimensions_checked : [],
+        effectiveReviews.flatMap((r) => (Array.isArray(r.dimensions_checked) ? r.dimensions_checked : [])),
       );
       const missingDims = requiredDims.filter((d) => !checkedDims.has(d));
       if (missingDims.length > 0) {
@@ -714,7 +723,9 @@ function main(): void {
       }
 
       // (G) medium/low only — 통과 + 알림
-      const otherFindings = result.findings.filter((f) => f && f.severity !== 'high');
+      const otherFindings = effectiveReviews
+        .flatMap((r) => (Array.isArray(r.findings) ? r.findings : []))
+        .filter((f) => f && f.severity !== 'high');
       let systemMessage: string | undefined;
       if (otherFindings.length > 0) {
         const sev = otherFindings

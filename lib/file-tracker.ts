@@ -407,6 +407,27 @@ function inReviewScope(file: string, withinDir?: string): boolean {
   return true;
 }
 
+/** getEditsSince와 동일 집합에 대해 파일별 마지막 편집 ISO 타임스탬프를 반환.
+ *  리뷰 커버리지의 파일별 staleness 판정에 사용(v0.26.5) — 전역 최신 편집 시각 기준은
+ *  "편집 안 된 파일의 유효한 리뷰까지 다른 파일 편집으로 무효화"하는 오차단을 낳는다.
+ *  필터는 getEditsSince와 반드시 동일해야 커버리지/staleness 집합이 어긋나지 않는다. */
+export function getEditsWithLastTimestampSince(
+  sessionId: string,
+  cursorTurn: number,
+  withinDir?: string,
+): Array<{ file: string; lastEditTimestamp: string }> {
+  const dir = ensureSessionDir(sessionId);
+  const records = readRecords(dir, 'edits.jsonl');
+  const latestByFile = new Map<string, string>();
+  for (const r of records) {
+    if (r.turn < cursorTurn) continue;
+    if (!inReviewScope(r.file, withinDir)) continue;
+    const prev = latestByFile.get(r.file);
+    if (prev === undefined || r.timestamp > prev) latestByFile.set(r.file, r.timestamp);
+  }
+  return Array.from(latestByFile, ([file, lastEditTimestamp]) => ({ file, lastEditTimestamp }));
+}
+
 /** getEditsSince 대상 파일 중 가장 최근 편집의 ISO 타임스탬프. 없으면 null.
  *  리뷰 staleness 판정에 사용: 리뷰가 이 시각보다 더 나중이어야 한다.
  *  withinDir는 getEditsSince와 동일 의미 — 두 함수의 대상 집합이 어긋나면

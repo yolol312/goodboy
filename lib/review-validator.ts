@@ -62,6 +62,39 @@ export function findRecentReviewFile(reviewsDir: string, withinMinutes: number):
   }
 }
 
+/** reviewsDir 안의 모든 유효 리뷰 파일을 최신순으로 반환 (withinMinutes 이내만).
+ *  v0.26.5 — 리뷰 누적 인정: 최신 리뷰 1개만 보면 부분 리뷰 2개가 서로를 무효화하는
+ *  두더지잡기가 된다(실측: 리뷰 A{4파일} 후 "README 미리뷰" 차단 → README만 리뷰 B로
+ *  돌리면 "4파일 미리뷰" 차단). 파일별 커버리지는 validateReviewCoverage가 판정한다. */
+export function findRecentReviewFiles(reviewsDir: string, withinMinutes: number): ReviewResult[] {
+  try {
+    const entries = readdirSync(reviewsDir);
+    const candidates: Array<{ path: string; mtime: number }> = [];
+    const now = Date.now();
+    for (const name of entries) {
+      if (!name.endsWith('.json')) continue;
+      const full = join(reviewsDir, name);
+      try {
+        const st = statSync(full);
+        if (!st.isFile()) continue;
+        if ((now - st.mtimeMs) / 60000 > withinMinutes) continue;
+        candidates.push({ path: full, mtime: st.mtimeMs });
+      } catch {
+        continue;
+      }
+    }
+    candidates.sort((a, b) => b.mtime - a.mtime);
+    const out: ReviewResult[] = [];
+    for (const c of candidates) {
+      const r = safeReadReview(c.path);
+      if (r !== null) out.push(r);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 export interface ValidationResult {
   ok: boolean;
   reason?: string;
@@ -139,6 +172,119 @@ function normalizePath(p: string): string {
   } catch {
     return p;
   }
+}
+
+// ── 파일별 누적 커버리지 검증 (v0.26.5) ────────────────────────────────────
+
+export interface ChangedFileEdit {
+  file: string;
+  /** 이 파일의 마지막 편집 ISO 시각. 없으면 staleness 검사 생략. */
+  lastEditTimestamp: string | null;
+}
+
+export interface CoverageResult extends ValidationResult {
+  /** 커버리지를 실제로 구성한 리뷰들(파일별 최신 커버 리뷰의 합집합, 최신순).
+   *  후속 검사(high-severity/가정 검증/차원 커버리지)는 이 집합 기준으로 평가한다. */
+  effective: ReviewResult[];
+}
+
+/** 리뷰 timestamp가 유효한 ISO이고 미래(+스큐)가 아닌지. 미래면 위조 의심으로 제외. */
+function hasTrustedTimestamp(r: ReviewResult, nowMs: number): boolean {
+  const ms = typeof r.timestamp === 'string' ? Date.parse(r.timestamp) : NaN;
+  const SKEW_MS = 5 * 60_000;
+  return Number.isFinite(ms) && ms <= nowMs + SKEW_MS;
+}
+
+/** 파일별 커버리지: 각 변경 파일에 대해 "그 파일의 마지막 편집보다 나중이고 그 파일을
+ *  커버하는" 리뷰가 하나라도 있으면 통과. 파일별 최신 커버 리뷰가 fail이면 실패.
+ *
+ *  단일-리뷰 방식(validateReview)의 두 가지 오차단을 해소한다:
+ *   (1) 부분 리뷰 상호 무효화 — 리뷰 A{4파일} + 리뷰 B{1파일}이 함께 있어도 최신 1개만
+ *       보면 영원히 커버리지 실패(실측 두더지잡기).
+ *   (2) 전역 staleness — 편집 안 된 파일의 유효한 리뷰가 다른 파일 편집으로 무효화.
+ *
+ *  신뢰 모델은 validateReview와 동일: 미래 timestamp 리뷰는 커버리지에서 제외(위조 방지,
+ *  쓰기 시점 서버 시각 강제와 2겹). staleness는 파일별 마지막 편집 시각과 비교한다. */
+export function validateReviewCoverage(
+  reviews: ReviewResult[],
+  changedEdits: ChangedFileEdit[],
+): CoverageResult {
+  if (!Array.isArray(reviews) || reviews.length === 0) {
+    return { ok: false, reason: '리뷰 결과 없음', effective: [] };
+  }
+  const nowMs = Date.now();
+  const trusted = reviews.filter((r) => hasTrustedTimestamp(r, nowMs));
+  const rejectedFuture = reviews.length - trusted.length;
+  if (trusted.length === 0) {
+    return {
+      ok: false,
+      reason: '유효한 리뷰가 없습니다(timestamp가 미래이거나 손상됨 — 게이트 우회로 간주해 거부).',
+      effective: [],
+    };
+  }
+  if (!Array.isArray(changedEdits) || changedEdits.length === 0) {
+    // 변경 파일이 없으면 최신 리뷰의 verdict만 검사(기존 의미론 유지).
+    const newest = trusted[0]!;
+    if (newest.verdict === 'fail') return { ok: false, reason: '리뷰 verdict이 fail', effective: [newest] };
+    return { ok: true, effective: [newest] };
+  }
+  // 최신순 정렬(호출부가 이미 최신순이어도 안전하게 재정렬).
+  const sorted = [...trusted].sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
+  const missing: string[] = [];
+  const stale: string[] = [];
+  const failed: string[] = [];
+  const effective = new Set<ReviewResult>();
+  for (const edit of changedEdits) {
+    const key = normalizePath(edit.file);
+    // 파일별 최신 커버 리뷰(fresh 우선). fresh가 없고 stale 커버만 있으면 stale로 분류.
+    let coveredStale = false;
+    let chosen: ReviewResult | null = null;
+    for (const r of sorted) {
+      if (!(r.reviewed_files ?? []).some((f) => normalizePath(f) === key)) continue;
+      const isFresh =
+        typeof edit.lastEditTimestamp !== 'string' ||
+        edit.lastEditTimestamp === '' ||
+        r.timestamp > edit.lastEditTimestamp;
+      if (isFresh) {
+        chosen = r;
+        break; // 최신순이므로 첫 fresh가 파일별 최신 커버 리뷰
+      }
+      coveredStale = true;
+    }
+    if (chosen === null) {
+      if (coveredStale) stale.push(edit.file);
+      else missing.push(edit.file);
+      continue;
+    }
+    if (chosen.verdict === 'fail') {
+      failed.push(edit.file);
+      continue;
+    }
+    effective.add(chosen);
+  }
+  const futureNote = rejectedFuture > 0 ? ` (미래 timestamp 리뷰 ${rejectedFuture}개는 위조 의심으로 무시됨)` : '';
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      reason: `리뷰되지 않은 변경 파일 ${missing.length}개: ${missing.slice(0, 3).join(', ')}${missing.length > 3 ? ' …' : ''}${futureNote}`,
+      effective: Array.from(effective),
+    };
+  }
+  if (stale.length > 0) {
+    return {
+      ok: false,
+      reason: `리뷰가 마지막 편집보다 오래된 파일 ${stale.length}개: ${stale.slice(0, 3).join(', ')}${stale.length > 3 ? ' …' : ''}. 해당 파일을 다시 리뷰하세요.${futureNote}`,
+      effective: Array.from(effective),
+    };
+  }
+  if (failed.length > 0) {
+    return {
+      ok: false,
+      reason: `최신 리뷰 verdict이 fail인 파일 ${failed.length}개: ${failed.slice(0, 3).join(', ')}${failed.length > 3 ? ' …' : ''}`,
+      effective: Array.from(effective),
+    };
+  }
+  return { ok: true, effective: Array.from(effective) };
 }
 
 export function highSeverityFindings(result: ReviewResult): ReviewFinding[] {
