@@ -72,37 +72,49 @@ function reasoningGateWindow(): number {
 //   escape 시 지연 모드 마커를 남기고, 섹션이 실제로 인식될 때까지 차단하지 않는다.
 //   인식 성공 = 지연 해소의 증거이므로 그때 마커를 지우고 게이트를 재무장한다.
 const REASONING_DENY_ESCAPE = 3;
-const REASONING_DENY_COUNT_FILE = 'reasoning-deny-count.txt';
-const REASONING_LAG_MODE_FILE = 'reasoning-lag-mode.txt';
 
-function isReasoningLagMode(sessionId: string): boolean {
+// v0.26.4 — 상태 파일을 에이전트 스코프로 분리(리뷰 지적): sessionId만으로 키잉하면
+//   서브에이전트의 지연 모드가 메인 게이트까지 무장해제하고, 메인의 섹션 인식이
+//   서브의 지연 모드를 해제해 차단 사이클이 혼합(메인+서브) 세션에서 재발한다.
+//   게이트 판정(transcript 선택)과 동일하게 agent_id ?? 'main'으로 스코핑한다
+//   (재-Read 게이트의 rereadScope 선례).
+function scopedStateFile(base: string, scope: string): string {
+  const safe = (scope || 'main').replace(/[^\w-]/g, '_');
+  return `${base}.${safe}.txt`;
+}
+
+function isReasoningLagMode(sessionId: string, scope: string): boolean {
   try {
-    return existsSync(join(ensureSessionDir(sessionId), REASONING_LAG_MODE_FILE));
+    return existsSync(join(ensureSessionDir(sessionId), scopedStateFile('reasoning-lag-mode', scope)));
   } catch {
     return false;
   }
 }
 
-function setReasoningLagMode(sessionId: string): void {
+function setReasoningLagMode(sessionId: string, scope: string): void {
   try {
-    writeFileSync(join(ensureSessionDir(sessionId), REASONING_LAG_MODE_FILE), '1', 'utf8');
+    writeFileSync(
+      join(ensureSessionDir(sessionId), scopedStateFile('reasoning-lag-mode', scope)),
+      '1',
+      'utf8',
+    );
   } catch {
     // best-effort
   }
 }
 
-function clearReasoningLagMode(sessionId: string): void {
+function clearReasoningLagMode(sessionId: string, scope: string): void {
   try {
-    const p = join(ensureSessionDir(sessionId), REASONING_LAG_MODE_FILE);
+    const p = join(ensureSessionDir(sessionId), scopedStateFile('reasoning-lag-mode', scope));
     if (existsSync(p)) unlinkSync(p);
   } catch {
     // best-effort
   }
 }
 
-function readReasoningDenyCount(sessionId: string): number {
+function readReasoningDenyCount(sessionId: string, scope: string): number {
   try {
-    const p = join(ensureSessionDir(sessionId), REASONING_DENY_COUNT_FILE);
+    const p = join(ensureSessionDir(sessionId), scopedStateFile('reasoning-deny-count', scope));
     if (!existsSync(p)) return 0;
     const n = parseInt(readFileSync(p, 'utf8').trim(), 10);
     return Number.isFinite(n) && n > 0 ? n : 0;
@@ -111,17 +123,21 @@ function readReasoningDenyCount(sessionId: string): number {
   }
 }
 
-function writeReasoningDenyCount(sessionId: string, n: number): void {
+function writeReasoningDenyCount(sessionId: string, scope: string, n: number): void {
   try {
-    writeFileSync(join(ensureSessionDir(sessionId), REASONING_DENY_COUNT_FILE), String(n), 'utf8');
+    writeFileSync(
+      join(ensureSessionDir(sessionId), scopedStateFile('reasoning-deny-count', scope)),
+      String(n),
+      'utf8',
+    );
   } catch {
     // best-effort — 카운터 기록 실패가 게이트 동작을 막지 않는다.
   }
 }
 
-function resetReasoningDenyCount(sessionId: string): void {
+function resetReasoningDenyCount(sessionId: string, scope: string): void {
   try {
-    if (readReasoningDenyCount(sessionId) > 0) writeReasoningDenyCount(sessionId, 0);
+    if (readReasoningDenyCount(sessionId, scope) > 0) writeReasoningDenyCount(sessionId, scope, 0);
   } catch {
     // best-effort
   }
@@ -511,21 +527,23 @@ function main(): void {
         // (C-escape v0.26.3) 섹션 미인식 처리 공용 경로 — 무언 편집/미인식 deny 모두
         //   같은 카운터를 쓴다. 지연 모드면 차단하지 않고 경고만, 아니면 3회까지 deny 후
         //   지연 모드로 전환한다. true를 반환하면 이번 편집을 통과시킨다는 뜻.
+        // 상태 스코프는 판정 대상 transcript와 동일 기준(agent_id ?? 'main')으로 잡는다.
+        const reasoningScope = input.agent_id ?? 'main';
         const lagModeWarning =
           '추론 게이트 지연 모드: transcript 기록 지연으로 섹션을 인식할 수 없어 차단하지 않습니다. ' +
           '## 추론 섹션을 계속 출력해 주세요 — 인식되는 즉시 게이트가 정상 복원됩니다.';
         const passUnrecognized = (denyReason: string, denyMessage: (n: number) => string): boolean => {
-          if (isReasoningLagMode(sessionId)) {
+          if (isReasoningLagMode(sessionId, reasoningScope)) {
             logGate(sessionId, 'reasoning', 'warn', 'lag-mode');
             preWarnings.push(lagModeWarning);
             return true;
           }
-          const denyCount = readReasoningDenyCount(sessionId) + 1;
+          const denyCount = readReasoningDenyCount(sessionId, reasoningScope) + 1;
           if (denyCount >= REASONING_DENY_ESCAPE) {
             // 카운터 리셋 후 재무장하면 지연이 지속되는 동안 편집마다 deny 2회가
             //   반복된다(실측) — sticky 지연 모드로 전환하고 인식 성공 시 재무장한다.
-            setReasoningLagMode(sessionId);
-            writeReasoningDenyCount(sessionId, 0);
+            setReasoningLagMode(sessionId, reasoningScope);
+            writeReasoningDenyCount(sessionId, reasoningScope, 0);
             logGate(sessionId, 'reasoning', 'warn', 'escape');
             preWarnings.push(
               '추론 게이트가 3회 차단 후에도 섹션을 인식하지 못했습니다. transcript 기록 지연으로 보고 ' +
@@ -533,7 +551,7 @@ function main(): void {
             );
             return true;
           }
-          writeReasoningDenyCount(sessionId, denyCount);
+          writeReasoningDenyCount(sessionId, reasoningScope, denyCount);
           logGate(sessionId, 'reasoning', 'deny', denyReason);
           emit(deny(denyMessage(denyCount)));
           return false;
@@ -569,8 +587,8 @@ function main(): void {
             if (!passed) return;
           } else {
             // 섹션 인식 성공 = 기록 지연 해소의 증거 → escape 카운터 리셋 + 지연 모드 해제(재무장).
-            resetReasoningDenyCount(sessionId);
-            clearReasoningLagMode(sessionId);
+            resetReasoningDenyCount(sessionId, reasoningScope);
+            clearReasoningLagMode(sessionId, reasoningScope);
           }
           // (A1) 실질 검사: 제목만 찍고 내용이 텅 빈 '시늉 추론'은 통과 불가.
           //   윈도우 내 추론 섹션 중 하나라도 4분류에 실제 항목이 있으면 통과.

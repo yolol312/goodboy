@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 
@@ -63,11 +63,16 @@ function makeCwd(): string {
 }
 
 /** Write(새 파일)로 hook 실행 → read-before-edit는 통과하고 추론 게이트만 평가됨. */
-async function runHook(cwd: string, transcriptPath: string | null): Promise<string> {
+async function runHook(
+  cwd: string,
+  transcriptPath: string | null,
+  opts?: { agentId?: string },
+): Promise<string> {
   const payload = JSON.stringify({
     session_id: sessionIdFor(cwd),
     cwd,
     transcript_path: transcriptPath ?? '',
+    ...(opts?.agentId ? { agent_id: opts.agentId } : {}),
     tool_name: 'Write',
     tool_input: { file_path: join(cwd, 'newfile.ts'), content: 'x' },
   });
@@ -349,6 +354,56 @@ describe('pre-tool-use reasoning gate — escape 카운터 (v0.26.1, 탈출구 �
     const rearmed = await runHook(cwd, noReason);
     expect(isBlocked(rearmed)).toBe(true);
     expect(rearmed).toContain('재시도 1/3');
+  });
+
+  test('서브에이전트 지연 모드가 메인 게이트를 무장해제하지 않는다 (v0.26.4)', async () => {
+    const cwd = makeCwd();
+    const mainTp = makeTranscript(cwd, ['추론 없는 메인 텍스트']);
+    // 서브에이전트 전용 transcript 레이아웃: <base>/subagents/agent-<id>.jsonl
+    const subDir = join(cwd, 'transcript', 'subagents');
+    mkdirSync(subDir, { recursive: true });
+    writeFileSync(
+      join(subDir, 'agent-sub1.jsonl'),
+      assistantLine('추론 없는 서브 텍스트') + '\n',
+      'utf8',
+    );
+
+    // 서브 3회 미인식 → 서브 스코프만 지연 모드 진입.
+    for (let i = 0; i < 3; i++) await runHook(cwd, mainTp, { agentId: 'sub1' });
+    const subLagged = await runHook(cwd, mainTp, { agentId: 'sub1' });
+    expect(isBlocked(subLagged)).toBe(false);
+    expect(subLagged).toContain('지연 모드');
+
+    // 메인은 여전히 1/3부터 차단되어야 한다 (스코프 미분리 시 경고만으로 통과해버린다).
+    const main = await runHook(cwd, mainTp);
+    expect(isBlocked(main)).toBe(true);
+    expect(main).toContain('재시도 1/3');
+  });
+
+  test('메인의 섹션 인식이 서브에이전트 지연 모드를 해제하지 않는다 (v0.26.4)', async () => {
+    const cwd = makeCwd();
+    const mainNoReason = makeTranscript(cwd, ['추론 없는 메인 텍스트']);
+    const subDir = join(cwd, 'transcript', 'subagents');
+    mkdirSync(subDir, { recursive: true });
+    writeFileSync(
+      join(subDir, 'agent-sub2.jsonl'),
+      assistantLine('추론 없는 서브 텍스트') + '\n',
+      'utf8',
+    );
+
+    // 서브 3회 미인식 → 서브 스코프 지연 모드 진입.
+    for (let i = 0; i < 3; i++) await runHook(cwd, mainNoReason, { agentId: 'sub2' });
+
+    // 메인이 추론 섹션을 인식하며 통과 — 재무장은 main 스코프에만 적용되어야 한다.
+    const okPath = join(cwd, 'ok.jsonl');
+    writeFileSync(okPath, assistantLine(REASONING_TEXT) + '\n', 'utf8');
+    const mainOk = await runHook(cwd, okPath);
+    expect(isBlocked(mainOk)).toBe(false);
+
+    // 서브는 여전히 지연 모드(차단 없이 경고만) — 스코프 미분리 시 1/3부터 사이클 재진입했다.
+    const sub = await runHook(cwd, mainNoReason, { agentId: 'sub2' });
+    expect(isBlocked(sub)).toBe(false);
+    expect(sub).toContain('지연 모드');
   });
 
   test('무언 편집 deny도 escape 카운터 공유 — 3회 후 지연 모드 (v0.26.3)', async () => {
