@@ -307,6 +307,50 @@ function resetRetryCount(claudeDir: string, file: string = '.goodboy-retry-count
   }
 }
 
+/** 리뷰 유효창(분). v0.26.7: 기본 30분 → 24시간(env GOODBOY_REVIEW_WINDOW_MIN).
+ *  staleness가 파일별 편집 시각 기준(v0.26.5)이라 벽시계 창은 정합성 담보가 아니라
+ *  위생 상한일 뿐인데, 30분은 "수락 전에 만료 → 같은 파일 재차단" 루프를 실측 유발했다. */
+function reviewWindowMinutes(): number {
+  return envInt('GOODBOY_REVIEW_WINDOW_MIN', 1440);
+}
+
+/** (v0.26.7) stop_hook_active 조기 return 경로의 비차단 리뷰 수락 시도.
+ *
+ *  "차단 → 리뷰 실행 → 턴 종료"가 리뷰 게이트 해소의 표준 경로인데, 그 턴 종료는
+ *  항상 stop_hook_active=true라 조기 return되어 수락(커서 전진)이 영원히 다음
+ *  full Stop으로 미뤄진다 — 그 사이 리뷰가 만료되면 같은 파일 집합으로 재차단(실측).
+ *  펜딩 편집의 파일별 커버리지가 통과하고 유효 finding에 high가 없으면 여기서
+ *  커서를 전진시키고 리뷰 게이트 카운터를 리셋한다. 어떤 경우에도 차단하지 않는다.
+ *  주의: 가정 검증(F1.5)/차원(F2) 넛지는 이 경로에서 평가하지 않는다 — 자체 escape를
+ *  가진 품질 넛지이며, 여기서 요구하면 수락만 미뤄져 만료 루프가 재발한다. */
+function tryAcceptPendingReview(sessionId: string, cwd: string): void {
+  try {
+    const cursor = readReviewCursor(cwd);
+    const cursorTurn = cursor ? cursor.turn : 0;
+    const recentEdits = getEditsSince(sessionId, cursorTurn, cwd);
+    if (recentEdits.length === 0) return;
+    const reviewsDir = resolvePath(cwd, '.claude', 'reviews');
+    const reviews = findRecentReviewFiles(reviewsDir, reviewWindowMinutes());
+    if (reviews.length === 0) return;
+    const changedEdits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd);
+    const v = validateReviewCoverage(reviews, changedEdits);
+    if (!v.ok) return;
+    const highs = currentFindings(reviews, cursor ? cursor.timestamp : null).filter(
+      (f) => f && f.severity === 'high',
+    );
+    if (highs.length > 0) return; // high는 다음 full Stop이 정식으로 차단/안내한다.
+    writeReviewCursor(cwd, getCurrentTurn(sessionId));
+    const claudeDir = ensureClaudeDir(cwd);
+    resetRetryCount(claudeDir, REVIEW_VALIDATE_COUNT_FILE);
+    resetRetryCount(claudeDir);
+    statusSnapshot.reviewPending = false;
+    // 수락은 평소 기록하지 않지만, 이 경로는 신설이라 관측 가능성을 위해 남긴다.
+    logGate(sessionId, 'review', 'warn', 'accept-on-stop-active');
+  } catch {
+    // fail-open — 수락 시도 실패가 조기 return 경로를 막지 않는다.
+  }
+}
+
 function main(): void {
   readStdin()
     .then((raw) => {
@@ -348,8 +392,14 @@ function main(): void {
         // best-effort
       }
 
-      // (B) 무한루프 방지
+      // (B) 무한루프 방지 — 단, 리뷰 수락은 여기서도 시도한다(v0.26.7).
+      //   "차단 → 리뷰 실행 → 턴 종료(stop_hook_active=true)"가 리뷰 게이트 해소의
+      //   표준 경로인데, 이 조기 return이 수락(커서 전진)까지 건너뛰면 pass 리뷰가
+      //   소비되지 않은 채 유효창을 넘겨 만료되고 같은 파일 집합으로 재차단되는
+      //   루프가 된다(실측: 07:00 pass 리뷰가 커서 미전진 상태로 07:42에 만료 차단).
+      //   tryAcceptPendingReview는 절대 차단하지 않는다 — 조건이 안 되면 조용히 통과.
       if (input.stop_hook_active === true) {
+        tryAcceptPendingReview(sessionId, cwd);
         emit({});
         return;
       }
@@ -535,7 +585,7 @@ function main(): void {
       const reviewsDir = resolvePath(cwd, '.claude', 'reviews');
       const reviews = (() => {
         try {
-          return findRecentReviewFiles(reviewsDir, 30);
+          return findRecentReviewFiles(reviewsDir, reviewWindowMinutes());
         } catch {
           return [] as ReturnType<typeof findRecentReviewFiles>;
         }
