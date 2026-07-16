@@ -301,7 +301,7 @@ describe('pre-tool-use reasoning gate — 텍스트 플러시 지연 fail-open (
 });
 
 describe('pre-tool-use reasoning gate — escape 카운터 (v0.26.1, 탈출구 없는 게이트 금지)', () => {
-  test('섹션 미인식 deny 3회째에는 경고와 함께 통과, 이후 카운터 리셋', async () => {
+  test('섹션 미인식 deny 3회째에는 경고와 함께 통과 → sticky 지연 모드 (v0.26.3)', async () => {
     const cwd = makeCwd();
     // 지연 아님(텍스트만 존재) + 추론 섹션 없음 → 정상 deny 경로.
     const tp = makeTranscript(cwd, ['추론 없는 텍스트']);
@@ -318,10 +318,63 @@ describe('pre-tool-use reasoning gate — escape 카운터 (v0.26.1, 탈출구 �
     expect(isBlocked(third)).toBe(false);
     expect(third).toContain('3회 차단 후에도');
 
-    // 카운터가 리셋됐으므로 4회째는 다시 1/3부터 deny.
+    // v0.26.2까지는 여기서 카운터가 리셋되어 4회째가 다시 1/3부터 차단됐다 —
+    // 플러시 지연이 지속되는 동안 편집마다 deny 2회 + escape 1회가 반복(실측).
+    // 이제는 지연 모드가 유지되어 인식될 때까지 차단 없이 경고만 나온다.
     const fourth = await runHook(cwd, tp);
-    expect(isBlocked(fourth)).toBe(true);
-    expect(fourth).toContain('재시도 1/3');
+    expect(isBlocked(fourth)).toBe(false);
+    expect(fourth).toContain('지연 모드');
+
+    const fifth = await runHook(cwd, tp);
+    expect(isBlocked(fifth)).toBe(false);
+  });
+
+  test('지연 모드에서 섹션 인식 성공 → 재무장: 이후 미인식은 다시 1/3부터 deny (v0.26.3)', async () => {
+    const cwd = makeCwd();
+    const noReason = makeTranscript(cwd, ['추론 없는 텍스트']);
+    // 3회 미인식 → 지연 모드 진입.
+    for (let i = 0; i < 3; i++) await runHook(cwd, noReason);
+    const lagged = await runHook(cwd, noReason);
+    expect(isBlocked(lagged)).toBe(false);
+    expect(lagged).toContain('지연 모드');
+
+    // 섹션이 인식되면(기록 지연 해소의 증거) 지연 모드 해제 + 정상 통과.
+    const okPath = join(cwd, 'ok.jsonl');
+    writeFileSync(okPath, assistantLine(REASONING_TEXT) + '\n', 'utf8');
+    const ok = await runHook(cwd, okPath);
+    expect(isBlocked(ok)).toBe(false);
+    expect(ok).toBe('{}');
+
+    // 재무장됐으므로 미인식은 다시 1/3부터 차단.
+    const rearmed = await runHook(cwd, noReason);
+    expect(isBlocked(rearmed)).toBe(true);
+    expect(rearmed).toContain('재시도 1/3');
+  });
+
+  test('무언 편집 deny도 escape 카운터 공유 — 3회 후 지연 모드 (v0.26.3)', async () => {
+    const cwd = makeCwd();
+    const path = join(cwd, 'transcript.jsonl');
+    const silent = JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'thinking', thinking: '...' }] },
+    });
+    writeFileSync(path, silent + '\n', 'utf8');
+
+    const first = await runHook(cwd, path);
+    expect(isBlocked(first)).toBe(true);
+    expect(first).toContain('무언 편집');
+    expect(first).toContain('재시도 1/3');
+
+    const second = await runHook(cwd, path);
+    expect(isBlocked(second)).toBe(true);
+    expect(second).toContain('재시도 2/3');
+
+    // v0.26.2까지는 무언 편집 deny에 escape가 없어 무한 차단 가능성이 있었다.
+    const third = await runHook(cwd, path);
+    expect(isBlocked(third)).toBe(false);
+
+    const fourth = await runHook(cwd, path);
+    expect(isBlocked(fourth)).toBe(false);
   });
 
   test('섹션 인식 성공 시 카운터 리셋 — 이후 deny는 1/3부터', async () => {
