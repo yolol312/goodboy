@@ -62,7 +62,7 @@ function seedSession(
 function writeCoveringReview(
   cwd: string,
   files: string[],
-  opts?: { high?: boolean; medium?: boolean; dims?: string[] },
+  opts?: { high?: boolean; medium?: boolean; dims?: string[]; assumptionsChecked?: boolean },
 ): void {
   const reviewsDir = join(cwd, '.claude', 'reviews');
   mkdirSync(reviewsDir, { recursive: true });
@@ -76,12 +76,29 @@ function writeCoveringReview(
       reviewed_files: files.map((f) => resolve(cwd, f)),
       category: 'fix-bug',
       findings,
-      unknown_assumptions_checked: [],
+      unknown_assumptions_checked: opts?.assumptionsChecked
+        ? [{ assumption: '입력은 항상 문자열', reasonable: true }]
+        : [],
       verdict: 'pass',
       dimensions_checked: opts?.dims ?? ['performance'],
     }),
     'utf8',
   );
+}
+
+/** ## 추론 섹션에 가정 1건을 선언한 assistant transcript를 만들고 경로를 반환. */
+function writeTranscriptWithAssumption(cwd: string): string {
+  const path = join(cwd, 'transcript.jsonl');
+  const text = ['## 추론', '### 사실', '- 파일 확인함', '### 가정', '- 입력은 항상 문자열'].join('\n');
+  writeFileSync(
+    path,
+    JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'text', text }] },
+    }) + '\n',
+    'utf8',
+  );
+  return path;
 }
 
 interface StopOut {
@@ -95,6 +112,7 @@ async function runStop(
   cwd: string,
   sessionId: string,
   stopHookActive: boolean,
+  transcriptPath?: string,
 ): Promise<StopOut> {
   const proc = Bun.spawn(['bun', STOP_HOOK], {
     cwd,
@@ -105,6 +123,7 @@ async function runStop(
         cwd,
         hook_event_name: 'Stop',
         stop_hook_active: stopHookActive,
+        ...(transcriptPath ? { transcript_path: transcriptPath } : {}),
       }),
     ),
     stdout: 'pipe',
@@ -178,6 +197,30 @@ describe('Stop hook — stop_hook_active 경로의 비차단 리뷰 수락 (v0.2
     const next = await runStop(tmp, cwd, sessionId, false);
     expect(next.decision).toBe('block');
     expect(next.reason).toContain('차원');
+  });
+
+  test('가정 선언 + 가정 검증 없는 리뷰는 수락 보류 — F1.5 우회 차단 (v0.26.8)', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 1, ['src/a.ts'], cwd);
+    const transcript = writeTranscriptWithAssumption(cwd);
+    writeCoveringReview(cwd, ['src/a.ts']); // unknown_assumptions_checked: []
+
+    const out = await runStop(tmp, cwd, sessionId, true, transcript);
+    expect(out.decision).toBeUndefined(); // 차단은 하지 않는다
+    expect(existsSync(cursorPath(cwd))).toBe(false); // 수락도 하지 않는다
+  });
+
+  test('가정 선언 + 가정 검증 수행 리뷰는 수락된다 (F1.5 충족)', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 1, ['src/a.ts'], cwd);
+    const safe = sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_');
+    writeFileSync(join(tmp, `goodboy-session-${safe}`, 'turn.txt'), '5', 'utf8');
+    const transcript = writeTranscriptWithAssumption(cwd);
+    writeCoveringReview(cwd, ['src/a.ts'], { assumptionsChecked: true });
+
+    const out = await runStop(tmp, cwd, sessionId, true, transcript);
+    expect(out.decision).toBeUndefined();
+    expect(existsSync(cursorPath(cwd))).toBe(true);
   });
 
   test('수락 시 medium/low finding을 systemMessage로 표면화한다 (v0.26.8)', async () => {
