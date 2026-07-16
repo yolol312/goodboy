@@ -314,31 +314,68 @@ function reviewWindowMinutes(): number {
   return envInt('GOODBOY_REVIEW_WINDOW_MIN', 1440);
 }
 
-/** (v0.26.7) stop_hook_active 조기 return 경로의 비차단 리뷰 수락 시도.
+/** (v0.26.7, v0.26.8 보강) stop_hook_active 조기 return 경로의 비차단 리뷰 수락 시도.
  *
  *  "차단 → 리뷰 실행 → 턴 종료"가 리뷰 게이트 해소의 표준 경로인데, 그 턴 종료는
  *  항상 stop_hook_active=true라 조기 return되어 수락(커서 전진)이 영원히 다음
  *  full Stop으로 미뤄진다 — 그 사이 리뷰가 만료되면 같은 파일 집합으로 재차단(실측).
- *  펜딩 편집의 파일별 커버리지가 통과하고 유효 finding에 high가 없으면 여기서
- *  커서를 전진시키고 리뷰 게이트 카운터를 리셋한다. 어떤 경우에도 차단하지 않는다.
- *  주의: 가정 검증(F1.5)/차원(F2) 넛지는 이 경로에서 평가하지 않는다 — 자체 escape를
- *  가진 품질 넛지이며, 여기서 요구하면 수락만 미뤄져 만료 루프가 재발한다. */
-function tryAcceptPendingReview(sessionId: string, cwd: string): void {
+ *
+ *  수락 조건은 full Stop의 차단 게이트와 동일하다(v0.26.8 — 리뷰 high 지적 대응:
+ *  여기서 F1.5/F2를 건너뛰면 표준 경로에서 그 게이트들이 사실상 발화하지 않는
+ *  우회가 된다). 조건 미달이면 수락하지 않고 다음 full Stop의 정식 차단에 맡긴다
+ *  — 유효창이 24h라 수락 보류가 만료 루프를 만들지 않는다. 어떤 경우에도 여기서
+ *  차단하지는 않는다(무한 block 방지 속성 유지).
+ *
+ *  반환: 수락 시 사용자에게 표면화할 systemMessage(발견사항 없으면 빈 문자열),
+ *  수락하지 않으면 null. medium/low finding을 조용히 소비하지 않기 위함(v0.26.8). */
+function tryAcceptPendingReview(
+  sessionId: string,
+  cwd: string,
+  transcriptPath: string | undefined,
+): string | null {
   try {
     const cursor = readReviewCursor(cwd);
     const cursorTurn = cursor ? cursor.turn : 0;
     const recentEdits = getEditsSince(sessionId, cursorTurn, cwd);
-    if (recentEdits.length === 0) return;
+    if (recentEdits.length === 0) return null;
     const reviewsDir = resolvePath(cwd, '.claude', 'reviews');
     const reviews = findRecentReviewFiles(reviewsDir, reviewWindowMinutes());
-    if (reviews.length === 0) return;
+    if (reviews.length === 0) return null;
     const changedEdits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd);
     const v = validateReviewCoverage(reviews, changedEdits);
-    if (!v.ok) return;
-    const highs = currentFindings(reviews, cursor ? cursor.timestamp : null).filter(
-      (f) => f && f.severity === 'high',
+    if (!v.ok) return null;
+    const active = currentFindings(reviews, cursor ? cursor.timestamp : null);
+    // (F 상당) high는 수락 보류 — 다음 full Stop이 정식으로 차단/안내한다.
+    if (active.some((f) => f && f.severity === 'high')) return null;
+    const effective = v.effective;
+    // (F1.5 상당) 추측/가정을 선언했는데 리뷰가 가정 검증을 안 했으면 수락 보류.
+    const declaredUnknowns = (() => {
+      try {
+        if (!transcriptPath) return 0;
+        for (const t of extractRecentAssistantTexts(transcriptPath, 50)) {
+          if (hasReasoningSection(t)) {
+            const sec = parseReasoningSection(t);
+            return sec ? sec.speculations.length + sec.assumptions.length : 0;
+          }
+        }
+        return 0;
+      } catch {
+        return 0;
+      }
+    })();
+    const checkedAssumptions = effective.reduce(
+      (sum, r) =>
+        sum + (Array.isArray(r.unknown_assumptions_checked) ? r.unknown_assumptions_checked.length : 0),
+      0,
     );
-    if (highs.length > 0) return; // high는 다음 full Stop이 정식으로 차단/안내한다.
+    if (declaredUnknowns > 0 && checkedAssumptions === 0) return null;
+    // (F2 상당) 필수 차원 누락이면 수락 보류.
+    const requiredDims = requiredDimensionsFor(recentEdits);
+    const checkedDims = new Set(
+      effective.flatMap((r) => (Array.isArray(r.dimensions_checked) ? r.dimensions_checked : [])),
+    );
+    if (requiredDims.some((d) => !checkedDims.has(d))) return null;
+    // 수락.
     writeReviewCursor(cwd, getCurrentTurn(sessionId));
     const claudeDir = ensureClaudeDir(cwd);
     resetRetryCount(claudeDir, REVIEW_VALIDATE_COUNT_FILE);
@@ -346,8 +383,18 @@ function tryAcceptPendingReview(sessionId: string, cwd: string): void {
     statusSnapshot.reviewPending = false;
     // 수락은 평소 기록하지 않지만, 이 경로는 신설이라 관측 가능성을 위해 남긴다.
     logGate(sessionId, 'review', 'warn', 'accept-on-stop-active');
+    // (G 상당) medium/low finding은 조용히 소비하지 않고 표면화한다(v0.26.8).
+    const others = active.filter((f) => f && f.severity !== 'high');
+    if (others.length === 0) return '';
+    const sev = others
+      .slice(0, 3)
+      .map((f) => `[${f.severity}] ${f.file}${f.line ? `:${f.line}` : ''} — ${f.issue}`)
+      .join('; ');
+    const more = others.length > 3 ? ` (외 ${others.length - 3}개)` : '';
+    return `리뷰 통과(수락). 참고할 발견사항: ${sev}${more}`;
   } catch {
     // fail-open — 수락 시도 실패가 조기 return 경로를 막지 않는다.
+    return null;
   }
 }
 
@@ -399,8 +446,8 @@ function main(): void {
       //   루프가 된다(실측: 07:00 pass 리뷰가 커서 미전진 상태로 07:42에 만료 차단).
       //   tryAcceptPendingReview는 절대 차단하지 않는다 — 조건이 안 되면 조용히 통과.
       if (input.stop_hook_active === true) {
-        tryAcceptPendingReview(sessionId, cwd);
-        emit({});
+        const acceptMsg = tryAcceptPendingReview(sessionId, cwd, input.transcript_path);
+        emit(acceptMsg ? { systemMessage: acceptMsg } : {});
         return;
       }
 

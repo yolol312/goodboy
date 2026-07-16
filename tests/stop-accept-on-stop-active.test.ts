@@ -56,26 +56,29 @@ function seedSession(
   }
 }
 
-/** 편집 파일을 커버하는 신선한 리뷰(편집보다 나중 시각). */
+/** 편집 파일을 커버하는 신선한 리뷰(편집보다 나중 시각).
+ *  기본 dimensions_checked는 ['performance'] — src/a.ts(.ts 코드 파일)의 필수 차원.
+ *  v0.26.8: 수락 조건이 full Stop과 동일해져 차원 누락 리뷰는 수락되지 않는다. */
 function writeCoveringReview(
   cwd: string,
   files: string[],
-  opts?: { high?: boolean },
+  opts?: { high?: boolean; medium?: boolean; dims?: string[] },
 ): void {
   const reviewsDir = join(cwd, '.claude', 'reviews');
   mkdirSync(reviewsDir, { recursive: true });
+  const findings: Array<Record<string, unknown>> = [];
+  if (opts?.high) findings.push({ file: resolve(cwd, files[0]!), issue: '심각한 문제', severity: 'high' });
+  if (opts?.medium) findings.push({ file: resolve(cwd, files[0]!), issue: '참고할 문제', severity: 'medium' });
   writeFileSync(
     join(reviewsDir, 'review.json'),
     JSON.stringify({
       timestamp: new Date().toISOString(),
       reviewed_files: files.map((f) => resolve(cwd, f)),
       category: 'fix-bug',
-      findings: opts?.high
-        ? [{ file: resolve(cwd, files[0]!), issue: '심각한 문제', severity: 'high' }]
-        : [],
+      findings,
       unknown_assumptions_checked: [],
       verdict: 'pass',
-      dimensions_checked: [],
+      dimensions_checked: opts?.dims ?? ['performance'],
     }),
     'utf8',
   );
@@ -160,5 +163,34 @@ describe('Stop hook — stop_hook_active 경로의 비차단 리뷰 수락 (v0.2
     const out = await runStop(tmp, cwd, sessionId, true);
     expect(out.decision).toBeUndefined();
     expect(existsSync(cursorPath(cwd))).toBe(false);
+  });
+
+  test('필수 차원 누락 리뷰는 수락하지 않는다 — F2 우회 차단 (v0.26.8)', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 1, ['src/a.ts'], cwd);
+    writeCoveringReview(cwd, ['src/a.ts'], { dims: [] }); // performance 누락
+
+    const out = await runStop(tmp, cwd, sessionId, true);
+    expect(out.decision).toBeUndefined(); // 차단은 하지 않는다
+    expect(existsSync(cursorPath(cwd))).toBe(false); // 수락도 하지 않는다
+
+    // 다음 full Stop이 차원 누락으로 정식 차단.
+    const next = await runStop(tmp, cwd, sessionId, false);
+    expect(next.decision).toBe('block');
+    expect(next.reason).toContain('차원');
+  });
+
+  test('수락 시 medium/low finding을 systemMessage로 표면화한다 (v0.26.8)', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 1, ['src/a.ts'], cwd);
+    const safe = sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_');
+    writeFileSync(join(tmp, `goodboy-session-${safe}`, 'turn.txt'), '5', 'utf8');
+    writeCoveringReview(cwd, ['src/a.ts'], { medium: true });
+
+    const out = await runStop(tmp, cwd, sessionId, true);
+    expect(out.decision).toBeUndefined();
+    expect(existsSync(cursorPath(cwd))).toBe(true); // medium은 수락을 막지 않는다
+    expect(out.systemMessage ?? '').toContain('참고할 발견사항'); // 조용히 소비하지 않는다
+    expect(out.systemMessage ?? '').toContain('[medium]');
   });
 });
