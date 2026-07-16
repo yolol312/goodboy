@@ -228,8 +228,10 @@ export function validateReviewCoverage(
     if (newest.verdict === 'fail') return { ok: false, reason: '리뷰 verdict이 fail', effective: [newest] };
     return { ok: true, effective: [newest] };
   }
-  // 최신순 정렬(호출부가 이미 최신순이어도 안전하게 재정렬).
-  const sorted = [...trusted].sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
+  // 최신순 정렬(호출부가 이미 최신순이어도 안전하게 재정렬). 동률은 입력 순서 유지(0).
+  const sorted = [...trusted].sort((a, b) =>
+    a.timestamp === b.timestamp ? 0 : a.timestamp < b.timestamp ? 1 : -1,
+  );
   const missing: string[] = [];
   const stale: string[] = [];
   const failed: string[] = [];
@@ -290,4 +292,41 @@ export function validateReviewCoverage(
 export function highSeverityFindings(result: ReviewResult): ReviewFinding[] {
   if (!result || !Array.isArray(result.findings)) return [];
   return result.findings.filter((f) => f && f.severity === 'high');
+}
+
+/** 커서(마지막 수락) 이후의 신뢰 리뷰들에서 "아직 유효한" finding을 모은다 (v0.26.6).
+ *
+ *  리뷰 지적(사각지대) 대응: finding 평가를 effective(커버리지 구성 리뷰)로만 하면,
+ *  변경 집합 밖 파일만 커버한 최신 리뷰의 high finding이 조용히 소실된다.
+ *  여기서는 finding 단위로 판정한다 — 그 finding의 파일을 커버하는 더 새로운 리뷰가
+ *  있으면 대체(superseded)된 것으로 제외(수정 후 재리뷰 의미론), 아니면 유효.
+ *  sinceTimestamp(리뷰 커서의 수락 시각) 이전 리뷰는 이미 표면화/수락된 것이므로 제외
+ *  — escape로 수락된 finding이 다음 턴마다 재출현해 게이트를 재차단하는 퇴행을 막는다. */
+export function currentFindings(
+  reviews: ReviewResult[],
+  sinceTimestamp: string | null,
+): ReviewFinding[] {
+  if (!Array.isArray(reviews) || reviews.length === 0) return [];
+  const nowMs = Date.now();
+  const pool = reviews.filter(
+    (r) =>
+      hasTrustedTimestamp(r, nowMs) &&
+      (typeof sinceTimestamp !== 'string' || sinceTimestamp === '' || r.timestamp > sinceTimestamp),
+  );
+  const out: ReviewFinding[] = [];
+  for (const r of pool) {
+    if (!Array.isArray(r.findings)) continue;
+    for (const f of r.findings) {
+      if (!f || typeof f.file !== 'string') continue;
+      const key = normalizePath(f.file);
+      const superseded = pool.some(
+        (o) =>
+          o !== r &&
+          o.timestamp > r.timestamp &&
+          (o.reviewed_files ?? []).some((rf) => normalizePath(rf) === key),
+      );
+      if (!superseded) out.push(f);
+    }
+  }
+  return out;
 }

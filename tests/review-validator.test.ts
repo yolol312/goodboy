@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import { resolve } from 'node:path';
-import { highSeverityFindings, validateReview, validateReviewCoverage } from '../lib/review-validator';
+import {
+  currentFindings,
+  highSeverityFindings,
+  validateReview,
+  validateReviewCoverage,
+} from '../lib/review-validator';
 import type { ReviewFinding, ReviewResult } from '../lib/types';
 
 function review(partial: Partial<ReviewResult>): ReviewResult {
@@ -207,6 +212,65 @@ describe('validateReviewCoverage (v0.26.5, 리뷰 누적 인정)', () => {
     expect(validateReviewCoverage([a], []).ok).toBe(true);
     const f = review({ timestamp: T2, verdict: 'fail' });
     expect(validateReviewCoverage([f], []).ok).toBe(false);
+  });
+});
+
+// v0.26.6 — finding 단위 평가(리뷰 사각지대 대응): 변경 집합 밖 파일만 커버한
+//   최신 리뷰의 high finding이 effective에서 탈락해 조용히 소실되던 문제.
+describe('currentFindings (v0.26.6, finding 단위 대체 의미론)', () => {
+  const T1 = '2026-01-01T10:00:00Z';
+  const T2 = '2026-01-01T10:05:00Z';
+  const T3 = '2026-01-01T10:10:00Z';
+  const highOn = (file: string): ReviewFinding => ({ file, issue: 'x', severity: 'high' });
+
+  test('변경 집합 밖 파일만 커버한 최신 리뷰의 high finding도 유지된다 (사각지대 회귀)', () => {
+    const outOfScope = review({
+      reviewed_files: ['/repo/other.ts'],
+      findings: [highOn('/repo/other.ts')],
+      timestamp: T3,
+      verdict: 'needs-changes',
+    });
+    const out = currentFindings([outOfScope], null);
+    expect(out.length).toBe(1);
+    expect(out[0]!.severity).toBe('high');
+  });
+
+  test('같은 파일을 커버하는 더 새로운 리뷰가 있으면 finding이 대체되어 제외된다', () => {
+    const oldWithFinding = review({
+      reviewed_files: ['/repo/a.ts'],
+      findings: [highOn('/repo/a.ts')],
+      timestamp: T2,
+    });
+    const newerClean = review({ reviewed_files: ['/repo/a.ts'], findings: [], timestamp: T3 });
+    const out = currentFindings([newerClean, oldWithFinding], null);
+    expect(out.length).toBe(0);
+  });
+
+  test('다른 파일을 커버하는 새 리뷰는 기존 finding을 대체하지 않는다', () => {
+    const a = review({ reviewed_files: ['/repo/a.ts'], findings: [highOn('/repo/a.ts')], timestamp: T2 });
+    const b = review({ reviewed_files: ['/repo/b.ts'], findings: [], timestamp: T3 });
+    const out = currentFindings([b, a], null);
+    expect(out.length).toBe(1);
+  });
+
+  test('커서(마지막 수락 시각) 이전 리뷰의 finding은 제외 — escape 수락 후 재출현 방지', () => {
+    const preCursor = review({
+      reviewed_files: ['/repo/a.ts'],
+      findings: [highOn('/repo/a.ts')],
+      timestamp: T1,
+    });
+    expect(currentFindings([preCursor], T2).length).toBe(0);
+    expect(currentFindings([preCursor], null).length).toBe(1);
+  });
+
+  test('미래 timestamp 리뷰의 finding은 신뢰하지 않는다', () => {
+    const future = new Date(Date.now() + 10 * 60_000).toISOString();
+    const forged = review({
+      reviewed_files: ['/repo/a.ts'],
+      findings: [highOn('/repo/a.ts')],
+      timestamp: future,
+    });
+    expect(currentFindings([forged], null).length).toBe(0);
   });
 });
 

@@ -8,6 +8,7 @@ import {
   clearReadRecords,
   clearValidationFailure,
   compactForcePct,
+  currentFindings,
   envInt,
   extractRecentAssistantTexts,
   findRecentReviewFiles,
@@ -595,13 +596,23 @@ function main(): void {
       // 검증 통과 → 이 게이트의 카운터 리셋(다음 실패는 새로 3회 기회).
       resetRetryCount(claudeDir, REVIEW_VALIDATE_COUNT_FILE);
 
-      // 후속 검사(F/F1.5/F2/G)는 커버리지를 실제 구성한 리뷰들(effective) 기준으로
+      // 가정 검증(F1.5)/차원(F2)은 커버리지를 실제 구성한 리뷰들(effective) 기준으로
       //   평가한다 — 파일별 최신 리뷰가 이전 리뷰를 대체하는 의미론. 빈 경우(변경
       //   파일 없음 등)는 최신 리뷰 1개로 폴백.
       const effectiveReviews = v.effective.length > 0 ? v.effective : reviews.slice(0, 1);
+      // finding 평가(F/G)는 effective만으로는 부족(리뷰 지적 — 변경 집합 밖 파일만
+      //   커버한 최신 리뷰의 high finding이 조용히 소실된다). 커서 이후의 모든 신뢰
+      //   리뷰에서, 더 새로운 리뷰로 대체되지 않은 finding을 모아 평가한다(v0.26.6).
+      const activeFindings = (() => {
+        try {
+          return currentFindings(reviews, cursor ? cursor.timestamp : null);
+        } catch {
+          return effectiveReviews.flatMap((r) => (Array.isArray(r.findings) ? r.findings : []));
+        }
+      })();
 
       // (F) 재시도 카운터 (high severity) — claudeDir은 (B5)에서 확보됨.
-      const highSev = effectiveReviews.flatMap((r) => highSeverityFindings(r));
+      const highSev = activeFindings.filter((f) => f && f.severity === 'high');
       if (highSev.length > 0) {
         const count = readRetryCount(claudeDir) + 1;
         writeRetryCount(claudeDir, count);
@@ -723,9 +734,7 @@ function main(): void {
       }
 
       // (G) medium/low only — 통과 + 알림
-      const otherFindings = effectiveReviews
-        .flatMap((r) => (Array.isArray(r.findings) ? r.findings : []))
-        .filter((f) => f && f.severity !== 'high');
+      const otherFindings = activeFindings.filter((f) => f && f.severity !== 'high');
       let systemMessage: string | undefined;
       if (otherFindings.length > 0) {
         const sev = otherFindings
