@@ -340,6 +340,10 @@ export function bashWriteMessage(files: string[]): string {
     '파일 생성·수정은 Edit/Write 도구를 쓰세요 — Bash 리다이렉션(> >> tee sed -i)은 ' +
     'read-before-edit·추론 게이트·리뷰 추적·자동 검증을 모두 우회합니다. ' +
     '임시 프로브 파일이 필요하면 `mktemp -d`가 만든 디렉터리(프로젝트 밖)에 만드세요. ' +
-    '(Bash 쓰기 게이트, GOODBOY_BASH_WRITE_GATE=off로 해제 가능)'
+    '대량 범위 편집(수백 줄 삭제 등)이라 Edit의 old_string 재현이 비현실적이면: ' +
+    '(1) Read로 범위를 확인한 뒤 Write 도구로 파일 전체를 재작성하거나, ' +
+    '(2) 사용자 승인을 받아 `touch .claude/.goodboy-bash-write-approved.txt` 후 같은 명령을 ' +
+    '다시 실행하세요(1회용 승인 — 편집은 리뷰 추적에 기록됩니다). ' +
+    '(Bash 쓰기 게이트 — 세션 전체 해제: GOODBOY_BASH_WRITE_GATE=off)'
   );
 }

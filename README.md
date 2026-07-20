@@ -413,8 +413,11 @@ Agent 도구로 서브에이전트 호출 (예: general-purpose)
 
 같은 응답 안에서 추론을 쓰고 바로 편집하면 transcript 기록 지연으로 아직 인식되지 않을 수
 있습니다 — 같은 편집을 다시 시도하세요. 3회 연속 미인식이면 게이트가 **지연 모드**로 전환되어
-섹션이 인식될 때까지 차단 없이 경고만 냅니다(인식되는 즉시 정상 복원). 서브에이전트가 편집할
-때는 **서브에이전트 자신이 쓴** 추론 섹션으로 판정합니다(메인의 글이 아님).
+이후 이 세션에서는 차단 없이 경고만 냅니다(기록 지연이 확인된 세션에서 편집마다 헛 차단이
+반복되는 것을 막기 위해 세션 내내 유지 — 인식 성공 시 재무장하는 구 동작은
+`GOODBOY_REASONING_LAG_STICKY=rearm`). 문서 파일(.md/.txt/.rst/.adoc 등) 편집은 기본
+면제됩니다(`GOODBOY_REASONING_DOC_EXEMPT=off`로 복원). 서브에이전트가 편집할 때는
+**서브에이전트 자신이 쓴** 추론 섹션으로 판정합니다(메인의 글이 아님).
 
 ### "Stop이 차단됩니다 — 리뷰 필요"
 
@@ -438,7 +441,16 @@ Agent(general-purpose, "review-changes 스킬에 따라 다음 파일을 리뷰:
 - 임시 프로브 파일은 `mktemp -d`가 만든 프로젝트 밖 디렉터리에 만드세요(허용됨).
 - 빌드 산출물(`dist/`, `build/`, `node_modules/`, `.git/`, `.claude/`)과 `*.log`는 허용됩니다.
 - 특정 경로를 더 허용하려면 `GOODBOY_BASH_WRITE_ALLOW=scratch,tmpout` (cwd 기준 상대 경로).
-- 게이트 해제: `GOODBOY_BASH_WRITE_GATE=off` (또는 `warn`으로 경고만).
+- 게이트 해제: `GOODBOY_BASH_WRITE_GATE=off` (또는 `warn`으로 경고만). env는 Claude Code를
+  띄운 셸(또는 settings의 env)에 설정해야 hook 프로세스에 전달됩니다 — 대화 중 Bash 명령
+  앞에 붙이는 방식은 hook에 적용되지 않습니다.
+
+**대량 범위 편집** (수백 줄 주석 블록 삭제 등 Edit의 old_string 재현이 비현실적인 경우):
+
+1. 권장 — Read로 범위를 확인한 뒤 **Write 도구로 파일 전체를 재작성**합니다.
+2. 사용자 승인을 받은 경우 — `touch .claude/.goodboy-bash-write-approved.txt` 후 같은
+   명령(`sed -i` 등)을 다시 실행하세요. **1회용** 승인이며, 대상 파일은 편집 기록에
+   남아 리뷰 추적·Stop 리뷰 게이트가 그대로 유지됩니다.
 
 **한계**: `python -c "open('x','w')"` 처럼 인터프리터 내부에서 쓰는 경로는 잡지 못합니다.
 "무심코 우회"를 막는 것이 목적이며, 결심한 우회를 원천 봉쇄하지는 못합니다.

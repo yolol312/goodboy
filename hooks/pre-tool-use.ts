@@ -24,6 +24,7 @@ import {
   hasReasoningSection,
   logGate,
   parseReasoningSection,
+  recordEdit,
   wasFileEditedRecently,
   wasFileReadRecently,
 } from '../lib';
@@ -374,14 +375,42 @@ function main(): void {
             typeof toolInput.command === 'string' ? (toolInput.command as string) : '';
           const writes = classifyBashWrite(command, cwd);
           if (writes.length > 0) {
-            const msg = bashWriteMessage(writes);
-            if (gate === 'warn') {
-              logGate(sessionId, 'bash-write', 'warn', `${writes.length}개`);
-              preWarnings.push(msg);
+            // (v0.27.0, 실사용 피드백) 1회용 승인 마커 — 수백 줄 범위 삭제처럼 Edit의
+            //   old_string 정확 재현이 비현실적인 대량 편집의 정식 우회로. 위험 게이트의
+            //   승인 마커와 동일 패턴. 마커는 소비(삭제)되고, 대상 파일을 편집 기록에
+            //   남겨 리뷰 추적·Stop 리뷰 게이트는 그대로 유지된다.
+            const approvalPath = resolvePath(cwd, '.claude', '.goodboy-bash-write-approved.txt');
+            let approved = false;
+            try {
+              if (existsSync(approvalPath)) {
+                unlinkSync(approvalPath);
+                approved = true;
+              }
+            } catch {
+              // 마커 처리 실패 → 승인 없음으로 취급(게이트 유지)
+            }
+            if (approved) {
+              try {
+                const turn = getCurrentTurn(sessionId);
+                for (const f of writes) recordEdit(sessionId, f, turn, input.agent_id);
+              } catch {
+                // best-effort — 기록 실패가 승인된 쓰기를 막지 않는다.
+              }
+              logGate(sessionId, 'bash-write', 'warn', `approved(${writes.length}개)`);
+              preWarnings.push(
+                `승인 마커로 Bash 쓰기를 1회 허용했습니다(${writes.length}개 파일). ` +
+                  '해당 파일들은 편집 기록에 포함되어 리뷰 대상입니다.',
+              );
             } else {
-              logGate(sessionId, 'bash-write', 'deny', `${writes.length}개`);
-              emit(deny(msg));
-              return;
+              const msg = bashWriteMessage(writes);
+              if (gate === 'warn') {
+                logGate(sessionId, 'bash-write', 'warn', `${writes.length}개`);
+                preWarnings.push(msg);
+              } else {
+                logGate(sessionId, 'bash-write', 'deny', `${writes.length}개`);
+                emit(deny(msg));
+                return;
+              }
             }
           }
         }
@@ -490,11 +519,20 @@ function main(): void {
         }
       }
 
+      // (C0) 문서 파일 면제 (v0.27.0, 실사용 피드백): 문서-only 편집(.md/.txt 등)은
+      //   추론 4분류의 실익이 낮은데 게이트 마찰(지연 하니스의 헛 차단)은 코드와 동일하게
+      //   발생한다. 기본 면제하고, env GOODBOY_REASONING_DOC_EXEMPT=off로 복원 가능.
+      const editTargetLower = ((toolInput.file_path as string | undefined) ?? '').toLowerCase();
+      const reasoningDocExempt =
+        isEditTool &&
+        /\.(md|markdown|mdx|txt|rst|adoc|asciidoc)$/.test(editTargetLower) &&
+        envStr('GOODBOY_REASONING_DOC_EXEMPT', 'on') !== 'off';
+
       // (C) 추론 게이트
       // 마지막 메시지 하나만 보면, 모델이 추론 섹션을 출력한 뒤 도구 호출 직전에
       // 다른 말("이제 파일을 수정하겠습니다")을 한 줄 더 하면 잘못 차단된다.
       // → 최근 N개 turn 중 ANY가 추론 섹션을 담고 있으면 통과시킨다.
-      if (isEditTool) {
+      if (isEditTool && !reasoningDocExempt) {
         // 서브에이전트의 편집은 "서브에이전트가 쓴 글"로 판정해야 한다.
         //   hook은 서브에이전트 호출에도 메인 transcript_path를 넘긴다 → 그대로 쓰면
         //   서브가 ## 추론을 아무리 써도 메인의 글만 검사되어 영구 차단된다(실측: 9회 출력, 8회 차단).
@@ -530,8 +568,8 @@ function main(): void {
         // 상태 스코프는 판정 대상 transcript와 동일 기준(agent_id ?? 'main')으로 잡는다.
         const reasoningScope = input.agent_id ?? 'main';
         const lagModeWarning =
-          '추론 게이트 지연 모드: transcript 기록 지연으로 섹션을 인식할 수 없어 차단하지 않습니다. ' +
-          '## 추론 섹션을 계속 출력해 주세요 — 인식되는 즉시 게이트가 정상 복원됩니다.';
+          '추론 게이트 지연 모드: transcript 기록 지연이 확인된 세션이라 차단하지 않습니다. ' +
+          '## 추론 섹션은 편집 전에 계속 출력해 주세요(정책은 유지되며, 리뷰가 검증합니다).';
         const passUnrecognized = (denyReason: string, denyMessage: (n: number) => string): boolean => {
           if (isReasoningLagMode(sessionId, reasoningScope)) {
             logGate(sessionId, 'reasoning', 'warn', 'lag-mode');
@@ -547,7 +585,7 @@ function main(): void {
             logGate(sessionId, 'reasoning', 'warn', 'escape');
             preWarnings.push(
               '추론 게이트가 3회 차단 후에도 섹션을 인식하지 못했습니다. transcript 기록 지연으로 보고 ' +
-                '지연 모드로 전환합니다 — 섹션이 인식될 때까지 편집을 차단하지 않습니다. ## 추론 섹션을 계속 출력해 주세요.',
+                '지연 모드로 전환합니다 — 이 세션에서는 편집을 더 이상 차단하지 않습니다. ## 추론 섹션은 계속 출력해 주세요.',
             );
             return true;
           }
@@ -586,9 +624,16 @@ function main(): void {
             );
             if (!passed) return;
           } else {
-            // 섹션 인식 성공 = 기록 지연 해소의 증거 → escape 카운터 리셋 + 지연 모드 해제(재무장).
+            // 섹션 인식 성공 → escape 카운터 리셋.
             resetReasoningDenyCount(sessionId, reasoningScope);
-            clearReasoningLagMode(sessionId, reasoningScope);
+            // 지연 모드 해제(재무장)는 기본적으로 하지 않는다(v0.27.0, 실사용 피드백):
+            //   지연이 상존하는 세션에서 재무장하면 편집 배치마다 deny 1~2회 + escape가
+            //   반복된다(실측 보고 — "매 편집마다 1~2회 헛 실패"). 한 번 지연이 확인된
+            //   세션은 경고 유도만 유지한다. 지연 없는 하니스는 escape에 도달하지 않으므로
+            //   게이트 강도 손실이 없다. 구 재무장 동작은 GOODBOY_REASONING_LAG_STICKY=rearm.
+            if (envStr('GOODBOY_REASONING_LAG_STICKY', 'session') === 'rearm') {
+              clearReasoningLagMode(sessionId, reasoningScope);
+            }
           }
           // (A1) 실질 검사: 제목만 찍고 내용이 텅 빈 '시늉 추론'은 통과 불가.
           //   윈도우 내 추론 섹션 중 하나라도 4분류에 실제 항목이 있으면 통과.

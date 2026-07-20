@@ -66,7 +66,7 @@ function makeCwd(): string {
 async function runHook(
   cwd: string,
   transcriptPath: string | null,
-  opts?: { agentId?: string },
+  opts?: { agentId?: string; fileName?: string },
 ): Promise<string> {
   const payload = JSON.stringify({
     session_id: sessionIdFor(cwd),
@@ -74,7 +74,7 @@ async function runHook(
     transcript_path: transcriptPath ?? '',
     ...(opts?.agentId ? { agent_id: opts.agentId } : {}),
     tool_name: 'Write',
-    tool_input: { file_path: join(cwd, 'newfile.ts'), content: 'x' },
+    tool_input: { file_path: join(cwd, opts?.fileName ?? 'newfile.ts'), content: 'x' },
   });
   const proc = Bun.spawn(['bun', HOOK], {
     cwd,
@@ -334,26 +334,72 @@ describe('pre-tool-use reasoning gate — escape 카운터 (v0.26.1, 탈출구 �
     expect(isBlocked(fifth)).toBe(false);
   });
 
-  test('지연 모드에서 섹션 인식 성공 → 재무장: 이후 미인식은 다시 1/3부터 deny (v0.26.3)', async () => {
+  test('sticky 기본값: 인식 성공 후에도 지연 모드 유지 — 이후 미인식은 경고만 (v0.27.0)', async () => {
     const cwd = makeCwd();
     const noReason = makeTranscript(cwd, ['추론 없는 텍스트']);
     // 3회 미인식 → 지연 모드 진입.
     for (let i = 0; i < 3; i++) await runHook(cwd, noReason);
-    const lagged = await runHook(cwd, noReason);
-    expect(isBlocked(lagged)).toBe(false);
-    expect(lagged).toContain('지연 모드');
 
-    // 섹션이 인식되면(기록 지연 해소의 증거) 지연 모드 해제 + 정상 통과.
+    // 섹션 인식 성공 → 카운터 리셋, 정상 통과. 단 지연 모드는 유지(sticky).
     const okPath = join(cwd, 'ok.jsonl');
     writeFileSync(okPath, assistantLine(REASONING_TEXT) + '\n', 'utf8');
     const ok = await runHook(cwd, okPath);
     expect(isBlocked(ok)).toBe(false);
     expect(ok).toBe('{}');
 
-    // 재무장됐으므로 미인식은 다시 1/3부터 차단.
-    const rearmed = await runHook(cwd, noReason);
-    expect(isBlocked(rearmed)).toBe(true);
-    expect(rearmed).toContain('재시도 1/3');
+    // v0.26.9까지는 여기서 재무장되어 다시 1/3부터 차단됐다 — 지연이 상존하는
+    // 세션에서 편집 배치마다 헛 차단 1~2회가 반복(실사용 보고). 이제 경고만 낸다.
+    const after = await runHook(cwd, noReason);
+    expect(isBlocked(after)).toBe(false);
+    expect(after).toContain('지연 모드');
+  });
+
+  test('GOODBOY_REASONING_LAG_STICKY=rearm: 인식 성공 시 재무장 — 이후 미인식은 1/3부터 deny', async () => {
+    const prev = process.env.GOODBOY_REASONING_LAG_STICKY;
+    process.env.GOODBOY_REASONING_LAG_STICKY = 'rearm';
+    try {
+      const cwd = makeCwd();
+      const noReason = makeTranscript(cwd, ['추론 없는 텍스트']);
+      for (let i = 0; i < 3; i++) await runHook(cwd, noReason); // 지연 모드 진입
+      const lagged = await runHook(cwd, noReason);
+      expect(isBlocked(lagged)).toBe(false);
+      expect(lagged).toContain('지연 모드');
+
+      // 섹션 인식 → 재무장(구 동작 옵트인).
+      const okPath = join(cwd, 'ok.jsonl');
+      writeFileSync(okPath, assistantLine(REASONING_TEXT) + '\n', 'utf8');
+      const ok = await runHook(cwd, okPath);
+      expect(isBlocked(ok)).toBe(false);
+
+      const rearmed = await runHook(cwd, noReason);
+      expect(isBlocked(rearmed)).toBe(true);
+      expect(rearmed).toContain('재시도 1/3');
+    } finally {
+      if (prev === undefined) delete process.env.GOODBOY_REASONING_LAG_STICKY;
+      else process.env.GOODBOY_REASONING_LAG_STICKY = prev;
+    }
+  });
+
+  test('문서 파일(.md) 편집은 추론 게이트 면제 (v0.27.0)', async () => {
+    const cwd = makeCwd();
+    const noReason = makeTranscript(cwd, ['추론 없는 텍스트']);
+    const out = await runHook(cwd, noReason, { fileName: 'notes.md' });
+    expect(isBlocked(out)).toBe(false);
+    expect(out).toBe('{}');
+  });
+
+  test('GOODBOY_REASONING_DOC_EXEMPT=off면 문서 파일도 게이트 적용', async () => {
+    const prev = process.env.GOODBOY_REASONING_DOC_EXEMPT;
+    process.env.GOODBOY_REASONING_DOC_EXEMPT = 'off';
+    try {
+      const cwd = makeCwd();
+      const noReason = makeTranscript(cwd, ['추론 없는 텍스트']);
+      const out = await runHook(cwd, noReason, { fileName: 'notes.md' });
+      expect(isBlocked(out)).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.GOODBOY_REASONING_DOC_EXEMPT;
+      else process.env.GOODBOY_REASONING_DOC_EXEMPT = prev;
+    }
   });
 
   test('서브에이전트 지연 모드가 메인 게이트를 무장해제하지 않는다 (v0.26.4)', async () => {
