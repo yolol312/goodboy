@@ -1,8 +1,11 @@
-import { describe, expect, test } from 'bun:test';
-import { resolve } from 'node:path';
+import { afterEach, describe, expect, test } from 'bun:test';
+import { existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import {
   currentFindings,
   highSeverityFindings,
+  pruneOldReviewFiles,
   validateReview,
   validateReviewCoverage,
 } from '../lib/review-validator';
@@ -271,6 +274,68 @@ describe('currentFindings (v0.26.6, finding 단위 대체 의미론)', () => {
       timestamp: future,
     });
     expect(currentFindings([forged], null).length).toBe(0);
+  });
+});
+
+describe('pruneOldReviewFiles (v0.27.5, 리뷰 파일 위생)', () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => {
+    while (tmpDirs.length) {
+      try {
+        rmSync(tmpDirs.pop()!, { recursive: true, force: true });
+      } catch {
+        // best-effort
+      }
+    }
+  });
+
+  function makeReviewsDir(): string {
+    const d = mkdtempSync(join(tmpdir(), 'goodboy-prune-'));
+    tmpDirs.push(d);
+    return d;
+  }
+
+  function writeAged(dir: string, name: string, ageMinutes: number): string {
+    const p = join(dir, name);
+    writeFileSync(p, '{}', 'utf8');
+    const t = new Date(Date.now() - ageMinutes * 60000);
+    utimesSync(p, t, t);
+    return p;
+  }
+
+  test('보존 기간 지난 .json만 삭제, 최신 파일과 비-json은 보존', () => {
+    const dir = makeReviewsDir();
+    const old1 = writeAged(dir, 'old1.json', 60 * 24 * 4); // 4일
+    const old2 = writeAged(dir, 'old2.json', 60 * 24 * 10); // 10일
+    const fresh = writeAged(dir, 'fresh.json', 30); // 30분
+    const notJson = writeAged(dir, 'note.txt', 60 * 24 * 10);
+
+    const pruned = pruneOldReviewFiles(dir, 4320); // 3일
+    expect(pruned).toBe(2);
+    expect(existsSync(old1)).toBe(false);
+    expect(existsSync(old2)).toBe(false);
+    expect(existsSync(fresh)).toBe(true);
+    expect(existsSync(notJson)).toBe(true);
+  });
+
+  test('경계: 보존 기간과 같은 나이는 보존(초과분만 삭제)', () => {
+    const dir = makeReviewsDir();
+    const atBoundary = writeAged(dir, 'boundary.json', 100);
+    expect(pruneOldReviewFiles(dir, 100)).toBe(0);
+    expect(existsSync(atBoundary)).toBe(true);
+  });
+
+  test('olderThanMinutes가 0 이하 또는 비유한이면 no-op', () => {
+    const dir = makeReviewsDir();
+    const old = writeAged(dir, 'old.json', 60 * 24 * 30);
+    expect(pruneOldReviewFiles(dir, 0)).toBe(0);
+    expect(pruneOldReviewFiles(dir, -5)).toBe(0);
+    expect(pruneOldReviewFiles(dir, Number.NaN)).toBe(0);
+    expect(existsSync(old)).toBe(true);
+  });
+
+  test('디렉터리가 없으면 0 반환(조용히 통과)', () => {
+    expect(pruneOldReviewFiles(join(tmpdir(), 'goodboy-prune-none-없는경로'), 4320)).toBe(0);
   });
 });
 

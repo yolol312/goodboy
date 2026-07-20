@@ -5,7 +5,7 @@
 //   이제 이 경로에서 커버리지 통과 + high finding 부재면 커서를 전진시킨다.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
@@ -235,5 +235,71 @@ describe('Stop hook — stop_hook_active 경로의 비차단 리뷰 수락 (v0.2
     expect(existsSync(cursorPath(cwd))).toBe(true); // medium은 수락을 막지 않는다
     expect(out.systemMessage ?? '').toContain('참고할 발견사항'); // 조용히 소비하지 않는다
     expect(out.systemMessage ?? '').toContain('[medium]');
+  });
+});
+
+describe('Stop hook — 리뷰 파일 위생 (v0.27.5)', () => {
+  test('보존 기간(기본 3일) 지난 리뷰 파일은 Stop마다 삭제, 최신 파일은 보존', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    const reviewsDir = join(cwd, '.claude', 'reviews');
+    mkdirSync(reviewsDir, { recursive: true });
+    const oldFile = join(reviewsDir, 'old.json');
+    writeFileSync(oldFile, '{}', 'utf8');
+    const fiveDaysAgo = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
+    utimesSync(oldFile, fiveDaysAgo, fiveDaysAgo);
+    const freshFile = join(reviewsDir, 'fresh.json');
+    writeFileSync(freshFile, '{}', 'utf8');
+
+    await runStop(tmp, cwd, sessionId, false);
+    expect(existsSync(oldFile)).toBe(false);
+    expect(existsSync(freshFile)).toBe(true);
+  });
+
+  test('유효창이 보존 기간보다 길면 유효창으로 클램프 — 창 내 리뷰는 지우지 않는다 (리뷰 medium)', async () => {
+    const prev = process.env.GOODBOY_REVIEW_WINDOW_MIN;
+    process.env.GOODBOY_REVIEW_WINDOW_MIN = '20160'; // 14일 — 기본 retention(3일)보다 김
+    try {
+      const { tmp, cwd, sessionId } = newSandbox();
+      const reviewsDir = join(cwd, '.claude', 'reviews');
+      mkdirSync(reviewsDir, { recursive: true });
+      // 5일 전 리뷰: 기본 retention(3일)로는 삭제 대상이지만 유효창(14일) 안이라
+      // 게이트가 아직 읽을 수 있다 — 클램프가 없으면(변이) 여기서 지워진다.
+      const inWindow = join(reviewsDir, 'in-window.json');
+      writeFileSync(inWindow, '{}', 'utf8');
+      const fiveDaysAgo = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
+      utimesSync(inWindow, fiveDaysAgo, fiveDaysAgo);
+      // 20일 전 리뷰: 유효창 밖 — 클램프 적용 후에도 삭제되어야 한다.
+      const outWindow = join(reviewsDir, 'out-window.json');
+      writeFileSync(outWindow, '{}', 'utf8');
+      const twentyDaysAgo = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000);
+      utimesSync(outWindow, twentyDaysAgo, twentyDaysAgo);
+
+      await runStop(tmp, cwd, sessionId, false);
+      expect(existsSync(inWindow)).toBe(true);
+      expect(existsSync(outWindow)).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.GOODBOY_REVIEW_WINDOW_MIN;
+      else process.env.GOODBOY_REVIEW_WINDOW_MIN = prev;
+    }
+  });
+
+  test('GOODBOY_REVIEW_RETENTION_MIN=0이면 위생 비활성(삭제 안 함)', async () => {
+    const prev = process.env.GOODBOY_REVIEW_RETENTION_MIN;
+    process.env.GOODBOY_REVIEW_RETENTION_MIN = '0';
+    try {
+      const { tmp, cwd, sessionId } = newSandbox();
+      const reviewsDir = join(cwd, '.claude', 'reviews');
+      mkdirSync(reviewsDir, { recursive: true });
+      const oldFile = join(reviewsDir, 'old.json');
+      writeFileSync(oldFile, '{}', 'utf8');
+      const monthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      utimesSync(oldFile, monthAgo, monthAgo);
+
+      await runStop(tmp, cwd, sessionId, false);
+      expect(existsSync(oldFile)).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.GOODBOY_REVIEW_RETENTION_MIN;
+      else process.env.GOODBOY_REVIEW_RETENTION_MIN = prev;
+    }
   });
 });

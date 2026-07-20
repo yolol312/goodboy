@@ -1,6 +1,6 @@
 // 리뷰 결과 JSON 파일 검증 (Stop hook에서 사용)
 
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { ReviewFinding, ReviewResult, Verdict } from './types';
 
@@ -93,6 +93,35 @@ export function findRecentReviewFiles(reviewsDir: string, withinMinutes: number)
   } catch {
     return [];
   }
+}
+
+/** (v0.27.5) 보존 기간이 지난 리뷰 파일 삭제 — 실사용 보고: .claude/reviews/*.json이
+ *  무한정 쌓인다. 유효창(기본 24h)을 지난 리뷰는 게이트가 다시는 읽지 않는 죽은
+ *  데이터다. Stop 훅이 매번 best-effort로 호출한다. 삭제한 파일 수를 반환.
+ *  ⚠️ 호출부는 olderThanMinutes를 유효창 이상으로 클램프해야 한다 — 여기서는
+ *  전달값을 그대로 신뢰한다(단위 테스트 용이성). */
+export function pruneOldReviewFiles(reviewsDir: string, olderThanMinutes: number): number {
+  if (!Number.isFinite(olderThanMinutes) || olderThanMinutes <= 0) return 0;
+  let pruned = 0;
+  try {
+    const now = Date.now();
+    for (const name of readdirSync(reviewsDir)) {
+      if (!name.endsWith('.json')) continue;
+      const full = join(reviewsDir, name);
+      try {
+        const st = statSync(full);
+        if (!st.isFile()) continue;
+        if ((now - st.mtimeMs) / 60000 <= olderThanMinutes) continue;
+        unlinkSync(full);
+        pruned++;
+      } catch {
+        continue;
+      }
+    }
+  } catch {
+    // 디렉터리 없음/권한 등 — 정리는 위생 작업이라 조용히 넘어간다.
+  }
+  return pruned;
 }
 
 export interface ValidationResult {

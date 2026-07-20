@@ -12,6 +12,7 @@ import {
   envInt,
   extractRecentAssistantTexts,
   findRecentReviewFiles,
+  pruneOldReviewFiles,
   getContextUsage,
   getCurrentTurn,
   getEditsSince,
@@ -419,6 +420,23 @@ function main(): void {
         incrementTurn(sessionId);
       } catch (err) {
         process.stderr.write(`[goodboy stop] incrementTurn error: ${String(err)}\n`);
+      }
+
+      // (A0.5, v0.27.5) 리뷰 파일 위생 — 실사용 보고: .claude/reviews/*.json이 무한정
+      //   쌓인다. 유효창을 지난 리뷰는 게이트가 다시는 읽지 않으므로 보존 기간
+      //   (GOODBOY_REVIEW_RETENTION_MIN, 기본 3일; 0 이하로 비활성) 경과분을 삭제한다.
+      //   유효창보다 짧게 설정돼도 아직 유효한 리뷰는 지우지 않게 클램프한다.
+      try {
+        const retention = envInt('GOODBOY_REVIEW_RETENTION_MIN', 4320);
+        if (retention > 0) {
+          const pruned = pruneOldReviewFiles(
+            resolvePath(cwd, '.claude', 'reviews'),
+            Math.max(retention, reviewWindowMinutes()),
+          );
+          if (pruned > 0) logGate(sessionId, 'review', 'warn', `pruned-old-reviews(${pruned})`);
+        }
+      } catch {
+        // best-effort — 위생 실패가 Stop 처리를 막지 않는다.
       }
 
       // (E1) 스냅샷: 카테고리/위험도(session-state에서, 현재 세션 것만).

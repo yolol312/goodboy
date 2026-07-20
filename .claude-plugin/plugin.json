@@ -1,6 +1,6 @@
 {
   "name": "goodboy",
-  "version": "0.27.4",
+  "version": "0.27.5",
   "description": "Good Boy — 세상에 나쁜 AI는 없다(There Are No Bad Agents). agentic LLM-CLI 가드레일(도구 위임·재읽기 방지·컨텍스트 관리·재귀 폭주 방어·토큰 낭비 억제)",
   "author": {
     "name": "yolol312"

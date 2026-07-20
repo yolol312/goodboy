@@ -431,6 +431,19 @@ Agent 도구로 서브에이전트 호출 (예: general-purpose)
 Agent(general-purpose, "review-changes 스킬에 따라 다음 파일을 리뷰: <변경 파일 목록>")
 ```
 
+### `.claude/reviews/*.json`이 쌓입니다
+
+리뷰 결과 파일은 Stop 리뷰 게이트의 판정 근거로, 유효창(기본 24시간) 안의 것만 읽힙니다.
+v0.27.5부터 보존 기간(기본 3일, `GOODBOY_REVIEW_RETENTION_MIN` 분 단위)이 지난 파일을
+Stop마다 자동 삭제합니다(`0`으로 비활성; 유효창보다 짧게 설정해도 유효한 리뷰는 지우지
+않습니다). `.claude/.goodboy-last-review.json`은 리뷰 커서(단일 파일)라 삭제하지 않습니다.
+git 추적에서 빼려면 프로젝트 `.gitignore`에 추가하세요:
+
+```
+.claude/reviews/
+.claude/.goodboy-*
+```
+
 ### "위험 작업이 차단됩니다"
 
 사용자 승인이 필요합니다. `touch .claude/.goodboy-risk-approved.txt`
