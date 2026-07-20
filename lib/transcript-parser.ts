@@ -193,23 +193,57 @@ export function assistantTextFromLine(line: string): string | null {
   return null;
 }
 
-/** 마지막(가장 최근) 최대 n개의 assistant message 텍스트를 최신순으로 반환.
+export interface AssistantTextEntry {
+  text: string;
+  /** transcript 엔트리의 생성 시각(epoch ms). 필드가 없거나 파싱 불가면 null.
+   *  ⚠️ 이 시각은 "생성" 시각이다 — 지연 하니스에서는 파일 기록(플러시)이 이보다
+   *  수십 초 늦게 일어난다(실측). 추론 게이트의 지연 확정(lag-confirm)이 이 차이를 쓴다. */
+  timestampMs: number | null;
+}
+
+/** transcript 한 줄에서 엔트리 생성 시각(top-level timestamp)을 epoch ms로 추출. 실패 시 null. */
+function timestampFromLine(line: string): number | null {
+  try {
+    const obj = JSON.parse(line.trim()) as Record<string, unknown>;
+    const ts = obj.timestamp;
+    if (typeof ts === 'string') {
+      const ms = Date.parse(ts);
+      return Number.isFinite(ms) ? ms : null;
+    }
+    if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** 마지막(가장 최근) 최대 n개의 assistant message 텍스트를 생성 시각과 함께 최신순으로 반환.
  *  파싱 실패/없음이면 빈 배열. 게이트는 fail-open을 위해 길이 0을 별도 처리한다. */
-export function extractRecentAssistantTexts(transcriptPath: string, n: number): string[] {
+export function extractRecentAssistantTextEntries(
+  transcriptPath: string,
+  n: number,
+): AssistantTextEntry[] {
   try {
     if (!transcriptPath || !existsSync(transcriptPath)) return [];
     const raw = readFileSync(transcriptPath, 'utf8');
     const lines = raw.split(/\r?\n/);
-    const texts: string[] = [];
+    const entries: AssistantTextEntry[] = [];
     // 뒤에서부터 훑어 최근 n개의 assistant message 텍스트 수집
-    for (let i = lines.length - 1; i >= 0 && texts.length < n; i--) {
-      const text = assistantTextFromLine(lines[i] ?? '');
-      if (text !== null) texts.push(text);
+    for (let i = lines.length - 1; i >= 0 && entries.length < n; i--) {
+      const line = lines[i] ?? '';
+      const text = assistantTextFromLine(line);
+      if (text !== null) entries.push({ text, timestampMs: timestampFromLine(line) });
     }
-    return texts;
+    return entries;
   } catch {
     return [];
   }
+}
+
+/** 마지막(가장 최근) 최대 n개의 assistant message 텍스트를 최신순으로 반환.
+ *  파싱 실패/없음이면 빈 배열. 게이트는 fail-open을 위해 길이 0을 별도 처리한다. */
+export function extractRecentAssistantTexts(transcriptPath: string, n: number): string[] {
+  return extractRecentAssistantTextEntries(transcriptPath, n).map((e) => e.text);
 }
 
 /** 서브에이전트의 전용 transcript 경로를 해석한다.

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 
@@ -476,6 +476,160 @@ describe('pre-tool-use reasoning gate — escape 카운터 (v0.26.1, 탈출구 �
 
     const fourth = await runHook(cwd, path);
     expect(isBlocked(fourth)).toBe(false);
+  });
+
+  test('지연 확정(v0.27.4): deny 이전에 생성된 추론 텍스트가 재시도에서 인식되면 즉시 지연 모드', async () => {
+    const cwd = makeCwd();
+    const tp = join(cwd, 'transcript.jsonl');
+    // 1) 추론 없는 텍스트만 → deny 1/3 (실사용 재현: 모델은 이미 ## 추론을 출력했지만
+    //    아직 transcript에 플러시되지 않은 상태).
+    writeFileSync(tp, assistantLine('추론 없는 텍스트') + '\n', 'utf8');
+    const first = await runHook(cwd, tp);
+    expect(isBlocked(first)).toBe(true);
+    expect(first).toContain('재시도 1/3');
+
+    // 2) deny **이전**에 생성된(timestamp가 과거) 추론 텍스트가 뒤늦게 플러시됨.
+    const before = new Date(Date.now() - 60_000).toISOString();
+    const laggedLine = JSON.stringify({
+      type: 'assistant',
+      timestamp: before,
+      message: { role: 'assistant', content: [{ type: 'text', text: REASONING_TEXT }] },
+    });
+    writeFileSync(tp, assistantLine('추론 없는 텍스트') + '\n' + laggedLine + '\n', 'utf8');
+
+    // 3) 같은 호출 재시도 → 통과 + 지연 확정으로 즉시 지연 모드 전환.
+    const second = await runHook(cwd, tp);
+    expect(isBlocked(second)).toBe(false);
+    expect(second).toContain('지연 모드로 전환');
+
+    // 4) 다음 편집(다시 미인식 상태) → escape 3회를 기다리지 않고 경고만으로 통과.
+    writeFileSync(tp, assistantLine('추론 없는 다음 턴 텍스트') + '\n', 'utf8');
+    const next = await runHook(cwd, tp);
+    expect(isBlocked(next)).toBe(false);
+    expect(next).toContain('지연 모드');
+  });
+
+  test('지연 확정 아님: deny 이후 생성된(순응) 추론 텍스트는 지연 모드로 전환하지 않는다', async () => {
+    const cwd = makeCwd();
+    const tp = join(cwd, 'transcript.jsonl');
+    writeFileSync(tp, assistantLine('추론 없는 텍스트') + '\n', 'utf8');
+    const first = await runHook(cwd, tp);
+    expect(isBlocked(first)).toBe(true);
+
+    // deny를 보고 모델이 순응해 새로 출력한 추론 텍스트(timestamp가 deny 이후 = 미래).
+    const after = new Date(Date.now() + 60_000).toISOString();
+    const compliedLine = JSON.stringify({
+      type: 'assistant',
+      timestamp: after,
+      message: { role: 'assistant', content: [{ type: 'text', text: REASONING_TEXT }] },
+    });
+    writeFileSync(tp, assistantLine('추론 없는 텍스트') + '\n' + compliedLine + '\n', 'utf8');
+    const second = await runHook(cwd, tp);
+    expect(isBlocked(second)).toBe(false);
+
+    // 게이트는 무장 상태 유지 — 다음 미인식은 1/3부터 다시 차단(빠른 하니스 강도 유지).
+    writeFileSync(tp, assistantLine('추론 없는 다음 턴 텍스트') + '\n', 'utf8');
+    const next = await runHook(cwd, tp);
+    expect(isBlocked(next)).toBe(true);
+    expect(next).toContain('재시도 1/3');
+  });
+
+  test('지연 확정 fail-safe: timestamp가 없는 추론 텍스트는 지연 모드로 전환하지 않는다', async () => {
+    const cwd = makeCwd();
+    const tp = join(cwd, 'transcript.jsonl');
+    writeFileSync(tp, assistantLine('추론 없는 텍스트') + '\n', 'utf8');
+    const first = await runHook(cwd, tp);
+    expect(isBlocked(first)).toBe(true);
+
+    // timestamp 필드 없는(구형/변형 포맷) 추론 텍스트 — 판정 불가 → 전환 안 함.
+    writeFileSync(
+      tp,
+      assistantLine('추론 없는 텍스트') + '\n' + assistantLine(REASONING_TEXT) + '\n',
+      'utf8',
+    );
+    const second = await runHook(cwd, tp);
+    expect(isBlocked(second)).toBe(false);
+
+    writeFileSync(tp, assistantLine('추론 없는 다음 턴 텍스트') + '\n', 'utf8');
+    const next = await runHook(cwd, tp);
+    expect(isBlocked(next)).toBe(true);
+    expect(next).toContain('재시도 1/3');
+  });
+
+  /** timestamp를 가진 추론 텍스트 assistant 줄. */
+  function reasoningLineAt(iso: string): string {
+    return JSON.stringify({
+      type: 'assistant',
+      timestamp: iso,
+      message: { role: 'assistant', content: [{ type: 'text', text: REASONING_TEXT }] },
+    });
+  }
+
+  test('지연 확정 기준은 현재 시각이 아니라 deny 시각이다 (변이 사살: 리뷰 medium)', async () => {
+    const cwd = makeCwd();
+    const tp = join(cwd, 'transcript.jsonl');
+    writeFileSync(tp, assistantLine('추론 없는 텍스트') + '\n', 'utf8');
+    const first = await runHook(cwd, tp);
+    expect(isBlocked(first)).toBe(true);
+
+    // deny 시각(deny-count 파일 mtime)을 2분 전으로 밀어, "deny 이후이지만 현재보다는
+    // 과거"에 생성된 현실적인 순응 타임라인을 만든다. 비교 기준이 현재 시각으로
+    // 잘못 바뀌면(변이) 이 순응 텍스트(1분 전)도 지연 확정으로 오판된다.
+    const denyCountPath = join(
+      tmpdir(),
+      `goodboy-session-${sessionIdFor(cwd)}`,
+      'reasoning-deny-count.main.txt',
+    );
+    const past = new Date(Date.now() - 120_000);
+    utimesSync(denyCountPath, past, past);
+
+    writeFileSync(
+      tp,
+      assistantLine('추론 없는 텍스트') +
+        '\n' +
+        reasoningLineAt(new Date(Date.now() - 60_000).toISOString()) +
+        '\n',
+      'utf8',
+    );
+    const second = await runHook(cwd, tp);
+    expect(isBlocked(second)).toBe(false);
+
+    // 순응(생성 시각 > deny 시각)이므로 게이트는 무장 유지 — 다음 미인식은 1/3부터 차단.
+    writeFileSync(tp, assistantLine('추론 없는 다음 턴 텍스트') + '\n', 'utf8');
+    const next = await runHook(cwd, tp);
+    expect(isBlocked(next)).toBe(true);
+    expect(next).toContain('재시도 1/3');
+  });
+
+  test('지연 확정은 직전 deny가 있을 때만 — 카운터 0 상태의 과거 ts 인식은 전환 안 함 (변이 사살)', async () => {
+    const cwd = makeCwd();
+    const tp = join(cwd, 'transcript.jsonl');
+    // deny 1회 → 순응 인식으로 카운터 0 리셋(deny-count 파일은 0으로 잔존, mtime=리셋 시각).
+    writeFileSync(tp, assistantLine('추론 없는 텍스트') + '\n', 'utf8');
+    const first = await runHook(cwd, tp);
+    expect(isBlocked(first)).toBe(true);
+    writeFileSync(
+      tp,
+      assistantLine('추론 없는 텍스트') +
+        '\n' +
+        reasoningLineAt(new Date(Date.now() + 60_000).toISOString()) +
+        '\n',
+      'utf8',
+    );
+    const reset = await runHook(cwd, tp);
+    expect(isBlocked(reset)).toBe(false);
+
+    // 새 턴: 직전 deny 없이(카운터 0) 과거 ts 추론이 인식됨 — priorDenies 가드가 없다면
+    // (변이) 리셋 mtime과 비교해 잘못 지연 모드로 전환된다.
+    writeFileSync(tp, reasoningLineAt(new Date(Date.now() - 60_000).toISOString()) + '\n', 'utf8');
+    const ok = await runHook(cwd, tp);
+    expect(isBlocked(ok)).toBe(false);
+
+    // 게이트 무장 유지 — 다음 미인식은 1/3부터 차단되어야 한다.
+    writeFileSync(tp, assistantLine('추론 없는 다음 턴 텍스트') + '\n', 'utf8');
+    const next = await runHook(cwd, tp);
+    expect(isBlocked(next)).toBe(true);
+    expect(next).toContain('재시도 1/3');
   });
 
   test('섹션 인식 성공 시 카운터 리셋 — 이후 deny는 1/3부터', async () => {

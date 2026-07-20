@@ -17,7 +17,7 @@ import {
   ensureSessionDir,
   envInt,
   envStr,
-  extractRecentAssistantTexts,
+  extractRecentAssistantTextEntries,
   getCurrentTurn,
   getRecentReadMtime,
   hasAssistantMessages,
@@ -141,6 +141,19 @@ function resetReasoningDenyCount(sessionId: string, scope: string): void {
     if (readReasoningDenyCount(sessionId, scope) > 0) writeReasoningDenyCount(sessionId, scope, 0);
   } catch {
     // best-effort
+  }
+}
+
+/** 마지막 deny 기록 시각(epoch ms) — deny-count 파일의 mtime. 파일이 없거나 실패면 null.
+ *  카운터가 0으로 리셋될 때도 mtime이 갱신되므로, 반드시 count > 0인 상태에서
+ *  (즉 리셋 이전에) 읽어야 "마지막 deny 시각"으로 유효하다. */
+function lastReasoningDenyAtMs(sessionId: string, scope: string): number | null {
+  try {
+    const p = join(ensureSessionDir(sessionId), scopedStateFile('reasoning-deny-count', scope));
+    if (!existsSync(p)) return null;
+    return statSync(p).mtimeMs;
+  } catch {
+    return null;
   }
 }
 
@@ -567,7 +580,11 @@ function main(): void {
         if (lagEntries >= lagThreshold) {
           logGate(sessionId, 'reasoning', 'fail-open', `text-flush-lag(${lagEntries})`);
         } else {
-        const recentTexts = extractRecentAssistantTexts(reasoningTranscript, reasoningGateWindow());
+        const recentEntries = extractRecentAssistantTextEntries(
+          reasoningTranscript,
+          reasoningGateWindow(),
+        );
+        const recentTexts = recentEntries.map((e) => e.text);
         // (C-escape v0.26.3) 섹션 미인식 처리 공용 경로 — 무언 편집/미인식 deny 모두
         //   같은 카운터를 쓴다. 지연 모드면 차단하지 않고 경고만, 아니면 3회까지 deny 후
         //   지연 모드로 전환한다. true를 반환하면 이번 편집을 통과시킨다는 뜻.
@@ -630,6 +647,39 @@ function main(): void {
             );
             if (!passed) return;
           } else {
+            // (C-confirm v0.27.4) 지연 확정 — 실사용 재보고("편집마다 헛 deny 1회 잔존") 대응:
+            //   sticky 지연 모드는 3회 escape에서만 켜지는데, "deny 1회 → 재시도에서 인식"이
+            //   되는 중간 속도 플러시 세션은 카운터가 1→리셋을 반복하며 escape에 영영 도달하지
+            //   못한다. 직전에 deny했는데 지금 인식된 추론 텍스트가 그 deny **이전에 생성**된
+            //   것이면(생성 시각 < deny 시각), 그 deny는 플러시 지연 오탐이었다는 직접 증거다 —
+            //   모델이 deny를 보고 순응해 새로 쓴 텍스트라면 생성 시각이 deny 이후여야 한다.
+            //   이 경우 escape를 기다리지 않고 즉시 지연 모드로 전환해 헛 deny를 세션당 1회로
+            //   수렴시킨다. (hook 입력에 현재 턴 텍스트가 없어 최초 1회는 구조적으로 남는다.)
+            //   순응 케이스(생성 시각 ≥ deny 시각)는 전환하지 않아 빠른 하니스의 게이트 강도가
+            //   유지되고, 시각 정보가 없으면 아무것도 하지 않는다(fail-safe).
+            const priorDenies = readReasoningDenyCount(sessionId, reasoningScope);
+            if (
+              priorDenies > 0 &&
+              !isReasoningLagMode(sessionId, reasoningScope) &&
+              envStr('GOODBOY_REASONING_LAG_STICKY', 'session') !== 'rearm' &&
+              envStr('GOODBOY_REASONING_LAG_CONFIRM', 'on') !== 'off'
+            ) {
+              const denyAtMs = lastReasoningDenyAtMs(sessionId, reasoningScope);
+              const recognizedAtMs = recentEntries
+                .filter((e) => hasReasoningSection(e.text))
+                .map((e) => e.timestampMs)
+                .filter((t): t is number => t !== null)
+                .reduce<number | null>((max, t) => (max === null || t > max ? t : max), null);
+              if (denyAtMs !== null && recognizedAtMs !== null && recognizedAtMs < denyAtMs) {
+                setReasoningLagMode(sessionId, reasoningScope);
+                logGate(sessionId, 'reasoning', 'warn', 'lag-confirmed');
+                preWarnings.push(
+                  '추론 게이트: 방금 차단했던 편집의 ## 추론 섹션이 차단 이전에 이미 출력됐던 것으로 확인됐습니다' +
+                    '(transcript 기록 지연). 이 세션은 지연 모드로 전환합니다 — 이후 편집은 차단 없이 진행되며, ' +
+                    '## 추론 섹션은 계속 출력해 주세요(리뷰가 검증합니다).',
+                );
+              }
+            }
             // 섹션 인식 성공 → escape 카운터 리셋.
             resetReasoningDenyCount(sessionId, reasoningScope);
             // 지연 모드 해제(재무장)는 기본적으로 하지 않는다(v0.27.0, 실사용 피드백):
