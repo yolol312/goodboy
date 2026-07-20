@@ -243,6 +243,10 @@ function main(): void {
       //   미주입) PostToolUse 사후 경고로 이동함. 여기서는 더 이상 다루지 않는다.
       const preWarnings: string[] = [];
 
+      // (v0.27.1) Bash 쓰기 승인 마커의 지연 소비 — A1.7에서 존재만 확인해 두고,
+      //   이후의 모든 deny 게이트(위험 게이트 D)를 통과한 뒤에만 소비·기록한다.
+      let pendingBashWriteApproval: { markerPath: string; writes: string[] } | null = null;
+
       // (A0) 재귀 폭주 방어 — Agent/Task 호출에 한해, 60초 슬라이딩 윈도우로
       //   총 호출 상한/동일 프롬프트 반복을 검사한다. agent_type 존재 여부와
       //   무관하게 적용한다(서브에이전트가 또 서브에이전트를 부르는 폭주를 막기 위함).
@@ -377,30 +381,20 @@ function main(): void {
           if (writes.length > 0) {
             // (v0.27.0, 실사용 피드백) 1회용 승인 마커 — 수백 줄 범위 삭제처럼 Edit의
             //   old_string 정확 재현이 비현실적인 대량 편집의 정식 우회로. 위험 게이트의
-            //   승인 마커와 동일 패턴. 마커는 소비(삭제)되고, 대상 파일을 편집 기록에
-            //   남겨 리뷰 추적·Stop 리뷰 게이트는 그대로 유지된다.
+            //   승인 마커와 동일 패턴(honor-system). 여기서는 존재만 확인하고 통과 여부만
+            //   정한다 — 마커 소비(삭제)와 편집 기록은 이후의 모든 deny 게이트(위험 게이트 D)를
+            //   통과한 뒤에 수행한다(v0.27.1 리뷰 지적: D가 deny하면 마커만 소비되고
+            //   실행되지 않은 쓰기가 유령 편집으로 기록되는 문제).
             const approvalPath = resolvePath(cwd, '.claude', '.goodboy-bash-write-approved.txt');
-            let approved = false;
-            try {
-              if (existsSync(approvalPath)) {
-                unlinkSync(approvalPath);
-                approved = true;
-              }
-            } catch {
-              // 마커 처리 실패 → 승인 없음으로 취급(게이트 유지)
-            }
-            if (approved) {
+            const approved = (() => {
               try {
-                const turn = getCurrentTurn(sessionId);
-                for (const f of writes) recordEdit(sessionId, f, turn, input.agent_id);
+                return existsSync(approvalPath);
               } catch {
-                // best-effort — 기록 실패가 승인된 쓰기를 막지 않는다.
+                return false; // 마커 확인 실패 → 승인 없음으로 취급(게이트 유지)
               }
-              logGate(sessionId, 'bash-write', 'warn', `approved(${writes.length}개)`);
-              preWarnings.push(
-                `승인 마커로 Bash 쓰기를 1회 허용했습니다(${writes.length}개 파일). ` +
-                  '해당 파일들은 편집 기록에 포함되어 리뷰 대상입니다.',
-              );
+            })();
+            if (approved) {
+              pendingBashWriteApproval = { markerPath: approvalPath, writes };
             } else {
               const msg = bashWriteMessage(writes);
               if (gate === 'warn') {
@@ -683,6 +677,28 @@ function main(): void {
             return;
           }
         }
+      }
+
+      // (v0.27.1) Bash 쓰기 승인 마커 지연 소비 — 여기 도달 = 모든 deny 게이트 통과.
+      //   마커를 소비(1회용)하고, 대상 파일을 편집 기록에 남겨 리뷰 추적을 유지한다.
+      if (pendingBashWriteApproval !== null) {
+        const { markerPath, writes } = pendingBashWriteApproval;
+        try {
+          if (existsSync(markerPath)) unlinkSync(markerPath);
+        } catch {
+          // best-effort — 마커 삭제 실패가 승인된 쓰기를 막지 않는다(다음 호출에서 재소비될 수 있음).
+        }
+        try {
+          const turn = getCurrentTurn(sessionId);
+          for (const f of writes) recordEdit(sessionId, f, turn, input.agent_id);
+        } catch {
+          // best-effort — 기록 실패가 승인된 쓰기를 막지 않는다.
+        }
+        logGate(sessionId, 'bash-write', 'warn', `approved(${writes.length}개)`);
+        preWarnings.push(
+          `승인 마커로 Bash 쓰기를 1회 허용했습니다(${writes.length}개 파일). ` +
+            '해당 파일들은 편집 기록에 포함되어 리뷰 대상입니다.',
+        );
       }
 
       emitPass(preWarnings);

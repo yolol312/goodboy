@@ -90,4 +90,25 @@ describe('pre-tool-use bash-write gate — 승인 마커 (v0.27.0)', () => {
     const second = await runBash(cwd, 'echo hi > src/b.ts');
     expect(isBlocked(second)).toBe(true);
   });
+
+  test('위험 게이트가 deny하면 마커는 소비되지 않고 유령 편집도 기록되지 않는다 (v0.27.1)', async () => {
+    const cwd = makeCwd();
+    mkdirSync(join(cwd, '.claude'), { recursive: true });
+    writeFileSync(markerPath(cwd), '', 'utf8');
+    // 현재 세션에 바인딩된 risky 상태 → 위험 게이트(D)가 Bash를 deny한다.
+    writeFileSync(
+      join(cwd, '.claude', '.goodboy-session-state.json'),
+      JSON.stringify({ category: 'migrate', risk: 'risky', sessionId: basename(cwd) }),
+      'utf8',
+    );
+
+    const out = await runBash(cwd, 'echo hi > src/a.ts');
+    expect(isBlocked(out)).toBe(true);
+    expect(out).toContain('위험');
+    // v0.27.0에서는 A1.7 시점에 마커가 먼저 소비되고 실행되지 않은 쓰기가
+    // 유령 편집으로 기록됐다(리뷰 지적) — 이제 deny 게이트 통과 후에만 소비한다.
+    expect(existsSync(markerPath(cwd))).toBe(true);
+    const editsPath = join(tmpdir(), `goodboy-session-${basename(cwd)}`, 'edits.jsonl');
+    expect(existsSync(editsPath)).toBe(false);
+  });
 });
