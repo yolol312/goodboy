@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // PreToolUse hook — 도구 강제 위임, Read-before-edit, 추론 게이트, 위험도 게이트
 
-import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
 import {
   assistantEntriesAfterLastText,
@@ -243,9 +243,14 @@ function main(): void {
       //   미주입) PostToolUse 사후 경고로 이동함. 여기서는 더 이상 다루지 않는다.
       const preWarnings: string[] = [];
 
-      // (v0.27.1) Bash 쓰기 승인 마커의 지연 소비 — A1.7에서 존재만 확인해 두고,
-      //   이후의 모든 deny 게이트(위험 게이트 D)를 통과한 뒤에만 소비·기록한다.
-      let pendingBashWriteApproval: { markerPath: string; writes: string[] } | null = null;
+      // (v0.27.1~2) Bash 쓰기 승인 마커 — A1.7에서 원자 소비해 두고, 이후의 모든
+      //   deny 게이트(위험 게이트 D)를 통과한 뒤에만 편집 기록·표면화한다.
+      //   D가 deny하면 consumedPath에서 markerPath로 복원해 승인을 보존한다.
+      let pendingBashWriteApproval: {
+        markerPath: string;
+        consumedPath: string;
+        writes: string[];
+      } | null = null;
 
       // (A0) 재귀 폭주 방어 — Agent/Task 호출에 한해, 60초 슬라이딩 윈도우로
       //   총 호출 상한/동일 프롬프트 반복을 검사한다. agent_type 존재 여부와
@@ -386,20 +391,22 @@ function main(): void {
             //   통과한 뒤에 수행한다(v0.27.1 리뷰 지적: D가 deny하면 마커만 소비되고
             //   실행되지 않은 쓰기가 유령 편집으로 기록되는 문제).
             const approvalPath = resolvePath(cwd, '.claude', '.goodboy-bash-write-approved.txt');
-            // 원자적 소비(v0.27.2 리뷰 지적: 존재 확인만 하면 병렬 Bash 쓰기 2건이 마커
-            //   1개로 모두 승인되는 TOCTOU) — unlink는 정확히 1회만 성공하므로 여기서
-            //   소비한다. 이후 위험 게이트(D)가 deny하면 마커를 복원해 승인을 보존한다.
+            // 원자적 소비 — renameSync로 고유 경로에 이동한다. rename은 어떤 경합에서도
+            //   정확히 한 프로세스만 성공한다(패자는 ENOENT). ⚠️ unlink로 구현하면 안
+            //   된다: macOS에서 동시 unlink(2)가 같은 경로에 둘 다 성공해 병렬 이중
+            //   승인이 된다(v0.27.3 리뷰 실측 9/10). 위험 게이트(D)가 deny하면
+            //   consumedPath에서 복원해 승인을 보존한다.
+            const consumedPath = `${approvalPath}.consumed-${process.pid}`;
             const approved = (() => {
               try {
-                if (!existsSync(approvalPath)) return false;
-                unlinkSync(approvalPath); // 실패(경합 패배 포함) 시 catch → 승인 없음
+                renameSync(approvalPath, consumedPath); // 경합 패배 시 throw → 승인 없음
                 return true;
               } catch {
-                return false; // 마커 확인/소비 실패 → 승인 없음으로 취급(게이트 유지)
+                return false; // 마커 없음/소비 실패 → 승인 없음으로 취급(게이트 유지)
               }
             })();
             if (approved) {
-              pendingBashWriteApproval = { markerPath: approvalPath, writes };
+              pendingBashWriteApproval = { markerPath: approvalPath, consumedPath, writes };
             } else {
               const msg = bashWriteMessage(writes);
               if (gate === 'warn') {
@@ -677,9 +684,9 @@ function main(): void {
             //   (v0.27.1/2: deny로 승인만 소진되는 문제와 병렬 이중 승인 TOCTOU를 함께 해소).
             if (pendingBashWriteApproval !== null) {
               try {
-                writeFileSync(pendingBashWriteApproval.markerPath, '', 'utf8');
+                renameSync(pendingBashWriteApproval.consumedPath, pendingBashWriteApproval.markerPath);
               } catch {
-                // best-effort — 복원 실패 시 사용자가 마커를 다시 만들면 된다.
+                // best-effort — 복원 실패(fail-closed: 승인 소실) 시 사용자가 마커를 다시 만들면 된다.
               }
             }
             logGate(sessionId, 'risk', 'deny', state.category ?? 'unknown');
@@ -694,10 +701,15 @@ function main(): void {
       }
 
       // Bash 쓰기 승인 마무리 — 여기 도달 = 모든 deny 게이트 통과. 마커는 A1.7에서
-      //   이미 원자 소비됐으므로(1회용 보장), 대상 파일을 편집 기록에 남겨 리뷰 추적을
-      //   유지하고 사용자에게 표면화만 한다.
+      //   이미 원자 소비됐으므로(1회용 보장), 소비 파일을 정리하고 대상 파일을 편집
+      //   기록에 남겨 리뷰 추적을 유지하며 사용자에게 표면화한다.
       if (pendingBashWriteApproval !== null) {
-        const { writes } = pendingBashWriteApproval;
+        const { consumedPath, writes } = pendingBashWriteApproval;
+        try {
+          unlinkSync(consumedPath);
+        } catch {
+          // best-effort — 잔여 소비 파일은 무해(.claude/ 안, 승인 판정에 미사용).
+        }
         try {
           const turn = getCurrentTurn(sessionId);
           for (const f of writes) recordEdit(sessionId, f, turn, input.agent_id);
