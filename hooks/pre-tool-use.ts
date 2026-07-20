@@ -386,11 +386,16 @@ function main(): void {
             //   통과한 뒤에 수행한다(v0.27.1 리뷰 지적: D가 deny하면 마커만 소비되고
             //   실행되지 않은 쓰기가 유령 편집으로 기록되는 문제).
             const approvalPath = resolvePath(cwd, '.claude', '.goodboy-bash-write-approved.txt');
+            // 원자적 소비(v0.27.2 리뷰 지적: 존재 확인만 하면 병렬 Bash 쓰기 2건이 마커
+            //   1개로 모두 승인되는 TOCTOU) — unlink는 정확히 1회만 성공하므로 여기서
+            //   소비한다. 이후 위험 게이트(D)가 deny하면 마커를 복원해 승인을 보존한다.
             const approved = (() => {
               try {
-                return existsSync(approvalPath);
+                if (!existsSync(approvalPath)) return false;
+                unlinkSync(approvalPath); // 실패(경합 패배 포함) 시 catch → 승인 없음
+                return true;
               } catch {
-                return false; // 마커 확인 실패 → 승인 없음으로 취급(게이트 유지)
+                return false; // 마커 확인/소비 실패 → 승인 없음으로 취급(게이트 유지)
               }
             })();
             if (approved) {
@@ -668,6 +673,15 @@ function main(): void {
         if (state && state.risk === 'risky' && state.sessionId === sessionId) {
           const approvedPath = resolvePath(cwd, '.claude', '.goodboy-risk-approved.txt');
           if (!existsSync(approvedPath)) {
+            // 위험 게이트가 deny하면, A1.7에서 원자 소비한 Bash 쓰기 승인 마커를 복원한다
+            //   (v0.27.1/2: deny로 승인만 소진되는 문제와 병렬 이중 승인 TOCTOU를 함께 해소).
+            if (pendingBashWriteApproval !== null) {
+              try {
+                writeFileSync(pendingBashWriteApproval.markerPath, '', 'utf8');
+              } catch {
+                // best-effort — 복원 실패 시 사용자가 마커를 다시 만들면 된다.
+              }
+            }
             logGate(sessionId, 'risk', 'deny', state.category ?? 'unknown');
             emit(
               deny(
@@ -679,15 +693,11 @@ function main(): void {
         }
       }
 
-      // (v0.27.1) Bash 쓰기 승인 마커 지연 소비 — 여기 도달 = 모든 deny 게이트 통과.
-      //   마커를 소비(1회용)하고, 대상 파일을 편집 기록에 남겨 리뷰 추적을 유지한다.
+      // Bash 쓰기 승인 마무리 — 여기 도달 = 모든 deny 게이트 통과. 마커는 A1.7에서
+      //   이미 원자 소비됐으므로(1회용 보장), 대상 파일을 편집 기록에 남겨 리뷰 추적을
+      //   유지하고 사용자에게 표면화만 한다.
       if (pendingBashWriteApproval !== null) {
-        const { markerPath, writes } = pendingBashWriteApproval;
-        try {
-          if (existsSync(markerPath)) unlinkSync(markerPath);
-        } catch {
-          // best-effort — 마커 삭제 실패가 승인된 쓰기를 막지 않는다(다음 호출에서 재소비될 수 있음).
-        }
+        const { writes } = pendingBashWriteApproval;
         try {
           const turn = getCurrentTurn(sessionId);
           for (const f of writes) recordEdit(sessionId, f, turn, input.agent_id);

@@ -91,6 +91,21 @@ describe('pre-tool-use bash-write gate — 승인 마커 (v0.27.0)', () => {
     expect(isBlocked(second)).toBe(true);
   });
 
+  test('병렬 Bash 쓰기 2건은 마커 1개로 정확히 1건만 승인된다 (v0.27.2, TOCTOU)', async () => {
+    const cwd = makeCwd();
+    mkdirSync(join(cwd, '.claude'), { recursive: true });
+    writeFileSync(markerPath(cwd), '', 'utf8');
+
+    // unlink는 정확히 1회만 성공하므로(원자 소비) 어떤 인터리빙에서도 1건만 승인된다.
+    const [a, b] = await Promise.all([
+      runBash(cwd, 'echo hi > src/a.ts'),
+      runBash(cwd, 'echo hi > src/b.ts'),
+    ]);
+    const approvedCount = [a, b].filter((o) => !isBlocked(o)).length;
+    expect(approvedCount).toBe(1);
+    expect(existsSync(markerPath(cwd))).toBe(false);
+  });
+
   test('위험 게이트가 deny하면 마커는 소비되지 않고 유령 편집도 기록되지 않는다 (v0.27.1)', async () => {
     const cwd = makeCwd();
     mkdirSync(join(cwd, '.claude'), { recursive: true });
