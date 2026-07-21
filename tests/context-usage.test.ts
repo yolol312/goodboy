@@ -233,6 +233,65 @@ describe('getContextUsage', () => {
   });
 });
 
+describe('getContextUsage — 압축 경계 인식 (v0.27.6, H1-03 오탐)', () => {
+  // 실측 재현(productmanagementsystem 세션): /compact 직후 압축 후 usage가 아직
+  // 플러시되지 않아 압축 전 528K(1M의 53%)가 최신으로 읽혀 H1-03이 재차단됐다.
+  const bigUsageLine = JSON.stringify({
+    message: { model: 'claude-3-5-sonnet', usage: { input_tokens: 106_000 } },
+  });
+  const boundaryLine = JSON.stringify({
+    type: 'system',
+    subtype: 'compact_boundary',
+    content: 'Conversation compacted',
+  });
+  const summaryLine = JSON.stringify({
+    type: 'user',
+    isCompactSummary: true,
+    message: { role: 'user', content: '요약...' },
+  });
+
+  test('경계 이후 usage가 없으면 압축 전 usage를 버리고 측정 실패(null) — fail-open', () => {
+    const path = writeTranscript([bigUsageLine, summaryLine, boundaryLine]);
+    expect(getContextUsage(path)).toBeNull();
+  });
+
+  test('경계 이후 usage가 있으면 압축 후 수치만 반영', () => {
+    const smallUsageLine = JSON.stringify({
+      message: { model: 'claude-3-5-sonnet', usage: { input_tokens: 12_000 } },
+    });
+    const path = writeTranscript([bigUsageLine, summaryLine, boundaryLine, smallUsageLine]);
+    const u = getContextUsage(path);
+    expect(u).not.toBeNull();
+    expect(u!.tokens).toBe(12_000);
+    expect(u!.percent).toBeCloseTo(6, 5);
+  });
+
+  test('isCompactSummary 엔트리 단독으로도 경계로 인식', () => {
+    const path = writeTranscript([bigUsageLine, summaryLine]);
+    expect(getContextUsage(path)).toBeNull();
+  });
+
+  test('system/compact_boundary 엔트리 단독으로도 경계로 인식 (변이 사살: 리뷰 medium)', () => {
+    // 기존 테스트들은 summary 마커와 함께 쓰거나 경계 뒤에 usage가 있어,
+    // compact_boundary 분기만 삭제한 변이가 전체 스위트를 통과했다(리뷰 실측).
+    const path = writeTranscript([bigUsageLine, boundaryLine]);
+    expect(getContextUsage(path)).toBeNull();
+  });
+
+  test('경계가 여러 번이면 마지막 경계 이후만 반영', () => {
+    const midUsage = JSON.stringify({
+      message: { model: 'claude-3-5-sonnet', usage: { input_tokens: 80_000 } },
+    });
+    const lastUsage = JSON.stringify({
+      message: { model: 'claude-3-5-sonnet', usage: { input_tokens: 5_000 } },
+    });
+    const path = writeTranscript([bigUsageLine, boundaryLine, midUsage, boundaryLine, lastUsage]);
+    const u = getContextUsage(path);
+    expect(u).not.toBeNull();
+    expect(u!.tokens).toBe(5_000);
+  });
+});
+
 describe('getContextUsage — GOODBOY_CONTEXT_LIMIT env override & safe 1M defaulting', () => {
   const ORIG = process.env.GOODBOY_CONTEXT_LIMIT;
   afterEach(() => {

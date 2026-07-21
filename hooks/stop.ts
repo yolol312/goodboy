@@ -186,7 +186,16 @@ function maybeForceCompact(
   sessionId: string,
 ): { output: HookOutput | null; forced: boolean } {
   try {
-    if (!usage) return { output: null, forced: false };
+    if (!usage) {
+      // (v0.27.6) 측정 불가 — 압축 경계 직후(압축 후 usage 미플러시)가 대표 사례.
+      //   이전 사이클의 잔존 카운트가 다음 진짜 초과 때 즉시 escape로 튀지 않게 리셋한다.
+      try {
+        resetRetryCount(ensureClaudeDir(cwd), COMPACT_FORCE_COUNT_FILE);
+      } catch {
+        // best-effort
+      }
+      return { output: null, forced: false };
+    }
     const forcePct = compactForcePct();
     const pct = Math.round(usage.percent);
     const claudeDir = ensureClaudeDir(cwd);

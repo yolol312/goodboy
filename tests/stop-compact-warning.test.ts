@@ -226,6 +226,112 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
     expect(out.stopReason).toBeUndefined();
   });
 
+  // (v0.27.6) 압축 경계 직후 — 실측 오탐: /compact 후에도 압축 전 usage가 플러시 지연으로
+  //   최신으로 읽혀 재차단됐다(pct=53 deny, 실제 6%). 경계 이후 usage가 없으면 강제 금지.
+  test('compact 경계 직후(압축 후 usage 미플러시) → NO force + 카운터 리셋', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
+    writeReview(cwd, passingReview(cwd));
+    // 1) 압축 전 60% → 강제 block(카운터 1).
+    const transcript = writeTranscript(cwd, 120_000);
+    const out1 = await runStop(tmp, cwd, sessionId, transcript);
+    expect(out1.decision).toBe('block');
+    expect(out1.stopReason).toBe('compact_needed');
+
+    // 2) 사용자가 /compact — 경계 마커가 기록되지만 압축 후 usage는 아직 플러시 전.
+    const boundary =
+      JSON.stringify({ type: 'user', isCompactSummary: true, message: { role: 'user', content: '요약' } }) +
+      '\n' +
+      JSON.stringify({ type: 'system', subtype: 'compact_boundary', content: 'Conversation compacted' }) +
+      '\n';
+    writeFileSync(
+      transcript,
+      JSON.stringify({
+        message: { model: 'claude-3-5-sonnet-20241022', usage: { input_tokens: 120_000 } },
+      }) +
+        '\n' +
+        boundary,
+      'utf8',
+    );
+    // 수정 전에는 압축 전 120K(60%)가 그대로 읽혀 2/3 재차단됐다(실측 재현).
+    const out2 = await runStop(tmp, cwd, sessionId, transcript);
+    expect(out2.stopReason).toBeUndefined();
+    expect(out2.reason ?? '').not.toContain('강제');
+    expect(out2.decision).toBeUndefined(); // passing review → clean pass
+
+    // 3) 압축 후 usage가 플러시되면 압축 후 수치 기준으로 판정(6% → 강제 없음),
+    //    카운터도 리셋됐으므로 이후 진짜 초과는 1/3부터 시작한다.
+    writeFileSync(
+      transcript,
+      JSON.stringify({
+        message: { model: 'claude-3-5-sonnet-20241022', usage: { input_tokens: 120_000 } },
+      }) +
+        '\n' +
+        boundary +
+        JSON.stringify({
+          message: { model: 'claude-3-5-sonnet-20241022', usage: { input_tokens: 12_000 } },
+        }) +
+        '\n',
+      'utf8',
+    );
+    const out3 = await runStop(tmp, cwd, sessionId, transcript);
+    expect(out3.decision).toBeUndefined();
+    expect(out3.stopReason).toBeUndefined();
+
+    // 4) 카운터 리셋 검증: 다시 초과하면 3회째(escape)가 아니라 1/3부터 차단.
+    writeFileSync(
+      transcript,
+      JSON.stringify({
+        message: { model: 'claude-3-5-sonnet-20241022', usage: { input_tokens: 120_000 } },
+      }) + '\n',
+      'utf8',
+    );
+    const out4 = await runStop(tmp, cwd, sessionId, transcript);
+    expect(out4.decision).toBe('block');
+    expect(out4.reason).toContain('1/3');
+  });
+
+  // (v0.27.6 변이 사살, 리뷰 medium) usage-null 카운터 리셋이 어느 테스트로도 고정되지
+  //   않았다 — 기존 통합 시나리오는 null 다음에 임계 미만(6%) 단계가 있어 그 경로의
+  //   기존 리셋이 변이를 가렸다. 여기서는 null 직후 곧바로 재초과시켜 구속한다.
+  test('측정 불가(경계 직후)가 강제 카운터를 리셋한다 — 직후 재초과는 1/3부터', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
+    writeReview(cwd, passingReview(cwd));
+
+    // 1) 60% → 강제 block(카운터 1).
+    const transcript = writeTranscript(cwd, 120_000);
+    const out1 = await runStop(tmp, cwd, sessionId, transcript);
+    expect(out1.decision).toBe('block');
+    expect(out1.reason).toContain('1/3');
+
+    // 2) 경계 직후(압축 후 usage 미플러시) → 측정 불가, 강제 없음 + 카운터 리셋.
+    writeFileSync(
+      transcript,
+      JSON.stringify({
+        message: { model: 'claude-3-5-sonnet-20241022', usage: { input_tokens: 120_000 } },
+      }) +
+        '\n' +
+        JSON.stringify({ type: 'system', subtype: 'compact_boundary', content: 'Conversation compacted' }) +
+        '\n',
+      'utf8',
+    );
+    const out2 = await runStop(tmp, cwd, sessionId, transcript);
+    expect(out2.stopReason).toBeUndefined();
+
+    // 3) 곧바로 다시 초과 — 리셋이 없었다면(변이) 2/3로 이어졌을 것.
+    writeFileSync(
+      transcript,
+      JSON.stringify({
+        message: { model: 'claude-3-5-sonnet-20241022', usage: { input_tokens: 120_000 } },
+      }) + '\n',
+      'utf8',
+    );
+    const out3 = await runStop(tmp, cwd, sessionId, transcript);
+    expect(out3.decision).toBe('block');
+    expect(out3.reason).toContain('1/3');
+  });
+
   // (3-A) 1M 지원 세대(opus-4-8)인데 [1m] 표식이 없으면 200K/1M 구분 불가 → 강제 보류.
   test('ambiguous 1M-capable model without marker (opus-4-8) → NO force', async () => {
     const { tmp, cwd, sessionId } = newSandbox();

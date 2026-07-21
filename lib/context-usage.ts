@@ -403,6 +403,23 @@ export function getContextUsage(
 
     const obj = parsed as Record<string, unknown>;
 
+    // (v0.27.6) 압축 경계 — 실사용 오탐: /compact 직후에도 assistant usage 엔트리의
+    //   플러시 지연 때문에 압축 **전** 마지막 usage(예: 528K/1M=53%)가 "최신"으로 읽혀
+    //   H1-03이 재차단됐다(실측: 압축 후 실제 64K=6%인데 pct=53 deny). 경계 마커
+    //   (system/compact_boundary 또는 isCompactSummary 요약 엔트리)를 만나면 그 이전
+    //   usage를 버린다 — 압축 후 usage가 아직 없으면 측정 실패(null)로 fail-open 되어
+    //   강제가 발동하지 않고, 플러시되는 대로 압축 후 수치가 반영된다.
+    if (obj.type === 'system' && obj.subtype === 'compact_boundary') {
+      lastTokens = null;
+      lastModel = null;
+      continue;
+    }
+    if (obj.isCompactSummary === true) {
+      lastTokens = null;
+      lastModel = null;
+      continue;
+    }
+
     // 모델은 보이는 대로 가장 최근 값을 따로 기억(usage 줄에 model이 없을 때의 폴백).
     try {
       const m = modelFromObject(obj);
