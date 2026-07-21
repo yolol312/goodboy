@@ -66,7 +66,7 @@ function makeCwd(): string {
 async function runHook(
   cwd: string,
   transcriptPath: string | null,
-  opts?: { agentId?: string; fileName?: string },
+  opts?: { agentId?: string; fileName?: string; env?: Record<string, string> },
 ): Promise<string> {
   const payload = JSON.stringify({
     session_id: sessionIdFor(cwd),
@@ -78,7 +78,14 @@ async function runHook(
   });
   const proc = Bun.spawn(['bun', HOOK], {
     cwd,
-    env: { ...process.env, GOODBOY_DISABLE_DELEGATION: '1' },
+    env: {
+      ...process.env,
+      GOODBOY_DISABLE_DELEGATION: '1',
+      // 재시도 플러시 대기(v0.27.7)는 테스트에서 기본 비활성 — deny 반복 테스트가
+      // 대기로 느려지지 않게 한다. 대기 동작 자체는 전용 테스트가 opts.env로 켠다.
+      GOODBOY_REASONING_FLUSH_WAIT_MS: '0',
+      ...(opts?.env ?? {}),
+    },
     stdin: new TextEncoder().encode(payload),
     stdout: 'pipe',
     stderr: 'pipe',
@@ -630,6 +637,59 @@ describe('pre-tool-use reasoning gate — escape 카운터 (v0.26.1, 탈출구 �
     const next = await runHook(cwd, tp);
     expect(isBlocked(next)).toBe(true);
     expect(next).toContain('재시도 1/3');
+  });
+
+  test('재시도 플러시 대기(v0.27.7): 대기 중 섹션이 플러시되면 통과 + 지연 확정까지 연결', async () => {
+    const cwd = makeCwd();
+    const tp = join(cwd, 'transcript.jsonl');
+    writeFileSync(tp, assistantLine('추론 없는 텍스트') + '\n', 'utf8');
+    // 1) deny 1/3 (대기 없음 — 첫 호출은 카운터 0이라 즉시 판정).
+    const first = await runHook(cwd, tp);
+    expect(isBlocked(first)).toBe(true);
+    expect(first).toContain('재시도 1/3');
+
+    // 2) 재시도를 대기 모드(5초)로 실행하면서, 1.2초 뒤 deny 이전 생성 시각의
+    //    추론 텍스트가 플러시되는 상황을 재현한다.
+    const laggedLine = JSON.stringify({
+      type: 'assistant',
+      timestamp: new Date(Date.now() - 60_000).toISOString(),
+      message: { role: 'assistant', content: [{ type: 'text', text: REASONING_TEXT }] },
+    });
+    const pending = runHook(cwd, tp, { env: { GOODBOY_REASONING_FLUSH_WAIT_MS: '5000' } });
+    setTimeout(() => {
+      writeFileSync(tp, assistantLine('추론 없는 텍스트') + '\n' + laggedLine + '\n', 'utf8');
+    }, 1200);
+    const second = await pending;
+    // 즉시 재거부(수정 전 동작)라면 여기서 deny 2/3이 됐다 — 대기가 플러시를 잡아 통과.
+    expect(isBlocked(second)).toBe(false);
+    // 인식된 텍스트가 deny 이전 생성 → 지연 확정으로 sticky 전환까지 이어진다.
+    expect(second).toContain('지연 모드로 전환');
+
+    // 3) 이후 편집은 미인식이어도 차단 없음(sticky).
+    writeFileSync(tp, assistantLine('추론 없는 다음 턴') + '\n', 'utf8');
+    const next = await runHook(cwd, tp);
+    expect(isBlocked(next)).toBe(false);
+  });
+
+  test('재시도 플러시 대기: 끝내 플러시가 없으면 기존 deny 경로 유지(2/3)', async () => {
+    const cwd = makeCwd();
+    const tp = makeTranscript(cwd, ['추론 없는 텍스트']);
+    const first = await runHook(cwd, tp);
+    expect(isBlocked(first)).toBe(true);
+    // 1.5초 대기 후에도 섹션 없음 → 정상 deny 2/3 (안전망 불변).
+    const second = await runHook(cwd, tp, { env: { GOODBOY_REASONING_FLUSH_WAIT_MS: '1500' } });
+    expect(isBlocked(second)).toBe(true);
+    expect(second).toContain('재시도 2/3');
+  });
+
+  test('재시도 플러시 대기: 첫 호출(직전 deny 없음)에는 대기하지 않는다', async () => {
+    const cwd = makeCwd();
+    const tp = makeTranscript(cwd, ['추론 없는 텍스트']);
+    const started = Date.now();
+    // 대기 한도를 크게 줘도 카운터 0이면 즉시 판정되어야 한다.
+    const out = await runHook(cwd, tp, { env: { GOODBOY_REASONING_FLUSH_WAIT_MS: '20000' } });
+    expect(isBlocked(out)).toBe(true);
+    expect(Date.now() - started).toBeLessThan(5000);
   });
 
   test('섹션 인식 성공 시 카운터 리셋 — 이후 deny는 1/3부터', async () => {

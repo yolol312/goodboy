@@ -580,16 +580,51 @@ function main(): void {
         if (lagEntries >= lagThreshold) {
           logGate(sessionId, 'reasoning', 'fail-open', `text-flush-lag(${lagEntries})`);
         } else {
-        const recentEntries = extractRecentAssistantTextEntries(
+        // 상태 스코프는 판정 대상 transcript와 동일 기준(agent_id ?? 'main')으로 잡는다.
+        const reasoningScope = input.agent_id ?? 'main';
+        let recentEntries = extractRecentAssistantTextEntries(
           reasoningTranscript,
           reasoningGateWindow(),
         );
+        // (C-wait v0.27.7) 재시도 플러시 대기 — 실사용 재보고: deny 후 즉시 재시도가
+        //   플러시(실측 19~40초+)보다 빨리 도착하면 2회째도 미인식된다("이거 또 왜 추론을
+        //   감지 못 하지"). deny 직후의 재시도(카운터>0)인데 섹션이 아직 안 보이면, 즉시
+        //   재거부하지 않고 transcript에 섹션이 나타날 때까지 최대 N초(기본 20초) 폴링한다.
+        //   인식되면 기존 지연 확정(C-confirm)이 이어져 sticky 전환까지 한 번에 간다.
+        //   끝내 안 보이면 기존 deny/escape 경로 그대로(안전망 불변). 첫 호출(카운터 0)과
+        //   지연 모드에서는 대기하지 않는다. GOODBOY_REASONING_FLUSH_WAIT_MS=0으로 비활성.
+        //   상한 45초: hooks.json PreToolUse timeout(60초, 이 대기를 위해 30→60으로 상향)
+        //   안에서 15초 여유를 남긴다 — 상한이 타임아웃을 넘으면 하니스가 hook을 죽여
+        //   게이트 전체가 fail-open 된다(리뷰 지적).
+        const flushWaitMs = Math.min(envInt('GOODBOY_REASONING_FLUSH_WAIT_MS', 20000), 45000);
+        if (
+          flushWaitMs > 0 &&
+          readReasoningDenyCount(sessionId, reasoningScope) > 0 &&
+          !isReasoningLagMode(sessionId, reasoningScope) &&
+          !recentEntries.some((e) => hasReasoningSection(e.text))
+        ) {
+          const startMs = Date.now();
+          const deadline = startMs + flushWaitMs;
+          while (Date.now() < deadline) {
+            Bun.sleepSync(500);
+            recentEntries = extractRecentAssistantTextEntries(
+              reasoningTranscript,
+              reasoningGateWindow(),
+            );
+            if (recentEntries.some((e) => hasReasoningSection(e.text))) break;
+          }
+          const hit = recentEntries.some((e) => hasReasoningSection(e.text));
+          logGate(
+            sessionId,
+            'reasoning',
+            'warn',
+            `${hit ? 'flush-wait-hit' : 'flush-wait-miss'}(${Date.now() - startMs}ms)`,
+          );
+        }
         const recentTexts = recentEntries.map((e) => e.text);
         // (C-escape v0.26.3) 섹션 미인식 처리 공용 경로 — 무언 편집/미인식 deny 모두
         //   같은 카운터를 쓴다. 지연 모드면 차단하지 않고 경고만, 아니면 3회까지 deny 후
         //   지연 모드로 전환한다. true를 반환하면 이번 편집을 통과시킨다는 뜻.
-        // 상태 스코프는 판정 대상 transcript와 동일 기준(agent_id ?? 'main')으로 잡는다.
-        const reasoningScope = input.agent_id ?? 'main';
         const lagModeWarning =
           '추론 게이트 지연 모드: transcript 기록 지연이 확인된 세션이라 차단하지 않습니다. ' +
           '## 추론 섹션은 편집 전에 계속 출력해 주세요(정책은 유지되며, 리뷰가 검증합니다).';
