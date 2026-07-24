@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
@@ -168,5 +168,78 @@ describe('Stop hook — H1-01 long-session warning', () => {
     expect(out.decision).toBe('block'); // review still required
     expect(out.systemMessage ?? '').not.toContain('긴 세션');
     expect(out.stopReason).toBeUndefined();
+  });
+});
+
+// (v0.27.8) 실사용 버그 리포트: Opus 1M 세션에서 절대 임계 50K가 점유 5% 시점에
+//   "긴 세션"을 오판 + 한도 교정(53%→11%) 후에도 경고 래치가 리셋되지 않았다.
+describe('Stop hook — H1-01 한도 비례 임계 + 래치 해제 (v0.27.8)', () => {
+  /** 1M 확정 모델(fable)의 transcript — 한도 비례 임계(25% = 250K) 검증용. */
+  function write1mTranscript(cwd: string, tokens: number): string {
+    const path = join(cwd, 'transcript.jsonl');
+    writeFileSync(
+      path,
+      JSON.stringify({ message: { model: 'claude-fable-5', usage: { input_tokens: tokens } } }) +
+        '\n',
+      'utf8',
+    );
+    return path;
+  }
+
+  const habitStatePath = (tmp: string, sessionId: string): string =>
+    join(sessionDir(tmp, sessionId), 'habit-state.json');
+
+  test('1M 세션 111K 토큰(11%)은 "긴 세션"이 아니다 — 임계가 한도의 25%(250K)로 확장', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
+    // 구버전(절대 50K)이라면 111K > 50K로 경고가 떴다(실사용 리포트 재현).
+    const t = write1mTranscript(cwd, 111_234);
+    const out = await runStop(tmp, cwd, sessionId, t);
+    expect(out.systemMessage ?? '').not.toContain('긴 세션');
+    expect(out.stopReason).toBeUndefined();
+  });
+
+  test('1M 세션도 임계(250K) 초과면 "긴 세션" 경고 — 게이트 자체는 유지', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
+    const t = write1mTranscript(cwd, 300_000); // 30% — 강제(50%) 미만, 임계(250K) 초과
+    const out = await runStop(tmp, cwd, sessionId, t);
+    expect(out.systemMessage).toContain('긴 세션');
+  });
+
+  test('오탐 래치 해제: 조건이 해소되면 longSessionWarned가 리셋된다', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
+    // 한도 오판 구간에서 이미 경고가 래치된 상태를 심는다(리포트의 habit-state 실측 재현).
+    seedHabitState(tmp, sessionId, {
+      sessionStartTs: new Date().toISOString(),
+      longSessionWarned: true,
+      lastCtxWarnPct: 53,
+    });
+    const t = write1mTranscript(cwd, 111_234); // 11% — 시간/토큰 조건 모두 미달
+    const out = await runStop(tmp, cwd, sessionId, t);
+    expect(out.systemMessage ?? '').not.toContain('긴 세션');
+    const state = JSON.parse(readFileSync(habitStatePath(tmp, sessionId), 'utf8')) as {
+      longSessionWarned?: boolean;
+      lastCtxWarnPct?: number;
+    };
+    expect(state.longSessionWarned).toBe(false); // 래치 해제 — 이후 진짜 긴 세션은 다시 경고
+    // 성장 경고 기준도 실제 점유율로 하향 재설정(53 고정이면 63%까지 침묵했다).
+    expect(state.lastCtxWarnPct).toBe(11);
+  });
+
+  test('기준 하향 후 실제 성장(30%)은 다시 경고된다', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
+    seedHabitState(tmp, sessionId, {
+      sessionStartTs: new Date().toISOString(),
+      lastCtxWarnPct: 53,
+    });
+    // 1) 11%로 하향 재설정.
+    await runStop(tmp, cwd, sessionId, write1mTranscript(cwd, 111_234));
+    // 2) 30%로 성장 → 시작 임계(30) 이상 + 기준(11)+10 이상 → 컨텍스트 경고.
+    //    구버전(단조 증가 고정)이라면 53+10=63%까지 침묵했다.
+    const out = await runStop(tmp, cwd, sessionId, write1mTranscript(cwd, 300_000));
+    expect(out.systemMessage).toContain('컨텍스트 사용률이 30%');
   });
 });

@@ -98,12 +98,22 @@ function modelBase(m: string): string {
   return m.toLowerCase().replace(/\[[^\]]*\]/g, '').trim();
 }
 
-/** 두 모델 ID가 같은 베이스인지(한쪽이 다른 쪽의 접두 — 날짜 접미사 허용). */
+/** 두 모델 ID가 같은 베이스인지(한쪽이 다른 쪽의 접두 — 날짜 접미사 허용).
+ *
+ *  (v0.27.8) 별칭 매칭 추가 — 실사용 버그: settings.json은 전체 ID 대신 패밀리 별칭
+ *  ("opus[1m]" 등)을 흔히 쓰는데, 관측 모델 "claude-opus-4-8"과 접두 관계가 아니라서
+ *  settings 폴백이 거부되고 1M 세션 초반이 200K로 계산됐다(53% 오표시 실측).
+ *  짧은 쪽이 대시 없는 별칭이면 긴 쪽 ID의 하이픈 세그먼트 포함으로 매칭한다
+ *  ("opus" ∈ claude-opus-4-8 ✓). 2-D 방어(settings fable[1m] + --model haiku 오판 방지)는
+ *  양쪽 다 대시가 있는 전체 ID라 이 경로를 타지 않아 그대로 유지된다. */
 function sameModelBase(a: string, b: string): boolean {
   const x = modelBase(a);
   const y = modelBase(b);
   if (x === '' || y === '') return false;
-  return x.startsWith(y) || y.startsWith(x);
+  if (x.startsWith(y) || y.startsWith(x)) return true;
+  const [shorter, longer] = x.length <= y.length ? [x, y] : [y, x];
+  if (!shorter.includes('-') && longer.split('-').includes(shorter)) return true;
+  return false;
 }
 
 /** 한 transcript 줄(객체)에서 "구조적(파싱된) 모델 필드"에 1M 표식이 있는지 검사한다.
@@ -175,7 +185,14 @@ function resolveContextLimit(inp: LimitInputs): number {
   const settingsModel = settingsModelString(inp.settingsPath);
   if (settingsModel && modelHasExtendedMarker(settingsModel)) {
     const observed = inp.usageLineModel ?? inp.hookModel ?? null;
-    if (!observed || sameModelBase(observed, settingsModel)) return EXTENDED_CONTEXT_LIMIT;
+    // (v0.27.8 리뷰 high) 확정 200K 모델(haiku, claude-2/3 세대)은 별칭이 일치해도
+    //   승격하지 않는다 — 별칭 매칭("sonnet" ∈ claude-3-5-sonnet)이 물리적으로 1M이
+    //   불가능한 모델까지 1M/confident로 만들어 H1-01/H1-03을 조용히 무력화했다.
+    if (modelIsKnownStandard(observed)) {
+      // 통과 — 아래 확정 테이블/기본 경로가 200K로 판정한다.
+    } else if (!observed || sameModelBase(observed, settingsModel)) {
+      return EXTENDED_CONTEXT_LIMIT;
+    }
   }
 
   // 2.5) 모델별 확정 테이블: 1M이 기본값이자 최대인 패밀리(Fable/Mythos)는

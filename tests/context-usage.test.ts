@@ -501,6 +501,67 @@ describe('getContextUsage — runtime dynamic 1M detection (low-token false-posi
     expect(u!.percent).toBeCloseTo(15, 5);
   });
 
+  // (v0.27.8) 실사용 버그: settings.json은 패밀리 별칭("opus[1m]")을 흔히 쓰는데
+  //   관측 모델 "claude-opus-4-8"과 접두 관계가 아니라 폴백이 거부됐다 —
+  //   1M 세션 초반이 200K로 계산되어 11%가 53%로 표시(라이브 증거).
+  test('settings 별칭 "opus[1m]" + 관측 "claude-opus-4-8" → 1M 인정 (별칭 매칭)', () => {
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({ message: { model: 'claude-opus-4-8', usage: { input_tokens: 111_234 } } }),
+    ]);
+    const u = getContextUsage(path, { settingsPath: writeSettings('opus[1m]') });
+    expect(u!.limit).toBe(1_000_000);
+    expect(u!.percent).toBeCloseTo(11.1234, 3);
+  });
+
+  test('settings 별칭 "sonnet[1m]" + 관측 "claude-sonnet-5-20260203" → 1M 인정', () => {
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({
+        message: { model: 'claude-sonnet-5-20260203', usage: { input_tokens: 150_000 } },
+      }),
+    ]);
+    const u = getContextUsage(path, { settingsPath: writeSettings('sonnet[1m]') });
+    expect(u!.limit).toBe(1_000_000);
+  });
+
+  // (리뷰 high) 별칭 매칭이 확정 200K 모델까지 1M로 승격시키면 안 된다 —
+  //   물리적으로 1M이 불가능한 모델이 1M/confident가 되어 게이트가 조용히 무력화된다.
+  test('settings "sonnet[1m]"이라도 관측이 확정 200K(claude-3-5-sonnet)면 승격 거부', () => {
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({
+        message: { model: 'claude-3-5-sonnet-20241022', usage: { input_tokens: 150_000 } },
+      }),
+    ]);
+    const u = getContextUsage(path, { settingsPath: writeSettings('sonnet[1m]') });
+    expect(u!.limit).toBe(200_000);
+    expect(u!.percent).toBeCloseTo(75, 5);
+  });
+
+  test('settings "haiku[1m]"이라도 관측이 haiku면 승격 거부 (확정 200K)', () => {
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({
+        message: { model: 'claude-haiku-4-5-20251001', usage: { input_tokens: 150_000 } },
+      }),
+    ]);
+    const u = getContextUsage(path, { settingsPath: writeSettings('haiku[1m]') });
+    expect(u!.limit).toBe(200_000);
+    expect(u!.confident).toBe(true);
+  });
+
+  test('settings 별칭 "opus[1m]"이라도 관측 모델이 다른 패밀리(haiku)면 무시', () => {
+    delete process.env.GOODBOY_CONTEXT_LIMIT;
+    const path = writeTranscript([
+      JSON.stringify({
+        message: { model: 'claude-haiku-4-5-20251001', usage: { input_tokens: 30_000 } },
+      }),
+    ]);
+    const u = getContextUsage(path, { settingsPath: writeSettings('opus[1m]') });
+    expect(u!.limit).toBe(200_000);
+  });
+
   test('settings [1m] + 날짜 접미사 차이는 같은 베이스로 인정', () => {
     delete process.env.GOODBOY_CONTEXT_LIMIT;
     const path = writeTranscript([

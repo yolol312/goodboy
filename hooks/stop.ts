@@ -10,6 +10,7 @@ import {
   compactForcePct,
   currentFindings,
   envInt,
+  envStr,
   extractRecentAssistantTexts,
   findRecentReviewFiles,
   pruneOldReviewFiles,
@@ -126,19 +127,34 @@ function maybeSetLongSessionWarning(
     }
 
     // H1-03 강제가 이번 Stop에 발동했으면 스팸 방지를 위해 H1-01 생략. 세션당 1회.
-    if (!forceActive && !state.longSessionWarned) {
+    if (!forceActive) {
       const timeWarnMin = envInt('GOODBOY_SESSION_TIME_WARN_MIN', 35);
-      const tokenWarn = envInt('GOODBOY_TOKEN_WARN', 50_000);
+      // (v0.27.8) 토큰 임계 기본값을 한도 비례(25%)로 — 실사용 버그: 절대값 50K는
+      //   1M 세션에서 점유 5% 시점에 "긴 세션"을 오판했다. 25%는 200K 창에서 정확히
+      //   기존 기본값(50K)이라 표준 세션 동작이 보존되고, 1M 창에선 250K로 확장된다.
+      //   env GOODBOY_TOKEN_WARN 명시 시 절대값이 우선한다. 한도 미측정이면 50K 유지.
+      const tokenWarnEnv = envStr('GOODBOY_TOKEN_WARN', '');
+      const tokenWarn =
+        tokenWarnEnv !== '' && Number.isFinite(parseInt(tokenWarnEnv, 10))
+          ? parseInt(tokenWarnEnv, 10)
+          : usage
+            ? Math.round(usage.limit * 0.25)
+            : 50_000;
       const startMs = state.sessionStartTs ? Date.parse(state.sessionStartTs) : NaN;
       const elapsedMin = Number.isFinite(startMs) ? (nowMs - startMs) / 60000 : 0;
       const timeExceeded = elapsedMin > timeWarnMin;
       const tokenExceeded = usage ? usage.tokens > tokenWarn : false;
-      if (timeExceeded || tokenExceeded) {
+      if (!state.longSessionWarned && (timeExceeded || tokenExceeded)) {
         // ⚠️ 문구에 '/compact' 문자열을 넣지 않는다(강제 신호와 구분 + 기존 테스트 보존).
         habitWarnings.push(
           '긴 세션이 감지되었습니다 — 새 세션 시작 또는 대화 압축을 권장합니다. (긴 세션 경고, H1-01)',
         );
         state.longSessionWarned = true;
+        dirty = true;
+      } else if (state.longSessionWarned && !timeExceeded && !tokenExceeded) {
+        // (v0.27.8) 오탐 래치 해제 — 한도 재확정(200K→1M) 또는 압축으로 판정 조건이
+        //   해소됐으면 다시 무장한다. 이후 진짜 긴 세션은 다시 1회 경고된다.
+        state.longSessionWarned = false;
         dirty = true;
       }
     }
@@ -156,6 +172,12 @@ function maybeSetLongSessionWarning(
           `컨텍스트 사용률이 ${Math.round(usage.percent)}%입니다. ` +
             '불필요한 맥락이 쌓였다면 대화 압축 또는 새 세션을 고려하세요. (컨텍스트 경고, H1-01)',
         );
+        state.lastCtxWarnPct = Math.floor(usage.percent);
+        dirty = true;
+      } else if (usage.percent < last) {
+        // (v0.27.8) 기준 하향 재설정 — 한도 재확정(53%→11% 실측)이나 압축으로 점유율이
+        //   내려갔으면 성장 경고 기준도 따라 내린다. 단조 증가 고정이면 교정 후의
+        //   실제 성장(11%→21%…)이 옛 최고치(53%)를 넘을 때까지 경고가 침묵한다.
         state.lastCtxWarnPct = Math.floor(usage.percent);
         dirty = true;
       }

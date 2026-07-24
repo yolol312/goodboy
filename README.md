@@ -253,11 +253,17 @@ claude plugin enable  goodboy@goodboy
 긴 세션에서 컨텍스트가 가득 차는 것을 막기 위해, Good Boy의 **Stop hook이 매 턴 transcript에서
 컨텍스트 점유율을 계산**한다.
 
-- 점유율이 **50%를 초과하면 `/compact` 실행을 권고하는 경고를 `systemMessage`로 띄운다.**
+- 점유율 30%부터 +10%p마다 **컨텍스트 경고(H1-01)** 를 `systemMessage`로 띄우고, 점유율이
+  **강제 임계(기본 50%, `GOODBOY_COMPACT_FORCE_PCT`)를 넘고 한도가 확정적이면 H1-03이
+  턴 종료를 `decision:'block'`으로 막으며 `stopReason:'compact_needed'` 신호를 보낸다**
+  (권고가 아니라 강제 — 3회 후 escape로 통과, 한도 미확정이면 보류).
 - 모델/환경과 무관하게 작동한다(transcript의 input + cache_read + cache_creation 토큰을 모델
   컨텍스트 한도로 나눠 계산. 1M 모델은 자동으로 1,000,000 한도로 인식).
-- 임계치는 `hooks/stop.ts`의 `COMPACT_WARN_PCT` 상수(기본 `50`)로 조정한다.
-- **단 hook은 `/compact`를 자동 실행하지 못한다(강한 권고일 뿐).** 실제 압축은 사용자가 실행한다.
+- **단 hook이 `/compact` 자체를 실행하지는 못한다** — 실제 압축은 사용자(또는
+  `compact_needed`를 인식하는 하니스)가 수행한다.
+- **긴 세션 경고(H1-01)의 토큰 임계**는 한도의 25%가 기본(200K 창=50K, 1M 창=250K —
+  v0.27.8, 절대값 50K가 1M 세션을 상시 "긴 세션"으로 오판하던 문제 수정).
+  `GOODBOY_TOKEN_WARN`으로 절대값 지정 가능.
 - **압축 경계 인식**(v0.27.6): `/compact` 직후에는 압축 후 usage 기록이 플러시될 때까지
   압축 **전** 수치가 최신으로 읽힐 수 있다(실측: 압축 후 6%인데 53%로 재차단). 이제 경계
   마커 이전의 usage는 버리므로, 압축 직후에는 측정 불가로 강제를 보류하고 새 기록이
