@@ -120,9 +120,9 @@ budget, 증거 기반 ↔ branch protection required checks), 추가로 이식�
 
 | # | 패턴 | 원천 | goodboy 적용 |
 |---|---|---|---|
-| P1 | **dryrun→warn→deny 승격 사다리** | OPA Gatekeeper(enforcementAction) | 신규·개정 게이트는 dryrun(로그만)으로 출시 → 오탐 집계 → warn → deny 승격. 강도를 코드가 아닌 설정으로 |
+| P1 | **dryrun→warn→deny 승격 사다리** | OPA Gatekeeper(enforcementAction) | 신규·개정 게이트는 dryrun(로그만)으로 출시 → 오탐 집계 → warn → deny 승격. 강도를 코드가 아닌 설정으로. 승격 상한은 §2.4 신호 등급이 정한다(사다리로 등급 상한을 넘을 수 없음) |
 | P2 | **판정 시점 선언 의무** | K8s admission("정책 강제는 반드시 validating에서") | 각 게이트가 "이 판정에 필요한 정보가 이 시점에 완전한가"를 선언, 불완전하면 deny 금지(§2.5-2의 아키텍처화) |
-| P3 | **Inconclusive 3치 판정** | Argo Rollouts(성공/실패/미확정 — 미확정은 pause+사람) | 판정을 pass/fail/inconclusive로: inconclusive→ask(사용자), fail도 단발은 누적만(failureLimit), 확정(합의)시만 deny |
+| P3 | **Inconclusive 3치 판정** | Argo Rollouts(성공/실패/미확정 — 미확정은 pause+사람) | 판정을 pass/fail/inconclusive로: inconclusive 시 개입은 §2.1 매트릭스를 따른다(손상 크면 ask, 작으면 warn/통과 — 일괄 ask 아님). fail도 단발은 누적만(failureLimit), 확정(합의)시만 deny |
 | P4 | **예산 + 2창 합의 개입** | SRE error budget + multi-window burn-rate | 세션당 위반 예산 + 강개입은 [누적 소진 && 최근에도 위반 지속] AND일 때만 — "이미 교정된 세션"에 대한 오개입 구조적 차단 |
 | P5 | **억제의 관리화 + 세션 diff 한정** | ESLint(억제에 설명+미사용 억제 회수) + SonarQube CaYC(new code만 판정) | 게이트 인라인 억제(사유 필수·세션 스코프·미사용 시 회수 리포트), 판정 모수를 "이 세션의 변경"으로 한정 |
 
@@ -141,7 +141,10 @@ budget, 증거 기반 ↔ branch protection required checks), 추가로 이식�
 1. **근거 인라인 인용**: 추론 항목마다 `- X이다 ← 사실#2` 형식으로 근거 사실을 연결
    (Toulmin grounds의 경량 이식). 근거 없는 추론이 **형식 검사만으로** 노출되어 과신
    오분류를 구조로 잡는다 — §2.5-1(주장→검증 가능한 구조)과 직결. 게이트는 형식만 검사
-   (T0 승격), 연결의 타당성은 리뷰 차원이 검증.
+   하고 연결의 타당성은 리뷰 차원이 검증한다. ⚠️ 신호 등급 주의(문서 리뷰 지적): 검사
+   자체는 결정적이어도 **신호원이 transcript 텍스트인 이상 T2**다 — 향상되는 것은 판정의
+   결정성(LLM 품질 판단 → 기계적 형식 대조)이지 등급이 아니며, 개입 강도 상한은 T2 규칙을
+   따른다.
 2. **if-wrong 한 줄**: 가정·추측 항목에 `(틀리면: <영향> / 확인: <방법>)` — KAC의
    영향도 평가 + 리뷰 검증 자동화의 입력.
 3. **`### 기각됨` 범주(디버깅 계열 스킬 한정)**: 반증된 가설 기록(FEVER의 REFUTED) —
@@ -168,7 +171,7 @@ budget, 증거 기반 ↔ branch protection required checks), 추가로 이식�
 | 2-1 | **위험 카탈로그 2단계** | 파일 경로 티어(자격증명·`.git/` 내부=deny / 락파일·CI·인프라=위험도 자동 상향) + 벤더별 DB 삭제 CLI 패턴 | MoAI pre_tool.go (Apache-2.0, 출처 주석) |
 | 2-2 | **게이트 텔레메트리 → 튜닝 제안** | 발동·escape 비율 집계 → Stop에서 세션당 1회 "H2-01 12회 중 8회 escape — warn 전환 고려" 제안. **자동 적용 금지** | MoAI(reflective write) + gstack(plan-tune의 민감도 튜닝 관점) |
 | 2-3 | **경량 SPEC 게이트** | 위험도 중+ 작업에서 수용 기준(시나리오·완료 조건) 산출물을 세션 상태로 요구, Stop 리뷰가 "기준 충족"을 검증 차원에 추가 | MoAI(SPEC-First)의 산출물 검증만 이식 — 라이프사이클은 소유하지 않음 |
-| 2-4 | **추론 게이트 재설계 (사전 유도·사후 확정)** | 유도는 PostToolUse additionalContext 사후 넛지(도달 실증 채널), 확정 검사는 Stop에서 "펜딩 편집 ↔ 추론 대응"(커서 기반, 최신 턴은 유보 — Stop도 플러시 미보장이므로 지연 내성 유지). 차단 시점 오탐 → 비차단 유보로 전환 | §2.5-2. 문서 리뷰 지적 반영: 채널·플러시 전제 정정. lag-confirm류 장치는 축소되나 지연 내성 자체는 존치 |
+| 2-4 | **추론 게이트 재설계 (사전 유도·사후 확정)** | 유도는 PostToolUse additionalContext 사후 넛지(도달 실증 채널), 확정 검사는 Stop에서 "펜딩 편집 ↔ 추론 대응"(커서 기반, 최신 턴은 유보 — Stop도 플러시 미보장이므로 지연 내성 유지). 차단 시점 오탐 → 비차단 유보로 전환. **확정 검사의 개입 강도**: 독립 차단을 신설하지 않고 기존 리뷰 게이트 경유(미대응 발견 시 리뷰 요구 사유·finding으로 표면화 — 기존 escape 체계 그대로 적용) | §2.5-2. 문서 리뷰 지적 반영: 채널·플러시 전제 정정. lag-confirm류 장치는 축소되나 지연 내성 자체는 존치 |
 | 2-5 | **추론 4분류 개정 구현** | §2.7의 5항 — 근거 인라인 인용 형식 검사, if-wrong 한 줄, 기각됨(디버깅), 인센티브 문구, 가정 정의 단일화. 스킬 문서 + 파서(parseReasoningSection) + 리뷰 차원 연동 | §2.7. 2-4와 묶어 진행 권장 |
 
 ### Phase 3 — 생태 공존 (Phase 2 후)
