@@ -522,17 +522,47 @@ function main(): void {
             const turn = getCurrentTurn(sessionId);
             // FRICTION #4: 세션 내에서 직접 Read 했거나, 직접 Write/Edit 한 파일이면
             // 이미 내용을 알고 있으므로 read-before-edit를 만족한 것으로 본다.
-            const ok =
-              wasFileReadRecently(sessionId, absPath, turn, 20) ||
-              wasFileEditedRecently(sessionId, absPath, turn, 20);
-            if (!ok) {
+            // (v0.27.9) 창 기본 20→30턴: 재-Read 게이트(A2)는 "읽은 내용이 30턴 산다"고
+            //   판정하는데 여기만 20턴이면, 21~30턴 구간의 편집이 불필요한 전체 재독을
+            //   강제한다(tokenhabit H2-01 실측 — goodboy 자신이 유발하는 재독).
+            //   두 게이트의 컨텍스트 수명 근사치를 같은 값으로 정렬한다.
+            const rbeWindow = envInt('GOODBOY_READ_BEFORE_EDIT_WINDOW', 30);
+            const editedOk = wasFileEditedRecently(sessionId, absPath, turn, rbeWindow);
+            const readOk = wasFileReadRecently(sessionId, absPath, turn, rbeWindow);
+            if (!editedOk && !readOk) {
               logGate(sessionId, 'read-before-edit', 'deny', absPath);
               emit(
                 deny(
-                  `이 파일을 먼저 Read 도구로 읽은 후 편집하세요: ${absPath}. (Read-before-edit 정책)`,
+                  `이 파일을 먼저 Read 도구로 읽은 후 편집하세요: ${absPath}. ` +
+                    '큰 파일이면 편집할 범위만 offset/limit로 부분 읽기 해도 충분합니다. (Read-before-edit 정책)',
                 ),
               );
               return;
+            }
+            // (v0.27.9, 리뷰 지적) 창 확대(20→30)의 안전 보강 — 창 안에 read가 있어도
+            //   그 사이 파일이 외부에서 바뀌었으면(mtime 불일치) 그 지식은 낡았다 → 재독 요구.
+            //   직접 편집한 파일은 편집 시점 지식이 유효(editedOk 우선). mtime을 모르면
+            //   fail-open(구버전 기록 하위호환). 재-Read 게이트(A2)와 같은 mtime 기준이라,
+            //   여기서 요구된 재독이 A2에 다시 차단되는 순환은 없다(mtime 변경 = A2 허용 조건).
+            if (!editedOk && readOk) {
+              try {
+                const prevMtime = getRecentReadMtime(sessionId, absPath, turn, rbeWindow);
+                if (prevMtime !== null) {
+                  const curMtime = statSync(absPath).mtimeMs;
+                  if (curMtime !== prevMtime) {
+                    logGate(sessionId, 'read-before-edit', 'deny', `stale-read ${absPath}`);
+                    emit(
+                      deny(
+                        `마지막 Read 이후 파일이 변경되었습니다: ${absPath}. ` +
+                          '변경된 내용을 다시 Read(부분 읽기 가능)한 후 편집하세요. (Read-before-edit 정책, 변경 감지)',
+                      ),
+                    );
+                    return;
+                  }
+                }
+              } catch {
+                // fail-open — mtime 판정 실패가 편집을 막지 않는다.
+              }
             }
           }
         }

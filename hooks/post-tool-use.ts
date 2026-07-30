@@ -19,6 +19,7 @@ import {
   recordWebFetch,
   wasUrlFetched,
   webRefetchMessage,
+  webRepeatSearchMessage,
   writeHabitState,
   writeValidationFailure,
 } from '../lib';
@@ -404,22 +405,38 @@ function main(): void {
         }
       }
 
-      // (D) H2-04 — 동일 URL 재페치 경고(비차단). 세션 전체 스코프(서브에이전트 포함) —
-      //   메인이 위임한 서브가 같은 페이지를 또 가져오는 낭비까지 잡는다.
+      // (D) H2-04 — 동일 URL 재페치/동일 검색어 재검색 경고(비차단). 세션 전체 스코프
+      //   (서브에이전트 포함) — 메인이 위임한 서브가 같은 페이지를 또 가져오는 낭비까지 잡는다.
       //   원격 내용 변경은 감지할 수 없으므로 deny가 아닌 warn 고정.
-      //   env GOODBOY_WEBFETCH_REFETCH_WARN=on|off (기본 on).
-      if (toolName === 'WebFetch' && envStr('GOODBOY_WEBFETCH_REFETCH_WARN', 'on') !== 'off') {
+      //   (v0.27.9) WebSearch 확장 — tokenhabit 실측(웹 호출 270회, 같은 대상 반복 다수).
+      //   검색어는 "search:" 접두로 URL 기록과 키 공간을 분리한다. 기록은 압축 epoch 리셋
+      //   (clearReadRecords)에서 함께 비워진다 — 압축 후 "앞선 결과"는 컨텍스트에 없다.
+      //   env GOODBOY_WEBFETCH_REFETCH_WARN=on|off (기본 on, WebSearch 포함).
+      if (
+        (toolName === 'WebFetch' || toolName === 'WebSearch') &&
+        envStr('GOODBOY_WEBFETCH_REFETCH_WARN', 'on') !== 'off'
+      ) {
         try {
-          const url = typeof toolInput.url === 'string' ? (toolInput.url as string) : '';
-          if (url) {
-            if (wasUrlFetched(sessionId, url)) {
-              additionalContext = webRefetchMessage(url);
+          const isFetch = toolName === 'WebFetch';
+          const target = isFetch
+            ? typeof toolInput.url === 'string'
+              ? (toolInput.url as string)
+              : ''
+            : typeof toolInput.query === 'string'
+              ? (toolInput.query as string)
+              : '';
+          if (target) {
+            const key = isFetch ? target : `search:${target}`;
+            if (wasUrlFetched(sessionId, key)) {
+              additionalContext = isFetch
+                ? webRefetchMessage(target)
+                : webRepeatSearchMessage(target);
             }
-            recordWebFetch(sessionId, url);
+            recordWebFetch(sessionId, key);
           }
         } catch (err) {
           // fail-open
-          process.stderr.write(`[goodboy post-tool-use] webfetch warn error: ${String(err)}\n`);
+          process.stderr.write(`[goodboy post-tool-use] web refetch warn error: ${String(err)}\n`);
         }
       }
 

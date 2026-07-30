@@ -372,12 +372,19 @@ function normalizeUrl(url: string): string {
   return u;
 }
 
+/** (v0.27.9, 리뷰 지적) 기록 키 정규화 — URL만 normalizeUrl을 거친다.
+ *  'search:' 접두 검색어 키에 URL 정규화를 적용하면 '#'가 fragment로 절단되어
+ *  "C# async await"와 "C# LINQ"가 둘 다 'search:C'로 충돌한다(거짓 재검색 경고 실측). */
+function normalizeWebKey(key: string): string {
+  return key.startsWith('search:') ? key.trim() : normalizeUrl(key);
+}
+
 /** WebFetch URL 기록(세션 스코프). 서브에이전트 포함 — 세션 전체에서 같은 페이지
  *  재페치를 감지하기 위해 일부러 에이전트 스코프를 두지 않는다. */
 export function recordWebFetch(sessionId: string, url: string): void {
   try {
     const dir = ensureSessionDir(sessionId);
-    const record = { url: normalizeUrl(url), timestamp: new Date().toISOString() };
+    const record = { url: normalizeWebKey(url), timestamp: new Date().toISOString() };
     appendFileSync(join(dir, WEBFETCH_LOG_FILE), JSON.stringify(record) + '\n', 'utf8');
   } catch {
     // best-effort
@@ -389,7 +396,7 @@ export function wasUrlFetched(sessionId: string, url: string): boolean {
   try {
     const path = join(ensureSessionDir(sessionId), WEBFETCH_LOG_FILE);
     if (!existsSync(path)) return false;
-    const target = normalizeUrl(url);
+    const target = normalizeWebKey(url);
     for (const line of readFileSync(path, 'utf8').split(/\r?\n/)) {
       const trimmed = line.trim();
       if (trimmed === '') continue;
@@ -411,6 +418,15 @@ export function webRefetchMessage(url: string): string {
   return (
     `이 URL은 이번 세션에서 이미 가져왔습니다: ${url} — 앞선 결과를 참조하세요. ` +
     '원격 내용이 바뀌었을 근거가 있을 때만 다시 가져오세요. (웹 재페치 방지, H2-04)'
+  );
+}
+
+/** (v0.27.9) H2-04 동일 검색어 반복 문구 — tokenhabit 실측(웹 호출 270회) 대응으로
+ *  재페치 경고를 WebSearch까지 확장했다. */
+export function webRepeatSearchMessage(query: string): string {
+  return (
+    `이 검색어는 이번 세션에서 이미 검색했습니다: ${query} — 앞선 결과를 참조하세요. ` +
+    '새 정보가 필요하면 검색어를 좁히거나 바꾸세요. (웹 재검색 방지, H2-04)'
   );
 }
 

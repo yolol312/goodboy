@@ -238,13 +238,17 @@ export function incrementTurn(sessionId: string): number {
 /** H2-01 epoch 리셋: 세션의 read 기록 전체 삭제(컨텍스트 압축 감지 시).
  *  압축 후에는 앞서 읽은 내용이 모델 컨텍스트에 없으므로, 재-Read 차단의 전제
  *  ("앞서 읽은 내용을 참조할 수 있다")가 깨진다 → 기록을 비워 압축 이후를 새 기준으로 한다.
+ *  (v0.27.9, 리뷰 지적) webfetch.jsonl(H2-04 재페치 기록)도 같은 전제를 공유하므로 함께
+ *  비운다 — 남겨두면 압축 후 존재하지 않는 "앞선 결과 참조" 경고가 나온다.
  *  ⚠️ edits.jsonl은 지우지 않는다 — 리뷰 커서/검증 스코프가 의존한다. */
 export function clearReadRecords(sessionId: string): void {
-  try {
-    const path = join(ensureSessionDir(sessionId), 'reads.jsonl');
-    if (existsSync(path)) unlinkSync(path);
-  } catch {
-    // best-effort
+  for (const name of ['reads.jsonl', 'webfetch.jsonl']) {
+    try {
+      const path = join(ensureSessionDir(sessionId), name);
+      if (existsSync(path)) unlinkSync(path);
+    } catch {
+      // best-effort
+    }
   }
 }
 
