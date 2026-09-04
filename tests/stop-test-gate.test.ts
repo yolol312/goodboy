@@ -161,6 +161,28 @@ describe('Stop hook — 층1 테스트 게이트', () => {
     expect(out.reason).toContain('test-changes');
   });
 
+  // 라이브 실측: 문서만 고친 턴에 README.md·agents/*.md·skills/*.md 5개를 두고
+  // "테스트되지 않은 변경 파일"로 차단했다. 해소할 방법이 없어 escape로만 끝난다.
+  test('문서만 바뀐 턴은 발동하지 않는다', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 3, ['README.md', 'docs/GUIDE.md'], cwd);
+
+    const out = await runStop(tmp, cwd, sessionId);
+    expect(out.reason ?? '').not.toContain('테스트가 없습니다');
+    expect(out.reason ?? '').not.toContain('테스트되지 않은 변경 파일');
+  });
+
+  test('문서와 코드가 섞이면 코드만 요구한다', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 3, ['README.md', CODE_FILE], cwd);
+
+    const out = await runStop(tmp, cwd, sessionId);
+    expect(out.decision).toBe('block');
+    expect(out.reason).toContain('테스트가 없습니다');
+    expect(out.reason).toContain(CODE_FILE);
+    expect(out.reason).not.toContain('README.md');
+  });
+
   test('편집이 없으면 게이트가 발동하지 않는다', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 3, [], cwd);

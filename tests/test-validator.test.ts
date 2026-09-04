@@ -6,16 +6,18 @@
 import { describe, expect, test, afterEach } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { AcceptanceCoverage, TestResult } from '../lib/types';
 import {
   detectTestInfrastructure,
   evidenceProblems,
   failingSuites,
+  isDocFile,
   isTestFile,
   missingTestFiles,
   requiresMutationProbe,
   scanForbiddenPatterns,
+  stripLiteralsAndComments,
   uncoveredCriteria,
   validateEvidence,
   validateTestCoverage,
@@ -241,6 +243,75 @@ describe('scanForbiddenPatterns — 통과하지만 아무것도 검증하지 �
   test('읽을 수 없는 파일은 건너뛴다 (fail-open)', () => {
     expect(scanForbiddenPatterns(['/nope/none.ts'])).toEqual([]);
   });
+
+  // 자기-호스팅 결함(라이브 실측): 이 스캐너를 검증하는 메타 테스트는 금지 패턴을
+  // **픽스처 문자열로 반드시 포함**한다. 그걸 위반으로 세면 해소 방법이 "정당한 테스트를
+  // 지우기"밖에 없어 게이트가 영구 오탐이 된다 — goodboy 자신의 테스트 2개가 실제로
+  // 걸려서, 층1이 이 저장소에서 통과 불가능했다.
+  test('문자열 리터럴 안의 금지 패턴은 위반이 아니다 (실행되지 않는다)', () => {
+    const src = [
+      'const bad = "await page.waitForTimeout(3000);";',
+      "const bad2 = 'test.skip(\"x\", () => {});';",
+      'const bad3 = `expect(n).toBeGreaterThanOrEqual(0)`;',
+      'expect(scan([bad, bad2, bad3])).toHaveLength(3);',
+    ].join('\n');
+    expect(scanForbiddenPatterns([withContent(src)])).toEqual([]);
+  });
+
+  test('주석 안의 금지 패턴도 위반이 아니다', () => {
+    const src = [
+      '// waitForTimeout 을 쓰지 마세요',
+      '/* test.skip 으로 남기지 마세요 */',
+      'await expect(page.getByRole("button")).toBeVisible();',
+    ].join('\n');
+    expect(scanForbiddenPatterns([withContent(src)])).toEqual([]);
+  });
+
+  test('실행되는 코드의 금지 패턴은 여전히 잡는다 (문자열로 숨겨도 소용없게)', () => {
+    const src = [
+      'const doc = "waitForTimeout 은 금지";',
+      'await page.waitForTimeout(1000);',
+    ].join('\n');
+    expect(scanForbiddenPatterns([withContent(src)]).map((h) => h.key)).toContain('wait-timeout');
+  });
+
+  test('정규식의 \\/ 를 줄 주석으로 오인해 그 줄을 통째로 지우지 않는다', () => {
+    // 오인하면 뒤따르는 실제 위반이 조용히 사라진다(= 미검출). 위반 방향으로 틀리면 안 된다.
+    const src = 'const re = /https?:\\/\\//; await page.waitForTimeout(500);';
+    expect(scanForbiddenPatterns([withContent(src)]).map((h) => h.key)).toContain('wait-timeout');
+  });
+
+  test('닫히지 않은 아포스트로피가 파일 끝까지 삼키지 않는다', () => {
+    // "don't" 같은 주석 속 아포스트로피 하나로 이후 전부가 문자열 취급되면
+    // 그 아래 모든 위반이 숨는다. 따옴표 문자열은 줄을 넘지 않는다.
+    const src = ["const s = 'don", 'await page.waitForTimeout(500);'].join('\n');
+    expect(scanForbiddenPatterns([withContent(src)]).map((h) => h.key)).toContain('wait-timeout');
+  });
+
+  test('goodboy 자신의 메타 테스트가 위반으로 잡히지 않는다 (자기-호스팅 회귀)', () => {
+    const own = [
+      resolve(import.meta.dir, 'test-validator.test.ts'),
+      resolve(import.meta.dir, 'stop-test-gate.test.ts'),
+    ];
+    expect(scanForbiddenPatterns(own)).toEqual([]);
+  });
+});
+
+describe('stripLiteralsAndComments', () => {
+  test('길이와 줄 구조를 보존한다 (오프셋 기반 보고를 깨지 않게)', () => {
+    const src = 'const a = "xx";\n// c\nconst b = 1;\n';
+    const out = stripLiteralsAndComments(src);
+    expect(out.length).toBe(src.length);
+    expect(out.split('\n').length).toBe(src.split('\n').length);
+    expect(out).toContain('const a = "');
+    expect(out).not.toContain('xx');
+  });
+
+  test('빈/비문자열 입력은 빈 문자열', () => {
+    expect(stripLiteralsAndComments('')).toBe('');
+    // @ts-expect-error 런타임 견고성 확인
+    expect(stripLiteralsAndComments(null)).toBe('');
+  });
 });
 
 describe('isTestFile — 테스트 파일은 커버리지 요구 대상이 아니다', () => {
@@ -266,6 +337,36 @@ describe('isTestFile — 테스트 파일은 커버리지 요구 대상이 아�
     expect(isTestFile('package.json')).toBe(false);
     expect(isTestFile('src/latest.ts')).toBe(false); // 'test'가 부분문자열로 들어간 이름
     expect(isTestFile('')).toBe(false);
+  });
+});
+
+// 라이브 실측: 문서만 고친 턴에 층1이 README.md·agents/*.md·skills/*.md 5개를 두고
+// "테스트되지 않은 변경 파일"로 차단했다. README를 단위 테스트할 수는 없으니 해소
+// 방법이 없고, 3회 차단 후 escape로만 끝난다 — 게이트의 최악 결말이다.
+describe('isDocFile — 문서는 커버리지 요구 대상이 아니다', () => {
+  test('문서 확장자를 인식한다 (추론 게이트의 면제 목록과 동일)', () => {
+    for (const f of [
+      'README.md',
+      'docs/GUIDE.markdown',
+      'site/page.mdx',
+      'notes.txt',
+      'doc.rst',
+      'a.adoc',
+      'b.asciidoc',
+    ]) {
+      expect(isDocFile(f)).toBe(true);
+    }
+  });
+
+  test('대소문자를 가리지 않는다', () => {
+    expect(isDocFile('README.MD')).toBe(true);
+  });
+
+  test('소스는 문서가 아니다', () => {
+    expect(isDocFile('src/a.ts')).toBe(false);
+    expect(isDocFile('lib/readme.ts')).toBe(false); // 이름에 readme가 들어갈 뿐
+    expect(isDocFile('mdx.ts')).toBe(false); // 확장자가 아니라 이름에 mdx
+    expect(isDocFile('')).toBe(false);
   });
 });
 

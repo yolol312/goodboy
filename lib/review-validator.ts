@@ -99,12 +99,21 @@ export function findRecentReviewFiles(reviewsDir: string, withinMinutes: number)
  *  무한정 쌓인다. 유효창(기본 24h)을 지난 리뷰는 게이트가 다시는 읽지 않는 죽은
  *  데이터다. Stop 훅이 매번 best-effort로 호출한다. 삭제한 파일 수를 반환.
  *  ⚠️ 호출부는 olderThanMinutes를 유효창 이상으로 클램프해야 한다 — 여기서는
- *  전달값을 그대로 신뢰한다(단위 테스트 용이성). */
-export function pruneOldReviewFiles(reviewsDir: string, olderThanMinutes: number): number {
+ *  전달값을 그대로 신뢰한다(단위 테스트 용이성).
+ *
+ *  @param nowMs 기준 시각. 생략하면 `Date.now()`. **경계 테스트를 결정적으로 만들기
+ *    위한 것이다** — 픽스처가 `Date.now()-N분` 으로 mtime을 찍고 구현이 자기
+ *    `Date.now()` 로 나이를 재면, 두 호출이 같은 밀리초 안에 끝날 때만 나이가 정확히
+ *    N분이라 경계 테스트가 운으로 통과한다(실측: 격리 재현 10회 중 1회 실패). */
+export function pruneOldReviewFiles(
+  reviewsDir: string,
+  olderThanMinutes: number,
+  nowMs?: number,
+): number {
   if (!Number.isFinite(olderThanMinutes) || olderThanMinutes <= 0) return 0;
   let pruned = 0;
   try {
-    const now = Date.now();
+    const now = typeof nowMs === 'number' && Number.isFinite(nowMs) ? nowMs : Date.now();
     for (const name of readdirSync(reviewsDir)) {
       if (!name.endsWith('.json')) continue;
       const full = join(reviewsDir, name);

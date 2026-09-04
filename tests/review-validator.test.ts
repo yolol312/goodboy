@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
@@ -318,11 +318,30 @@ describe('pruneOldReviewFiles (v0.27.5, 리뷰 파일 위생)', () => {
     expect(existsSync(notJson)).toBe(true);
   });
 
-  test('경계: 보존 기간과 같은 나이는 보존(초과분만 삭제)', () => {
+  // 기준 시각을 주입한다. 주입하지 않으면 픽스처의 Date.now()와 구현의 Date.now()가
+  // **같은 밀리초 안에** 끝날 때만 나이가 정확히 경계값이라, 이 테스트는 운으로
+  // 통과한다(실측: 격리 재현 10회 중 1회 실패, CI에서 무작위로 터짐).
+  test('경계: 보존 기간과 같은 나이는 보존', () => {
     const dir = makeReviewsDir();
     const atBoundary = writeAged(dir, 'boundary.json', 100);
-    expect(pruneOldReviewFiles(dir, 100)).toBe(0);
+    const exactlyBoundary = statSync(atBoundary).mtimeMs + 100 * 60000;
+    expect(pruneOldReviewFiles(dir, 100, exactlyBoundary)).toBe(0);
     expect(existsSync(atBoundary)).toBe(true);
+  });
+
+  test('경계: 1ms만 넘어도 삭제한다', () => {
+    const dir = makeReviewsDir();
+    const justOver = writeAged(dir, 'over.json', 100);
+    const oneMsPast = statSync(justOver).mtimeMs + 100 * 60000 + 1;
+    expect(pruneOldReviewFiles(dir, 100, oneMsPast)).toBe(1);
+    expect(existsSync(justOver)).toBe(false);
+  });
+
+  test('nowMs를 안 주면 기존 동작(Date.now 기준)을 유지한다', () => {
+    const dir = makeReviewsDir();
+    const old = writeAged(dir, 'old.json', 200);
+    expect(pruneOldReviewFiles(dir, 100)).toBe(1);
+    expect(existsSync(old)).toBe(false);
   });
 
   test('olderThanMinutes가 0 이하 또는 비유한이면 no-op', () => {

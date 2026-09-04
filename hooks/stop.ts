@@ -18,6 +18,7 @@ import {
   extractRecentUserTexts,
   assistantTextFreshness,
   gateMessage,
+  isDocFile,
   isGateMessage,
   hallucinatedCitations,
   hasAnyReadRecords,
@@ -544,6 +545,17 @@ function testGateActive(cwd: string): { active: boolean; evidence: string } {
 }
 
 /**
+ * (층1) 이 파일이 테스트 커버리지 요구 대상인가.
+ *
+ * 두 부류를 뺀다. 둘 다 "요구해도 해소할 방법이 없어서 escape로만 끝나는" 부류다:
+ *   - 테스트 파일 — 테스트를 테스트하라는 무한 후퇴(실측: tests/hello.test.ts)
+ *   - 문서 파일 — README를 단위 테스트할 수 없다(실측: README.md 등 5개 요구)
+ */
+function needsTestCoverage(file: string): boolean {
+  return !isTestFile(file) && !isDocFile(file);
+}
+
+/**
  * (층1) stop_hook_active 조기 return 경로의 **비차단** 테스트 수락 시도.
  *
  * "차단 → 테스트 실행 → 턴 종료"가 테스트 게이트 해소의 표준 경로인데, 그 턴 종료는
@@ -562,12 +574,12 @@ function tryAcceptPendingTest(sessionId: string, cwd: string, claudeDir: string)
   try {
     const cursor = readTestCursor(cwd);
     const cursorTurn = cursor ? cursor.turn : 0;
-    const recentEdits = getEditsSince(sessionId, cursorTurn, cwd);
+    const recentEdits = getEditsSince(sessionId, cursorTurn, cwd).filter(needsTestCoverage);
     if (recentEdits.length === 0) return false;
     const results = findRecentTestFiles(resolvePath(cwd, '.claude', 'tests'), testWindowMinutes());
     if (results.length === 0) return false;
-    const changedEdits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd).filter(
-      (e) => !isTestFile(e.file),
+    const changedEdits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd).filter((e) =>
+      needsTestCoverage(e.file),
     );
     const cov = validateTestCoverage(results, changedEdits);
     if (!cov.ok) return false;
@@ -611,7 +623,8 @@ function testGate(sessionId: string, cwd: string, claudeDir: string): HookOutput
   try {
     const cursor = readTestCursor(cwd);
     const cursorTurn = cursor ? cursor.turn : 0;
-    const recentEdits = getEditsSince(sessionId, cursorTurn, cwd);
+    // 문서·테스트 파일만 바뀐 턴은 층1의 관심사가 아니다 — 요구해도 해소할 방법이 없다.
+    const recentEdits = getEditsSince(sessionId, cursorTurn, cwd).filter(needsTestCoverage);
     if (recentEdits.length === 0) {
       statusSnapshot.testPending = false;
       return null;
@@ -676,8 +689,9 @@ function testGate(sessionId: string, cwd: string, claudeDir: string): HookOutput
 
     // 테스트 파일 자체는 커버리지 요구 대상에서 뺀다 — 테스트를 테스트하라는 무한 후퇴가
     //   된다(라이브 실측: `tests/hello.test.ts` 가 "테스트되지 않은 변경 파일"로 잡혔다).
-    const changedEdits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd).filter(
-      (e) => !isTestFile(e.file),
+    //   문서도 같은 이유로 뺀다(라이브 실측: README.md 등 5개를 요구했다).
+    const changedEdits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd).filter((e) =>
+      needsTestCoverage(e.file),
     );
     const cov = validateTestCoverage(results, changedEdits);
     if (!cov.ok) {

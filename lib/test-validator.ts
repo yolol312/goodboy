@@ -78,12 +78,18 @@ export function findRecentTestFiles(testsDir: string, withinMinutes: number): Te
   }
 }
 
-/** 보존 기간이 지난 테스트 결과 파일 삭제 (리뷰 파일 정리와 동일 위생 작업). */
-export function pruneOldTestFiles(testsDir: string, olderThanMinutes: number): number {
+/** 보존 기간이 지난 테스트 결과 파일 삭제 (리뷰 파일 정리와 동일 위생 작업).
+ *  @param nowMs 기준 시각. 생략하면 `Date.now()`. pruneOldReviewFiles와 같은 이유로
+ *    주입 가능하다 — 경계를 벽시계 경쟁 없이 검증하기 위해서다. */
+export function pruneOldTestFiles(
+  testsDir: string,
+  olderThanMinutes: number,
+  nowMs?: number,
+): number {
   if (!Number.isFinite(olderThanMinutes) || olderThanMinutes <= 0) return 0;
   let pruned = 0;
   try {
-    const now = Date.now();
+    const now = typeof nowMs === 'number' && Number.isFinite(nowMs) ? nowMs : Date.now();
     for (const name of readdirSync(testsDir)) {
       if (!name.endsWith('.json')) continue;
       const full = join(testsDir, name);
@@ -120,6 +126,23 @@ export function isTestFile(filePath: string): boolean {
   if (/(^|\/)(tests?|__tests__|spec|e2e)\//.test(f)) return true;
   if (/(^|\/)test_[^/]+\.py$/.test(f) || /_test\.(py|go|rb)$/.test(f)) return true;
   return false;
+}
+
+/**
+ * 문서 파일인가 — 층1 커버리지 요구 대상에서 뺀다.
+ *
+ * README를 단위 테스트할 수는 없다. 그런데 층1은 `isTestFile` 제외만 넣고 문서를
+ * 빠뜨려서, 문서만 고친 턴에도 "테스트되지 않은 변경 파일"로 차단했다(실측:
+ * README.md·agents/*.md·skills/*.md 5개를 요구). 해소할 방법이 없으니 3회 차단 후
+ * escape로만 끝나는, 게이트의 최악 결말이다.
+ *
+ * 추론 게이트가 문서를 면제하는 근거와 같다(`GOODBOY_REASONING_DOC_EXEMPT`):
+ * 실익은 낮은데 마찰은 코드와 동일하다. 확장자 목록도 그쪽과 맞춘다.
+ */
+export function isDocFile(filePath: string): boolean {
+  if (typeof filePath !== 'string' || filePath === '') return false;
+  const f = filePath.split('\\').join('/').toLowerCase();
+  return /\.(md|markdown|mdx|txt|rst|adoc|asciidoc)$/.test(f);
 }
 
 /**
@@ -473,6 +496,77 @@ export interface ForbiddenHit {
   message: string;
 }
 
+/**
+ * 문자열·템플릿 리터럴·주석의 **내용**을 공백으로 지운다(길이·줄바꿈은 보존).
+ *
+ * 금지 패턴은 "실행되는 코드"에서만 의미가 있다. 그런데 정적 스캐너를 검증하는 메타
+ * 테스트는 금지 패턴을 **픽스처 문자열로 반드시 포함**한다 — 그걸 위반으로 세면
+ * 해소 방법이 "정당한 테스트를 지우기"밖에 없어 게이트가 영구 오탐이 된다.
+ * 실측: goodboy 자신의 `tests/test-validator.test.ts` 가 4건, `tests/stop-test-gate.test.ts`
+ * 가 1건 걸렸고, 층1이 자기 저장소에서 통과 불가능해졌다.
+ *
+ * 우회 여지가 없는 방향으로 고른 것이다 — 문자열 안에 숨긴 `waitForTimeout(` 은
+ * 애초에 실행되지 않으므로, 지워도 잡아야 할 것을 놓치지 않는다.
+ *
+ * 정규식 리터럴은 별도로 파싱하지 않는다. 다만 일반 코드의 `\` 는 다음 글자를
+ * 건너뛴다 — `/https?:\/\//` 같은 정규식의 `\/` 가 줄 주석 시작으로 오인돼
+ * 그 줄이 통째로 지워지는 것(= 위반 미검출)을 막기 위해서다.
+ */
+export function stripLiteralsAndComments(source: string): string {
+  if (typeof source !== 'string' || source === '') return '';
+  const out = source.split('');
+  const blank = (from: number, to: number): void => {
+    for (let k = from; k < to && k < out.length; k++) {
+      if (out[k] !== '\n') out[k] = ' ';
+    }
+  };
+  let i = 0;
+  const n = source.length;
+  while (i < n) {
+    const c = source[i]!;
+    const next = source[i + 1];
+    if (c === '\\') {
+      i += 2; // 일반 코드의 이스케이프(정규식 `\/` 등)
+      continue;
+    }
+    if (c === '/' && next === '/') {
+      const end = source.indexOf('\n', i);
+      const stop = end === -1 ? n : end;
+      blank(i, stop);
+      i = stop;
+      continue;
+    }
+    if (c === '/' && next === '*') {
+      const end = source.indexOf('*/', i + 2);
+      const stop = end === -1 ? n : end + 2;
+      blank(i, stop);
+      i = stop;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      const quote = c;
+      let j = i + 1;
+      while (j < n) {
+        const d = source[j]!;
+        if (d === '\\') {
+          j += 2;
+          continue;
+        }
+        if (d === quote) break;
+        // 따옴표 문자열은 줄을 넘지 않는다 — 닫히지 않은 따옴표(아포스트로피 등)가
+        //   파일 끝까지 삼켜 위반을 통째로 숨기는 것을 막는다. 템플릿은 넘어간다.
+        if (d === '\n' && quote !== '`') break;
+        j++;
+      }
+      blank(i + 1, Math.min(j, n));
+      i = Math.min(j + 1, n);
+      continue;
+    }
+    i++;
+  }
+  return out.join('');
+}
+
 /** 테스트 파일들에서 가짜 테스트 패턴을 찾는다. 읽기 실패한 파일은 건너뛴다(fail-open). */
 export function scanForbiddenPatterns(testFiles: string[]): ForbiddenHit[] {
   const hits: ForbiddenHit[] = [];
@@ -484,8 +578,10 @@ export function scanForbiddenPatterns(testFiles: string[]): ForbiddenHit[] {
     } catch {
       continue;
     }
+    // 문자열·주석은 실행되지 않는다 — 픽스처를 위반으로 세지 않는다.
+    const code = stripLiteralsAndComments(content);
     for (const p of FORBIDDEN_TEST_PATTERNS) {
-      if (p.re.test(content)) {
+      if (p.re.test(code)) {
         hits.push({ file: f, key: p.key, message: p.message });
       }
     }
