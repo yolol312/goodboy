@@ -84,7 +84,8 @@ interface StopOut {
 async function runStop(tmp: string, cwd: string, sessionId: string): Promise<StopOut> {
   const proc = Bun.spawn(['bun', STOP_HOOK], {
     cwd,
-    env: { ...process.env, TMPDIR: tmp, HOME: tmp },
+    // 층1 테스트 게이트는 리뷰 검증 게이트보다 앞서 발동한다 → 이 파일에서는 끈다.
+    env: { ...process.env, TMPDIR: tmp, HOME: tmp, GOODBOY_TEST_GATE: 'off' },
     stdin: new TextEncoder().encode(
       JSON.stringify({ session_id: sessionId, cwd, hook_event_name: 'Stop' }),
     ),

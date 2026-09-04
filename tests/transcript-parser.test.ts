@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   assistantEntriesAfterLastText,
+  assistantTextFreshness,
   parseTokensFromTranscript,
 } from '../lib/transcript-parser';
 
@@ -163,5 +164,68 @@ describe('assistantEntriesAfterLastText', () => {
   test('없는 파일/빈 경로는 0 (fail-open)', () => {
     expect(assistantEntriesAfterLastText('/nonexistent/x.jsonl')).toBe(0);
     expect(assistantEntriesAfterLastText('')).toBe(0);
+  });
+});
+
+// 지키려는 성질: Stop 훅이 **이번 턴의 답변**만 판정하게 한다.
+// 라이브 실측(P7)에서 층0 인용 게이트가 환각 인용 3건을 전부 놓쳤다 — 답변 기록보다
+// 130ms 먼저 훅이 돌았기 때문이다. 직전 턴 답변을 대신 판정하면 이미 정정한 주장을
+// 재차단하게 되므로, "신선하지 않음"은 대기 후 fail-open으로 이어져야 한다.
+// 'pending'과 'unknown'을 반드시 구별해야 한다 — 사용자 프롬프트가 없는 transcript를
+// 'pending'으로 보면 매 턴 헛되이 대기하다 훅 timeout을 먹는다(실측: 기존 테스트 6건 초과).
+describe('assistantTextFreshness', () => {
+  const textEntry = (text: string) =>
+    JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'text', text }] },
+    });
+  const thinkingEntry = () =>
+    JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'thinking', thinking: '...' }] },
+    });
+  const userEntry = (text = '해줘') =>
+    JSON.stringify({ type: 'user', message: { role: 'user', content: text } });
+  const toolResultEntry = () =>
+    JSON.stringify({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'x', content: 'ok' }],
+      },
+    });
+
+  test('사용자 프롬프트 뒤에 답변이 있으면 fresh', () => {
+    const path = writeTranscript([userEntry(), thinkingEntry(), textEntry('답변')]);
+    expect(assistantTextFreshness(path)).toBe('fresh');
+  });
+
+  test('이번 턴 답변이 아직 안 쓰였으면 pending (P7 실측 상황)', () => {
+    const path = writeTranscript([userEntry('1턴'), textEntry('1턴 답'), userEntry('2턴')]);
+    expect(assistantTextFreshness(path)).toBe('pending');
+  });
+
+  test('thinking만 기록된 상태도 pending', () => {
+    const path = writeTranscript([userEntry(), thinkingEntry()]);
+    expect(assistantTextFreshness(path)).toBe('pending');
+  });
+
+  test('tool_result는 사용자 프롬프트로 세지 않는다 — 도구를 쓴 턴도 판정 대상이다', () => {
+    const path = writeTranscript([userEntry(), textEntry('답변'), toolResultEntry()]);
+    expect(assistantTextFreshness(path)).toBe('fresh');
+  });
+
+  test('사용자 프롬프트가 없는 transcript는 unknown — 대기하지 않는다', () => {
+    expect(assistantTextFreshness(writeTranscript([textEntry('답변')]))).toBe('unknown');
+    expect(
+      assistantTextFreshness(
+        writeTranscript([JSON.stringify({ message: { usage: { input_tokens: 100 } } })]),
+      ),
+    ).toBe('unknown');
+  });
+
+  test('없는 파일/빈 경로는 unknown (대기 없이 건너뜀)', () => {
+    expect(assistantTextFreshness('/nonexistent/x.jsonl')).toBe('unknown');
+    expect(assistantTextFreshness('')).toBe('unknown');
   });
 });

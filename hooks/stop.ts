@@ -3,17 +3,43 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
-import type { StatusSnapshot } from '../lib';
+import type { CitationProblem, StatusSnapshot } from '../lib';
 import {
+  citationBlockMessage,
   clearReadRecords,
   clearValidationFailure,
   compactForcePct,
   currentFindings,
   envInt,
   envStr,
+  excludeUserOriginated,
+  extractCitations,
   extractRecentAssistantTexts,
+  extractRecentUserTexts,
+  assistantTextFreshness,
+  gateMessage,
+  isGateMessage,
+  hallucinatedCitations,
+  hasAnyReadRecords,
+  unreadBlockMessage,
+  unreadCitations,
+  verifyCitations,
+  wasFileReadRecently,
+  detectTestInfrastructure,
+  failingSuites,
+  findDevCycleArtifacts,
   findRecentReviewFiles,
+  findRecentTestFiles,
+  missingTestFiles,
   pruneOldReviewFiles,
+  pruneOldTestFiles,
+  readTestCursor,
+  requiredAcceptanceCriteria,
+  scanForbiddenPatterns,
+  uncoveredCriteria,
+  validateEvidence,
+  validateTestCoverage,
+  writeTestCursor,
   getContextUsage,
   getCurrentTurn,
   getEditsSince,
@@ -21,6 +47,7 @@ import {
   hasReasoningSection,
   highSeverityFindings,
   incrementTurn,
+  isTestFile,
   logGate,
   parseReasoningSection,
   readGateLog,
@@ -86,6 +113,14 @@ const VALIDATION_COUNT_FILE = '.goodboy-validation-retry-count.txt';
 //   v0.25.0까지 이 게이트만 escape가 없어 영구 데드락을 만들었다(라이브 재현:
 //   삭제된 프로브/리뷰 산출물이 유령 파일로 남아 커버리지가 영원히 실패).
 const REVIEW_VALIDATE_COUNT_FILE = '.goodboy-review-validate-retry-count.txt';
+
+// (층1) 테스트 게이트 재시도 카운터. 리뷰 카운터와 분리 — 테스트 재시도가 리뷰의
+// 재시도 기회를 깎으면, 테스트를 고치는 동안 리뷰 게이트가 escape로 새어나간다.
+const TEST_COUNT_FILE = '.goodboy-test-retry-count.txt';
+
+// (층0) 인용 검증 게이트 재시도 카운터. 다른 게이트와 분리 — 층0은 편집 없는 턴에도
+// 발동하므로, 카운터를 공유하면 답변 턴의 재시도가 리뷰의 기회를 깎는다.
+const CLAIM_COUNT_FILE = '.goodboy-claim-retry-count.txt';
 
 // 이번 Stop 실행에서 사용자에게 보일 토큰-습관 경고들(H1-01 긴 세션 경고, H1-03 강제 escape 통지).
 // emit()이 모든 출력 경로(block/pass)의 systemMessage에 이 경고들을 덧붙인다 —
@@ -274,6 +309,12 @@ function maybeForceCompact(
 }
 
 function emit(out: HookOutput): void {
+  // 차단 사유에 출처를 붙인다 — 하니스는 이걸 user 엔트리로 되먹이므로,
+  //   (a) 서브에이전트가 프롬프트 인젝션으로 오인하지 않게 하고
+  //   (b) 층0이 훅 자신의 발화를 "사용자가 쓴 인용"으로 착각하지 않게 한다.
+  if (out.decision === 'block' && typeof out.reason === 'string') {
+    out.reason = gateMessage(out.reason);
+  }
   // 토큰-습관 경고들을 systemMessage에 덧붙인다(기존 systemMessage가 있으면 줄바꿈 append).
   // 리뷰 block/pass 어느 경로로 emit하든 사용자에게 보이도록 출력 단계에서 합친다.
   if (habitWarnings.length > 0) {
@@ -344,6 +385,356 @@ function resetRetryCount(claudeDir: string, file: string = '.goodboy-retry-count
  *  위생 상한일 뿐인데, 30분은 "수락 전에 만료 → 같은 파일 재차단" 루프를 실측 유발했다. */
 function reviewWindowMinutes(): number {
   return envInt('GOODBOY_REVIEW_WINDOW_MIN', 1440);
+}
+
+/**
+ * (층0) 인용 검증 게이트 — **편집이 있든 없든** 매 턴 동작한다.
+ *
+ * 다른 모든 게이트는 편집이 있을 때만 발동한다. 그래서 코드베이스를 길게 설명하는
+ * 답변 턴은 통째로 무방비였다 — `파일:줄`을 대고 단정해도 아무도 확인하지 않았다.
+ *
+ * 판정은 전부 결정적이다(LLM 없음):
+ *   - 파일 없음 / 줄 범위 밖  → 확정 환각. 즉시 차단하고 정정을 요구한다.
+ *   - 읽은 기록 없음          → 근거 미확인. 차단하되, 반복되면 hallucination 축 리뷰로 승격.
+ *
+ * fail-open 지점:
+ *   - transcript를 못 읽으면 생략
+ *   - 읽기 기록이 통째로 없으면(압축 직후 등) '읽은 기록 없음' 판정을 생략
+ *   - `파일:줄` 형식이 아닌 단순 언급(백틱 경로)은 인용으로 보지 않는다
+ *
+ * @returns block 출력(차단) 또는 null(통과/비활성)
+ */
+function checkCitations(
+  sessionId: string,
+  cwd: string,
+  transcriptPath: string | undefined,
+): CitationProblem[] {
+  if (envStr('GOODBOY_CLAIM_GATE', 'on') === 'off') return [];
+  if (!transcriptPath) return [];
+  try {
+    // (플러시 대기) Stop 훅은 이번 턴 답변이 transcript에 기록되기 **전에** 실행될 수 있다.
+    //   라이브 실측(P7): 답변 기록과 훅 실행이 130ms 차이라 게이트가 판정 대상을 못 보고
+    //   환각 인용 3건을 전부 놓쳤다. 신선하지 않으면 짧게 폴링한다.
+    //   상한 8초: Stop 훅 timeout(15초) 안에서 나머지 게이트에 여유를 남긴다.
+    //   끝내 안 보이면 **직전 턴 답변을 판정하지 않고** 통과시킨다 — 이미 정정된 주장을
+    //   재차단하는 것이 미검출보다 나쁘다. GOODBOY_CLAIM_FLUSH_WAIT_MS=0으로 비활성.
+    //   사용자 프롬프트 자체가 없는 transcript('unknown')는 기다려도 답변이 나타나지
+    //   않으므로 대기하지 않는다 — 이걸 구분하지 않으면 매 턴 헛되이 대기한다.
+    const waitMs = Math.min(envInt('GOODBOY_CLAIM_FLUSH_WAIT_MS', 3000), 8000);
+    const freshness = assistantTextFreshness(transcriptPath);
+    if (freshness === 'unknown') return [];
+    if (freshness === 'pending') {
+      if (waitMs <= 0) return [];
+      const startMs = Date.now();
+      const deadline = startMs + waitMs;
+      let fresh = false;
+      while (Date.now() < deadline) {
+        Bun.sleepSync(200);
+        if (assistantTextFreshness(transcriptPath) === 'fresh') {
+          fresh = true;
+          break;
+        }
+      }
+      logGate(
+        sessionId,
+        'claim',
+        'warn',
+        `${fresh ? 'flush-wait-hit' : 'flush-wait-miss'}(${Date.now() - startMs}ms)`,
+      );
+      if (!fresh) return [];
+    }
+    const last = extractRecentAssistantTexts(transcriptPath, 1)[0] ?? '';
+    if (last === '') return [];
+    // 사용자가 프롬프트에 먼저 쓴 인용은 모델의 주장이 아니다 — 존재하지 않는 경로를
+    //   사용자가 대고 모델이 "그런 파일 없습니다"라고 답하는 정직한 경우를 벌하지 않는다.
+    //   단, **훅 자신의 차단 메시지는 제외한다.** 하니스가 Stop 훅 피드백을 user 엔트리로
+    //   기록하는데, 그 안에 문제의 인용이 그대로 들어 있어서 "사용자가 먼저 쓴 것"으로
+    //   둔갑했다 — 첫 차단 이후 같은 환각이 영구 면역되던 실측 결함(P9).
+    const citations = excludeUserOriginated(
+      extractCitations(last, cwd),
+      extractRecentUserTexts(transcriptPath, 3).filter((t) => !isGateMessage(t)),
+      cwd,
+    );
+    if (citations.length === 0) return [];
+    const turn = getCurrentTurn(sessionId);
+    return verifyCitations(citations, {
+      readTrackingAvailable: hasAnyReadRecords(sessionId),
+      // 세션 전체를 창으로 본다 — 인용의 근거는 "언제 읽었나"가 아니라 "읽었나"다.
+      wasRead: (abs) => wasFileReadRecently(sessionId, abs, turn, turn + 1),
+    });
+  } catch (err) {
+    process.stderr.write(`[goodboy stop] citation check error: ${String(err)}\n`);
+    return [];
+  }
+}
+
+function claimGate(
+  sessionId: string,
+  cwd: string,
+  claudeDir: string,
+  transcriptPath: string | undefined,
+): HookOutput | null {
+  try {
+    const problems = checkCitations(sessionId, cwd, transcriptPath);
+    if (problems.length === 0) {
+      resetRetryCount(claudeDir, CLAIM_COUNT_FILE);
+      return null;
+    }
+
+    const hallucinated = hallucinatedCitations(problems);
+    const unread = unreadCitations(problems);
+
+    const count = readRetryCount(claudeDir, CLAIM_COUNT_FILE) + 1;
+    if (count >= MAX_RETRIES) {
+      // 영구 차단 방지 — 통과시키되 사용자에게 알린다.
+      resetRetryCount(claudeDir, CLAIM_COUNT_FILE);
+      logGate(sessionId, 'claim', 'warn', 'escape');
+      habitWarnings.push(
+        `인용 검증이 ${MAX_RETRIES}회 차단 후에도 해소되지 않아 이번 턴은 통과시킵니다. ` +
+          `사용자 확인이 필요합니다. (${(hallucinated[0] ?? unread[0])?.detail ?? ''})`,
+      );
+      return null;
+    }
+    writeRetryCount(claudeDir, count, CLAIM_COUNT_FILE);
+
+    if (hallucinated.length > 0) {
+      logGate(sessionId, 'claim', 'deny', `hallucinated(${hallucinated.length})`);
+      return {
+        decision: 'block',
+        reason: `${citationBlockMessage(hallucinated)} (재시도 ${count}/${MAX_RETRIES})`,
+      };
+    }
+    logGate(sessionId, 'claim', 'deny', `unread(${unread.length})`);
+    return {
+      decision: 'block',
+      reason: `${unreadBlockMessage(unread, count >= 2)} (재시도 ${count}/${MAX_RETRIES})`,
+    };
+  } catch (err) {
+    // fail-open — 게이트 자체의 오류가 턴을 막지 않는다.
+    process.stderr.write(`[goodboy stop] claim gate error: ${String(err)}\n`);
+    return null;
+  }
+}
+
+/** 테스트 결과 유효창(분). 리뷰와 같은 기본값(24h) — 근거도 같다(벽시계 창은 위생 상한). */
+function testWindowMinutes(): number {
+  return envInt('GOODBOY_TEST_WINDOW_MIN', 1440);
+}
+
+/**
+ * (층1) 이 저장소에서 테스트 게이트를 켤 것인가.
+ *
+ * `GOODBOY_TEST_GATE` = `auto`(기본) | `on` | `off`.
+ *
+ * `auto`인 이유: 무조건 켜면 **테스트를 돌릴 수단이 없는 저장소**에서 마찰만 남는다.
+ * 라이브 실측에서 빈 저장소에 파일 하나 만드는 작업이 3회 차단 후 escape로 끝났다 —
+ * 아무것도 검증하지 못하면서 경고만 남는, 게이트의 최악 결말이다. 반대로 dev-cycle
+ * 산출물이 있으면(요구사항·프로토타입이 확정된 작업) 인프라 유무와 무관하게 켠다.
+ * 테스트를 새로 도입해서라도 검증해야 하는 상황이기 때문이다.
+ */
+function testGateActive(cwd: string): { active: boolean; evidence: string } {
+  const mode = envStr('GOODBOY_TEST_GATE', 'auto');
+  if (mode === 'off') return { active: false, evidence: 'off' };
+  if (mode === 'on') return { active: true, evidence: 'on' };
+  if (findDevCycleArtifacts(cwd) !== null) {
+    return { active: true, evidence: 'dev-cycle 산출물' };
+  }
+  const infra = detectTestInfrastructure(cwd);
+  return { active: infra.present, evidence: infra.evidence };
+}
+
+/**
+ * (층1) stop_hook_active 조기 return 경로의 **비차단** 테스트 수락 시도.
+ *
+ * "차단 → 테스트 실행 → 턴 종료"가 테스트 게이트 해소의 표준 경로인데, 그 턴 종료는
+ * 항상 stop_hook_active=true라 조기 return되어 검증·수락이 다음 full Stop으로 미뤄진다.
+ * 다음 턴이 없으면(예: `-p` 단발 세션) 결과가 **영영 검증되지 않은 채 세션이 끝난다**
+ * — 라이브 실측: 테스트 결과 JSON이 만들어졌는데 커서가 전진하지 않고 세션 종료.
+ *
+ * 리뷰의 tryAcceptPendingReview와 같은 원칙이다: 여기서는 절대 차단하지 않고,
+ * 조건이 충족될 때만 조용히 수락(커서 전진)한다.
+ *
+ * @returns 이번 호출에서 실제로 수락(커서 전진)했으면 true. 호출부는 이 신호로
+ *          "직전 차단이 해소됐다"를 알고 다음 층(리뷰)까지 이어서 판정한다.
+ */
+function tryAcceptPendingTest(sessionId: string, cwd: string, claudeDir: string): boolean {
+  if (!testGateActive(cwd).active) return false;
+  try {
+    const cursor = readTestCursor(cwd);
+    const cursorTurn = cursor ? cursor.turn : 0;
+    const recentEdits = getEditsSince(sessionId, cursorTurn, cwd);
+    if (recentEdits.length === 0) return false;
+    const results = findRecentTestFiles(resolvePath(cwd, '.claude', 'tests'), testWindowMinutes());
+    if (results.length === 0) return false;
+    const changedEdits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd).filter(
+      (e) => !isTestFile(e.file),
+    );
+    const cov = validateTestCoverage(results, changedEdits);
+    if (!cov.ok) return false;
+    const effective = cov.effective.length > 0 ? cov.effective : results.slice(0, 1);
+    if (failingSuites(effective)) return false;
+    if (missingTestFiles(effective)) return false;
+    if (validateEvidence(effective)) return false;
+    if (scanForbiddenPatterns(effective.flatMap((r) => r.test_files ?? [])).length > 0) return false;
+    if (uncoveredCriteria(effective, requiredAcceptanceCriteria(cwd)).length > 0) return false;
+    // 수락.
+    resetRetryCount(claudeDir, TEST_COUNT_FILE);
+    writeTestCursor(cwd, getCurrentTurn(sessionId));
+    statusSnapshot.testPending = false;
+    logGate(sessionId, 'test', 'warn', 'accept-on-stop-active');
+    return true;
+  } catch {
+    // fail-open — 수락 시도 실패가 조기 return 경로를 막지 않는다.
+    return false;
+  }
+}
+
+/**
+ * (층1) 테스트 게이트 — 리뷰 게이트 **앞**에서 동작 검증을 강제한다.
+ *
+ * 순서가 중요하다: 리뷰(리팩토링·성능·보안)는 "동작은 맞다"를 전제로 하는 검토라,
+ * 테스트가 통과하지 않은 코드를 리뷰하는 것은 순서가 뒤집힌 것이다.
+ *
+ * 검사하는 것(전부 결정적):
+ *   - 변경 파일 커버리지 + 파일별 staleness
+ *   - 스위트 실패 0
+ *   - test_files 실재 — 임시 프로브를 테스트로 위장하는 것을 막는다
+ *   - red-green 증거 — 되돌린 상태에서 실패함을 종료 코드로 보였는가
+ *   - 뮤테이션 프로브(UI 축) — 대상을 훼손하면 실패하는가
+ *   - 수용 기준 커버리지 — dev-cycle 산출물이 요구한 항목을 커버했는가
+ *   - 가짜 테스트 패턴 정적 검사
+ *
+ * @returns block 출력(차단) 또는 null(통과/게이트 비활성)
+ */
+function testGate(sessionId: string, cwd: string, claudeDir: string): HookOutput | null {
+  const gate = testGateActive(cwd);
+  try {
+    const cursor = readTestCursor(cwd);
+    const cursorTurn = cursor ? cursor.turn : 0;
+    const recentEdits = getEditsSince(sessionId, cursorTurn, cwd);
+    if (recentEdits.length === 0) {
+      statusSnapshot.testPending = false;
+      return null;
+    }
+    // 비활성 판정은 **편집이 있을 때** 알린다 — 편집도 없는 턴에 "테스트 층이 꺼져 있다"고
+    //   말해봐야 소음이다. 조용히 꺼져 있으면 사용자가 층의 부재를 눈치채지 못한다.
+    if (!gate.active) {
+      statusSnapshot.testPending = false;
+      if (gate.evidence !== 'off') {
+        const state = readHabitState(sessionId);
+        if (state.testGateInactiveWarned !== true) {
+          state.testGateInactiveWarned = true;
+          writeHabitState(sessionId, state);
+          logGate(sessionId, 'test', 'warn', 'inactive: no-test-infrastructure');
+          habitWarnings.push(
+            `층1 테스트 게이트가 이 저장소에서 비활성입니다 — 테스트를 돌릴 수단을 찾지 ` +
+              `못했습니다(테스트 디렉터리/설정 파일/package.json scripts.test 등). ` +
+              `강제하려면 \`GOODBOY_TEST_GATE=on\` 으로 켜세요.`,
+          );
+        }
+      }
+      return null;
+    }
+    statusSnapshot.testPending = true;
+
+    const testsDir = resolvePath(cwd, '.claude', 'tests');
+    const results = findRecentTestFiles(testsDir, testWindowMinutes());
+
+    const block = (reason: string): HookOutput | null => {
+      const count = readRetryCount(claudeDir, TEST_COUNT_FILE) + 1;
+      if (count < MAX_RETRIES) {
+        writeRetryCount(claudeDir, count, TEST_COUNT_FILE);
+        // 자르지 않는다 — gate-log가 자체 상한(300자)으로 다듬는다. 80자로 잘랐더니
+        //   라이브 로그에서 어떤 파일이 문제인지 보이지 않았다(경로가 `/pr` 에서 끊김).
+        logGate(sessionId, 'test', 'deny', reason);
+        return {
+          decision: 'block',
+          reason: `${reason} (테스트 게이트, 재시도 ${count}/${MAX_RETRIES})`,
+        };
+      }
+      // 한계 초과 → 통과 + 알림 + 커서 전진(영구 차단 방지 — 리뷰 게이트와 동일 패턴).
+      resetRetryCount(claudeDir, TEST_COUNT_FILE);
+      writeTestCursor(cwd, getCurrentTurn(sessionId));
+      // 사유를 함께 남긴다 — 라이브 검증에서 'escape'만 기록돼 3번째 차단 이유를
+      //   사후에 알 수 없었다(계측 원칙: 게이트가 왜 새어나갔는지 추적 가능해야 한다).
+      logGate(sessionId, 'test', 'warn', `escape: ${reason}`);
+      habitWarnings.push(
+        `테스트 게이트가 ${MAX_RETRIES}회 차단 후에도 해소되지 않아 이번 턴은 통과시킵니다. ` +
+          `사용자 확인이 필요합니다. (사유: ${reason})`,
+      );
+      return null;
+    };
+
+    if (results.length === 0) {
+      const preview = recentEdits.slice(0, 5).join(', ');
+      const more = recentEdits.length > 5 ? ` 외 ${recentEdits.length - 5}개` : '';
+      return block(
+        `변경된 코드에 대한 테스트가 없습니다. test-changes 서브에이전트를 호출해 ` +
+          `단위/통합 테스트를 작성·실행하고 결과를 기록하세요: ${preview}${more}`,
+      );
+    }
+
+    // 테스트 파일 자체는 커버리지 요구 대상에서 뺀다 — 테스트를 테스트하라는 무한 후퇴가
+    //   된다(라이브 실측: `tests/hello.test.ts` 가 "테스트되지 않은 변경 파일"로 잡혔다).
+    const changedEdits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd).filter(
+      (e) => !isTestFile(e.file),
+    );
+    const cov = validateTestCoverage(results, changedEdits);
+    if (!cov.ok) {
+      return block(`테스트 검증 실패: ${cov.reason ?? '알 수 없는 이유'}.`);
+    }
+    const effective = cov.effective.length > 0 ? cov.effective : results.slice(0, 1);
+
+    const suiteFail = failingSuites(effective);
+    if (suiteFail) return block(`${suiteFail}. 원인을 수정하고 다시 테스트하세요.`);
+
+    const missingFiles = missingTestFiles(effective);
+    if (missingFiles) return block(missingFiles);
+
+    const evidenceIssue = validateEvidence(effective);
+    if (evidenceIssue) {
+      return block(
+        `테스트 증거가 불충분합니다: ${evidenceIssue} ` +
+          `되돌린 상태에서 실패(red)하고 지금은 통과(green)함을 실행으로 보여야 합니다.`,
+      );
+    }
+
+    const forbidden = scanForbiddenPatterns(effective.flatMap((r) => r.test_files ?? []));
+    if (forbidden.length > 0) {
+      const list = forbidden
+        .slice(0, 3)
+        .map((h) => `${h.file}: ${h.message}`)
+        .join(' / ');
+      return block(
+        `통과하지만 아무것도 검증하지 않는 테스트 패턴이 있습니다: ${list}` +
+          `${forbidden.length > 3 ? ` 외 ${forbidden.length - 3}건` : ''}`,
+      );
+    }
+
+    const required = requiredAcceptanceCriteria(cwd);
+    const uncovered = uncoveredCriteria(effective, required);
+    if (uncovered.length > 0) {
+      const list = uncovered
+        .slice(0, 3)
+        .map((c) => `${c.id}(${c.description})`)
+        .join('; ');
+      return block(
+        `확정된 요구사항/프로토타입이 요구하는 수용 기준이 테스트로 커버되지 않았습니다: ` +
+          `${list}${uncovered.length > 3 ? ` 외 ${uncovered.length - 3}건` : ''}. ` +
+          `\`bun \${CLAUDE_PLUGIN_ROOT}/lib/cli.ts acceptance-list\` 로 전체 목록을 확인하세요.`,
+      );
+    }
+
+    // 통과 → 커서 전진 + 카운터 리셋.
+    resetRetryCount(claudeDir, TEST_COUNT_FILE);
+    writeTestCursor(cwd, getCurrentTurn(sessionId));
+    statusSnapshot.testPending = false;
+    return null;
+  } catch (err) {
+    // fail-open — 게이트 자체의 오류가 턴을 막지 않는다.
+    process.stderr.write(`[goodboy stop] test gate error: ${String(err)}\n`);
+    return null;
+  }
 }
 
 /** (v0.26.7, v0.26.8 보강) stop_hook_active 조기 return 경로의 비차단 리뷰 수락 시도.
@@ -470,6 +861,20 @@ function main(): void {
         // best-effort — 위생 실패가 Stop 처리를 막지 않는다.
       }
 
+      // (A0.6) 테스트 결과 파일 위생 — 리뷰와 동일 정책.
+      try {
+        const retention = envInt('GOODBOY_TEST_RETENTION_MIN', 4320);
+        if (retention > 0) {
+          const pruned = pruneOldTestFiles(
+            resolvePath(cwd, '.claude', 'tests'),
+            Math.max(retention, testWindowMinutes()),
+          );
+          if (pruned > 0) logGate(sessionId, 'test', 'warn', `pruned-old-tests(${pruned})`);
+        }
+      } catch {
+        // best-effort
+      }
+
       // (E1) 스냅샷: 카테고리/위험도(session-state에서, 현재 세션 것만).
       try {
         const statePath = resolvePath(cwd, '.claude', '.goodboy-session-state.json');
@@ -495,9 +900,38 @@ function main(): void {
       //   루프가 된다(실측: 07:00 pass 리뷰가 커서 미전진 상태로 07:42에 만료 차단).
       //   tryAcceptPendingReview는 절대 차단하지 않는다 — 조건이 안 되면 조용히 통과.
       if (input.stop_hook_active === true) {
-        const acceptMsg = tryAcceptPendingReview(sessionId, cwd, input.transcript_path);
-        emit(acceptMsg ? { systemMessage: acceptMsg } : {});
-        return;
+        // 층0: 이 경로에서는 절대 차단하지 않지만, 정정 후에도 여전히 실재하지 않는
+        //   위치를 인용하고 있으면 사용자에게 보이도록 경고만 남긴다(무한 block 방지 유지).
+        try {
+          const stillWrong = hallucinatedCitations(
+            checkCitations(sessionId, cwd, input.transcript_path),
+          );
+          if (stillWrong.length > 0) {
+            logGate(sessionId, 'claim', 'warn', 'still-hallucinated-on-stop-active');
+            habitWarnings.push(
+              `정정 후에도 실재하지 않는 위치를 인용하고 있습니다: ${stillWrong[0]!.detail}`,
+            );
+          }
+        } catch {
+          // fail-open
+        }
+        // 층1도 같은 이유로 여기서 수락을 시도한다 — 표준 경로("차단 → 테스트 실행 →
+        //   턴 종료")의 종료가 항상 stop_hook_active라, 여기서 수락하지 않으면 결과가
+        //   검증되지 않은 채 세션이 끝난다(라이브 실측).
+        const testAccepted = tryAcceptPendingTest(sessionId, cwd, ensureClaudeDir(cwd));
+        if (!testAccepted) {
+          const acceptMsg = tryAcceptPendingReview(sessionId, cwd, input.transcript_path);
+          emit(acceptMsg ? { systemMessage: acceptMsg } : {});
+          return;
+        }
+        // 층1을 방금 수락했다면 조기 return 하지 않고 **층2까지 이어서 판정한다.**
+        //   조기 return의 목적은 "직전 차단에 대응한 턴을 또 막지 않기"인데, 테스트
+        //   수락은 그 차단이 **해소됐다**는 뜻이므로 다음 층으로 넘어가는 것이 맞다.
+        //   그러지 않으면 층1만 만족시키고 층2를 건너뛸 수 있다 — 라이브 실측(P14):
+        //   테스트는 red-green까지 제대로 했는데 리뷰는 gate-log에 흔적조차 없이 종료.
+        //   수락은 커서를 전진시켜 1회성이라(다음 Stop에선 recentEdits가 비어 false)
+        //   이 경로가 반복되지 않는다 — 무한 루프가 되지 않는 근거다.
+        logGate(sessionId, 'test', 'warn', 'continue-to-review-after-accept');
       }
 
       // (B2) 컨텍스트 사용량 측정. 측정 실패(null)면 강제/경고를 모두 생략한다(fail-open).
@@ -645,6 +1079,23 @@ function main(): void {
       } else {
         // 마커 없음/타 세션 마커 → 카운터 리셋(다음 실패는 새로 3회 기회).
         resetRetryCount(claudeDir, VALIDATION_COUNT_FILE);
+      }
+
+      // (B5.5) 층0 — 인용 검증. **편집 유무와 무관하게** 매 턴 동작하는 유일한 게이트다.
+      //   답변만 하는 턴(코드베이스 설명 등)은 이 게이트가 없으면 통째로 무검증이다.
+      const claimBlock = claimGate(sessionId, cwd, claudeDir, input.transcript_path);
+      if (claimBlock) {
+        emit(claimBlock);
+        return;
+      }
+
+      // (B6) 층1 — 테스트 게이트. 리뷰보다 **먼저** 동작을 검증한다.
+      //   리뷰(리팩토링·성능·보안)는 "동작은 맞다"를 전제로 하는 검토라, 테스트가
+      //   통과하지 않은 코드를 리뷰하는 것은 순서가 뒤집힌 것이다.
+      const testBlock = testGate(sessionId, cwd, claudeDir);
+      if (testBlock) {
+        emit(testBlock);
+        return;
       }
 
       // (C) 변경 검사 — 마지막으로 수락된 리뷰(커서) 이후 편집된 파일만 본다.

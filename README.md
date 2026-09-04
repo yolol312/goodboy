@@ -112,21 +112,90 @@ PostToolUse hook이 자동 검증 실행 — 기본은 타입체크만 (GOODBOY_
 린트/테스트까지). 실패 시 실패 마커를 남기고, 마커가 해소될 때까지 Stop hook이
 턴 종료를 차단한다(재검증 통과 시 자동 해제).
    ↓
-모델이 작업 완료 시도 → Stop hook이 리뷰 결과 파일 검사
+모델이 작업 완료 시도 → Stop hook 층1 **테스트 게이트** (리뷰보다 먼저)
+   - 없음 → 차단, "test-changes 서브에이전트 호출하세요"
+   ↓
+test-changes 서브에이전트가 동작을 검증
+   - 컨테이너(docker compose)로 서버/DB 기동 → 단위·통합·E2E(Playwright) 작성·실행
+   - dev-cycle 프로토타입이 있으면 **정답지로 대조** (구조·능력·상태, 픽셀 아님)
+   - red-green + 뮤테이션 프로브로 "통과하지만 아무것도 검증하지 않는 테스트" 배제
+   → .claude/tests/<ts>.json 작성. 테스트 파일 자체는 repo에 남는다
+   ↓
+Stop hook 재검사(층1): 스위트 실패 0 / test_files 실재 / red가 실패했는지 /
+   UI 기준의 뮤테이션 감지 / 수용 기준 커버리지 / 가짜 테스트 패턴 → 하나라도 미달이면 차단
+   ↓
+모델이 다시 완료 시도 → Stop hook 층2 **리뷰 게이트**
    - 리뷰 대상 = 마지막 리뷰 이후 **메인이 편집한** 파일 (서브에이전트가 만든 프로브/임시
      파일은 대상 아님 — 리뷰 에이전트가 자기 프로브 파일 때문에 다시 차단되는 자기참조
      루프를 막는다)
    - 없음 → 차단, "review-changes 서브에이전트 호출하세요"
    ↓
-review-changes 서브에이전트가 깊은 리뷰 (변경 파일 Read + 환각 검증 + 추론 분류 검증 + ...)
-   → .claude/reviews/<ts>.json 작성 (verdict: pass | needs-changes | fail)
+review-changes 서브에이전트를 **축별로 병렬 호출** (한 메시지에서 동시에)
+   hallucination(항상) · refactoring · security · performance · ui
+   → 각 축이 자기 .claude/reviews/<ts>.json 작성. Stop이 합집합으로 커버리지 판정
    ↓
-Stop hook 재검사:
+Stop hook 재검사(층2):
    - verdict=pass → 통과
    - high severity finding → 자동 수정 시도 (재시도 3회 cap)
    - 추론 섹션에 추측/가정을 선언했는데 리뷰가 가정 검증을 안 했으면 → 차단
+   - 필수 차원 누락 → 차단
    - medium/low → 사용자에게 표시 후 결정 위임
 ```
+
+### 검증 4층
+
+| 층 | 언제 | 무엇을 묻나 | 산출물 |
+|---|---|---|---|
+| **층0 인용 검증** | **매 턴 (편집 없어도)** | 인용한 `파일:줄`이 실재하는가 · 실제로 읽었는가 | (없음, 기계 판정) |
+| **자동 검증** | Edit/Write 직후 | 타입이 맞는가 | (마커) |
+| **층1 테스트** | 턴 종료 시, 리뷰보다 먼저 | **동작하는가 · 요구를 만족하는가** | `.claude/tests/*.json` + repo의 테스트 파일 |
+| **층2 리뷰** | 테스트 통과 후 | 환각 · 리팩토링 · 성능 · 보안 | `.claude/reviews/*.json` |
+
+순서가 뒤집히면 안 된다 — 리뷰(리팩토링·성능·보안)는 "동작은 맞다"를 전제로 하는 검토다.
+
+## 층0 인용 검증
+
+다른 모든 게이트는 **편집이 있을 때만** 발동한다. 그래서 코드베이스를 설명만 하는 답변 턴은
+통째로 무검증이었다 — `파일:줄`을 대고 단정해도 아무도 확인하지 않았다. 층0이 그 구멍을 메운다.
+
+| 검사 | 위반 시 |
+|---|---|
+| 인용한 파일이 실재하는가 | **확정 환각** → 즉시 차단, 정정 요구 |
+| 인용한 줄이 파일 길이 안인가 | **확정 환각** → 즉시 차단 |
+| 그 파일을 이 세션에서 읽었는가 | 근거 미확인 → 차단. 반복되면 `hallucination` 축 리뷰로 승격 |
+
+**오탐을 막는 설계**가 핵심이다. 이 게이트는 모든 턴에 발동하므로 오탐이 잦으면 통째로 꺼진다:
+
+- **`파일:줄` 형식만** 인용으로 본다. 백틱 경로 단순 언급(`` `package.json` ``)이나 URL, 버전
+  문자열은 건드리지 않는다
+- 줄 번호는 **파일 길이 초과**만 본다(내용 일치까지 보지 않음 — 편집으로 줄이 밀리는 것은 정상)
+- **읽기 기록이 통째로 없으면 판정을 생략**한다 — 압축(compact) 직후에는 기록이 비므로
+
+이 게이트가 성립하려면 **Bash 읽기 추적**이 필요하다. bypass permissions 모드에서는 시스템이
+"파일은 `cat`/`sed -n`으로 읽어라"라고 지시하는데, 예전에는 `Read` 도구만 기록해서 정직하게
+읽은 세션조차 읽기 이력이 0이었다. 이제 `cat`/`head`/`tail`/`sed -n`/`bat`/`less` 로 읽은
+프로젝트 파일도 읽기로 기록한다(`grep`/`rg`는 제외 — 검색은 "그 파일을 봤다"는 증거가 아니다).
+
+### 판정 대상은 "이번 턴의 답변"이다
+
+Stop 훅은 이번 턴의 답변이 transcript에 기록되기 **전에** 실행될 수 있다(실측 130ms 차).
+그대로 두면 게이트가 판정 대상을 못 보고 환각을 통째로 놓치거나, 반대로 **직전 턴 답변**을
+판정해 이미 정정한 주장을 재차단한다. 그래서:
+
+- 마지막 사용자 프롬프트 뒤에 답변 텍스트가 있어야 판정한다
+- 없으면 최대 3초 폴링한다 (`GOODBOY_CLAIM_FLUSH_WAIT_MS`, 상한 8초)
+- 사용자 프롬프트 자체가 없는 transcript는 기다리지 않고 건너뛴다
+- 끝내 안 보이면 판정하지 않는다 — 정정된 주장을 재차단하는 쪽이 미검출보다 나쁘다
+
+### 훅 발화는 사용자 발화가 아니다
+
+하니스는 차단 사유를 *user* 엔트리로 되먹인다. 그 사유에는 문제의 인용이 그대로 들어 있어서,
+"사용자가 먼저 쓴 인용은 모델 주장이 아니다" 규칙에 걸려 **첫 차단 이후 같은 환각이 영구
+면역**됐다(실측). 이제 모든 차단 메시지에 `[goodboy 훅]` 출처가 붙고, 층0은 그 표식이 붙은
+발화를 사용자 발화로 세지 않는다. 같은 표식이 **서브에이전트가 게이트 메시지를 프롬프트
+인젝션으로 오인해 무시하던 문제**도 함께 막는다.
+
+끄기: `GOODBOY_CLAIM_GATE=off`
 
 ### 도구 위임
 
@@ -345,7 +414,8 @@ goodboy/                                # 플러그인 루트
 │   ├── request-review/SKILL.md
 │   └── setup-statusline/SKILL.md       # 상태바 설치/연동
 ├── agents/
-│   └── review-changes.md
+│   ├── test-changes.md                 # 층1 — 컨테이너 기동·테스트 작성/실행·프로토타입 대조
+│   └── review-changes.md               # 층2 — 축(환각/리팩토링/보안/성능/UI)별 병렬 실행
 ├── statusline/
 │   └── statusline.ts                   # 동봉 상태바 (선택 설치)
 ├── lib/
@@ -355,8 +425,12 @@ goodboy/                                # 플러그인 루트
 │   ├── reasoning-parser.ts
 │   ├── risk-classifier.ts
 │   ├── review-validator.ts
-│   ├── review-cursor.ts
-│   ├── review-dimensions.ts
+│   ├── review-cursor.ts                # 리뷰/테스트 커서 (게이트별 분리)
+│   ├── review-dimensions.ts            # 변경 → 필수 차원 + 병렬 리뷰 축 매핑
+│   ├── acceptance.ts                   # dev-cycle 산출물 → 수용 기준 (층1 정답지)
+│   ├── test-validator.ts               # 테스트 결과 검증 (red-green·뮤테이션·커버리지)
+│   ├── claim-check.ts                  # 층0 인용 검증 (파일:줄 실재·읽음 여부)
+│   ├── bash-read.ts                    # Bash로 읽은 파일 추적 (cat/head/sed -n …)
 │   ├── context-usage.ts                # auto-compact 점유율 계산 (게이트/상태바 공용)
 │   ├── transcript-parser.ts
 │   ├── file-tracker.ts
@@ -373,10 +447,87 @@ goodboy/                                # 플러그인 루트
 
 ```
 <project>/.claude/
-├── reviews/                            # review-changes 결과 JSON
+├── reviews/                            # review-changes 결과 JSON (축별로 여러 개)
+├── tests/                              # test-changes 결과 JSON
 └── (마커 파일들 — .goodboy-session-state.json, .goodboy-risk-approved.txt,
-    .goodboy-retry-count.txt, .goodboy-review-cursor.json 등)
+    .goodboy-retry-count.txt, .goodboy-last-review.json, .goodboy-last-test.json 등)
 ```
+
+## 층1 테스트 게이트
+
+변경된 코드가 **실제로 동작하는지**, **앞서 확정한 요구사항을 만족하는지**를 실행으로 확인한다.
+리뷰보다 먼저 돈다.
+
+### 무엇을 결정적으로 검사하나
+
+| 검사 | 왜 |
+|---|---|
+| 변경 파일 커버리지 + 파일별 staleness | 편집 후 다시 테스트하지 않으면 통과 못 함 |
+| 스위트 실패 0 | — |
+| `test_files` 실재 | 임시 디렉터리에 만들고 지운 프로브를 테스트로 위장하는 것을 막음 |
+| **red-green** | 되돌린 상태에서 **실패(exit≠0)** 했음을 보여야 함. 통과 사실만으로는 그 테스트가 무언가를 붙잡고 있다는 증거가 안 됨 |
+| **뮤테이션 프로브** (`PT-*`/`UIUX-*`) | 검증 대상을 훼손하면 실패해야 함. UI 단언은 훼손해도 통과하기 쉬움 |
+| 수용 기준 커버리지 | dev-cycle 산출물이 요구한 항목을 실제로 커버했는가 |
+| 가짜 테스트 패턴 | `waitForTimeout`, 빈 `catch`, `toBeGreaterThanOrEqual(0)`, `it.skip` 등 |
+
+### 정답지 — dev-cycle 산출물
+
+`docs/CYCLE.md` 의 현재 버전에서 `docs/versions/<VER>/` 를 찾아 수용 기준을 산출한다:
+
+```bash
+bun ${CLAUDE_PLUGIN_ROOT}/lib/cli.ts acceptance-list
+```
+
+| ID | 정답지 |
+|---|---|
+| `UIUX-NEW-<n>` / `UIUX-CHG-<n>` | `UIUX.md` 의 화면 목록 · 변경 화면 표 |
+| `PT-STRUCT` | 프로토타입 앱 영역의 구조/클래스가 구현에 존재 |
+| `PT-CTRL-<id>` | 이번 버전이 도입한 선택지가 실제로 동작 |
+| `PT-REGRESSION` | `수정 전`/`적용 후` 가 같은 항목은 구현에서도 그대로 |
+
+프로토타입 대조는 **픽셀 비교가 아니다.** 목업 데이터는 실제 값과 다르므로, 비교하는 것은
+구조·클래스·능력·상태의 존재다. 조작 바(`pt-*`)는 앱에 없는 것이므로 대조에서 제외한다
+(dev-cycle `PROTOTYPE-SPEC.md` 7절 "대조 계약").
+
+dev-cycle을 쓰지 않는 프로젝트에서는 수용 기준이 비고, 단위/통합 + red-green + 뮤테이션만 남는다.
+
+### 언제 켜지는가
+
+`GOODBOY_TEST_GATE` = **`auto`(기본)** | `on` | `off`.
+
+`auto`는 **테스트를 돌릴 수단이 있을 때만** 강제한다. 무조건 켜면 인프라가 없는 저장소에서
+3회 차단 후 escape로 끝나는데, 그건 검증은 0이고 경고만 남는 결말이다(라이브 실측).
+
+| 신호 | 예 |
+|---|---|
+| 테스트 디렉터리 | `tests/` `test/` `__tests__/` `spec/` `e2e/` |
+| 테스트 설정 파일 | `jest.config.*` `vitest.config.*` `playwright.config.*` `pytest.ini` `tox.ini` `phpunit.xml` `.rspec` |
+| 패키지 스크립트 | `package.json` 의 `scripts.test` (npm 자리표시자는 제외) |
+| 파이썬 | `pyproject.toml` 에 `pytest` 언급 |
+| 언어 표준 러너 | `go.mod` `Cargo.toml` |
+| dev-cycle 산출물 | `docs/CYCLE.md` + `docs/versions/<VER>/` — 인프라가 없어도 켠다 |
+
+신호가 하나도 없으면 게이트는 조용히 꺼지고, 세션당 1회 안내만 남긴다. 그래도 강제하려면
+`GOODBOY_TEST_GATE=on`, 완전히 끄려면 `off`.
+
+## 층2 리뷰 — 축별 병렬
+
+리뷰는 축으로 나뉘어 **병렬 서브에이전트**로 돈다. 각 축은 자기 `dimensions_checked` 만 채우고,
+Stop hook이 **합집합**으로 커버리지를 판정한다.
+
+```bash
+bun ${CLAUDE_PLUGIN_ROOT}/lib/cli.ts review-axes <변경 파일...>   # 띄울 축을 결정적으로 산출
+```
+
+| 축 | 담당 차원 |
+|---|---|
+| `hallucination` | (차원 없음 — 환각·추론 4분류·가정 검증). **항상** 돈다 |
+| `refactoring` | `refactoring-quality` |
+| `security` | `security-secrets`, `security-injection`, `security-authz`, `dependency-risk`, `web-hardening`, `error-path`, `proto-pollution` |
+| `performance` | `performance` |
+| `ui` | `ui-ux-accessibility`, `plan-completeness` |
+
+호출은 **한 메시지에서 여러 Agent 호출을 동시에** 보내야 실제로 병렬이 된다.
 
 ## 트러블슈팅
 
@@ -510,6 +661,59 @@ git 추적에서 빼려면 프로젝트 `.gitignore`에 추가하세요:
 자동 검증이 실패한 상태입니다. 실패한 검증(타입 에러 등)을 수정하세요 — 파일을 편집하면
 검증이 자동 재실행되고, 통과하면 차단이 해제됩니다. 3회 차단 후에는 사용자 확인 안내와 함께
 통과됩니다.
+
+### "Stop이 차단됩니다 — 층0 인용 검증"
+
+답변에서 인용한 `파일:줄`이 실재하지 않거나, 그 파일을 이 세션에서 읽은 기록이 없습니다.
+
+- **"그런 파일이 없습니다" / "N줄까지입니다"** → 확정 환각입니다. 파일을 실제로 읽어 확인하고
+  인용을 정정하거나, 근거가 없으면 `## 추론 > 추측`으로 낮추세요.
+- **"읽은 기록이 없습니다"** → `Read`(또는 `cat`/`sed -n`)로 실제 확인한 뒤 답하세요.
+
+3회 차단 후에는 사용자 확인 안내와 함께 통과합니다. 끄기: `GOODBOY_CLAIM_GATE=off`
+
+### "게이트 산출물은 편집 도구로 직접 쓸 수 없습니다"
+
+`.claude/tests/`·`.claude/reviews/`에 Write/Edit으로 직접 파일을 만들려 한 경우입니다.
+반드시 CLI를 거쳐야 합니다:
+
+```bash
+cat <<'JSON' | bun ${CLAUDE_PLUGIN_ROOT}/lib/cli.ts test-write     # 또는 review-write
+{ ... }
+JSON
+```
+
+라이브 검증에서 에이전트가 CLI를 쓰지 않고 자기 형식으로 JSON을 써서, 게이트가 읽지 못해
+"결과 없음"으로 계속 차단되고 쓰레기 파일만 쌓이는 일이 반복 관측됐습니다. CLI가 스키마를
+검증하고 파일명·timestamp를 맞춥니다. 끄기: `GOODBOY_ARTIFACT_WRITE_GATE=off`
+
+### "Stop이 차단됩니다 — 테스트 게이트"
+
+층1 게이트입니다. 사유별로 대응이 다릅니다:
+
+| 사유 | 대응 |
+|---|---|
+| "테스트가 없습니다" | `test-changes` 서브에이전트를 호출하세요 |
+| "테스트되지 않은 변경 파일" | 그 파일까지 커버하도록 다시 테스트 |
+| "test_files … 존재하지 않습니다" | 테스트를 `mktemp` 가 아니라 **repo 안에** 만드세요 |
+| "red 증거가 성공(exit 0)" | 되돌린 상태에서 실패하는 것을 먼저 보여야 합니다 |
+| "뮤테이션 프로브가 없습니다" | UI 기준은 대상을 훼손했을 때 실패하는지 확인이 필요합니다 |
+| "acceptance가 비어 있습니다" | dev-cycle 기준이 없어도 무엇을 검증했는지 최소 1건은 red-green으로 적어야 합니다 |
+| "수용 기준이 커버되지 않았습니다" | `acceptance-list` 로 목록을 확인하고 채우세요 |
+| "아무것도 검증하지 않는 테스트 패턴" | `waitForTimeout`·빈 `catch`·항상 참인 단언을 제거하세요 |
+
+3회 차단 후에는 사용자 확인 안내와 함께 통과합니다. 테스트 인프라가 없는 프로젝트에서는
+기본값 `auto`가 게이트를 알아서 끕니다(위 "언제 켜지는가"). 항상 끄려면 `GOODBOY_TEST_GATE=off`.
+
+### 리뷰가 "필수 차원 누락"으로 계속 차단됩니다
+
+축을 나눠 병렬로 돌렸는데 일부 축이 실패했거나, 한 에이전트에게 여러 축을 몰아준 경우입니다.
+
+1. `bun ${CLAUDE_PLUGIN_ROOT}/lib/cli.ts review-axes <변경 파일...>` 로 필요한 축을 확인
+2. 누락된 차원을 담당하는 축을 다시 호출
+
+각 축은 **자기 차원만** `dimensions_checked` 에 적어야 합니다. Stop hook은 커서 이후의
+fresh 리뷰 전부를 합집합으로 보므로, 축을 나눠 적어도 커버리지가 채워집니다.
 
 ### "Edit가 차단됩니다 — 추론 섹션이 비어 있습니다"
 

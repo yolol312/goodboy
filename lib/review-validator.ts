@@ -212,8 +212,14 @@ export interface ChangedFileEdit {
 }
 
 export interface CoverageResult extends ValidationResult {
-  /** 커버리지를 실제로 구성한 리뷰들(파일별 최신 커버 리뷰의 합집합, 최신순).
-   *  후속 검사(high-severity/가정 검증/차원 커버리지)는 이 집합 기준으로 평가한다. */
+  /** 커버리지를 구성한 리뷰들 — 각 변경 파일을 커버하면서 그 파일의 마지막 편집보다
+   *  나중인(fresh) 리뷰 **전부**의 합집합. 후속 검사(가정 검증/차원 커버리지)가 이 집합을 쓴다.
+   *
+   *  ⚠️ 파일별 "최신 1개"가 아니라 fresh 전부인 이유: 리뷰를 축(리팩토링/보안/성능/환각)으로
+   *  나눠 **병렬 서브에이전트**로 돌리면 같은 파일을 커버하는 부분 리뷰가 여러 개 생긴다.
+   *  최신 1개만 취하면 나머지 축의 dimensions_checked가 통째로 사라져, 실제로 평가한
+   *  차원을 "누락"으로 오판하고 영구 차단된다. 차원·가정 검증은 "했다"는 누적 사실이므로
+   *  합집합이 맞다. 대체(supersede) 의미론이 필요한 finding 평가는 currentFindings가 담당한다. */
   effective: ReviewResult[];
 }
 
@@ -270,6 +276,9 @@ export function validateReviewCoverage(
     // 파일별 최신 커버 리뷰(fresh 우선). fresh가 없고 stale 커버만 있으면 stale로 분류.
     let coveredStale = false;
     let chosen: ReviewResult | null = null;
+    // fresh 커버 리뷰를 전부 모은다(병렬 축 리뷰 지원). chosen = 그중 최신 —
+    //   verdict=fail 판정은 "가장 최근 판단"만 따라야 하므로 최신 1개로 한다.
+    const freshCovering: ReviewResult[] = [];
     for (const r of sorted) {
       if (!(r.reviewed_files ?? []).some((f) => normalizePath(f) === key)) continue;
       const isFresh =
@@ -277,8 +286,9 @@ export function validateReviewCoverage(
         edit.lastEditTimestamp === '' ||
         r.timestamp > edit.lastEditTimestamp;
       if (isFresh) {
-        chosen = r;
-        break; // 최신순이므로 첫 fresh가 파일별 최신 커버 리뷰
+        if (chosen === null) chosen = r; // 최신순이므로 첫 fresh가 파일별 최신 커버 리뷰
+        freshCovering.push(r);
+        continue;
       }
       coveredStale = true;
     }
@@ -291,7 +301,7 @@ export function validateReviewCoverage(
       failed.push(edit.file);
       continue;
     }
-    effective.add(chosen);
+    for (const r of freshCovering) effective.add(r);
   }
   const futureNote = rejectedFuture > 0 ? ` (미래 timestamp 리뷰 ${rejectedFuture}개는 위조 의심으로 무시됨)` : '';
   if (missing.length > 0) {

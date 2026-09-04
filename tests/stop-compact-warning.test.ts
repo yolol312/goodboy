@@ -110,7 +110,17 @@ async function runStop(
     cwd,
     // HOME도 격리: 실제 ~/.claude/settings.json(개발자 머신의 [1m] 모델 등)이
     // 컨텍스트 창 판별에 새어들어와 200K 기준 단정을 뒤집지 않게 한다.
-    env: { ...process.env, TMPDIR: tmp, HOME: tmp, ...extraEnv },
+    // 층1 테스트 게이트는 리뷰/compact 게이트보다 앞서 발동해 이 파일의 전제를 가린다 → 끈다.
+    // 층0 플러시 대기도 끈다 — 합성 transcript에는 답변 텍스트가 영영 나타나지 않아
+    // 매 실행마다 대기 상한만큼 잡아먹는다(이 파일의 관심사가 아니다).
+    env: {
+      ...process.env,
+      TMPDIR: tmp,
+      HOME: tmp,
+      GOODBOY_TEST_GATE: 'off',
+      GOODBOY_CLAIM_FLUSH_WAIT_MS: '0',
+      ...extraEnv,
+    },
     stdin: new TextEncoder().encode(input),
     stdout: 'pipe',
     stderr: 'pipe',
@@ -127,7 +137,8 @@ async function runStop(
 const CODE_FILE = 'util.ts';
 const COMPACT_MARKER = '/compact';
 
-/** A passing review for util.ts: future-dated, covers performance dimension. */
+/** A passing review for util.ts: future-dated, covers every dimension a code file requires
+ *  (performance + refactoring-quality + security-secrets after the 층2 재편). */
 function passingReview(cwd: string): Record<string, unknown> {
   return {
     timestamp: new Date(Date.now() + 60000).toISOString(),
@@ -136,7 +147,7 @@ function passingReview(cwd: string): Record<string, unknown> {
     findings: [],
     unknown_assumptions_checked: [],
     verdict: 'pass',
-    dimensions_checked: ['performance'],
+    dimensions_checked: ['performance', 'refactoring-quality', 'security-secrets'],
   };
 }
 

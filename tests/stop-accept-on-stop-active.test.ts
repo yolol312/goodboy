@@ -57,7 +57,8 @@ function seedSession(
 }
 
 /** 편집 파일을 커버하는 신선한 리뷰(편집보다 나중 시각).
- *  기본 dimensions_checked는 ['performance'] — src/a.ts(.ts 코드 파일)의 필수 차원.
+ *  기본 dimensions_checked는 src/a.ts(.ts 코드 파일)의 필수 차원 전부 —
+ *  층2 재편으로 코드 파일은 performance 외에 refactoring-quality·security-secrets도 요구한다.
  *  v0.26.8: 수락 조건이 full Stop과 동일해져 차원 누락 리뷰는 수락되지 않는다. */
 function writeCoveringReview(
   cwd: string,
@@ -80,7 +81,7 @@ function writeCoveringReview(
         ? [{ assumption: '입력은 항상 문자열', reasonable: true }]
         : [],
       verdict: 'pass',
-      dimensions_checked: opts?.dims ?? ['performance'],
+      dimensions_checked: opts?.dims ?? ['performance', 'refactoring-quality', 'security-secrets'],
     }),
     'utf8',
   );
@@ -116,7 +117,9 @@ async function runStop(
 ): Promise<StopOut> {
   const proc = Bun.spawn(['bun', STOP_HOOK], {
     cwd,
-    env: { ...process.env, TMPDIR: tmp, HOME: tmp },
+    // 이 파일은 리뷰 수락 경로를 검증한다. 층1 테스트 게이트는 리뷰보다 앞서 발동해
+    // 결과를 가리므로 끈다(테스트 게이트 자체는 stop-test-gate.test.ts가 검증).
+    env: { ...process.env, TMPDIR: tmp, HOME: tmp, GOODBOY_TEST_GATE: 'off' },
     stdin: new TextEncoder().encode(
       JSON.stringify({
         session_id: sessionId,

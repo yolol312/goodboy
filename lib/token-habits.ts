@@ -154,6 +154,8 @@ export interface HabitState {
   lastCtxPercent?: number;
   /** H4-03: 세션 내 모델 전환 경고를 이미 냈는지(세션당 1회). */
   modelSwitchWarned?: boolean;
+  /** 층1: 테스트 게이트가 이 저장소에서 비활성이라는 안내를 냈는지(세션당 1회). */
+  testGateInactiveWarned?: boolean;
 }
 
 const HABIT_STATE_FILE = 'habit-state.json';

@@ -193,6 +193,58 @@ export function assistantTextFromLine(line: string): string | null {
   return null;
 }
 
+/** transcript 한 줄이 user 메시지면 그 텍스트를, 아니면 null.
+ *  assistantTextFromLine의 대칭 — 층0이 "사용자가 먼저 쓴 인용"을 모델 주장에서 빼는 데 쓴다. */
+export function userTextFromLine(line: string): string | null {
+  const trimmed = line.trim();
+  if (trimmed === '') return null;
+  let obj: Record<string, unknown>;
+  try {
+    obj = JSON.parse(trimmed) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const type = obj.type as string | undefined;
+  const role = (obj.role ?? (obj.message && (obj.message as Record<string, unknown>).role)) as
+    | string
+    | undefined;
+  if (type !== 'user' && role !== 'user') return null;
+
+  const msg = (obj.message ?? obj) as Record<string, unknown>;
+  const content = msg.content;
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    const parts: string[] = [];
+    for (const c of content) {
+      if (c && typeof c === 'object') {
+        const cc = c as Record<string, unknown>;
+        // tool_result는 사용자가 쓴 글이 아니라 도구 출력이므로 제외한다.
+        if (cc.type === 'text' && typeof cc.text === 'string') parts.push(cc.text);
+      } else if (typeof c === 'string') {
+        parts.push(c);
+      }
+    }
+    if (parts.length > 0) return parts.join('\n');
+  }
+  return null;
+}
+
+/** 마지막(가장 최근) 최대 n개의 user 메시지 텍스트를 최신순으로 반환. */
+export function extractRecentUserTexts(transcriptPath: string, n: number): string[] {
+  try {
+    if (!transcriptPath || !existsSync(transcriptPath)) return [];
+    const lines = readFileSync(transcriptPath, 'utf8').split('\n');
+    const out: string[] = [];
+    for (let i = lines.length - 1; i >= 0 && out.length < n; i--) {
+      const t = userTextFromLine(lines[i] ?? '');
+      if (t !== null && t.trim() !== '') out.push(t);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 export interface AssistantTextEntry {
   text: string;
   /** transcript 엔트리의 생성 시각(epoch ms). 필드가 없거나 파싱 불가면 null.
@@ -244,6 +296,44 @@ export function extractRecentAssistantTextEntries(
  *  파싱 실패/없음이면 빈 배열. 게이트는 fail-open을 위해 길이 0을 별도 처리한다. */
 export function extractRecentAssistantTexts(transcriptPath: string, n: number): string[] {
   return extractRecentAssistantTextEntries(transcriptPath, n).map((e) => e.text);
+}
+
+/**
+ * 마지막 assistant 텍스트가 **이번 턴의 것**인지에 대한 3값 판정.
+ *
+ *   'fresh'   — 마지막 사용자 프롬프트 뒤에 답변 텍스트가 있다. 판정 가능.
+ *   'pending' — 사용자 프롬프트는 있는데 그 뒤의 답변 텍스트가 아직 없다. 기록 지연 중이므로
+ *               호출부가 잠깐 기다려 볼 가치가 있다.
+ *   'unknown' — 사용자 프롬프트 자체가 없다(합성 transcript, 도구 전용 기록 등).
+ *               기다려도 나타나지 않으므로 **대기 없이** 건너뛴다.
+ *
+ * Stop 훅은 이번 턴 답변이 transcript에 기록되기 전에 실행될 수 있다 — 라이브 실측(P7):
+ * 답변 기록 04:13:31.914Z, 훅 실행 04:13:32.044Z로 130ms 차. 이 구분이 없으면 층0 인용
+ * 게이트가 판정 대상을 못 보고 환각 인용을 통째로 놓치거나(P7: 3건 전부 미검출),
+ * 반대로 **직전 턴의 답변**을 판정해 이미 정정한 주장을 재차단한다.
+ *
+ * 사용자 프롬프트만 기준으로 삼는다 — tool_result는 `userTextFromLine`이 이미 걸러낸다.
+ * 파싱 실패/파일 없음은 'unknown'.
+ */
+export type AssistantTextFreshness = 'fresh' | 'pending' | 'unknown';
+
+export function assistantTextFreshness(transcriptPath: string): AssistantTextFreshness {
+  try {
+    if (!transcriptPath || !existsSync(transcriptPath)) return 'unknown';
+    const lines = readFileSync(transcriptPath, 'utf8').split(/\r?\n/);
+    let lastUser = -1;
+    let lastAssistantText = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i] ?? '';
+      if (line.trim() === '') continue;
+      if (userTextFromLine(line) !== null) lastUser = i;
+      else if (assistantTextFromLine(line) !== null) lastAssistantText = i;
+    }
+    if (lastUser < 0) return 'unknown';
+    return lastAssistantText > lastUser ? 'fresh' : 'pending';
+  } catch {
+    return 'unknown';
+  }
 }
 
 /** 서브에이전트의 전용 transcript 경로를 해석한다.

@@ -97,6 +97,8 @@ export interface StatusSnapshot {
   risk?: string | null;
   validationFailed?: boolean;
   reviewPending?: boolean;
+  /** 층1 테스트 게이트 대기 여부(변경은 있는데 유효한 테스트 결과가 없거나 미달). */
+  testPending?: boolean;
   /** 이번 세션의 게이트 deny 누계(참고용). */
   gateDenies?: number;
 }

@@ -252,6 +252,19 @@ export function clearReadRecords(sessionId: string): void {
   }
 }
 
+/** 이 세션에 읽기 기록이 하나라도 있는가.
+ *
+ *  층0 인용 검증의 fail-open 조건이다. 압축(compact) 직후에는 clearReadRecords가
+ *  기록을 비우므로, 정직하게 읽고 인용한 턴도 "읽은 적 없음"이 된다. 기록이 통째로
+ *  비어 있으면 판정 자체를 생략해 그 오차단을 막는다. */
+export function hasAnyReadRecords(sessionId: string): boolean {
+  try {
+    return readRecords(ensureSessionDir(sessionId), 'reads.jsonl').length > 0;
+  } catch {
+    return false;
+  }
+}
+
 /** 이번 턴 안에 Edit/Write로 변경된 파일 기록. agent는 D2 스코프용(선택). */
 export function recordEdit(sessionId: string, filePath: string, turn: number, agent?: string): void {
   // (B) goodboy 자체 산출물은 기록 자체를 남기지 않는다 — 리뷰 JSON을 Write 툴로
@@ -358,6 +371,10 @@ function isWithin(file: string, withinDir?: string): boolean {
 /** goodboy 자체 산출물 경로(자기참조 방지). 기록 시점(recordEdit)에도 제외한다. */
 const GOODBOY_ARTIFACT_SEGMENTS = [
   `${sep}.claude${sep}reviews${sep}`,
+  // 층1 테스트 결과도 goodboy 산출물이다. 라이브 검증에서 실측: test-changes 에이전트가
+  //   결과 JSON을 Write로 쓰자 그 파일이 편집으로 기록되어 리뷰 게이트가
+  //   "리뷰되지 않은 변경 파일: .claude/tests/<ts>.json" 으로 영구 차단했다(자기참조 순환).
+  `${sep}.claude${sep}tests${sep}`,
   `${sep}.claude${sep}.goodboy`,
   `${sep}.claude${sep}status.json`,
   `${sep}.claude${sep}gate-log.jsonl`,

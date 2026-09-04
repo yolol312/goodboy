@@ -22,7 +22,7 @@ function isFdTarget(target: string): boolean {
 /** 세그먼트 토큰 중 리다이렉션 연산자(> <) 자리를 표시하는 마커.
  *  공백을 포함해 정상 토큰과 절대 충돌하지 않는다. tee/sed의 파일 인자 수집은
  *  이 마커에서 멈춘다(`tee a.ts > /dev/null`의 /dev/null 오수집 방지). */
-const OP_TOKEN = ' op ';
+export const OP_TOKEN = ' op ';
 
 /** 따옴표 인식 토크나이저 (v0.26.2, 실측 오탐 5호 대응).
  *
@@ -31,7 +31,7 @@ const OP_TOKEN = ' op ';
  *  되므로, `python3 -c 'print("... tee and sed -i ...")'` 같은 문자열 안의 tee/sed 단어가
  *  명령 토큰과 정확 일치할 수 없다 — 정규식 \b 매칭의 따옴표 무시 오탐을 원천 차단한다.
  *  빈 따옴표 토큰('')은 보존한다(BSD `sed -i ''`의 옵션 인자). */
-function tokenizeSegments(command: string): string[][] {
+export function tokenizeSegments(command: string): string[][] {
   const segments: string[][] = [];
   let tokens: string[] = [];
   let cur = '';
@@ -102,7 +102,7 @@ function tokenizeSegments(command: string): string[][] {
  *  줄의 나머지(`cat <<EOF > src/a.ts`의 `> src/a.ts`)는 명령이므로 스캔 대상으로 남긴다.
  *  종결자를 못 찾으면(열린 heredoc) 나머지 전체를 본문으로 간주한다.
  *  `<<<`(herestring)는 heredoc이 아니다. `<<`는 리다이렉션 연산자로 취급하지 않는다. */
-function stripHeredocs(command: string): string {
+export function stripHeredocs(command: string): string {
   const lines = command.split('\n');
   const out: string[] = [];
   let i = 0;

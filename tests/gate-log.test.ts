@@ -58,7 +58,9 @@ async function runHook(
 ): Promise<{ out: Record<string, unknown> }> {
   const proc = Bun.spawn(['bun', hookPath], {
     cwd,
-    env: { ...process.env, TMPDIR: tmp },
+    // 층0 플러시 대기는 끈다 — 이 파일의 합성 transcript에는 답변 텍스트가 나타나지
+    // 않아 매 실행이 대기 상한만큼 걸린다(계측 로그가 관심사지 인용 판정이 아니다).
+    env: { ...process.env, TMPDIR: tmp, GOODBOY_CLAIM_FLUSH_WAIT_MS: '0' },
     stdin: new TextEncoder().encode(JSON.stringify(input)),
     stdout: 'pipe',
     stderr: 'pipe',

@@ -8,6 +8,7 @@ import {
   bashOutputFloodMessage,
   bashOutputWarnThresholds,
   classifyBashFlood,
+  classifyBashRead,
   clearValidationFailure,
   envStr,
   extractBashOutput,
@@ -17,6 +18,7 @@ import {
   recordEdit,
   recordRead,
   recordWebFetch,
+  safeMtime,
   wasUrlFetched,
   webRefetchMessage,
   webRepeatSearchMessage,
@@ -318,6 +320,15 @@ function main(): void {
               mtime = undefined;
             }
             recordRead(sessionId, absFp, turn, mtime, agentId);
+          }
+        } else if (toolName === 'Bash') {
+          // Bash로 읽은 파일도 읽기로 기록한다. bypass permissions 모드에서는 시스템이
+          //   "파일은 cat/sed로 읽어라"라고 지시하므로, 이 기록이 없으면 정직하게 읽고
+          //   정확히 인용한 세션조차 읽기 이력이 0이 되어 read-before-edit이 오차단하고
+          //   층0 인용 검증이 근거를 잃는다. 내용을 보여주는 명령만 인정한다(grep 제외).
+          const command = (toolInput.command as string | undefined) ?? '';
+          for (const abs of classifyBashRead(command, cwd)) {
+            recordRead(sessionId, abs, turn, safeMtime(abs), agentId);
           }
         } else if (toolName === 'Edit' || toolName === 'Write') {
           const fp = (toolInput.file_path as string | undefined) ?? '';

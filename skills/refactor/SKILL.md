@@ -44,13 +44,33 @@ required_inputs:
 
 4. **자동 검증**: Edit/Write 후 PostToolUse hook이 타입체크/린트/테스트 자동 실행. 실패 결과는 컨텍스트로 주입되니 확인 후 수정.
 
-5. **리뷰** ⚠️ 필수: 작업 완료 직전에 `review-changes` 서브에이전트를 호출하세요. Stop hook이 리뷰 결과 파일이 없으면 종료를 차단합니다.
+5. **테스트** ⚠️ 필수: 코드를 고쳤으면 `test-changes` 서브에이전트를 호출하세요. Stop hook의 층1 테스트 게이트가 테스트 결과 파일이 없으면 종료를 차단합니다.
 
    ```
-   Agent(general-purpose, "review-changes 스킬에 따라 다음 파일을 리뷰: <변경 파일>")
+   Agent(test-changes, "다음 변경을 테스트: <변경 파일> / 카테고리: <이 워크플로우>")
    ```
 
-   또는 review-changes 슬래시 커맨드/스킬 호출.
+   컨테이너로 의존 프로세스를 띄우고 단위·통합·E2E를 작성·실행하며, red-green과 뮤테이션 프로브로 "통과하지만 아무것도 검증하지 않는 테스트"를 배제합니다. 테스트 파일은 repo에 남습니다.
+
+6. **리뷰** ⚠️ 필수: 테스트가 통과한 뒤 `review-changes` 를 **축별로 병렬 호출**하세요. Stop hook이 리뷰 결과 파일이 없으면 종료를 차단합니다.
+
+   먼저 띄울 축을 결정적으로 확인합니다:
+
+   ```bash
+   bun ${CLAUDE_PLUGIN_ROOT}/lib/cli.ts review-axes <변경 파일...>
+   ```
+
+   그 다음 **한 메시지에서 여러 Agent 호출을 동시에** 보냅니다 — 그래야 실제로 병렬입니다.
+
+   ```
+   Agent(review-changes, "축: hallucination / 파일: <변경 파일> / 카테고리: <이 워크플로우>")
+   Agent(review-changes, "축: refactoring  / 파일: <변경 파일> / ...")
+   Agent(review-changes, "축: security     / 파일: <변경 파일> / ...")
+   Agent(review-changes, "축: performance  / 파일: <변경 파일> / ...")
+   ```
+
+   `hallucination` 축은 변경 내용과 무관하게 **항상** 포함합니다. 나머지는 `review-axes` 출력이 알려줍니다. 각 축은 자기 차원만 `dimensions_checked` 에 채우고, Stop hook이 합집합으로 커버리지를 판정합니다.
+
 
 ## 카테고리별 세부 단계
 

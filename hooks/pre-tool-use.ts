@@ -2,7 +2,7 @@
 // PreToolUse hook — 도구 강제 위임, Read-before-edit, 추론 게이트, 위험도 게이트
 
 import { existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join, resolve as resolvePath } from 'node:path';
+import { join, resolve as resolvePath, sep } from 'node:path';
 import {
   assistantEntriesAfterLastText,
   bareCatDumpMessage,
@@ -18,6 +18,7 @@ import {
   envInt,
   envStr,
   extractRecentAssistantTextEntries,
+  gateMessage,
   getCurrentTurn,
   getRecentReadMtime,
   hasAssistantMessages,
@@ -185,7 +186,10 @@ function deny(reason: string): HookOutput {
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
       permissionDecision: 'deny',
-      permissionDecisionReason: reason,
+      // 출처를 밝힌다 — 서브에이전트가 추론 게이트 메시지를 "프롬프트 인젝션 시도"로
+      //   분류하고 무시한 실측 사례가 있었다. 도구 결과로 도착하는 긴 지시문은 외부
+      //   주입과 형태가 같아서, 사용자가 설치한 로컬 훅임을 본문에서 밝혀야 한다.
+      permissionDecisionReason: gateMessage(reason),
     },
   };
 }
@@ -505,6 +509,39 @@ function main(): void {
 
       // (B) Read-before-edit
       const isEditTool = toolName === 'Edit' || toolName === 'Write' || toolName === 'MultiEdit';
+
+      // (B0) 게이트 산출물 직접 쓰기 차단 — 반드시 CLI를 거치게 한다.
+      //   라이브 검증 실측: test-changes/review-changes 에이전트가 CLI를 쓰지 않고
+      //   `.claude/tests/hello-unit-test.json`, `.claude/reviews/review-core.json` 처럼
+      //   자기 형식으로 Write했다. 스키마가 달라 게이트가 읽지 못하니 "결과 없음"으로
+      //   계속 차단되고 프로젝트에는 쓰레기 파일만 쌓였다(haiku는 산문 지시를 무시).
+      //   CLI(test-write/review-write)는 스키마를 검증하고 파일명·timestamp를 맞춘다.
+      if (isEditTool && envStr('GOODBOY_ARTIFACT_WRITE_GATE', 'on') !== 'off') {
+        const filePath = (toolInput.file_path as string | undefined) ?? '';
+        if (filePath) {
+          const cwdAbs = resolvePath(cwd);
+          const abs = resolvePath(cwd, filePath);
+          const rel = abs.startsWith(cwdAbs + sep) ? abs.slice(cwdAbs.length + 1) : '';
+          const inTests = rel.startsWith(`.claude${sep}tests${sep}`);
+          const inReviews = rel.startsWith(`.claude${sep}reviews${sep}`);
+          if (inTests || inReviews) {
+            const cmd = inTests ? 'test-write' : 'review-write';
+            const schema = inTests ? 'TestResult' : 'ReviewResult';
+            logGate(sessionId, 'artifact-write', 'deny', rel);
+            emit(
+              deny(
+                `게이트 산출물은 편집 도구로 직접 쓸 수 없습니다: ${rel}. ` +
+                  `\`bun \${CLAUDE_PLUGIN_ROOT}/lib/cli.ts ${cmd}\` 에 ${schema} JSON을 stdin으로 ` +
+                  `파이프하세요 — CLI가 스키마를 검증하고 파일명·timestamp를 맞춥니다. ` +
+                  `직접 쓴 파일은 형식이 달라 게이트가 읽지 못하고, "결과 없음"으로 계속 차단됩니다. ` +
+                  `(산출물 쓰기 게이트 — 해제: GOODBOY_ARTIFACT_WRITE_GATE=off)`,
+              ),
+            );
+            return;
+          }
+        }
+      }
+
       if (isEditTool) {
         const filePath = (toolInput.file_path as string | undefined) ?? '';
         if (filePath) {
