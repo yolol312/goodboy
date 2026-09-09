@@ -26,6 +26,8 @@ import { resolve as resolvePath } from 'node:path';
 export type AcceptanceSource =
   | 'uiux-new'
   | 'uiux-change'
+  | 'uiux-component'
+  | 'uiux-component-state'
   | 'prototype-structure'
   | 'prototype-control'
   | 'prototype-regression';
@@ -72,12 +74,31 @@ function parseTableRow(line: string): string[] | null {
   return cells;
 }
 
+/** `## 제목` 줄에서 제목 텍스트만. `##` 과 앞뒤 공백을 벗긴다. */
+function headingText(line: string): string {
+  return line.replace(/^#+\s*/, '').trim();
+}
+
 /**
  * `## <제목>` 아래의 첫 마크다운 표에서 **데이터 행만** 뽑는다.
  * 헤더 행(첫 행)과 구분선은 버리고, 모든 칸이 플레이스홀더/빈 칸인 행도 버린다.
+ *
+ * **정확히 일치하는 제목이 있으면 그것만 본다.** 없을 때만 부분 일치로 폴백한다.
+ * 부분 일치만 쓰면 같은 낱말을 품은 다른 절이 앞에 있을 때 그 표를 읽고 끝나버린다 —
+ * 실측: `## 화면별 컴포넌트 배치` 가 `## 컴포넌트` 앞에 있으면 화면 이름이 컴포넌트
+ * 기준으로 둔갑하고 진짜 표의 상태 기준이 **조용히 사라졌다.** 크래시가 아니라
+ * 오탑재라 더 나쁘다. 폴백은 `'무엇이 달라지는가'`(실제 제목은
+ * `## 변경 화면 — 무엇이 달라지는가`)처럼 처음부터 부분 일치를 전제한 호출을 위해 남긴다.
  */
 export function extractTableRows(markdown: string, headingIncludes: string): string[][] {
   const lines = (markdown ?? '').split(/\r?\n/);
+  const target = headingIncludes.trim();
+  // 정확 일치 제목이 **존재하는지**로 먼저 판정한다. "행이 비면 폴백"이 아니다 —
+  //   정확 일치 절의 표가 비어 있을 때 엉뚱한 절로 새는 것을 막아야 한다.
+  const hasExact = lines.some((l) => /^##\s/.test(l) && headingText(l) === target);
+  const matches = (line: string): boolean =>
+    hasExact ? headingText(line) === target : line.includes(headingIncludes);
+
   let inSection = false;
   let seenHeaderRow = false;
   let started = false;
@@ -87,7 +108,7 @@ export function extractTableRows(markdown: string, headingIncludes: string): str
     if (/^##\s/.test(line)) {
       // 다른 ## 섹션을 만나면, 이미 표를 읽었으면 종료. 아니면 대상 섹션인지 판정.
       if (inSection && started) break;
-      inSection = line.includes(headingIncludes);
+      inSection = matches(line);
       seenHeaderRow = false;
       started = false;
       continue;
@@ -186,6 +207,74 @@ export function extractUiuxCriteria(uiuxMd: string): AcceptanceCriterion[] {
       source: 'uiux-change',
       description: `${isPlaceholderCell(screen) ? '화면' : screen}: ${what}`,
     });
+  }
+
+  out.push(...extractComponentCriteria(uiuxMd));
+
+  return out;
+}
+
+/**
+ * 데이터가 들어가는 컴포넌트가 반드시 가져야 하는 상태.
+ *
+ * 이 셋이 실무에서 가장 자주 빠진다. 빠지면 구현이 지어내고, 대개 아무 안내 없는 빈
+ * 화면이 된다. 그래서 컴포넌트 기준 하나로 뭉치지 않고 **상태마다 따로** 기준을 만든다
+ * — 뭉치면 "컴포넌트 만들었다"로 한 번에 커버 처리되어 상태 누락이 그대로 통과한다.
+ */
+const DATA_STATES: Array<{ key: string; label: string; re: RegExp }> = [
+  { key: 'EMPTY', label: '빈 상태', re: /빈\s*상태|empty/i },
+  { key: 'ERROR', label: '에러 상태', re: /에러|오류|error/i },
+  { key: 'LOADING', label: '로딩 상태', re: /로딩|loading|스켈레톤|skeleton/i },
+];
+
+/**
+ * UIUX.md `## 컴포넌트` 표 → 수용 기준.
+ *
+ *   | 컴포넌트 | 구분 | 변형 | 상태 | 쓰이는 화면 |
+ *
+ *  - `신규`·`변경` 행 → `UIUX-COMP-<n>` (그 컴포넌트가 명세대로 동작한다)
+ *  - `상태` 칸에 빈 상태·에러·로딩이 적혀 있으면 각각 `UIUX-STATE-<n>`
+ *
+ * `그대로` 는 기준을 만들지 않는다 — 화면과 같은 이유로 회귀 축이 담당한다.
+ * 표가 없으면 빈 배열이다(이 절을 쓰지 않는 예전 버전의 UIUX.md 호환).
+ */
+export function extractComponentCriteria(uiuxMd: string): AcceptanceCriterion[] {
+  const out: AcceptanceCriterion[] = [];
+  const rows = extractTableRows(uiuxMd ?? '', '컴포넌트');
+  let compIdx = 0;
+  let stateIdx = 0;
+
+  for (const cells of rows) {
+    const name = cells[0] ?? '';
+    // 이름 칸으로만 거른다. 템플릿의 상태 범례("default·hover·disabled …")는
+    //   isPlaceholderCell 이 못 잡아서, 행 전체 판정만 믿으면 빈 이름이 새어 들어온다.
+    if (isPlaceholderCell(name)) continue;
+    const kind = (cells[1] ?? '').trim();
+    if (kind === '그대로') continue;
+
+    const variants = cells[2] ?? '';
+    const states = cells[3] ?? '';
+
+    compIdx += 1;
+    const variantPart = isPlaceholderCell(variants) ? '' : ` (변형: ${variants})`;
+    out.push({
+      id: `UIUX-COMP-${compIdx}`,
+      source: 'uiux-component',
+      description: `컴포넌트가 명세된 대로 렌더되고 동작한다: ${name}${variantPart}`,
+    });
+
+    if (isPlaceholderCell(states)) continue;
+    for (const st of DATA_STATES) {
+      if (!st.re.test(states)) continue;
+      stateIdx += 1;
+      out.push({
+        id: `UIUX-STATE-${stateIdx}`,
+        source: 'uiux-component-state',
+        description:
+          `${name} 의 ${st.label}가 실제로 표시된다 — 그 상황을 만들어서 확인한다` +
+          ` (코드에 분기가 있다는 것만으로는 충족이 아니다)`,
+      });
+    }
   }
 
   return out;

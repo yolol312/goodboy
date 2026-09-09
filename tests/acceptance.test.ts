@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   extractAppClasses,
+  extractComponentCriteria,
   extractControlGroupIds,
   extractPrototypeCriteria,
   extractTableRows,
@@ -109,6 +110,51 @@ describe('extractTableRows', () => {
   test('없는 섹션이면 빈 배열', () => {
     expect(extractTableRows(md, '존재하지 않는 섹션')).toEqual([]);
   });
+
+  // 실측 결함: 부분 일치만 쓰면 같은 낱말을 품은 다른 절이 **앞에** 있을 때 그 표를 읽고
+  // 끝나버린다. 크래시가 아니라 오탑재라 더 나쁘다 — 진짜 표의 기준이 조용히 사라진다.
+  test('같은 낱말을 품은 선행 절이 있어도 정확 일치 절을 읽는다', () => {
+    const doc = `## 화면별 컴포넌트 배치
+
+| 화면 | 슬롯 |
+|---|---|
+| 대시보드 | 헤더 |
+
+## 컴포넌트
+
+| 컴포넌트 | 구분 |
+|---|---|
+| LogTable | 신규 |
+`;
+    expect(extractTableRows(doc, '컴포넌트')).toEqual([['LogTable', '신규']]);
+  });
+
+  test('정확 일치 절의 표가 비어도 다른 절로 새지 않는다', () => {
+    const doc = `## 컴포넌트 원칙
+
+| 원칙 | 값 |
+|---|---|
+| 간격 | 4px |
+
+## 컴포넌트
+
+| 컴포넌트 | 구분 |
+|---|---|
+| | 신규 / 변경 / 그대로 |
+`;
+    expect(extractTableRows(doc, '컴포넌트')).toEqual([]);
+  });
+
+  test('정확 일치 제목이 없으면 부분 일치로 폴백한다', () => {
+    // `## 변경 화면 — 무엇이 달라지는가` 처럼 처음부터 부분 일치를 전제한 호출을 위해 남긴다.
+    const doc = `## 변경 화면 — 무엇이 달라지는가
+
+| 화면 | 지금 | 이번 버전 |
+|---|---|---|
+| 대시보드 | 없음 | 표 추가 |
+`;
+    expect(extractTableRows(doc, '무엇이 달라지는가')).toEqual([['대시보드', '없음', '표 추가']]);
+  });
 });
 
 describe('extractUiuxCriteria', () => {
@@ -159,6 +205,96 @@ describe('extractUiuxCriteria', () => {
 | | | | |
 `;
     expect(extractUiuxCriteria(tmpl)).toEqual([]);
+  });
+});
+
+// 지키려는 성질: **빈 상태·에러·로딩이 개별 커버 대상이 된다.**
+// 이 셋은 실무에서 가장 자주 누락되고, 누락되면 아무 안내 없는 빈 화면이 된다.
+// 컴포넌트 기준 하나로 뭉치면 "컴포넌트 만들었다"로 한 번에 커버 처리되어 그대로 통과한다.
+describe('extractComponentCriteria', () => {
+  const md = (rows: string) => `# UI/UX — v0.1
+
+## 컴포넌트
+
+| 컴포넌트 | 구분 | 변형 | 상태 | 쓰이는 화면 |
+|---|---|---|---|---|
+${rows}
+`;
+
+  test('신규 컴포넌트에 기준을 만들고 변형을 설명에 담는다', () => {
+    const cs = extractComponentCriteria(md('| Button | 신규 | primary·secondary | default | 대시보드 |'));
+    expect(cs).toHaveLength(1);
+    expect(cs[0]!.id).toBe('UIUX-COMP-1');
+    expect(cs[0]!.source).toBe('uiux-component');
+    expect(cs[0]!.description).toContain('Button');
+    expect(cs[0]!.description).toContain('primary·secondary');
+  });
+
+  test('데이터 상태 셋을 각각 별도 기준으로 쪼갠다', () => {
+    const cs = extractComponentCriteria(
+      md('| LogTable | 신규 | - | default·빈 상태·에러·로딩 | 대시보드 |'),
+    );
+    expect(cs.map((c) => c.id)).toEqual([
+      'UIUX-COMP-1',
+      'UIUX-STATE-1',
+      'UIUX-STATE-2',
+      'UIUX-STATE-3',
+    ]);
+    const states = cs.filter((c) => c.source === 'uiux-component-state');
+    expect(states.map((c) => c.description)).toEqual([
+      expect.stringContaining('빈 상태'),
+      expect.stringContaining('에러 상태'),
+      expect.stringContaining('로딩 상태'),
+    ]);
+  });
+
+  test('영문 표기도 인식한다', () => {
+    const cs = extractComponentCriteria(md('| List | 신규 | - | empty / error / loading | 목록 |'));
+    expect(cs.filter((c) => c.source === 'uiux-component-state')).toHaveLength(3);
+  });
+
+  test('상태가 없는 컴포넌트는 상태 기준을 만들지 않는다', () => {
+    const cs = extractComponentCriteria(md('| Badge | 신규 | - | default·hover | 전체 |'));
+    expect(cs).toHaveLength(1);
+  });
+
+  test('`그대로` 는 기준을 만들지 않는다 (회귀 축이 담당)', () => {
+    const cs = extractComponentCriteria(md('| AppHeader | 그대로 | - | default·빈 상태 | 전체 |'));
+    expect(cs).toEqual([]);
+  });
+
+  test('템플릿 범례 행을 기준으로 만들지 않는다', () => {
+    // 상태 칸의 "default·hover·disabled …" 는 isPlaceholderCell 이 못 잡는다 —
+    // 행 전체 판정만 믿으면 이름이 빈 기준이 새어 들어온다.
+    const cs = extractComponentCriteria(md('| | 신규 / 변경 / 그대로 | | default·hover·disabled … | |'));
+    expect(cs).toEqual([]);
+  });
+
+  test('`## 컴포넌트` 절이 없으면 빈 배열 (예전 UIUX.md 호환)', () => {
+    expect(extractComponentCriteria('# UI/UX\n\n## 화면 목록\n\n| 화면 |\n|---|\n| 대시보드 |\n')).toEqual([]);
+    expect(extractComponentCriteria('')).toEqual([]);
+  });
+
+  test('extractUiuxCriteria 가 컴포넌트 기준까지 함께 낸다 (배선 확인)', () => {
+    const full = `# UI/UX — v0.1
+
+## 컴포넌트
+
+| 컴포넌트 | 구분 | 변형 | 상태 | 쓰이는 화면 |
+|---|---|---|---|---|
+| LogTable | 신규 | - | 빈 상태 | 대시보드 |
+
+## 화면 목록
+
+| 화면 | 구분 | 경로 | 목적 | 대응 기획 항목 |
+|---|---|---|---|---|
+| 대시보드 | 신규 | /dash | 로그 확인 | F-1 |
+`;
+    expect(extractUiuxCriteria(full).map((c) => c.id)).toEqual([
+      'UIUX-NEW-1',
+      'UIUX-COMP-1',
+      'UIUX-STATE-1',
+    ]);
   });
 });
 
