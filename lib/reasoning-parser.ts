@@ -1,8 +1,9 @@
-// ## 추론 섹션 파싱 (사실/추론/가정/추측 4분류)
+// ## 근거(구 ## 추론) 섹션 파싱 (사실/판단/가정/추측 4분류)
 
 import type { ReasoningSection } from './types';
 
-const HEADING_REGEX = /^##\s+(추론|Reasoning)\s*$/i;
+// '## 근거'가 현행 헤딩. '## 추론'/'## Reasoning'은 하위 호환으로 계속 인정한다.
+const HEADING_REGEX = /^##\s+(근거|추론|Reasoning)\s*$/i;
 const SUBHEADING_REGEX = /^###\s+(.+?)\s*$/;
 
 interface Bucket {
@@ -22,7 +23,7 @@ function mapSubheading(label: string): keyof Bucket | null {
   //   라벨 비교 전 후행 비문자/비숫자(이모지·공백·기호)를 잘라 정확 매칭이 깨지지 않게 한다.
   const l = label.trim().toLowerCase().replace(/[^\p{L}\p{N}]+$/u, '').trim();
   if (l === '사실' || l === 'facts' || l === 'fact') return 'facts';
-  if (l === '추론' || l === 'inferences' || l === 'inference') return 'inferences';
+  if (l === '판단' || l === '추론' || l === 'inferences' || l === 'inference') return 'inferences';
   if (l === '가정' || l === 'assumptions' || l === 'assumption') return 'assumptions';
   if (l === '추측' || l === 'speculations' || l === 'speculation') return 'speculations';
   return null;

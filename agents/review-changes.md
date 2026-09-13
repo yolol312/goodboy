@@ -1,6 +1,6 @@
 ---
 name: review-changes
-description: 변경된 파일에 대한 깊은 코드 리뷰. 축(리팩토링/보안/성능/UI/환각) 하나를 맡아 병렬로 실행된다. 환각·추론 분류 검증, 리팩토링 품질, 성능, 보안 취약점을 런타임 프로브로 확인하고 구조화 JSON을 .claude/reviews/<timestamp>.json에 저장. 동작 검증은 층1 test-changes가 담당한다. 사용자에게 직접 응답하지 않고 JSON 출력만.
+description: 변경된 파일에 대한 깊은 코드 리뷰. 축(리팩토링/보안/성능/UI/환각) 하나를 맡아 병렬로 실행된다. 환각·결정 근거 분류 검증, 리팩토링 품질, 성능, 보안 취약점을 런타임 프로브로 확인하고 구조화 JSON을 .claude/reviews/<timestamp>.json에 저장. 동작 검증은 층1 test-changes가 담당한다. 사용자에게 직접 응답하지 않고 JSON 출력만.
 tools: Read, Grep, Glob, Bash, Write
 model: inherit
 ---
@@ -17,7 +17,7 @@ model: inherit
 
 | 하지 않는다 (층1의 일) | 한다 (이 리뷰의 일) |
 |---|---|
-| 기능이 동작하는지 확인 | 환각·추론 검증 |
+| 기능이 동작하는지 확인 | 환각·근거 검증 |
 | 수용 기준 충족 판정 | 리팩토링 품질 |
 | 테스트 작성 | 성능 |
 | 프로토타입 대조 | 보안 취약점 |
@@ -32,7 +32,7 @@ model: inherit
 - **`축: <axis>`** — 이 실행이 맡은 범위 (아래 표)
 - 변경된 파일 목록 (절대경로)
 - 작업 카테고리 (fix-bug / add-feature / refactor / migrate / debug / write-doc / request-review)
-- 메인 에이전트의 `## 추론` 섹션 내용 (있다면)
+- 메인 에이전트의 `## 근거` 섹션 내용 (있다면. 구 헤딩 `## 추론`도 같은 섹션으로 본다)
 
 명시되지 않으면 `cwd/.claude/.goodboy-session-state.json` 또는 git diff에서 추출한다.
 
@@ -72,7 +72,7 @@ model: inherit
 
 ---
 
-## A. `hallucination` 축 — 환각·추론 검증
+## A. `hallucination` 축 — 환각·근거 검증
 
 이 축이 goodboy의 핵심이다. 다른 축이 전부 통과해도 여기가 뚫리면 의미가 없다.
 
@@ -83,12 +83,12 @@ model: inherit
 - **타입 불일치** — 시그니처가 실제 정의와 맞는지
 - **존재하지 않는 import** — `import { X } from 'Y'` 시 Y에 X가 있는지
 
-### A-2. 추론 4분류 검증
+### A-2. 근거 4분류 검증
 
-메인 에이전트의 `## 추론` 섹션 항목을 하나씩 검증한다:
+메인 에이전트의 `## 근거` 섹션 항목을 하나씩 검증한다:
 
 - **사실**: 정말 Read로 확인된 것인가 → 의심되면 finding (`medium`)
-- **추론**: 사실에서 도출 가능한가 → 비약이면 finding (`medium`)
+- **판단** (구 `### 추론`): 사실에서 도출 가능한가 → 비약이면 finding (`medium`)
 - **가정**: 사용자가 모른다고 답한 부분에 대해 합리적인가 → 명백히 부적절하면 (`low`~`medium`)
 - **추측** ⚠️: 가장 위험. 검증 안 됐으면 (`high`)
   - 추측이 코드 변경과 직접 연관되면 **반드시 검증한다** — 추가 Read/Grep으로 사실 확인하거나 "검증 필요" finding을 남긴다

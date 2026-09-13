@@ -158,6 +158,43 @@ function lastReasoningDenyAtMs(sessionId: string, scope: string): number | null 
   }
 }
 
+// 추론(결정 근거) 게이트 모드: env GOODBOY_REASONING_GATE
+//   warn(기본) — 차단하지 않는다. 섹션 미인식/빈 섹션은 스코프당 1회만 안내하고 이후는 로그만.
+//   deny       — v0.28.2까지의 차단 동작 그대로(escape/flush-wait/lag-confirm 포함).
+//   off        — 게이트 (C) 전체를 건너뛴다.
+//   알 수 없는 값은 기본(warn)으로 취급한다.
+type ReasoningGateMode = 'warn' | 'deny' | 'off';
+
+function reasoningGateMode(): ReasoningGateMode {
+  const v = envStr('GOODBOY_REASONING_GATE', 'warn');
+  return v === 'deny' || v === 'off' ? v : 'warn';
+}
+
+const REASONING_WARN_GUIDANCE =
+  '변경 전에 `## 근거` 섹션(### 사실 / ### 판단 / ### 가정 / ### 추측)에 결론과 근거를 짧게 요약해 두면 ' +
+  '리뷰가 가정을 검증할 수 있습니다. (결정 근거 기록 권장 — 이 세션에서 1회만 안내)';
+
+/** warn 모드 안내를 이 스코프에서 이미 했는지. 판정 실패면 true(안내 반복보다 침묵이 낫다). */
+function isReasoningWarnNotified(sessionId: string, scope: string): boolean {
+  try {
+    return existsSync(join(ensureSessionDir(sessionId), scopedStateFile('reasoning-warn-notified', scope)));
+  } catch {
+    return true;
+  }
+}
+
+function setReasoningWarnNotified(sessionId: string, scope: string): void {
+  try {
+    writeFileSync(
+      join(ensureSessionDir(sessionId), scopedStateFile('reasoning-warn-notified', scope)),
+      '1',
+      'utf8',
+    );
+  } catch {
+    // best-effort
+  }
+}
+
 // 도구 강제 위임 대상 — 이 도구들은 메인이 직접 쓰지 않고 서브에이전트에게 위임한다.
 const DELEGATED_TOOLS = new Set(['WebSearch', 'WebFetch', 'Grep', 'Glob']);
 
@@ -618,7 +655,11 @@ function main(): void {
       // 마지막 메시지 하나만 보면, 모델이 추론 섹션을 출력한 뒤 도구 호출 직전에
       // 다른 말("이제 파일을 수정하겠습니다")을 한 줄 더 하면 잘못 차단된다.
       // → 최근 N개 turn 중 ANY가 추론 섹션을 담고 있으면 통과시킨다.
-      if (isEditTool && !reasoningDocExempt) {
+      // 모드(GOODBOY_REASONING_GATE) — off면 이 블록 전체를 건너뛰고, warn(기본)이면
+      //   아래 판정은 그대로 하되 차단 대신 로그/1회 안내만 한다. deny만 차단·카운터를 쓴다.
+      const reasoningMode = reasoningGateMode();
+      const reasoningDenyMode = reasoningMode === 'deny';
+      if (isEditTool && !reasoningDocExempt && reasoningMode !== 'off') {
         // 서브에이전트의 편집은 "서브에이전트가 쓴 글"로 판정해야 한다.
         //   hook은 서브에이전트 호출에도 메인 transcript_path를 넘긴다 → 그대로 쓰면
         //   서브가 ## 추론을 아무리 써도 메인의 글만 검사되어 영구 차단된다(실측: 9회 출력, 8회 차단).
@@ -664,7 +705,10 @@ function main(): void {
         //   안에서 15초 여유를 남긴다 — 상한이 타임아웃을 넘으면 하니스가 hook을 죽여
         //   게이트 전체가 fail-open 된다(리뷰 지적).
         const flushWaitMs = Math.min(envInt('GOODBOY_REASONING_FLUSH_WAIT_MS', 20000), 45000);
+        // warn 모드는 deny 카운터를 올리지 않으므로 원래도 대기가 발동하지 않지만, 같은 세션에
+        //   deny 모드 시절 카운터가 남아 있어도 대기(최대 45초 블로킹)하지 않도록 명시적으로 막는다.
         if (
+          reasoningDenyMode &&
           flushWaitMs > 0 &&
           readReasoningDenyCount(sessionId, reasoningScope) > 0 &&
           !isReasoningLagMode(sessionId, reasoningScope) &&
@@ -693,9 +737,23 @@ function main(): void {
         //   같은 카운터를 쓴다. 지연 모드면 차단하지 않고 경고만, 아니면 3회까지 deny 후
         //   지연 모드로 전환한다. true를 반환하면 이번 편집을 통과시킨다는 뜻.
         const lagModeWarning =
-          '추론 게이트 지연 모드: transcript 기록 지연이 확인된 세션이라 차단하지 않습니다. ' +
-          '## 추론 섹션은 편집 전에 계속 출력해 주세요(정책은 유지되며, 리뷰가 검증합니다).';
+          '근거 게이트 지연 모드: transcript 기록 지연이 확인된 세션이라 차단하지 않습니다. ' +
+          '## 근거 섹션은 편집 전에 계속 요약해 주세요(정책은 유지되며, 리뷰가 검증합니다).';
+        // warn 모드 공용 경로: 차단·카운터 없이 로그를 남기고, 안내가 필요한 경우 스코프당 1회만 싣는다.
+        const warnUnrecognized = (reason: string, guide: boolean): void => {
+          logGate(sessionId, 'reasoning', 'warn', reason);
+          if (guide && !isReasoningWarnNotified(sessionId, reasoningScope)) {
+            setReasoningWarnNotified(sessionId, reasoningScope);
+            preWarnings.push(REASONING_WARN_GUIDANCE);
+          }
+        };
         const passUnrecognized = (denyReason: string, denyMessage: (n: number) => string): boolean => {
+          if (!reasoningDenyMode) {
+            // warn: 무언 편집(silent-edit)은 로그만, 섹션 미인식은 1회 안내. deny 카운터를 올리지
+            //   않으므로 flush-wait/escape/lag-confirm(모두 카운터>0 전제)이 발동하지 않는다.
+            warnUnrecognized(denyReason, denyReason !== 'silent-edit');
+            return true;
+          }
           if (isReasoningLagMode(sessionId, reasoningScope)) {
             logGate(sessionId, 'reasoning', 'warn', 'lag-mode');
             preWarnings.push(lagModeWarning);
@@ -709,8 +767,8 @@ function main(): void {
             writeReasoningDenyCount(sessionId, reasoningScope, 0);
             logGate(sessionId, 'reasoning', 'warn', 'escape');
             preWarnings.push(
-              '추론 게이트가 3회 차단 후에도 섹션을 인식하지 못했습니다. transcript 기록 지연으로 보고 ' +
-                '지연 모드로 전환합니다 — 이 세션에서는 편집을 더 이상 차단하지 않습니다. ## 추론 섹션은 계속 출력해 주세요.',
+              '근거 게이트가 3회 차단 후에도 섹션을 인식하지 못했습니다. transcript 기록 지연으로 보고 ' +
+                '지연 모드로 전환합니다 — 이 세션에서는 편집을 더 이상 차단하지 않습니다. ## 근거 섹션은 계속 요약해 주세요.',
             );
             return true;
           }
@@ -728,9 +786,9 @@ function main(): void {
             const passed = passUnrecognized(
               'silent-edit',
               (n) =>
-                "편집 전에 '## 추론' 섹션을 텍스트로 출력하세요. 4분류로: ### 사실 / ### 추론 / ### 가정 / ### 추측 ⚠️ . " +
+                "편집 전에 '## 근거' 섹션에 결정 근거를 요약해 주세요. 4분류로: ### 사실 / ### 판단 / ### 가정 / ### 추측 ⚠️ . " +
                 '출력했는데도 이 메시지가 보이면 기록 반영이 지연된 것입니다 — 같은 도구 호출을 다시 시도하세요. ' +
-                `(추론 가시화 정책 — 무언 편집 불허, 재시도 ${n}/${REASONING_DENY_ESCAPE}, 3회 후 지연 모드로 통과)`,
+                `(결정 근거 기록 정책 — 무언 편집 불허, 재시도 ${n}/${REASONING_DENY_ESCAPE}, 3회 후 지연 모드로 통과)`,
             );
             if (!passed) return;
           } else if (reasoningTranscript !== '') {
@@ -743,9 +801,9 @@ function main(): void {
             const passed = passUnrecognized(
               'no-section',
               (n) =>
-                "편집 전에 '## 추론' 섹션을 출력하세요. 4분류로: ### 사실 / ### 추론 / ### 가정 / ### 추측 ⚠️ . " +
+                "편집 전에 '## 근거' 섹션에 결정 근거를 요약해 주세요. 4분류로: ### 사실 / ### 판단 / ### 가정 / ### 추측 ⚠️ . " +
                 '주의: 방금 출력한 텍스트는 기록 반영이 지연되어 아직 인식되지 않을 수 있습니다 — 이미 출력했다면 같은 도구 호출을 그대로 다시 시도하세요. ' +
-                `(추론 가시화 정책, 재시도 ${n}/${REASONING_DENY_ESCAPE}, 3회 후 지연 모드로 통과)`,
+                `(결정 근거 기록 정책, 재시도 ${n}/${REASONING_DENY_ESCAPE}, 3회 후 지연 모드로 통과)`,
             );
             if (!passed) return;
           } else {
@@ -761,6 +819,7 @@ function main(): void {
             //   유지되고, 시각 정보가 없으면 아무것도 하지 않는다(fail-safe).
             const priorDenies = readReasoningDenyCount(sessionId, reasoningScope);
             if (
+              reasoningDenyMode &&
               priorDenies > 0 &&
               !isReasoningLagMode(sessionId, reasoningScope) &&
               envStr('GOODBOY_REASONING_LAG_STICKY', 'session') !== 'rearm' &&
@@ -776,9 +835,9 @@ function main(): void {
                 setReasoningLagMode(sessionId, reasoningScope);
                 logGate(sessionId, 'reasoning', 'warn', 'lag-confirmed');
                 preWarnings.push(
-                  '추론 게이트: 방금 차단했던 편집의 ## 추론 섹션이 차단 이전에 이미 출력됐던 것으로 확인됐습니다' +
+                  '근거 게이트: 방금 차단했던 편집의 ## 근거 섹션이 차단 이전에 이미 출력됐던 것으로 확인됐습니다' +
                     '(transcript 기록 지연). 이 세션은 지연 모드로 전환합니다 — 이후 편집은 차단 없이 진행되며, ' +
-                    '## 추론 섹션은 계속 출력해 주세요(리뷰가 검증합니다).',
+                    '## 근거 섹션은 계속 요약해 주세요(리뷰가 검증합니다).',
                 );
               }
             }
@@ -807,14 +866,19 @@ function main(): void {
                 0,
             );
             if (!hasContent) {
-              logGate(sessionId, 'reasoning', 'deny', 'empty-section');
-              emit(
-                deny(
-                  "'## 추론' 섹션이 비어 있습니다. 4분류(### 사실 / ### 추론 / ### 가정 / ### 추측 ⚠️)에 " +
-                    "실제 내용을 작성하세요. 해당 없는 분류는 '- 없음'으로 명시합니다. (추론 실질화, A1)",
-                ),
-              );
-              return;
+              if (!reasoningDenyMode) {
+                // warn: 빈 섹션도 차단하지 않는다(1회 안내 후 로그만).
+                warnUnrecognized('empty-section', true);
+              } else {
+                logGate(sessionId, 'reasoning', 'deny', 'empty-section');
+                emit(
+                  deny(
+                    "'## 근거' 섹션이 비어 있습니다. 4분류(### 사실 / ### 판단 / ### 가정 / ### 추측 ⚠️)에 " +
+                      "결론과 근거를 짧게라도 적어 주세요. 해당 없는 분류는 '- 없음'으로 명시합니다. (결정 근거 실질화, A1)",
+                  ),
+                );
+                return;
+              }
             }
           }
         }

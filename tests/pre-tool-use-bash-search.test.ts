@@ -32,6 +32,41 @@ describe('classifyBashSearch (H2-03 unit)', () => {
     expect(classifyBashSearch('')).toBeNull();
     expect(classifyBashSearch('ls -la')).toBeNull();
   });
+
+  test('출력이 제한된 검색은 허용: 바로 다음 파이프가 head/tail/wc', () => {
+    expect(classifyBashSearch('grep -rn "x" --exclude-dir=node_modules . | head -40')).toBeNull();
+    expect(classifyBashSearch('rg foo | wc -l')).toBeNull();
+    expect(classifyBashSearch('find . -name "*.ts" | tail -5')).toBeNull();
+    expect(classifyBashSearch('git grep foo | head')).toBeNull();
+  });
+
+  test('출력이 제한된 검색은 허용: grep 계열 -l/-c/-q', () => {
+    expect(classifyBashSearch('grep -rl foo src')).toBeNull();
+    expect(classifyBashSearch('grep -r -c foo src')).toBeNull();
+    expect(classifyBashSearch('grep -rq foo .')).toBeNull();
+    expect(classifyBashSearch('grep -r --files-with-matches foo .')).toBeNull();
+    expect(classifyBashSearch('grep -r --count foo .')).toBeNull();
+    expect(classifyBashSearch('grep -r --quiet foo .')).toBeNull();
+  });
+
+  test('출력 제한이 아니면 여전히 감지', () => {
+    expect(classifyBashSearch('grep -rn foo .')).toBe('grep -r');
+    expect(classifyBashSearch('grep -rn foo . | sort')).toBe('grep -r'); // 바로 다음이 limiter 아님
+    expect(classifyBashSearch('grep -rn foo . | sort | head')).toBe('grep -r');
+    expect(classifyBashSearch('grep -rn foo --exclude-dir=node_modules .')).toBe('grep -r');
+    expect(classifyBashSearch('grep -rn foo . || head')).toBe('grep -r'); // || 는 파이프 아님
+    expect(classifyBashSearch('grep -rn foo . && wc -l x')).toBe('grep -r');
+    expect(classifyBashSearch('rg -l foo')).toBe('rg'); // -l/-c/-q 허용은 grep 계열만
+  });
+
+  test('따옴표 인식: 따옴표 안 | ; && 에서 자르지 않고, 따옴표 안 -r은 플래그가 아니다', () => {
+    expect(classifyBashSearch('grep -rn "a|b" .')).toBe('grep -r');
+    expect(classifyBashSearch('grep "x -r y" file.txt')).toBeNull();
+    expect(classifyBashSearch("grep 'a -R b' file.txt")).toBeNull();
+    // 따옴표 안 파이프는 세그먼트 경계가 아니므로 head 허용으로 오판하지 않는다.
+    expect(classifyBashSearch('grep -rn "x | head" .')).toBe('grep -r');
+    expect(classifyBashSearch('rg "foo; bar && baz"')).toBe('rg');
+  });
 });
 
 const HOOK = resolve(import.meta.dir, '..', 'hooks', 'pre-tool-use.ts');

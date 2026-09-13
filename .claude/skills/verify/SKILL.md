@@ -27,7 +27,7 @@ env TMPDIR=$SCRATCH/tmp claude -p "<프롬프트>" \
 2. `$SCRATCH/tmp/goodboy-session-*/status.json` — 한도/percent/confident (한도 판별 검증)
 3. `$SCRATCH/proj/.claude/reviews/*.json` — 리뷰 루프 수렴 여부
 4. transcript: `~/.claude/projects/<경로 인코딩된 proj dir>/*.jsonl` —
-   모델의 실제 출력(## 추론 존재, AskUserQuestion 호출 등). `grep -c "## 추론"` 등으로 확인.
+   모델의 실제 출력(## 근거 존재, AskUserQuestion 호출 등). `grep -cE "## (근거|추론)"` 등으로 확인(구 헤딩 `## 추론`도 인식됨).
 
 ## 검증된 프로브 시나리오
 

@@ -235,7 +235,7 @@ export function buildAskQuestionsInstruction(missing: RequiredInput[]): string {
     lines.push(`- ${input.name}: ${q}`);
   }
   lines.push('');
-  lines.push('사용자가 "확인 필요"를 선택한 항목은 가정으로 표시하고, 후속 ## 추론 섹션의 가정 목록에 포함하세요.');
+  lines.push('사용자가 "확인 필요"를 선택한 항목은 가정으로 표시하고, 후속 ## 근거 섹션의 가정 목록에 포함하세요.');
   return lines.join('\n');
 }
 
@@ -247,8 +247,8 @@ export function buildAskQuestionsInstruction(missing: RequiredInput[]): string {
  *  일반 프롬프트로 일반화한다: 충분한지의 판단은 모델이 하되, 부족하면 지어내지 말고
  *  질문하라는 행동 규칙을 매 프롬프트에 주입한다.
  *
- *  무시에 대한 안전망: 질문 대신 가정하고 진행하면, 그 가정은 추론 섹션(## 추론 > 가정)에
- *  기록해야 하고(추론 게이트 A1), 기록된 가정은 리뷰가 검증해야 통과된다(추측-리뷰 연동 A2)
+ *  무시에 대한 안전망: 질문 대신 가정하고 진행하면, 그 가정은 근거 섹션(## 근거 > 가정)에
+ *  기록해야 하고(근거 게이트 A1 — 기본 warn은 안내, deny면 차단), 기록된 가정은 리뷰가 검증해야 통과된다(추측-리뷰 연동 A2)
  *  — 즉 "묻지 않고 넘어가기"에도 비용이 있다. env GOODBOY_ASK_UNCLEAR=on|off (기본 on). */
 export const ASK_WHEN_UNCLEAR_INSTRUCTION = [
   '이 요청이 작업(코드 수정·생성·디버깅·설정 변경 등)이라면, 착수 전에 핵심 정보가 충분한지',
@@ -257,7 +257,7 @@ export const ASK_WHEN_UNCLEAR_INSTRUCTION = [
   '1. 실제로 부족한 항목만 AskUserQuestion으로 한 번에 묶어 질문하고, 각 질문에 "확인 필요"',
   '   옵션을 포함하세요.',
   '2. 사용자가 "확인 필요"를 선택했거나 답하지 못한 항목은 절대 답을 지어내지 말고',
-  '   `## 추론 > 가정` 섹션에 명시적 가정으로 기록하세요.',
+  '   `## 근거 > 가정` 섹션에 명시적 가정으로 기록하세요.',
   '3. 정보가 이미 충분하거나, 단순 질문/대화이거나, 사소한 결정이면 묻지 말고 바로 진행하세요.',
   '(부족 입력 질문 유도, B2)',
 ].join('\n');
@@ -269,7 +269,7 @@ export const ASK_WHEN_UNCLEAR_INSTRUCTION = [
  *  모델에게 제시하고, 각 항목을 사용자 프롬프트가 이미 충족하는지 모델이 직접 자기점검하게 한다.
  *  - 이미 충족된 항목은 다시 묻지 않는다.
  *  - 진짜로 충족되지 않은 항목만 AskUserQuestion으로 묶어 묻는다.
- *  - 사용자가 답하지 못하는 항목은 절대 지어내지 말고 `## 추론 > 가정` 섹션에 명시적 가정으로 기록한다. */
+ *  - 사용자가 답하지 못하는 항목은 절대 지어내지 말고 `## 근거 > 가정` 섹션에 명시적 가정으로 기록한다. */
 export function buildRequiredInputsChecklist(required: RequiredInput[]): string {
   if (!Array.isArray(required) || required.length === 0) return '';
   const lines: string[] = [];
@@ -285,6 +285,6 @@ export function buildRequiredInputsChecklist(required: RequiredInput[]): string 
   lines.push('처리 규칙:');
   lines.push('1. 프롬프트가 이미 충족하는 항목은 다시 묻지 마세요. (단어가 그냥 들어있는지가 아니라 실제로 내용이 명세되었는지로 판단하세요.)');
   lines.push('2. 실제로 충족되지 않은 항목만 AskUserQuestion 도구로 한 번에 묶어 물어보고, 각 질문에 "확인 필요" 옵션을 자동으로 추가하세요.');
-  lines.push('3. 사용자가 "확인 필요"를 선택했거나 답할 수 없는 항목은 절대로 답을 지어내지 마세요(no fabrication). 대신 `## 추론 > 가정` 섹션에 어떤 가정을 두고 진행하는지 명시적으로 기록하세요.');
+  lines.push('3. 사용자가 "확인 필요"를 선택했거나 답할 수 없는 항목은 절대로 답을 지어내지 마세요(no fabrication). 대신 `## 근거 > 가정` 섹션에 어떤 가정을 두고 진행하는지 명시적으로 기록하세요.');
   return lines.join('\n');
 }

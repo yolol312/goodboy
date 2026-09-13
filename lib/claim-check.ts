@@ -185,7 +185,7 @@ export function citationBlockMessage(problems: CitationProblem[]): string {
   return (
     `답변에서 실재하지 않는 위치를 인용했습니다:\n${list}${more}\n` +
     `해당 파일을 실제로 읽어 확인한 뒤 인용을 정정하거나, 근거가 없으면 그 주장을 ` +
-    `\`## 추론 > 추측\` 으로 낮춰 다시 답하세요. (층0 인용 검증)`
+    `\`## 근거 > 추측\` 으로 낮춰 다시 답하세요. (층0 인용 검증)`
   );
 }
 
@@ -199,6 +199,6 @@ export function unreadBlockMessage(problems: CitationProblem[], escalate: boolea
     ? `반복해서 해소되지 않았습니다 — review-changes 서브에이전트를 \`축: hallucination\` 으로 ` +
       `호출해 인용한 주장들을 검증하고 결과를 기록하세요.`
     : `그 파일을 Read(또는 cat/sed -n)로 실제 확인한 뒤 다시 답하세요. 확인 없이 쓴 것이면 ` +
-      `\`## 추론 > 추측\` 으로 분류하세요.`;
+      `\`## 근거 > 추측\` 으로 분류하세요.`;
   return `인용한 위치를 이 세션에서 확인한 기록이 없습니다:\n${list}${more}\n${tail} (층0 인용 검증)`;
 }

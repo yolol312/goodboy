@@ -7,7 +7,7 @@ Claude Code 등 agentic LLM-CLI 환경에서 LLM의 약점(컨텍스트 오염·
 ## 핵심 원칙
 
 - **결정성은 hook으로** — 모델 판단에 맡기지 않고 hook 4종(PreToolUse / PostToolUse / UserPromptSubmit / Stop)으로 강제
-- **추론은 가시화** — 사실 / 추론 / 가정 / 추측 4분류로 작업 전에 출력 의무
+- **결정 근거 기록** — 사실 / 판단 / 가정 / 추측 4분류로 결론과 근거를 작업 전에 짧게 요약 (기본은 권장 + 1회 안내, `GOODBOY_REASONING_GATE=deny`면 차단 강제)
 - **검증된 방법만** — 변경 후 별도 서브에이전트가 리뷰하고 구조화 JSON으로 결과 반환
 - **사용자 결정권 보존** — 위험 작업은 명시적 승인 마커 없이 진행 불가
 
@@ -16,7 +16,7 @@ Claude Code 등 agentic LLM-CLI 환경에서 LLM의 약점(컨텍스트 오염·
 LLM이 코드 작성 시 자주 발생하는 4가지 약점과 Good Boy의 해결책:
 
 1. **컨텍스트 오염** → 넓게 훑는 탐색 도구를 서브에이전트로 위임 강제 (PreToolUse hook)
-2. **환각** → 추론 4분류 가시화 + Read-before-edit + 자동 검증 + 리뷰 강제
+2. **환각** → 결정 근거 기록(4분류) + Read-before-edit + 자동 검증 + 리뷰 강제
 3. **부족한 프롬프트** → 카테고리별 필수요소 사전 검증 + "확인 필요" 답변 허용
 4. **검증 부재** → 별도 서브에이전트가 리뷰 후 구조화 JSON 결과 → Stop hook이 통과/차단 결정
 
@@ -86,8 +86,8 @@ POSIX 셸을 전제하므로 **Git for Windows 설치가 필수**입니다. 이�
 
 슬래시 커맨드 없이 자연어로 요청해도, 매 프롬프트에 self-assessment 지시가 주입된다:
 착수에 필요한 핵심 정보(대상/기대 동작/재현 방법 등)가 부족하면 **지어내지 말고
-AskUserQuestion으로 묶어 질문**하고, 답 없는 항목은 `## 추론 > 가정`에 기록하라는 규칙.
-충분한지의 판단은 모델이 하지만, 묻지 않고 가정으로 진행하면 추론 게이트(A1)와
+AskUserQuestion으로 묶어 질문**하고, 답 없는 항목은 `## 근거 > 가정`에 기록하라는 규칙.
+충분한지의 판단은 모델이 하지만, 묻지 않고 가정으로 진행하면 근거 게이트(A1)와
 추측-리뷰 연동(A2)이 그 가정의 기록·검증을 강제한다. 끄기: `GOODBOY_ASK_UNCLEAR=off`
 
 ### 동작 흐름 (예: /fix-bug)
@@ -100,13 +100,14 @@ UserPromptSubmit hook:
    - 인자가 있으면 필수 입력 체크리스트를 모델에게 주입 → 모델이 자기점검(self-assessment)
      후 실제로 부족한 항목만 AskUserQuestion으로 질문 ("확인 필요" 옵션 포함)
    ↓
-모델: ## 추론 섹션 출력 (사실/추론/가정/추측 4분류) ⚠️ 필수 — 내용까지 검사(빈 섹션 차단)
+모델: ## 근거 섹션에 결정 근거 요약 (사실/판단/가정/추측 4분류) — 기본은 권장(없거나 비면 1회 안내),
+      GOODBOY_REASONING_GATE=deny면 필수 + 내용까지 검사(빈 섹션 차단)
    ↓
 위험도 게이트 (PreToolUse hook): 위험도 risky면 사용자 승인 마커 확인
    ↓
 모델 작업: Read → Edit/Write
    - Read-before-edit hook이 Edit/Write 시 같은 파일 Read 이력 검증
-   - 추론 게이트가 ## 추론 섹션 존재 + 실질 내용 검증
+   - 근거 게이트가 ## 근거 섹션 존재 + 실질 내용 검사 (기본 warn=안내만, deny=차단, off=검사 안 함)
    ↓
 PostToolUse hook이 자동 검증 실행 — 기본은 타입체크만 (GOODBOY_AUTOVALIDATE=all이면
 린트/테스트까지). 실패 시 실패 마커를 남기고, 마커가 해소될 때까지 Stop hook이
@@ -137,7 +138,7 @@ review-changes 서브에이전트를 **축별로 병렬 호출** (한 메시지�
 Stop hook 재검사(층2):
    - verdict=pass → 통과
    - high severity finding → 자동 수정 시도 (재시도 3회 cap)
-   - 추론 섹션에 추측/가정을 선언했는데 리뷰가 가정 검증을 안 했으면 → 차단
+   - ## 근거 섹션에 추측/가정을 선언했는데 리뷰가 가정 검증을 안 했으면 → 차단
    - 필수 차원 누락 → 차단
    - medium/low → 사용자에게 표시 후 결정 위임
 ```
@@ -219,25 +220,26 @@ PreToolUse hook이 메인에서 탐색 도구 4종 호출을 차단하고 서브
 |---|---|---|
 | H2-01 같은 파일 재-Read | deny (에이전트별 스코프, 30턴 윈도우 + 압축 감지 시 기록 리셋, mtime 비교) + 위임 프롬프트에 기독 파일 포함 시 warn | `GOODBOY_REREAD_GATE=deny`, `GOODBOY_DELEGATED_REREAD_WARN=on` |
 | H2-02 출력 홍수 | bare `cat <대용량>` 사전 deny + 사후 경고(패턴별 1회) | `GOODBOY_CAT_GATE=deny`, 임계 `GOODBOY_CAT_DENY_BYTES=256000` |
-| H2-03 Bash 재귀 탐색 | deny (rg/grep -r/find → 위임 유도) | `GOODBOY_BASH_SEARCH_GATE=deny` |
+| H2-03 Bash 재귀 탐색 | deny (rg/grep -r/find → 위임 유도). 출력이 제한된 검색은 허용 — 바로 다음 파이프가 `head`/`tail`/`wc`(모든 검색 도구), grep 계열의 `-l`/`-c`/`-q`. `--exclude-dir`만으로는 허용 안 함 | `GOODBOY_BASH_SEARCH_GATE=deny` |
 | (우회 차단) Bash 파일 쓰기 | deny — `> >> tee sed -i dd of=`로 프로젝트 파일 쓰기 금지 (Edit/Write 도구로 유도). 산출물(`dist/ build/ node_modules/ .git/ .claude/`)·`*.log`·프로젝트 밖 경로는 허용 | `GOODBOY_BASH_WRITE_GATE=deny`, 추가 허용 `GOODBOY_BASH_WRITE_ALLOW=a,b` |
 | H2-04 웹 재페치 | 동일 URL 재페치 warn (세션 스코프) | `GOODBOY_WEBFETCH_REFETCH_WARN=on` |
 | H1-01 컨텍스트 성장 | 30%부터 +10%p마다 반복 경고 | `GOODBOY_CTX_WARN_START_PCT=30`, `GOODBOY_CTX_WARN_STEP_PCT=10` |
 | H1-03 compact 막차 | 50% 초과 시 턴 종료 차단 + compact 유도 | `GOODBOY_COMPACT_FORCE_PCT=50` |
 | H4-03 모델 전환(캐시 킬) | 세션 내 메인 모델 전환 감지 시 1회 경고 | 상시 |
 
-## 추론 4분류
+## 결정 근거 기록 (4분류)
 
-모든 카테고리 Skill이 작업 전에 `## 추론` 섹션 출력을 의무화. PreToolUse hook이 없으면 Edit/Write 차단.
+모든 카테고리 Skill이 작업 전에 `## 근거` 섹션에 결론과 근거를 짧게 요약하도록 요구한다.
+리뷰(`hallucination` 축)가 이 섹션의 가정·추측을 검증한다. 구 헤딩 `## 추론` / `### 추론`도 계속 인식한다.
 
 ```markdown
-## 추론
+## 근거
 
 ### 사실 (검증됨)
 - 실제 Read한 코드/문서로 확인된 것만
 
-### 추론 (사실에서 도출, 검증 가능)
-- 검증 가능한 논리적 추론
+### 판단 (확인된 사실에서 나온 결론)
+- 결론만 한 줄씩
 
 ### 가정 (정보 부족)
 - 사용자가 "확인 필요"라 답한 항목 — 어떻게 가정하고 진행할지
@@ -245,6 +247,15 @@ PreToolUse hook이 메인에서 탐색 도구 4종 호출을 차단하고 서브
 ### 추측 ⚠️ (근거 약함)
 - 검증 없이 채운 부분. 리뷰 서브에이전트가 우선 검증
 ```
+
+PreToolUse의 근거 게이트는 코드 편집(Edit/Write/MultiEdit) 직전에 최근 assistant 텍스트에서 이 섹션을 찾는다.
+문서 파일(.md/.txt 등) 편집은 기본 면제.
+
+| env | 효과 |
+|---|---|
+| `GOODBOY_REASONING_GATE=warn` (기본) | 차단하지 않는다. 섹션이 없거나 비어 있으면 에이전트 스코프(메인/서브에이전트별)당 1회만 안내하고 이후는 게이트 로그만 남긴다. 텍스트 없이 바로 편집(무언 편집)은 로그만 |
+| `GOODBOY_REASONING_GATE=deny` | 섹션 미인식·무언 편집·빈 섹션을 차단 (3회 후 지연 모드 escape, 재시도 플러시 대기, 지연 확정 포함 — 아래 트러블슈팅 참조) |
+| `GOODBOY_REASONING_GATE=off` | 근거 게이트 전체를 끈다 |
 
 ## 위험도 게이트
 
@@ -256,7 +267,7 @@ PreToolUse hook이 메인에서 탐색 도구 4종 호출을 차단하고 서브
 
 위험도별 게이트:
 
-- **단순(simple)**: 자동 진행 — 추론 가시화만 필수
+- **단순(simple)**: 자동 진행 — 결정 근거 기록만 필수
 - **중간(medium)**: 추측 카테고리에 항목 있으면 사용자 확인 권장
 - **위험(risky)**: 항상 사용자 승인 마커 (`.claude/.goodboy-risk-approved.txt`) 확인
 
@@ -284,7 +295,7 @@ Good Boy는 표준 플러그인 설치 범위를 따른다.
 /plugin install goodboy@goodboy --scope project   # 또는 user | local. 기본은 user(글로벌)
 ```
 
-> Good Boy는 모든 편집마다 추론·리뷰 게이트가 끼어드는 무거운 플러그인이다.
+> Good Boy는 모든 편집마다 근거·리뷰 게이트가 끼어드는 무거운 플러그인이다.
 > **글로벌(user)보다 project / local / session 범위를 권장한다.**
 
 ### 범위 전환 (이미 설치된 플러그인의 범위 변경)
@@ -528,7 +539,7 @@ bun ${CLAUDE_PLUGIN_ROOT}/lib/cli.ts review-axes <변경 파일...>   # 띄울 �
 
 | 축 | 담당 차원 |
 |---|---|
-| `hallucination` | (차원 없음 — 환각·추론 4분류·가정 검증). **항상** 돈다 |
+| `hallucination` | (차원 없음 — 환각·근거 4분류·가정 검증). **항상** 돈다 |
 | `refactoring` | `refactoring-quality` |
 | `security` | `security-secrets`, `security-injection`, `security-authz`, `dependency-risk`, `web-hardening`, `error-path`, `proto-pollution` |
 | `performance` | `performance` |
@@ -586,24 +597,25 @@ Agent 도구로 서브에이전트 호출 (예: general-purpose)
 없습니다. 페이지 갱신 확인 같은 정당한 재요청은 막지 않습니다.
 `GOODBOY_WEBFETCH_REFETCH_WARN=off`로 비활성.
 
-### "Edit가 차단됩니다 — 추론 게이트"
+### "Edit가 차단됩니다 — 근거 게이트"
 
-편집 전에 `## 추론` 섹션을 출력하세요 (사실/추론/가정/추측 4분류).
+기본(`GOODBOY_REASONING_GATE=warn`)에서는 차단되지 않습니다 — 이 절은 `deny` 모드일 때의 동작입니다.
+편집 전에 `## 근거` 섹션에 결정 근거를 요약하세요 (사실/판단/가정/추측 4분류).
 
-같은 응답 안에서 추론을 쓰고 바로 편집하면 transcript 기록 지연으로 아직 인식되지 않을 수
+같은 응답 안에서 근거를 쓰고 바로 편집하면 transcript 기록 지연으로 아직 인식되지 않을 수
 있습니다 — 같은 편집을 다시 시도하세요. **재시도 플러시 대기**(v0.27.7): 차단 직후의 재시도인데
 섹션이 아직 안 보이면 즉시 재거부하지 않고 기록이 플러시될 때까지 최대 20초
 (`GOODBOY_REASONING_FLUSH_WAIT_MS`, 0=비활성) 기다린 뒤 판정합니다 — 재시도가 플러시보다
 빨라 2회째도 헛 차단되던 경우가 대기로 흡수됩니다. 게이트는 두 경로로 **지연 모드**에 진입해
 이후 이 세션에서 차단 없이 경고만 냅니다: (1) 3회 연속 미인식(escape), (2) **지연 확정**(v0.27.4) —
-재시도에서 인식된 추론 텍스트의 생성 시각이 직전 차단보다 앞서면(= 차단이 기록 지연 오탐이었다는
+재시도에서 인식된 근거 텍스트의 생성 시각이 직전 차단보다 앞서면(= 차단이 기록 지연 오탐이었다는
 직접 증거) 1회 차단 만에 즉시 전환. 헛 차단은 세션당 최대 1회로 수렴합니다(hook이 현재 턴의
-텍스트를 입력받지 못해 최초 1회는 구조적으로 남음). 차단 이후 새로 출력된 추론(순응)은 전환
+텍스트를 입력받지 못해 최초 1회는 구조적으로 남음). 차단 이후 새로 출력된 근거(순응)는 전환
 사유가 아니므로 지연 없는 하니스에서 게이트 강도가 유지됩니다. 지연 모드는 세션 내내 유지되며,
 인식 성공 시 재무장하는 구 동작은 `GOODBOY_REASONING_LAG_STICKY=rearm`, 지연 확정만 끄려면
 `GOODBOY_REASONING_LAG_CONFIRM=off`. 문서 파일(.md/.txt/.rst/.adoc 등) 편집은 기본
 면제됩니다(`GOODBOY_REASONING_DOC_EXEMPT=off`로 복원). 서브에이전트가 편집할 때는
-**서브에이전트 자신이 쓴** 추론 섹션으로 판정합니다(메인의 글이 아님).
+**서브에이전트 자신이 쓴** 근거 섹션으로 판정합니다(메인의 글이 아님).
 
 ### "Stop이 차단됩니다 — 리뷰 필요"
 
@@ -633,7 +645,7 @@ git 추적에서 빼려면 프로젝트 `.gitignore`에 추가하세요:
 ### "Bash로 프로젝트 파일을 쓰려 합니다" 라며 차단됩니다
 
 정상 동작입니다. `cat > src/x.ts <<EOF`, `sed -i`, `tee` 같은 Bash 쓰기는 read-before-edit·
-추론 게이트를 지나치고 편집 기록에도 남지 않아 **리뷰 강제와 자동 검증까지 통째로 무력화**
+근거 게이트를 지나치고 편집 기록에도 남지 않아 **리뷰 강제와 자동 검증까지 통째로 무력화**
 합니다(라이브 검증에서 서브에이전트가 추론 게이트에 8회 막힌 뒤 heredoc으로 우회한 사례가
 실측되었습니다). 파일 생성·수정은 Edit/Write 도구를 쓰세요.
 
@@ -674,7 +686,7 @@ git 추적에서 빼려면 프로젝트 `.gitignore`에 추가하세요:
 답변에서 인용한 `파일:줄`이 실재하지 않거나, 그 파일을 이 세션에서 읽은 기록이 없습니다.
 
 - **"그런 파일이 없습니다" / "N줄까지입니다"** → 확정 환각입니다. 파일을 실제로 읽어 확인하고
-  인용을 정정하거나, 근거가 없으면 `## 추론 > 추측`으로 낮추세요.
+  인용을 정정하거나, 근거가 없으면 `## 근거 > 추측`으로 낮추세요.
 - **"읽은 기록이 없습니다"** → `Read`(또는 `cat`/`sed -n`)로 실제 확인한 뒤 답하세요.
 
 3회 차단 후에는 사용자 확인 안내와 함께 통과합니다. 끄기: `GOODBOY_CLAIM_GATE=off`
@@ -722,9 +734,9 @@ JSON
 각 축은 **자기 차원만** `dimensions_checked` 에 적어야 합니다. Stop hook은 커서 이후의
 fresh 리뷰 전부를 합집합으로 보므로, 축을 나눠 적어도 커버리지가 채워집니다.
 
-### "Edit가 차단됩니다 — 추론 섹션이 비어 있습니다"
+### "Edit가 차단됩니다 — 근거 섹션이 비어 있습니다"
 
-`## 추론` 제목만 출력하고 내용이 없으면 차단됩니다. 4분류 각각에 실제 항목을 쓰세요
+`deny` 모드에서 `## 근거` 제목만 출력하고 내용이 없으면 차단됩니다(기본 warn은 1회 안내만). 4분류 각각에 결론과 근거를 짧게 쓰세요
 (해당 없는 분류는 `- 없음`으로 명시).
 
 ### auto-compact 경고가 안 뜸

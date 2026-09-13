@@ -89,7 +89,9 @@ export const TOKEN_HABITS: Record<string, TokenHabit> = {
     description:
       '메인 세션에서 Bash로 수행하는 재귀 코드베이스 탐색(grep -r/rg/ag/ack/git grep/find -name)을 ' +
       '감지해 차단하고 서브에이전트 위임을 유도(도구 위임 게이트가 Bash로 우회되는 것을 막음). ' +
-      '파이프 뒤 필터(... | grep)·단일 파일 grep은 예외. 서브에이전트(agent_type)는 면제. ' +
+      '파이프 뒤 필터(... | grep)·단일 파일 grep은 예외. 출력이 제한된 검색도 허용: 바로 다음 파이프가 ' +
+      'head/tail/wc인 경우(모든 검색 도구), grep 계열이 -l/-c/-q(--files-with-matches/--count/--quiet)인 경우 ' +
+      '(--exclude-dir만으로는 허용 안 함). 판정은 따옴표를 인식한다. 서브에이전트(agent_type)는 면제. ' +
       'GOODBOY_BASH_SEARCH_GATE=deny|warn|off (기본 deny).',
   },
   'H5-04': {
@@ -443,6 +445,13 @@ export function webRepeatSearchMessage(query: string): string {
  *   - find는 -name/-path/-regex/-type 등 탐색 술어가 있을 때 매칭.
  *   - 선행 환경변수 할당(FOO=bar) 및 래퍼(sudo/time/nice/nohup/command)는 건너뛴다.
  *   - --version/--help/-V는 제외.
+ *   - 출력이 제한된 검색은 허용(null):
+ *     · 검색 세그먼트 바로 다음 파이프 세그먼트가 head/tail/wc인 경우(모든 검색 도구 공통).
+ *     · grep 계열(grep/egrep/fgrep/rgrep/git grep)이 -l/-c/-q
+ *       (--files-with-matches/--count/--quiet)로 목록·개수·종료코드만 받는 경우.
+ *     · --exclude-dir 등 범위 축소 옵션만으로는 허용하지 않는다(출력량이 제한되지 않음).
+ *   - 세그먼트 분할과 플래그 판정은 따옴표를 인식한다 — 따옴표 안의 | ; && 에서 자르지 않고,
+ *     따옴표 안 문자열(예: grep "x -r y")은 플래그로 보지 않는다.
  *  fail-safe: 비문자열/예외는 null(게이트 미발동). */
 export function classifyBashSearch(command: string): string | null {
   try {
@@ -450,36 +459,73 @@ export function classifyBashSearch(command: string): string | null {
     const trimmed = command.trim();
     if (trimmed === '') return null;
 
-    // 첫 세그먼트만(파이프/;/&& 이전). 뒤쪽 grep은 필터링이므로 대상 아님.
-    const firstSeg = (trimmed.split(/\||;|&&|\n/)[0] ?? '').trim();
-    if (firstSeg === '') return null;
+    // 첫 세그먼트만(파이프/;/&&/||/개행 이전, 따옴표 밖 기준). 뒤쪽 grep은 필터링이므로 대상 아님.
+    const segments = splitShellSegments(trimmed);
+    const first = segments[0];
+    if (!first || first.text === '') return null;
 
     // 선행 환경변수 할당 + 래퍼 명령 제거.
-    let seg = firstSeg.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+/, '');
-    seg = seg.replace(/^(?:sudo|time|nice|nohup|command)\s+/, '');
-    const tokens = seg.split(/\s+/).filter(Boolean);
-    const bin = tokens[0] ?? '';
+    const tokens = tokenizeShellWords(first.text);
+    while (
+      tokens.length > 0 &&
+      !tokens[0]!.quoted &&
+      (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0]!.value) ||
+        /^(?:sudo|time|nice|nohup|command)$/.test(tokens[0]!.value))
+    ) {
+      tokens.shift();
+    }
+    const bin = tokens[0]?.value ?? '';
+    const isGitGrep = bin === 'git' && tokens[1]?.value === 'grep';
 
-    if (/(^|\s)(--version|--help|-V)(\s|$)/.test(seg)) return null;
+    // 따옴표 밖 옵션 토큰만(`--` 이후는 위치 인자라 제외).
+    const flags: string[] = [];
+    for (const t of tokens.slice(isGitGrep ? 2 : 1)) {
+      if (t.quoted) continue;
+      if (t.value === '--') break;
+      if (t.value.startsWith('-')) flags.push(t.value);
+    }
 
-    if (bin === 'rg' || bin === 'ripgrep') return 'rg';
-    if (bin === 'ag') return 'ag';
-    if (bin === 'ack') return 'ack';
-    if (bin === 'git' && tokens[1] === 'grep') return 'git grep';
+    if (flags.some((f) => f === '--version' || f === '--help' || f === '-V')) return null;
+
+    // 바로 다음 파이프 세그먼트가 head/tail/wc면 출력이 제한되므로 허용.
+    const next = segments[1];
+    const pipedToLimiter =
+      first.op === '|' &&
+      next !== undefined &&
+      /^(head|tail|wc)$/.test(tokenizeShellWords(next.text)[0]?.value ?? '');
+    const unlessLimited = (label: string): string | null => (pipedToLimiter ? null : label);
+
+    // grep 계열의 목록/개수/존재 확인 모드(-l/-c/-q)는 매치 본문을 출력하지 않는다.
+    const grepOutputLimited = flags.some(
+      (f) =>
+        (/^-[A-Za-z]+$/.test(f) && /[lcq]/.test(f)) ||
+        f === '--files-with-matches' ||
+        f === '--count' ||
+        f === '--quiet',
+    );
+
+    if (bin === 'rg' || bin === 'ripgrep') return unlessLimited('rg');
+    if (bin === 'ag') return unlessLimited('ag');
+    if (bin === 'ack') return unlessLimited('ack');
+    if (isGitGrep) return grepOutputLimited ? null : unlessLimited('git grep');
 
     if (bin === 'grep' || bin === 'egrep' || bin === 'fgrep' || bin === 'rgrep') {
-      if (bin === 'rgrep') return 'grep -r';
       // 재귀 플래그가 있을 때만. 단일 파일 grep(재귀 아님)은 통과.
       const recursive =
-        /(^|\s)-[a-z]*[rR][a-z]*(\s|=|$)/i.test(seg) ||
-        /--recursive\b/.test(seg) ||
-        /--include\b/.test(seg);
-      return recursive ? 'grep -r' : null;
+        bin === 'rgrep' ||
+        flags.some(
+          (f) =>
+            /^-[a-zA-Z]*[rR][a-zA-Z]*(=|$)/.test(f) ||
+            /^--(dereference-)?recursive$/.test(f) ||
+            /^--include(=|$)/.test(f),
+        );
+      if (!recursive || grepOutputLimited) return null;
+      return unlessLimited('grep -r');
     }
 
     if (bin === 'find') {
       // 탐색 술어(-name/-path/-regex/-type 등)가 있을 때만. 단순 디렉터리 지정은 통과.
-      if (/(^|\s)-(i?name|i?path|i?regex|type)\b/.test(seg)) return 'find';
+      if (flags.some((f) => /^-(i?name|i?path|i?regex|type)$/.test(f))) return unlessLimited('find');
       return null;
     }
 
@@ -487,6 +533,89 @@ export function classifyBashSearch(command: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** 따옴표를 인식해 셸 명령을 제어 연산자(| || && ; 개행) 기준으로 나눈다.
+ *  op = 해당 세그먼트 **뒤에** 오는 연산자(마지막 세그먼트는 null). 따옴표/이스케이프 안의
+ *  연산자 문자는 자르지 않는다. 완전한 셸 파서가 아니라 게이트 판정용 근사다. */
+function splitShellSegments(cmd: string): Array<{ text: string; op: string | null }> {
+  const out: Array<{ text: string; op: string | null }> = [];
+  let cur = '';
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!;
+    if (quote !== null) {
+      cur += c;
+      if (c === '\\' && quote === '"' && i + 1 < cmd.length) {
+        cur += cmd[++i];
+      } else if (c === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (c === '\\' && i + 1 < cmd.length) {
+      cur += c + cmd[++i];
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      quote = c;
+      cur += c;
+      continue;
+    }
+    let op: string | null = null;
+    if (c === '|') op = cmd[i + 1] === '|' ? '||' : '|';
+    else if (c === '&' && cmd[i + 1] === '&') op = '&&';
+    else if (c === ';' || c === '\n') op = c;
+    if (op !== null) {
+      out.push({ text: cur.trim(), op });
+      cur = '';
+      i += op.length - 1;
+      continue;
+    }
+    cur += c;
+  }
+  out.push({ text: cur.trim(), op: null });
+  return out;
+}
+
+/** 세그먼트를 따옴표 인식 단어로 나눈다. quoted = 토큰이 따옴표로 시작함(= 따옴표 안 문자열). */
+function tokenizeShellWords(seg: string): Array<{ value: string; quoted: boolean }> {
+  const out: Array<{ value: string; quoted: boolean }> = [];
+  let value = '';
+  let started = false;
+  let quoted = false;
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < seg.length; i++) {
+    const c = seg[i]!;
+    if (quote !== null) {
+      if (c === quote) quote = null;
+      else if (c === '\\' && quote === '"' && i + 1 < seg.length) value += seg[++i];
+      else value += c;
+      continue;
+    }
+    if (/\s/.test(c)) {
+      if (started) out.push({ value, quoted });
+      value = '';
+      started = false;
+      quoted = false;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      if (!started) quoted = true;
+      started = true;
+      quote = c;
+      continue;
+    }
+    if (c === '\\' && i + 1 < seg.length) {
+      value += seg[++i];
+      started = true;
+      continue;
+    }
+    value += c;
+    started = true;
+  }
+  if (started) out.push({ value, quoted });
+  return out;
 }
 
 export const BASH_SEARCH_MESSAGE =

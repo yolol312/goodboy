@@ -75,7 +75,7 @@ describe('buildRequiredInputsChecklist', () => {
   test('includes the no-fabrication instruction and 가정 routing', () => {
     const out = buildRequiredInputsChecklist(addFeatureInputs);
     expect(out).toContain('지어내지 마세요');
-    expect(out).toContain('## 추론 > 가정');
+    expect(out).toContain('## 근거 > 가정');
   });
 
   test('marks allow_unknown=false items as 확인 필수', () => {

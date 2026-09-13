@@ -81,7 +81,8 @@ async function runHook(
   if (agentId) payload.agent_id = agentId;
   const proc = Bun.spawn(['bun', HOOK], {
     cwd,
-    env: { ...process.env, GOODBOY_DISABLE_DELEGATION: '1' },
+    // 차단 여부로 판정 대상 transcript를 검증하므로 deny 모드로 고정(기본은 warn=비차단).
+    env: { ...process.env, GOODBOY_DISABLE_DELEGATION: '1', GOODBOY_REASONING_GATE: 'deny' },
     stdin: new TextEncoder().encode(JSON.stringify(payload)),
     stdout: 'pipe',
     stderr: 'pipe',

@@ -6,6 +6,15 @@ describe('hasReasoningSection', () => {
     expect(hasReasoningSection('intro\n## 추론\n- 사실')).toBe(true);
   });
 
+  test('detects the current ## 근거 heading', () => {
+    expect(hasReasoningSection('intro\n## 근거\n- 사실')).toBe(true);
+  });
+
+  test('does not match a mere mention of 근거 in prose or a ### 근거 subheading', () => {
+    expect(hasReasoningSection('근거가 부족하다')).toBe(false);
+    expect(hasReasoningSection('### 근거\n- x')).toBe(false);
+  });
+
   test('detects English ## Reasoning heading (case-insensitive)', () => {
     expect(hasReasoningSection('## reasoning\nstuff')).toBe(true);
   });
@@ -40,6 +49,33 @@ describe('parseReasoningSection', () => {
     expect(r!.inferences).toEqual(['i1']);
     expect(r!.assumptions).toEqual(['a1']);
     expect(r!.speculations).toEqual(['s1 ⚠️']);
+  });
+
+  test('parses ## 근거 with ### 판단 as inferences (new heading scheme)', () => {
+    const text = [
+      '## 근거',
+      '### 사실',
+      '- f1',
+      '### 판단',
+      '- j1',
+      '- j2',
+      '### 가정',
+      '- a1',
+      '### 추측 ⚠️',
+      '- s1',
+    ].join('\n');
+    const r = parseReasoningSection(text);
+    expect(r).not.toBeNull();
+    expect(r!.facts).toEqual(['f1']);
+    expect(r!.inferences).toEqual(['j1', 'j2']);
+    expect(r!.assumptions).toEqual(['a1']);
+    expect(r!.speculations).toEqual(['s1']);
+  });
+
+  test('legacy ### 추론 subheading under ## 근거 still counts as inferences', () => {
+    const text = ['## 근거', '### 추론', '- i1', '### 판단', '- j1'].join('\n');
+    const r = parseReasoningSection(text);
+    expect(r!.inferences).toEqual(['i1', 'j1']);
   });
 
   test('returns null when no reasoning heading', () => {

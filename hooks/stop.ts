@@ -1284,7 +1284,7 @@ function main(): void {
           emit({
             decision: 'block',
             reason:
-              `메인 에이전트가 추론 섹션에서 추측/가정 ${declaredUnknowns}건을 선언했지만, ` +
+              `메인 에이전트가 ## 근거 섹션에서 추측/가정 ${declaredUnknowns}건을 선언했지만, ` +
               `리뷰가 가정 검증을 수행하지 않았습니다(unknown_assumptions_checked 비어 있음). ` +
               `review-changes 서브에이전트로 각 추측/가정을 검증해 결과에 기록한 뒤 다시 리뷰하세요. ` +
               `(추측-리뷰 연동, 재시도 ${count}/${MAX_RETRIES})`,

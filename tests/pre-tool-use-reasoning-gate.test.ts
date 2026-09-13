@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 
@@ -84,6 +84,9 @@ async function runHook(
       // 재시도 플러시 대기(v0.27.7)는 테스트에서 기본 비활성 — deny 반복 테스트가
       // 대기로 느려지지 않게 한다. 대기 동작 자체는 전용 테스트가 opts.env로 켠다.
       GOODBOY_REASONING_FLUSH_WAIT_MS: '0',
+      // 기본 모드는 warn(비차단)이다. 이 파일의 기존 테스트는 차단 동작(deny 모드)을 검증하므로
+      //   deny로 고정하고, warn/off 동작은 전용 describe가 opts.env로 덮어써 검증한다.
+      GOODBOY_REASONING_GATE: 'deny',
       ...(opts?.env ?? {}),
     },
     stdin: new TextEncoder().encode(payload),
@@ -713,5 +716,122 @@ describe('pre-tool-use reasoning gate — escape 카운터 (v0.26.1, 탈출구 �
     const d3 = await runHook(cwd, noReason);
     expect(isBlocked(d3)).toBe(true);
     expect(d3).toContain('재시도 1/3');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GOODBOY_REASONING_GATE — warn(기본) / deny / off
+//   warn: 차단하지 않는다. 섹션 미인식·빈 섹션은 스코프당 1회만 안내, 무언 편집은 로그만.
+// ---------------------------------------------------------------------------
+
+/** 빈 값 = 미설정과 같다(envStr이 기본값 warn으로 해석) — runHook의 deny 고정을 해제한다. */
+const DEFAULT_GATE = { GOODBOY_REASONING_GATE: '' };
+const WARN_GUIDANCE_MARK = '이 세션에서 1회만 안내';
+
+function reasoningGateLog(cwd: string): Array<{ gate: string; decision: string; reason?: string }> {
+  try {
+    const p = join(tmpdir(), `goodboy-session-${sessionIdFor(cwd)}`, 'gate-log.jsonl');
+    return readFileSync(p, 'utf8')
+      .split('\n')
+      .filter((l) => l.trim() !== '')
+      .map((l) => JSON.parse(l) as { gate: string; decision: string; reason?: string })
+      .filter((e) => e.gate === 'reasoning');
+  } catch {
+    return [];
+  }
+}
+
+describe('pre-tool-use reasoning gate — 모드 (GOODBOY_REASONING_GATE)', () => {
+  test('warn 기본: 무언 편집(silent-edit)은 차단·안내 없이 로그만 남긴다', async () => {
+    const cwd = makeCwd();
+    const path = join(cwd, 'transcript.jsonl');
+    writeFileSync(path, thinkingOnlyLine() + '\n', 'utf8');
+    const out = await runHook(cwd, path, { env: DEFAULT_GATE });
+    expect(isBlocked(out)).toBe(false);
+    expect(out).toBe('{}');
+    expect(reasoningGateLog(cwd)).toEqual([
+      expect.objectContaining({ decision: 'warn', reason: 'silent-edit' }),
+    ]);
+  });
+
+  test('warn 기본: 섹션 미인식은 통과 + 안내 1회, 두 번째 편집은 안내 없음(로그만)', async () => {
+    const cwd = makeCwd();
+    const tp = makeTranscript(cwd, ['근거 섹션 없는 텍스트']);
+
+    const first = await runHook(cwd, tp, { env: DEFAULT_GATE });
+    expect(isBlocked(first)).toBe(false);
+    expect(first).toContain('## 근거');
+    expect(first).toContain('### 판단');
+    expect(first).toContain(WARN_GUIDANCE_MARK);
+
+    const second = await runHook(cwd, tp, { env: DEFAULT_GATE });
+    expect(isBlocked(second)).toBe(false);
+    expect(second).toBe('{}');
+
+    // 미인식이 반복돼도 deny 카운터가 오르지 않는다 → escape/지연 모드 안내가 나오지 않는다.
+    const third = await runHook(cwd, tp, { env: DEFAULT_GATE });
+    expect(third).toBe('{}');
+    const log = reasoningGateLog(cwd);
+    expect(log.map((e) => `${e.decision}:${e.reason}`)).toEqual([
+      'warn:no-section',
+      'warn:no-section',
+      'warn:no-section',
+    ]);
+  });
+
+  test('warn 안내는 스코프(agent_id ?? main)별로 1회 — 서브에이전트는 따로 안내받는다', async () => {
+    const cwd = makeCwd();
+    const mainTp = makeTranscript(cwd, ['근거 없는 메인 텍스트']);
+    const subDir = join(cwd, 'transcript', 'subagents');
+    mkdirSync(subDir, { recursive: true });
+    writeFileSync(join(subDir, 'agent-subw.jsonl'), assistantLine('근거 없는 서브 텍스트') + '\n', 'utf8');
+
+    expect(await runHook(cwd, mainTp, { env: DEFAULT_GATE })).toContain(WARN_GUIDANCE_MARK);
+    const sub = await runHook(cwd, mainTp, { agentId: 'subw', env: DEFAULT_GATE });
+    expect(isBlocked(sub)).toBe(false);
+    expect(sub).toContain(WARN_GUIDANCE_MARK);
+    expect(await runHook(cwd, mainTp, { env: DEFAULT_GATE })).toBe('{}');
+  });
+
+  test('warn 기본: 빈 섹션(empty-section)도 통과 + 안내', async () => {
+    const cwd = makeCwd();
+    const tp = makeTranscript(cwd, [['## 근거', '### 사실', '### 판단'].join('\n')]);
+    const out = await runHook(cwd, tp, { env: DEFAULT_GATE });
+    expect(isBlocked(out)).toBe(false);
+    expect(out).toContain(WARN_GUIDANCE_MARK);
+    expect(reasoningGateLog(cwd).map((e) => e.reason)).toEqual(['empty-section']);
+  });
+
+  test('warn 기본: 내용 있는 ## 근거 섹션이면 안내 없이 통과', async () => {
+    const cwd = makeCwd();
+    const tp = makeTranscript(cwd, [['## 근거', '### 판단', '- 이 함수만 고치면 된다'].join('\n')]);
+    const out = await runHook(cwd, tp, { env: DEFAULT_GATE });
+    expect(out).toBe('{}');
+    expect(reasoningGateLog(cwd)).toEqual([]);
+  });
+
+  test('deny 모드: ## 근거 / ### 판단 헤딩도 인식해 통과, 미인식 차단 문구는 새 명칭', async () => {
+    const cwd = makeCwd();
+    const ok = makeTranscript(cwd, [['## 근거', '### 판단', '- 이 함수만 고치면 된다'].join('\n')]);
+    expect(isBlocked(await runHook(cwd, ok))).toBe(false);
+
+    const cwd2 = makeCwd();
+    const bad = makeTranscript(cwd2, ['근거 없는 텍스트']);
+    const out = await runHook(cwd2, bad);
+    expect(isBlocked(out)).toBe(true);
+    expect(out).toContain('## 근거');
+    expect(out).toContain('결정 근거 기록 정책');
+    expect(out).not.toContain('추론 가시화');
+  });
+
+  test('off 모드: 무언 편집·미인식·빈 섹션 모두 게이트 전체를 건너뛴다(로그도 없음)', async () => {
+    const off = { GOODBOY_REASONING_GATE: 'off' };
+    const cwd = makeCwd();
+    const silentPath = join(cwd, 'silent.jsonl');
+    writeFileSync(silentPath, thinkingOnlyLine() + '\n', 'utf8');
+    expect(await runHook(cwd, silentPath, { env: off })).toBe('{}');
+    expect(await runHook(cwd, makeTranscript(cwd, ['근거 없는 텍스트']), { env: off })).toBe('{}');
+    expect(await runHook(cwd, makeTranscript(cwd, ['## 근거']), { env: off })).toBe('{}');
+    expect(reasoningGateLog(cwd)).toEqual([]);
   });
 });
