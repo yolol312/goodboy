@@ -10,7 +10,34 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { classifyBashRead, safeMtime } from '../lib/bash-read';
+import { classifyBashRead, classifyBashReadDetailed, safeMtime } from '../lib/bash-read';
+
+// A7: partial readers (head/tail/sed -n) are tagged so the re-Read gate can ignore them.
+describe('classifyBashReadDetailed — partial flags (A7)', () => {
+  const sandbox = (): string => {
+    const cwd = mkdtempSync(join(tmpdir(), 'goodboy-brd-'));
+    tmpDirs.push(cwd);
+    writeFileSync(join(cwd, 'a.ts'), 'x\n', 'utf8');
+    return cwd;
+  };
+  const one = (cmd: string, cwd: string): { path: string; partial: boolean } | undefined =>
+    classifyBashReadDetailed(cmd, cwd)[0];
+
+  test('cat is a full read; head, tail and sed -n are partial', () => {
+    const cwd = sandbox();
+    expect(one('cat a.ts', cwd)?.partial).toBe(false);
+    expect(one('head -n 3 a.ts', cwd)?.partial).toBe(true);
+    expect(one('tail a.ts', cwd)?.partial).toBe(true);
+    expect(one("sed -n '1,5p' a.ts", cwd)?.partial).toBe(true);
+  });
+
+  test('a file read both partially and fully in one command counts as full', () => {
+    const cwd = sandbox();
+    expect(classifyBashReadDetailed('head -n 1 a.ts; cat a.ts', cwd)).toEqual([
+      { path: resolve(cwd, 'a.ts'), partial: false },
+    ]);
+  });
+});
 
 const tmpDirs: string[] = [];
 afterEach(() => {

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { AXIS_DIMENSIONS } from '../lib/review-dimensions';
 
 // H1-03 강제 자동 compact(force >= GOODBOY_COMPACT_FORCE_PCT, 기본 50%)의 Stop hook 통합 테스트.
 const STOP_HOOK = resolve(import.meta.dir, '..', 'hooks', 'stop.ts');
@@ -137,8 +138,10 @@ async function runStop(
 const CODE_FILE = 'util.ts';
 const COMPACT_MARKER = '/compact';
 
-/** A passing review for util.ts: future-dated, covers every dimension a code file requires
- *  (performance + refactoring-quality + security-secrets after the 층2 재편). */
+/** A passing review for util.ts: future-dated and checks every dimension. A code file needs
+ *  performance + refactoring-quality + security-secrets, but requiredDimensionsFor() also
+ *  matches tokens in the absolute path, so a random mkdtemp suffix (e.g. "url") can add
+ *  more; this file tests the compact gate, not review coverage. */
 function passingReview(cwd: string): Record<string, unknown> {
   return {
     timestamp: new Date(Date.now() + 60000).toISOString(),
@@ -147,7 +150,7 @@ function passingReview(cwd: string): Record<string, unknown> {
     findings: [],
     unknown_assumptions_checked: [],
     verdict: 'pass',
-    dimensions_checked: ['performance', 'refactoring-quality', 'security-secrets'],
+    dimensions_checked: Object.values(AXIS_DIMENSIONS).flat(),
   };
 }
 
@@ -179,7 +182,7 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
 
     expect(out.decision).toBe('block');
     expect(out.reason).toContain('강제'); // compact-force reason, NOT the review reason
-    expect(out.reason ?? '').not.toContain('리뷰가 필요합니다');
+    expect(out.reason ?? '').not.toContain('Review is required');
     expect(out.stopReason).toBe('compact_needed');
   });
 
@@ -190,7 +193,7 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
     const out = await runStop(tmp, cwd, sessionId, transcript);
 
     expect(out.decision).toBe('block');
-    expect(out.reason).toContain('리뷰가 필요합니다');
+    expect(out.reason).toContain('Review is required');
     expect(out.stopReason).toBeUndefined();
     expect(out.additionalContext).toBeUndefined();
   });
@@ -225,7 +228,32 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
     expect(out3.decision).toBeUndefined();
     expect(out3.stopReason).toBeUndefined();
     expect(out3.systemMessage ?? '').toContain('H1-03 강제');
-    expect(out3.systemMessage ?? '').toContain('3회');
+    // Counts the blocks that happened, like every other escape message (A9).
+    expect(out3.systemMessage ?? '').toContain('2회 차단 후에도');
+  });
+
+  // A7: resetting on escape made an endless block/block/pass cycle; the escape now latches.
+  test('escape latches for the session until usage drops below the threshold', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
+    writeReview(cwd, passingReview(cwd));
+    const transcript = writeTranscript(cwd, 120_000); // 60%
+    for (let i = 0; i < 3; i++) await runStop(tmp, cwd, sessionId, transcript); // block, block, escape
+
+    const out4 = await runStop(tmp, cwd, sessionId, transcript);
+    const out5 = await runStop(tmp, cwd, sessionId, transcript);
+    expect(out4.decision).toBeUndefined();
+    expect(out4.stopReason).toBeUndefined();
+    expect(out5.decision).toBeUndefined();
+    // The latch must not silence the context warning (it only suppresses re-forcing).
+    expect(out4.systemMessage ?? '').toContain('H1-01');
+
+    // Usage drops (compaction happened) → latch clears → a new excess starts at 1/3.
+    const low = writeTranscript(cwd, 12_000);
+    expect((await runStop(tmp, cwd, sessionId, low)).decision).toBeUndefined();
+    const again = await runStop(tmp, cwd, sessionId, writeTranscript(cwd, 120_000));
+    expect(again.decision).toBe('block');
+    expect(again.reason).toContain('1/3');
   });
 
   test('no transcript / unmeasurable → no force; review enforcement intact', async () => {
@@ -233,7 +261,7 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
     seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
     const out = await runStop(tmp, cwd, sessionId); // no transcript
     expect(out.decision).toBe('block');
-    expect(out.reason).toContain('리뷰');
+    expect(out.reason).toContain('Review is required');
     expect(out.stopReason).toBeUndefined();
   });
 

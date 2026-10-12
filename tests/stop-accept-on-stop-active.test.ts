@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { REVIEW_CURSOR_FILE, cursorFileName } from '../lib/review-cursor';
 
 const STOP_HOOK = resolve(import.meta.dir, '..', 'hooks', 'stop.ts');
 const tmpDirs: string[] = [];
@@ -141,7 +142,15 @@ async function runStop(
   }
 }
 
-const cursorPath = (cwd: string): string => join(cwd, '.claude', '.goodboy-last-review.json');
+/** The review cursor lives in the session state dir (A3), one file per project directory.
+ *  The name comes from the lib, so the "not accepted" checks below cannot pass vacuously
+ *  against a path nothing writes. */
+const cursorPath = (tmp: string, sessionId: string, cwd: string): string =>
+  join(
+    tmp,
+    `goodboy-session-${sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_')}`,
+    cursorFileName(REVIEW_CURSOR_FILE, cwd),
+  );
 
 describe('Stop hook — stop_hook_active 경로의 비차단 리뷰 수락 (v0.26.7)', () => {
   test('펜딩 편집 + 커버 리뷰 + stop_hook_active => 통과하며 커서 전진(수락)', async () => {
@@ -156,7 +165,7 @@ describe('Stop hook — stop_hook_active 경로의 비차단 리뷰 수락 (v0.2
     const out = await runStop(tmp, cwd, sessionId, true);
     expect(out.decision).toBeUndefined(); // 조기 return 경로는 절대 차단하지 않는다
     // v0.26.6까지는 여기서 커서가 전진하지 않아, 리뷰가 만료되면 같은 집합으로 재차단됐다.
-    expect(existsSync(cursorPath(cwd))).toBe(true);
+    expect(existsSync(cursorPath(tmp, sessionId, cwd))).toBe(true);
 
     // 수락됐으므로 다음 full Stop은 펜딩 편집 없음 → 재차단 없이 통과.
     const next = await runStop(tmp, cwd, sessionId, false);
@@ -170,7 +179,7 @@ describe('Stop hook — stop_hook_active 경로의 비차단 리뷰 수락 (v0.2
 
     const out = await runStop(tmp, cwd, sessionId, true);
     expect(out.decision).toBeUndefined(); // 그래도 차단은 하지 않는다
-    expect(existsSync(cursorPath(cwd))).toBe(false); // 수락도 하지 않는다
+    expect(existsSync(cursorPath(tmp, sessionId, cwd))).toBe(false); // 수락도 하지 않는다
 
     // 다음 full Stop이 high finding으로 정식 차단.
     const next = await runStop(tmp, cwd, sessionId, false);
@@ -184,7 +193,7 @@ describe('Stop hook — stop_hook_active 경로의 비차단 리뷰 수락 (v0.2
 
     const out = await runStop(tmp, cwd, sessionId, true);
     expect(out.decision).toBeUndefined();
-    expect(existsSync(cursorPath(cwd))).toBe(false);
+    expect(existsSync(cursorPath(tmp, sessionId, cwd))).toBe(false);
   });
 
   test('필수 차원 누락 리뷰는 수락하지 않는다 — F2 우회 차단 (v0.26.8)', async () => {
@@ -194,7 +203,7 @@ describe('Stop hook — stop_hook_active 경로의 비차단 리뷰 수락 (v0.2
 
     const out = await runStop(tmp, cwd, sessionId, true);
     expect(out.decision).toBeUndefined(); // 차단은 하지 않는다
-    expect(existsSync(cursorPath(cwd))).toBe(false); // 수락도 하지 않는다
+    expect(existsSync(cursorPath(tmp, sessionId, cwd))).toBe(false); // 수락도 하지 않는다
 
     // 다음 full Stop이 차원 누락으로 정식 차단.
     const next = await runStop(tmp, cwd, sessionId, false);
@@ -210,7 +219,7 @@ describe('Stop hook — stop_hook_active 경로의 비차단 리뷰 수락 (v0.2
 
     const out = await runStop(tmp, cwd, sessionId, true, transcript);
     expect(out.decision).toBeUndefined(); // 차단은 하지 않는다
-    expect(existsSync(cursorPath(cwd))).toBe(false); // 수락도 하지 않는다
+    expect(existsSync(cursorPath(tmp, sessionId, cwd))).toBe(false); // 수락도 하지 않는다
   });
 
   test('가정 선언 + 가정 검증 수행 리뷰는 수락된다 (F1.5 충족)', async () => {
@@ -223,7 +232,7 @@ describe('Stop hook — stop_hook_active 경로의 비차단 리뷰 수락 (v0.2
 
     const out = await runStop(tmp, cwd, sessionId, true, transcript);
     expect(out.decision).toBeUndefined();
-    expect(existsSync(cursorPath(cwd))).toBe(true);
+    expect(existsSync(cursorPath(tmp, sessionId, cwd))).toBe(true);
   });
 
   test('수락 시 medium/low finding을 systemMessage로 표면화한다 (v0.26.8)', async () => {
@@ -235,7 +244,7 @@ describe('Stop hook — stop_hook_active 경로의 비차단 리뷰 수락 (v0.2
 
     const out = await runStop(tmp, cwd, sessionId, true);
     expect(out.decision).toBeUndefined();
-    expect(existsSync(cursorPath(cwd))).toBe(true); // medium은 수락을 막지 않는다
+    expect(existsSync(cursorPath(tmp, sessionId, cwd))).toBe(true); // medium은 수락을 막지 않는다
     expect(out.systemMessage ?? '').toContain('참고할 발견사항'); // 조용히 소비하지 않는다
     expect(out.systemMessage ?? '').toContain('[medium]');
   });

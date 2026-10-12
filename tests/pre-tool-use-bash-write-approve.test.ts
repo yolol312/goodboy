@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
+import { approvalMarkerRelPath } from '../lib/approval-marker';
 
 const HOOK = resolve(import.meta.dir, '..', 'hooks', 'pre-tool-use.ts');
 const tmpDirs: string[] = [];
@@ -59,16 +60,45 @@ function isBlocked(stdout: string): boolean {
   return out.hookSpecificOutput?.permissionDecision === 'deny';
 }
 
-const markerPath = (cwd: string): string =>
-  join(cwd, '.claude', '.goodboy-bash-write-approved.txt');
+/** This session's one-shot marker (A3: approvals are per session; the id is basename(cwd)). */
+const markerPath = (cwd: string): string => join(cwd, approvalMarkerRelPath('bash-write', basename(cwd)));
 
 describe('pre-tool-use bash-write gate — 승인 마커 (v0.27.0)', () => {
   test('마커 없으면 차단 + 대량 편집 절차 안내 포함', async () => {
     const cwd = makeCwd();
     const out = await runBash(cwd, 'echo hi > src/a.ts');
     expect(isBlocked(out)).toBe(true);
-    expect(out).toContain('goodboy-bash-write-approved');
+    expect(out).toContain(approvalMarkerRelPath('bash-write', basename(cwd))); // this session's name
     expect(out).toContain('Write 도구로 파일 전체');
+  });
+
+  // A3: one repo-level name let another session's write consume this session's approval.
+  test("another session's write does not consume this session's marker", async () => {
+    const cwd = makeCwd();
+    mkdirSync(join(cwd, '.claude'), { recursive: true });
+    writeFileSync(markerPath(cwd), '', 'utf8');
+    const payload = JSON.stringify({
+      session_id: 'other-session',
+      cwd,
+      tool_name: 'Bash',
+      tool_input: { command: 'echo hi > src/b.ts' },
+    });
+    const proc = Bun.spawn(['bun', HOOK], {
+      cwd,
+      env: { ...process.env, GOODBOY_DISABLE_DELEGATION: '1' },
+      stdin: new TextEncoder().encode(payload),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    expect(isBlocked(out)).toBe(true);
+    expect(existsSync(markerPath(cwd))).toBe(true);
+    try {
+      rmSync(join(tmpdir(), 'goodboy-session-other-session'), { recursive: true, force: true });
+    } catch {
+      // best-effort
+    }
   });
 
   test('마커 있으면 1회 허용 — 마커 소비 + 편집 기록 + 경고 표면화', async () => {
@@ -111,15 +141,18 @@ describe('pre-tool-use bash-write gate — 승인 마커 (v0.27.0)', () => {
     mkdirSync(join(cwd, '.claude'), { recursive: true });
     writeFileSync(markerPath(cwd), '', 'utf8');
     // 현재 세션에 바인딩된 risky 상태 → 위험 게이트(D)가 Bash를 deny한다.
+    //   The gate reads the state from the session state dir (A3).
+    const sessionDir = join(tmpdir(), `goodboy-session-${basename(cwd)}`);
+    mkdirSync(sessionDir, { recursive: true });
     writeFileSync(
-      join(cwd, '.claude', '.goodboy-session-state.json'),
+      join(sessionDir, '.goodboy-session-state.json'),
       JSON.stringify({ category: 'migrate', risk: 'risky', sessionId: basename(cwd) }),
       'utf8',
     );
 
     const out = await runBash(cwd, 'echo hi > src/a.ts');
     expect(isBlocked(out)).toBe(true);
-    expect(out).toContain('위험');
+    expect(out).toContain('classified as risky');
     // v0.27.0에서는 A1.7 시점에 마커가 먼저 소비되고 실행되지 않은 쓰기가
     // 유령 편집으로 기록됐다(리뷰 지적) — 이제 deny 게이트 통과 후에만 소비한다.
     expect(existsSync(markerPath(cwd))).toBe(true);

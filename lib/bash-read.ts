@@ -37,8 +37,11 @@ function looksLikePath(token: string): boolean {
   return true;
 }
 
+/** Readers that show only part of a file (A7): a later full read is not a redundant re-read. */
+const PARTIAL_READERS = new Set(['head', 'tail']);
+
 /** 한 세그먼트(파이프/세미콜론으로 나뉜 한 명령)에서 읽은 파일 후보를 뽑는다. */
-function readTargetsInSegment(tokens: string[]): string[] {
+function readTargetsInSegment(tokens: string[]): { t: string; partial: boolean }[] {
   if (tokens.length === 0) return [];
   // 앞쪽의 env 대입(FOO=bar cmd …)은 건너뛴다.
   let i = 0;
@@ -48,9 +51,10 @@ function readTargetsInSegment(tokens: string[]): string[] {
   if (base === '') return [];
 
   const rest = tokens.slice(i + 1);
-  const out: string[] = [];
+  const out: { t: string; partial: boolean }[] = [];
 
   if (CONTENT_READERS.has(base)) {
+    const partial = PARTIAL_READERS.has(base);
     for (let k = 0; k < rest.length; k++) {
       const t = rest[k] ?? '';
       if (t === OP_TOKEN) break; // 리다이렉션 이후는 읽기 대상이 아니다
@@ -58,7 +62,7 @@ function readTargetsInSegment(tokens: string[]): string[] {
         k++; // 옵션 값 건너뛰기 (`head -n 20 file`)
         continue;
       }
-      if (looksLikePath(t)) out.push(t);
+      if (looksLikePath(t)) out.push({ t, partial });
     }
     return out;
   }
@@ -76,7 +80,7 @@ function readTargetsInSegment(tokens: string[]): string[] {
         sawScript = true;
         continue;
       }
-      if (looksLikePath(t)) out.push(t);
+      if (looksLikePath(t)) out.push({ t, partial: true });
     }
     return out;
   }
@@ -89,8 +93,14 @@ function readTargetsInSegment(tokens: string[]): string[] {
  * 실재하지 않는 경로는 제외한다(오탈자/리다이렉션 잔여물이 읽기로 기록되지 않게).
  */
 export function classifyBashRead(command: string, cwd: string): string[] {
+  return classifyBashReadDetailed(command, cwd).map((r) => r.path);
+}
+
+/** classifyBashRead plus whether each file was only partially shown (head/tail/sed -n).
+ *  A file read both partially and fully in one command counts as a full read. */
+export function classifyBashReadDetailed(command: string, cwd: string): { path: string; partial: boolean }[] {
   if (typeof command !== 'string' || command.trim() === '') return [];
-  let targets: string[];
+  let targets: { t: string; partial: boolean }[];
   try {
     const scanned = stripHeredocs(command);
     targets = tokenizeSegments(scanned).flatMap((tokens) => readTargetsInSegment(tokens));
@@ -108,8 +118,8 @@ export function classifyBashRead(command: string, cwd: string): string[] {
   })();
   if (cwdAbs === '') return [];
 
-  const found = new Set<string>();
-  for (const t of targets) {
+  const found = new Map<string, boolean>(); // path -> partial
+  for (const { t, partial } of targets) {
     let abs: string;
     try {
       abs = resolvePath(cwdAbs, t);
@@ -123,9 +133,9 @@ export function classifyBashRead(command: string, cwd: string): string[] {
     } catch {
       continue;
     }
-    found.add(abs);
+    found.set(abs, (found.get(abs) ?? true) && partial);
   }
-  return Array.from(found);
+  return Array.from(found, ([path, partial]) => ({ path, partial }));
 }
 
 /** 읽기 기록에 함께 남길 mtime. 실패하면 undefined(= mtime 없이 기록). */

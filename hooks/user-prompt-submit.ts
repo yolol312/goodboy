@@ -1,18 +1,21 @@
 #!/usr/bin/env bun
 // UserPromptSubmit hook — 슬래시 커맨드 필수요소 검증 + 위험도 사전 분류
 
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, unlinkSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import {
+  approvalMarkerPath,
   ASK_WHEN_UNCLEAR_INSTRUCTION,
   buildRequiredInputsChecklist,
-  classifyRisk,
   CONCISE_INSTRUCTION,
   detectRiskOverride,
   envStr,
+  explainRisk,
   getCurrentTurn,
   parseSkillFrontmatter,
+  resetRetryCount,
   wantsDetail,
+  writeSessionState,
 } from '../lib';
 
 interface PromptInput {
@@ -96,16 +99,6 @@ export function resolveSkillPath(cmd: string, cwd: string): string | null {
     if (existsSync(p)) return p;
   }
   return null;
-}
-
-function ensureClaudeDir(cwd: string): string {
-  const dir = resolvePath(cwd, '.claude');
-  try {
-    mkdirSync(dir, { recursive: true });
-  } catch {
-    // best-effort
-  }
-  return dir;
 }
 
 function main(): void {
@@ -203,39 +196,34 @@ function main(): void {
       // (C) 위험도 사전 분류
       try {
         const userOverride = detectRiskOverride(args);
-        const risk = classifyRisk({
+        // riskReason lets the risk gate's deny message name the cause (A4).
+        const { level: risk, reason: riskReason } = explainRisk({
           category: cmd,
           fileCount: 0,
           prompt: args,
           riskDefault: fmRiskDefault,
           userOverride,
         });
-        const claudeDir = ensureClaudeDir(cwd);
-        const stateFile = resolvePath(claudeDir, '.goodboy-session-state.json');
         const turn = getCurrentTurn(sessionId);
-        const state = {
+        // 새 작업 시작 → 이전 risk 승인 마커 삭제, 재시도 카운터 리셋. Both come before the
+        //   state write so a failed write cannot skip them (security review: a read-only
+        //   repo copy used to leave the old approval in place for the new risky task).
+        //   This session's marker and counters only — approvals are per session (A3).
+        try {
+          unlinkSync(approvalMarkerPath(cwd, 'risk', sessionId));
+        } catch {
+          // best-effort — usually there is no marker
+        }
+        resetRetryCount(sessionId);
+        // 2-B: 세션 바인딩. pre-tool-use 위험 게이트가 다른 세션/커밋된 잔재 state를 무시하게 한다.
+        //   The gates read the session-dir copy, so another session's command cannot replace it (A3).
+        writeSessionState(cwd, sessionId, {
           category: cmd,
           risk,
+          riskReason,
           turn,
-          // 2-B: 세션 바인딩. pre-tool-use 위험 게이트가 다른 세션/커밋된 잔재 state를 무시하게 한다.
-          sessionId,
           updatedAt: new Date().toISOString(),
-        };
-        writeFileSync(stateFile, JSON.stringify(state, null, 2), 'utf8');
-        // 새 작업 시작 → 이전 risk 승인 마커 삭제
-        const approvedPath = resolvePath(claudeDir, '.goodboy-risk-approved.txt');
-        try {
-          if (existsSync(approvedPath)) unlinkSync(approvedPath);
-        } catch {
-          // best-effort
-        }
-        // 재시도 카운터도 리셋
-        const retryPath = resolvePath(claudeDir, '.goodboy-retry-count.txt');
-        try {
-          if (existsSync(retryPath)) unlinkSync(retryPath);
-        } catch {
-          // best-effort
-        }
+        });
       } catch (err) {
         process.stderr.write(`[goodboy user-prompt-submit] state write error: ${String(err)}\n`);
       }

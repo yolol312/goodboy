@@ -119,10 +119,10 @@ describe('상태 스냅샷 (E1)', () => {
 
   test('검증 실패 마커가 살아 있으면 validationFailed=true + gateDenies 반영', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    const claudeDir = join(cwd, '.claude');
-    mkdirSync(claudeDir, { recursive: true });
+    // The marker lives in the session state dir (A3).
+    mkdirSync(sessionDir(tmp, sessionId), { recursive: true });
     writeFileSync(
-      join(claudeDir, '.goodboy-validation-failed.json'),
+      join(sessionDir(tmp, sessionId), '.goodboy-validation-failed.json'),
       JSON.stringify({ sessionId, timestamp: new Date().toISOString(), commands: ['x'] }),
       'utf8',
     );

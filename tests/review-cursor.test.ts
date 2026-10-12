@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
@@ -12,7 +12,15 @@ import {
   wasFileEditedRecently,
   wasFileReadRecently,
 } from '../lib/file-tracker';
-import { readReviewCursor, writeReviewCursor } from '../lib/review-cursor';
+import {
+  REVIEW_CURSOR_FILE,
+  TEST_CURSOR_FILE,
+  cursorFileName,
+  readReviewCursor,
+  readTestCursor,
+  writeReviewCursor,
+  writeTestCursor,
+} from '../lib/review-cursor';
 import { validateReview } from '../lib/review-validator';
 import type { ReviewResult } from '../lib/types';
 
@@ -148,15 +156,84 @@ describe('wasFileEditedRecently (FRICTION #4)', () => {
   });
 });
 
+// Cursors are per session and per project directory (A3): stored in the session state dir.
 describe('review cursor persistence', () => {
   test('absent cursor => null; write then read round-trips', () => {
+    const s = newSession();
     const cwd = newCwd();
-    expect(readReviewCursor(cwd)).toBeNull();
-    writeReviewCursor(cwd, 7);
-    const c = readReviewCursor(cwd);
+    expect(readReviewCursor(cwd, s)).toBeNull();
+    writeReviewCursor(cwd, 7, s);
+    const c = readReviewCursor(cwd, s);
     expect(c).not.toBeNull();
     expect(c!.turn).toBe(7);
+    expect(c!.sessionId).toBe(s);
     expect(typeof c!.timestamp).toBe('string');
+  });
+
+  // The cursor lives in the session state dir, next to the turn counter it refers to.
+  test('cursors are stored in the session state dir', () => {
+    const s = newSession();
+    const cwd = newCwd();
+    writeReviewCursor(cwd, 3, s);
+    writeTestCursor(cwd, 4, s);
+    expect(existsSync(join(ensureSessionDir(s), cursorFileName(REVIEW_CURSOR_FILE, cwd)))).toBe(true);
+    expect(existsSync(join(ensureSessionDir(s), cursorFileName(TEST_CURSOR_FILE, cwd)))).toBe(true);
+  });
+
+  // A3: turns are per-session, so another session's cursor must not be applied.
+  test("another session's cursor reads as null", () => {
+    const a = newSession();
+    const b = newSession();
+    const cwd = newCwd();
+    writeReviewCursor(cwd, 22, a);
+    expect(readReviewCursor(cwd, b)).toBeNull();
+    writeTestCursor(cwd, 18, a);
+    expect(readTestCursor(cwd, b)).toBeNull();
+    expect(readTestCursor(cwd, a)!.turn).toBe(18);
+  });
+
+  // Layer-1 test run: with one repo-level file, session B's accept overwrote session A's
+  // cursor, so A's already-accepted edits were gated again from "retry 1/3".
+  test("one session's accept does not overwrite another session's cursor", () => {
+    const a = newSession();
+    const b = newSession();
+    const cwd = newCwd();
+    writeReviewCursor(cwd, 22, a);
+    writeTestCursor(cwd, 21, a);
+    writeReviewCursor(cwd, 5, b);
+    writeTestCursor(cwd, 4, b);
+    expect(readReviewCursor(cwd, a)!.turn).toBe(22);
+    expect(readTestCursor(cwd, a)!.turn).toBe(21);
+    expect(readReviewCursor(cwd, b)!.turn).toBe(5);
+  });
+
+  // Hallucination-axis review: the Stop hook scopes the review set to its cwd, so an
+  // accept from a subdirectory must not move the cursor of the repo root.
+  test('each project directory of a session has its own cursor', () => {
+    const s = newSession();
+    const root = newCwd();
+    const sub = join(root, 'src');
+    writeReviewCursor(sub, 9, s);
+    writeTestCursor(sub, 9, s);
+    expect(readReviewCursor(root, s)).toBeNull();
+    expect(readTestCursor(root, s)).toBeNull();
+    expect(readReviewCursor(sub, s)!.turn).toBe(9);
+    expect(cursorFileName(REVIEW_CURSOR_FILE, root)).not.toBe(cursorFileName(REVIEW_CURSOR_FILE, sub));
+  });
+
+  test('a cursor without a matching sessionId reads as null', () => {
+    const s = newSession();
+    const cwd = newCwd();
+    const path = join(ensureSessionDir(s), cursorFileName(REVIEW_CURSOR_FILE, cwd));
+    writeFileSync(path, JSON.stringify({ turn: 22, timestamp: new Date().toISOString() }), 'utf8');
+    expect(readReviewCursor(cwd, s)).toBeNull();
+    writeFileSync(path, JSON.stringify({ turn: 22, timestamp: new Date().toISOString(), sessionId: 'other' }), 'utf8');
+    expect(readReviewCursor(cwd, s)).toBeNull();
+  });
+
+  test('a session id that is not a string reads as no cursor instead of throwing', () => {
+    expect(readReviewCursor(newCwd(), 42 as unknown as string)).toBeNull();
+    expect(() => writeReviewCursor(newCwd(), 1, 42 as unknown as string)).not.toThrow();
   });
 });
 

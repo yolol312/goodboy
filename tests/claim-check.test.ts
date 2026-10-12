@@ -9,6 +9,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
+  type CitationCache,
   citationBlockMessage,
   excludeUserOriginated,
   extractCitations,
@@ -125,13 +126,181 @@ describe('verifyCitations — C1/C2 확정 환각', () => {
     const problems = verifyCitations(cs);
     expect(problems).toHaveLength(1);
     expect(problems[0]!.kind).toBe('line-out-of-range');
-    expect(problems[0]!.detail).toContain('5줄까지');
+    expect(problems[0]!.detail).toContain('only 5 lines');
   });
 
   test('마지막 줄 개행이 줄 수를 부풀리지 않는다', () => {
     const cwd = newProject(); // 'a\nb\nc\nd\ne\n' = 5줄
     expect(verifyCitations(extractCitations('src/a.ts:5', cwd))).toEqual([]);
     expect(verifyCitations(extractCitations('src/a.ts:6', cwd))).toHaveLength(1);
+  });
+});
+
+// A8: ranges and lists used to slip through (`a.ts:10-20` unmatched, `a.ts:14,51` = line 14).
+describe('ranges and lists (A8)', () => {
+  test('a range is one citation checked up to its last line', () => {
+    const cwd = newProject(); // 5 lines
+    const cs = extractCitations('see src/a.ts:2-4 for it', cwd);
+    expect(cs).toHaveLength(1);
+    expect(cs[0]!.line).toBe(2);
+    expect(cs[0]!.lastLine).toBe(4);
+    expect(verifyCitations(cs)).toEqual([]);
+    const over = verifyCitations(extractCitations('src/a.ts:3-9', cwd));
+    expect(over).toHaveLength(1);
+    expect(over[0]!.kind).toBe('line-out-of-range');
+    expect(over[0]!.detail).toContain('src/a.ts:3-9');
+  });
+
+  test('en dash ranges and comma lists', () => {
+    const cwd = newProject();
+    expect(verifyCitations(extractCitations('src/a.ts:2–4', cwd))).toEqual([]);
+    expect(verifyCitations(extractCitations('src/a.ts:2,4', cwd))).toEqual([]);
+    expect(verifyCitations(extractCitations('src/a.ts:1,9', cwd))[0]!.kind).toBe('line-out-of-range');
+  });
+
+  test('prose after a citation is not a line list ("a.ts:5, 100 files")', () => {
+    const cwd = newProject();
+    const cs = extractCitations('see src/a.ts:5, 100 files changed', cwd);
+    expect(cs).toHaveLength(1);
+    expect(cs[0]!.line).toBe(5);
+    expect(verifyCitations(cs)).toEqual([]);
+  });
+
+  test('a reversed range is malformed and ignored, not reported', () => {
+    const cwd = newProject();
+    expect(extractCitations('src/a.ts:4-2', cwd)).toEqual([]);
+  });
+});
+
+// A8: a bare file name used to be resolved at the repo root only ("no such file").
+describe('bare file names (A8)', () => {
+  test('a unique basename resolves to its repo file', () => {
+    const cwd = newProject();
+    const cs = extractCitations('a.ts:3 has it', cwd);
+    expect(cs).toHaveLength(1);
+    expect(cs[0]!.abs).toBe(resolve(cwd, 'src/a.ts'));
+    expect(verifyCitations(cs)).toEqual([]);
+  });
+
+  test('an ambiguous basename is unverifiable (not a hallucination) and asks for the full path', () => {
+    const cwd = newProject();
+    mkdirSync(join(cwd, 'lib'), { recursive: true });
+    writeFileSync(join(cwd, 'lib', 'a.ts'), 'x\n', 'utf8');
+    const problems = verifyCitations(extractCitations('a.ts:1', cwd));
+    expect(problems).toHaveLength(1);
+    expect(problems[0]!.kind).toBe('ambiguous');
+    expect(hallucinatedCitations(problems)).toHaveLength(0);
+    expect(unreadCitations(problems)).toHaveLength(1);
+    expect(problems[0]!.detail).toContain('repo-relative path');
+    expect(problems[0]!.detail).toContain(join('src', 'a.ts'));
+  });
+
+  test('a basename found nowhere is still a missing file', () => {
+    const cwd = newProject();
+    const problems = verifyCitations(extractCitations('zzz.ts:3', cwd));
+    expect(problems[0]!.kind).toBe('missing-file');
+  });
+
+  test('node_modules is not searched, so a miss there is unresolvable, not a hallucination', () => {
+    const cwd = newProject();
+    mkdirSync(join(cwd, 'node_modules', 'pkg'), { recursive: true });
+    writeFileSync(join(cwd, 'node_modules', 'pkg', 'only.ts'), 'x\n', 'utf8');
+    const problems = verifyCitations(extractCitations('only.ts:1', cwd));
+    expect(problems[0]!.kind).toBe('ambiguous');
+    expect(problems[0]!.detail).toContain('could not resolve');
+    expect(hallucinatedCitations(problems)).toHaveLength(0);
+  });
+
+  test('a unique match elsewhere still resolves when node_modules exists', () => {
+    const cwd = newProject();
+    mkdirSync(join(cwd, 'node_modules', 'pkg'), { recursive: true });
+    expect(verifyCitations(extractCitations('a.ts:2', cwd))).toEqual([]);
+  });
+
+  test('the user-originated exclusion compares the whole range', () => {
+    const cwd = newProject();
+    const cs = extractCitations('src/a.ts:3-9', cwd);
+    // The user mentioned line 3 only; the model's range past EOF stays its own claim.
+    expect(excludeUserOriginated(cs, ['what is at src/a.ts:3 ?'], cwd)).toHaveLength(1);
+  });
+});
+
+// Layer-1 test run: a citation followed directly by "?" was not recognized, so the user's
+// question was not excluded and an honest "there is no such file" answer was blocked.
+describe('citation endings', () => {
+  test('?, !, a column, and Hangul particles end a citation', () => {
+    const cwd = newProject();
+    for (const t of ['Is it at src/a.ts:3?', 'see src/a.ts:3!', 'src/a.ts:3:7 error', 'src/a.ts:3에서 확인', 'src/a.ts:3을 봤다']) {
+      expect(extractCitations(t, cwd).map((c) => c.line)).toEqual([3]);
+    }
+  });
+
+  test("a user's question ending in ? is excluded from the answer", () => {
+    const cwd = newProject();
+    const cs = extractCitations('There is no src/nope.ts:42 in this repo.', cwd);
+    expect(excludeUserOriginated(cs, ['Is the bug at src/nope.ts:42?'], cwd)).toEqual([]);
+  });
+
+  test('letters right after the number still make no citation', () => {
+    expect(extractCitations('src/a.ts:3x', newProject())).toEqual([]);
+  });
+});
+
+// Performance review: each extractCitations call walked the repo on its own (the answer
+// plus up to three user prompts per Stop) with no time limit, which pushed a Stop past
+// the 15 s hook timeout on directory-heavy trees.
+describe('bare-name index cache and time budget', () => {
+  test('a shared cache walks the repo once: a file added after the first call is not seen', () => {
+    const cwd = newProject();
+    const cache: CitationCache = {};
+    expect(extractCitations('a.ts:1', cwd, cache)[0]!.abs).toBe(resolve(cwd, 'src/a.ts'));
+    mkdirSync(join(cwd, 'lib'), { recursive: true });
+    writeFileSync(join(cwd, 'lib', 'a.ts'), 'x\n', 'utf8');
+    // Same cache: still the first walk's answer. A fresh call walks again and sees both.
+    expect(extractCitations('a.ts:2', cwd, cache)[0]!.candidates).toBeUndefined();
+    expect(extractCitations('a.ts:2', cwd)[0]!.candidates).toHaveLength(2);
+  });
+
+  test('excludeUserOriginated resolves user prompts with the same cache', () => {
+    const cwd = newProject();
+    const cache: CitationCache = {};
+    const cs = extractCitations('see a.ts:3', cwd, cache);
+    expect(excludeUserOriginated(cs, ['why is a.ts:3 like that?'], cwd, cache)).toEqual([]);
+  });
+
+  test('a walk past its time budget is incomplete: a unique basename is unresolvable, not resolved', () => {
+    const cwd = newProject();
+    const problems = verifyCitations(extractCitations('a.ts:3', cwd, { timeBudgetMs: -1 }));
+    expect(problems).toHaveLength(1);
+    expect(problems[0]!.kind).toBe('ambiguous');
+    expect(problems[0]!.detail).toContain('could not resolve');
+    expect(hallucinatedCitations(problems)).toHaveLength(0);
+  });
+
+  test('a timed-out walk never reports a bare name as a missing file', () => {
+    const cwd = newProject();
+    const problems = verifyCitations(extractCitations('zzz.ts:3', cwd, { timeBudgetMs: -1 }));
+    expect(problems[0]!.kind).toBe('ambiguous');
+    expect(hallucinatedCitations(problems)).toHaveLength(0);
+  });
+
+  // Hallucination-axis review: a depth limit of 12 marked the whole index incomplete in
+  //   deep Java/Maven trees, so every bare name there became "could not resolve".
+  test('a unique basename deep in a package tree still resolves', () => {
+    const cwd = newProject();
+    const deep = join(cwd, 'src', 'main', 'java', 'com', 'acme', 'shop', 'order', 'api', 'v2', 'internal', 'web', 'dto', 'view');
+    mkdirSync(deep, { recursive: true });
+    writeFileSync(join(deep, 'OrderView.java'), 'class OrderView {}\n', 'utf8');
+    const cs = extractCitations('OrderView.java:1', cwd);
+    expect(cs[0]!.candidates).toBeUndefined();
+    expect(cs[0]!.abs).toBe(join(deep, 'OrderView.java'));
+  });
+
+  test('no citations in the answer: user prompts are not parsed', () => {
+    const cwd = newProject();
+    const cache: CitationCache = {};
+    expect(excludeUserOriginated([], ['a.ts:1'], cwd, cache)).toEqual([]);
+    expect(cache.index).toBeUndefined();
   });
 });
 

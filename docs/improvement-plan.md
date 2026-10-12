@@ -4,6 +4,10 @@
 > 품질 보증 가드레일 레이어**로 발전한다. MoAI-ADK·gstack 벤치마킹과 3주간의 실사용
 > 오탐 수정 이력(v0.26.3~v0.27.9)에서 도출했다.
 
+> **Status (2026-10-12):** new-gate items in this roadmap are on hold until the
+> stabilization track in [stabilization-plan.md](stabilization-plan.md) reaches v1.0.
+> That plan also corrects §2.2.4 and §2.2.5 below.
+
 ---
 
 ## 1. 목적 선언

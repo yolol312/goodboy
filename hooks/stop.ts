@@ -1,11 +1,11 @@
 #!/usr/bin/env bun
 // Stop hook — 턴 증가, 리뷰 강제/검증, 재시도 카운터, 커서/차원 검사
 
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { resolve as resolvePath } from 'node:path';
-import type { CitationProblem, StatusSnapshot } from '../lib';
+import { isAbsolute, relative, resolve as resolvePath, sep } from 'node:path';
+import type { CitationCache, CitationProblem, ReviewResult, StatusSnapshot } from '../lib';
 import {
   citationBlockMessage,
+  CLI_PATH,
   clearReadRecords,
   clearValidationFailure,
   compactForcePct,
@@ -46,18 +46,21 @@ import {
   getEditsSince,
   getEditsWithLastTimestampSince,
   hasReasoningSection,
-  highSeverityFindings,
   incrementTurn,
   isTestFile,
   logGate,
   parseReasoningSection,
   readGateLog,
   readHabitState,
+  readRetryCount,
   readReviewCursor,
+  readSessionState,
   readValidationFailure,
   requiredDimensionsFor,
+  resetRetryCount,
   validateReviewCoverage,
   writeHabitState,
+  writeRetryCount,
   writeReviewCursor,
   writeStatusSnapshot,
 } from '../lib';
@@ -89,6 +92,10 @@ interface HookOutput {
 }
 
 const MAX_RETRIES = 3;
+// Escapes fire on attempt MAX_RETRIES, i.e. after MAX_RETRIES - 1 blocks (A9: messages
+// and README said "after 3 blocks" while the gates block twice).
+const ESCAPE_AFTER_BLOCKS = MAX_RETRIES - 1;
+
 
 /** $HOME/.claude/settings.json 경로. HOME 미설정/오류 시 null(설정 폴백을 건너뜀).
  *  하드코딩 대신 process.env.HOME 기반으로 구성한다. */
@@ -240,7 +247,6 @@ function maybeSetLongSessionWarning(
  *           forced: 이번 Stop에서 강제가 발동했는지(escape 통과 포함) — H1-01 스팸 억제 판단용. */
 function maybeForceCompact(
   usage: ReturnType<typeof getContextUsage>,
-  cwd: string,
   sessionId: string,
 ): { output: HookOutput | null; forced: boolean } {
   try {
@@ -248,7 +254,7 @@ function maybeForceCompact(
       // (v0.27.6) 측정 불가 — 압축 경계 직후(압축 후 usage 미플러시)가 대표 사례.
       //   이전 사이클의 잔존 카운트가 다음 진짜 초과 때 즉시 escape로 튀지 않게 리셋한다.
       try {
-        resetRetryCount(ensureClaudeDir(cwd), COMPACT_FORCE_COUNT_FILE);
+        resetRetryCount(sessionId, COMPACT_FORCE_COUNT_FILE);
       } catch {
         // best-effort
       }
@@ -256,11 +262,10 @@ function maybeForceCompact(
     }
     const forcePct = compactForcePct();
     const pct = Math.round(usage.percent);
-    const claudeDir = ensureClaudeDir(cwd);
 
     // 임계 미만 → 카운터 리셋 후 아무 동작 없음.
     if (usage.percent < forcePct) {
-      resetRetryCount(claudeDir, COMPACT_FORCE_COUNT_FILE);
+      resetRetryCount(sessionId, COMPACT_FORCE_COUNT_FILE);
       return { output: null, forced: false };
     }
 
@@ -270,24 +275,30 @@ function maybeForceCompact(
     if (!usage.confident) {
       // E1: "강제했을 상황인데 한도 미확정으로 보류" — 무력화 상태의 핵심 신호라 기록한다.
       logGate(sessionId, 'compact-force', 'fail-open', `limit-unconfident pct=${pct}`);
-      resetRetryCount(claudeDir, COMPACT_FORCE_COUNT_FILE);
+      resetRetryCount(sessionId, COMPACT_FORCE_COUNT_FILE);
       return { output: null, forced: false };
     }
 
-    const count = readRetryCount(claudeDir, COMPACT_FORCE_COUNT_FILE) + 1;
+    const prev = readRetryCount(sessionId, COMPACT_FORCE_COUNT_FILE);
+    // A7: the escape latches for this session (the counter is session-bound) until usage
+    //   drops below the threshold or becomes unmeasurable — both paths above reset it.
+    //   Resetting on escape produced an endless block/block/pass cycle (observed: 7 Stops).
+    //   forced=false: nothing fires on a latched Stop, so H1-01/D4 context warnings stay on.
+    if (prev >= MAX_RETRIES) return { output: null, forced: false };
+    const count = prev + 1;
 
     // MAX_RETRIES escape — 강제를 반복했는데도 해소되지 않음 → 통과 + 경고(무한 block 방지).
     if (count >= MAX_RETRIES) {
-      resetRetryCount(claudeDir, COMPACT_FORCE_COUNT_FILE);
+      writeRetryCount(sessionId, MAX_RETRIES, COMPACT_FORCE_COUNT_FILE);
       logGate(sessionId, 'compact-force', 'warn', `escape pct=${pct}`);
       habitWarnings.push(
-        `컨텍스트 사용률 ${pct}%가 지속됩니다. 자동 압축 강제를 ${MAX_RETRIES}회 시도했으나 ` +
+        `컨텍스트 사용률 ${pct}%가 지속됩니다. 자동 압축 강제가 ${ESCAPE_AFTER_BLOCKS}회 차단 후에도 ` +
           '해소되지 않아 이번 턴은 통과시킵니다. 수동으로 /compact 또는 새 세션을 권장합니다. (H1-03 강제)',
       );
       return { output: null, forced: true };
     }
 
-    writeRetryCount(claudeDir, count, COMPACT_FORCE_COUNT_FILE);
+    writeRetryCount(sessionId, count, COMPACT_FORCE_COUNT_FILE);
     logGate(sessionId, 'compact-force', 'deny', `pct=${pct} retry=${count}`);
     return {
       output: {
@@ -342,44 +353,8 @@ function emit(out: HookOutput): void {
   }
 }
 
-function ensureClaudeDir(cwd: string): string {
-  const dir = resolvePath(cwd, '.claude');
-  try {
-    mkdirSync(dir, { recursive: true });
-  } catch {
-    // best-effort
-  }
-  return dir;
-}
-
-function readRetryCount(claudeDir: string, file: string = '.goodboy-retry-count.txt'): number {
-  try {
-    const path = resolvePath(claudeDir, file);
-    if (!existsSync(path)) return 0;
-    const raw = readFileSync(path, 'utf8').trim();
-    const n = parseInt(raw, 10);
-    return Number.isFinite(n) ? n : 0;
-  } catch {
-    return 0;
-  }
-}
-
-function writeRetryCount(claudeDir: string, n: number, file: string = '.goodboy-retry-count.txt'): void {
-  try {
-    writeFileSync(resolvePath(claudeDir, file), String(n), 'utf8');
-  } catch {
-    // best-effort
-  }
-}
-
-function resetRetryCount(claudeDir: string, file: string = '.goodboy-retry-count.txt'): void {
-  try {
-    const path = resolvePath(claudeDir, file);
-    if (existsSync(path)) unlinkSync(path);
-  } catch {
-    // best-effort
-  }
-}
+// Retry counters (readRetryCount/writeRetryCount/resetRetryCount) live in lib/retry-counter.ts
+// and are stored per session (stabilization plan A3).
 
 /** 리뷰 유효창(분). v0.26.7: 기본 30분 → 24시간(env GOODBOY_REVIEW_WINDOW_MIN).
  *  staleness가 파일별 편집 시각 기준(v0.26.5)이라 벽시계 창은 정합성 담보가 아니라
@@ -451,10 +426,14 @@ function checkCitations(
     //   단, **훅 자신의 차단 메시지는 제외한다.** 하니스가 Stop 훅 피드백을 user 엔트리로
     //   기록하는데, 그 안에 문제의 인용이 그대로 들어 있어서 "사용자가 먼저 쓴 것"으로
     //   둔갑했다 — 첫 차단 이후 같은 환각이 영구 면역되던 실측 결함(P9).
+    //   One cache for both sides (and main() runs this at most once per Stop), so the repo
+    //   is walked for bare names at most once per Stop.
+    const names: CitationCache = {};
     const citations = excludeUserOriginated(
-      extractCitations(last, cwd),
+      extractCitations(last, cwd, names),
       extractRecentUserTexts(transcriptPath, 3).filter((t) => !isGateMessage(t)),
       cwd,
+      names,
     );
     if (citations.length === 0) return [];
     const turn = getCurrentTurn(sessionId);
@@ -469,34 +448,29 @@ function checkCitations(
   }
 }
 
-function claimGate(
-  sessionId: string,
-  cwd: string,
-  claudeDir: string,
-  transcriptPath: string | undefined,
-): HookOutput | null {
+function claimGate(sessionId: string, citationCheck: () => CitationProblem[]): HookOutput | null {
   try {
-    const problems = checkCitations(sessionId, cwd, transcriptPath);
+    const problems = citationCheck();
     if (problems.length === 0) {
-      resetRetryCount(claudeDir, CLAIM_COUNT_FILE);
+      resetRetryCount(sessionId, CLAIM_COUNT_FILE);
       return null;
     }
 
     const hallucinated = hallucinatedCitations(problems);
     const unread = unreadCitations(problems);
 
-    const count = readRetryCount(claudeDir, CLAIM_COUNT_FILE) + 1;
+    const count = readRetryCount(sessionId, CLAIM_COUNT_FILE) + 1;
     if (count >= MAX_RETRIES) {
       // 영구 차단 방지 — 통과시키되 사용자에게 알린다.
-      resetRetryCount(claudeDir, CLAIM_COUNT_FILE);
+      resetRetryCount(sessionId, CLAIM_COUNT_FILE);
       logGate(sessionId, 'claim', 'warn', 'escape');
       habitWarnings.push(
-        `인용 검증이 ${MAX_RETRIES}회 차단 후에도 해소되지 않아 이번 턴은 통과시킵니다. ` +
+        `인용 검증이 ${ESCAPE_AFTER_BLOCKS}회 차단 후에도 해소되지 않아 이번 턴은 통과시킵니다. ` +
           `사용자 확인이 필요합니다. (${(hallucinated[0] ?? unread[0])?.detail ?? ''})`,
       );
       return null;
     }
-    writeRetryCount(claudeDir, count, CLAIM_COUNT_FILE);
+    writeRetryCount(sessionId, count, CLAIM_COUNT_FILE);
 
     if (hallucinated.length > 0) {
       logGate(sessionId, 'claim', 'deny', `hallucinated(${hallucinated.length})`);
@@ -550,9 +524,15 @@ function testGateActive(cwd: string): { active: boolean; evidence: string } {
  * 두 부류를 뺀다. 둘 다 "요구해도 해소할 방법이 없어서 escape로만 끝나는" 부류다:
  *   - 테스트 파일 — 테스트를 테스트하라는 무한 후퇴(실측: tests/hello.test.ts)
  *   - 문서 파일 — README를 단위 테스트할 수 없다(실측: README.md 등 5개 요구)
+ *
+ * Both checks see the path below `cwd` only. On the absolute path, a repo that lives under
+ * a tests/ or spec/ directory made every file a "test file" and silently turned layer 1
+ * off (layer-1 test run).
  */
-function needsTestCoverage(file: string): boolean {
-  return !isTestFile(file) && !isDocFile(file);
+function needsTestCoverage(file: string, cwd: string): boolean {
+  const rel = relative(resolvePath(cwd), file);
+  const scoped = rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel) ? rel : file;
+  return !isTestFile(scoped) && !isDocFile(scoped);
 }
 
 /**
@@ -569,17 +549,17 @@ function needsTestCoverage(file: string): boolean {
  * @returns 이번 호출에서 실제로 수락(커서 전진)했으면 true. 호출부는 이 신호로
  *          "직전 차단이 해소됐다"를 알고 다음 층(리뷰)까지 이어서 판정한다.
  */
-function tryAcceptPendingTest(sessionId: string, cwd: string, claudeDir: string): boolean {
+function tryAcceptPendingTest(sessionId: string, cwd: string): boolean {
   if (!testGateActive(cwd).active) return false;
   try {
-    const cursor = readTestCursor(cwd);
+    const cursor = readTestCursor(cwd, sessionId);
     const cursorTurn = cursor ? cursor.turn : 0;
-    const recentEdits = getEditsSince(sessionId, cursorTurn, cwd).filter(needsTestCoverage);
+    const recentEdits = getEditsSince(sessionId, cursorTurn, cwd).filter((f) => needsTestCoverage(f, cwd));
     if (recentEdits.length === 0) return false;
     const results = findRecentTestFiles(resolvePath(cwd, '.claude', 'tests'), testWindowMinutes());
     if (results.length === 0) return false;
     const changedEdits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd).filter((e) =>
-      needsTestCoverage(e.file),
+      needsTestCoverage(e.file, cwd),
     );
     const cov = validateTestCoverage(results, changedEdits);
     if (!cov.ok) return false;
@@ -590,8 +570,8 @@ function tryAcceptPendingTest(sessionId: string, cwd: string, claudeDir: string)
     if (scanForbiddenPatterns(effective.flatMap((r) => r.test_files ?? [])).length > 0) return false;
     if (uncoveredCriteria(effective, requiredAcceptanceCriteria(cwd)).length > 0) return false;
     // 수락.
-    resetRetryCount(claudeDir, TEST_COUNT_FILE);
-    writeTestCursor(cwd, getCurrentTurn(sessionId));
+    resetRetryCount(sessionId, TEST_COUNT_FILE);
+    writeTestCursor(cwd, getCurrentTurn(sessionId), sessionId);
     statusSnapshot.testPending = false;
     logGate(sessionId, 'test', 'warn', 'accept-on-stop-active');
     return true;
@@ -618,13 +598,13 @@ function tryAcceptPendingTest(sessionId: string, cwd: string, claudeDir: string)
  *
  * @returns block 출력(차단) 또는 null(통과/게이트 비활성)
  */
-function testGate(sessionId: string, cwd: string, claudeDir: string): HookOutput | null {
+function testGate(sessionId: string, cwd: string): HookOutput | null {
   const gate = testGateActive(cwd);
   try {
-    const cursor = readTestCursor(cwd);
+    const cursor = readTestCursor(cwd, sessionId);
     const cursorTurn = cursor ? cursor.turn : 0;
     // 문서·테스트 파일만 바뀐 턴은 층1의 관심사가 아니다 — 요구해도 해소할 방법이 없다.
-    const recentEdits = getEditsSince(sessionId, cursorTurn, cwd).filter(needsTestCoverage);
+    const recentEdits = getEditsSince(sessionId, cursorTurn, cwd).filter((f) => needsTestCoverage(f, cwd));
     if (recentEdits.length === 0) {
       statusSnapshot.testPending = false;
       return null;
@@ -654,9 +634,9 @@ function testGate(sessionId: string, cwd: string, claudeDir: string): HookOutput
     const results = findRecentTestFiles(testsDir, testWindowMinutes());
 
     const block = (reason: string): HookOutput | null => {
-      const count = readRetryCount(claudeDir, TEST_COUNT_FILE) + 1;
+      const count = readRetryCount(sessionId, TEST_COUNT_FILE) + 1;
       if (count < MAX_RETRIES) {
-        writeRetryCount(claudeDir, count, TEST_COUNT_FILE);
+        writeRetryCount(sessionId, count, TEST_COUNT_FILE);
         // 자르지 않는다 — gate-log가 자체 상한(300자)으로 다듬는다. 80자로 잘랐더니
         //   라이브 로그에서 어떤 파일이 문제인지 보이지 않았다(경로가 `/pr` 에서 끊김).
         logGate(sessionId, 'test', 'deny', reason);
@@ -666,13 +646,13 @@ function testGate(sessionId: string, cwd: string, claudeDir: string): HookOutput
         };
       }
       // 한계 초과 → 통과 + 알림 + 커서 전진(영구 차단 방지 — 리뷰 게이트와 동일 패턴).
-      resetRetryCount(claudeDir, TEST_COUNT_FILE);
-      writeTestCursor(cwd, getCurrentTurn(sessionId));
+      resetRetryCount(sessionId, TEST_COUNT_FILE);
+      writeTestCursor(cwd, getCurrentTurn(sessionId), sessionId);
       // 사유를 함께 남긴다 — 라이브 검증에서 'escape'만 기록돼 3번째 차단 이유를
       //   사후에 알 수 없었다(계측 원칙: 게이트가 왜 새어나갔는지 추적 가능해야 한다).
       logGate(sessionId, 'test', 'warn', `escape: ${reason}`);
       habitWarnings.push(
-        `테스트 게이트가 ${MAX_RETRIES}회 차단 후에도 해소되지 않아 이번 턴은 통과시킵니다. ` +
+        `테스트 게이트가 ${ESCAPE_AFTER_BLOCKS}회 차단 후에도 해소되지 않아 이번 턴은 통과시킵니다. ` +
           `사용자 확인이 필요합니다. (사유: ${reason})`,
       );
       return null;
@@ -691,7 +671,7 @@ function testGate(sessionId: string, cwd: string, claudeDir: string): HookOutput
     //   된다(라이브 실측: `tests/hello.test.ts` 가 "테스트되지 않은 변경 파일"로 잡혔다).
     //   문서도 같은 이유로 뺀다(라이브 실측: README.md 등 5개를 요구했다).
     const changedEdits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd).filter((e) =>
-      needsTestCoverage(e.file),
+      needsTestCoverage(e.file, cwd),
     );
     const cov = validateTestCoverage(results, changedEdits);
     if (!cov.ok) {
@@ -735,13 +715,13 @@ function testGate(sessionId: string, cwd: string, claudeDir: string): HookOutput
       return block(
         `확정된 요구사항/프로토타입이 요구하는 수용 기준이 테스트로 커버되지 않았습니다: ` +
           `${list}${uncovered.length > 3 ? ` 외 ${uncovered.length - 3}건` : ''}. ` +
-          `\`bun \${CLAUDE_PLUGIN_ROOT}/lib/cli.ts acceptance-list\` 로 전체 목록을 확인하세요.`,
+          `\`bun "${CLI_PATH}" acceptance-list\` 로 전체 목록을 확인하세요.`,
       );
     }
 
     // 통과 → 커서 전진 + 카운터 리셋.
-    resetRetryCount(claudeDir, TEST_COUNT_FILE);
-    writeTestCursor(cwd, getCurrentTurn(sessionId));
+    resetRetryCount(sessionId, TEST_COUNT_FILE);
+    writeTestCursor(cwd, getCurrentTurn(sessionId), sessionId);
     statusSnapshot.testPending = false;
     return null;
   } catch (err) {
@@ -749,6 +729,20 @@ function testGate(sessionId: string, cwd: string, claudeDir: string): HookOutput
     process.stderr.write(`[goodboy stop] test gate error: ${String(err)}\n`);
     return null;
   }
+}
+
+/** Reviews about this session's work: they cover at least one file the session edited.
+ *  `.claude/reviews/` is shared by every session in the repo, and since cursors are per
+ *  session, a session without a cursor saw every open finding in the window — another
+ *  session's high finding (even one that session had escaped) blocked a clean review here
+ *  (hallucination-axis review). Findings are evaluated over these reviews only. */
+function sessionReviews(reviews: ReviewResult[], sessionId: string, cwd: string): ReviewResult[] {
+  const mine = new Set(getEditsSince(sessionId, 0, cwd).map((f) => resolvePath(f)));
+  return reviews.filter((r) =>
+    (Array.isArray(r.reviewed_files) ? r.reviewed_files : []).some(
+      (f) => typeof f === 'string' && mine.has(resolvePath(cwd, f)),
+    ),
+  );
 }
 
 /** (v0.26.7, v0.26.8 보강) stop_hook_active 조기 return 경로의 비차단 리뷰 수락 시도.
@@ -771,7 +765,7 @@ function tryAcceptPendingReview(
   transcriptPath: string | undefined,
 ): string | null {
   try {
-    const cursor = readReviewCursor(cwd);
+    const cursor = readReviewCursor(cwd, sessionId);
     const cursorTurn = cursor ? cursor.turn : 0;
     const recentEdits = getEditsSince(sessionId, cursorTurn, cwd);
     if (recentEdits.length === 0) return null;
@@ -781,7 +775,7 @@ function tryAcceptPendingReview(
     const changedEdits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd);
     const v = validateReviewCoverage(reviews, changedEdits);
     if (!v.ok) return null;
-    const active = currentFindings(reviews, cursor ? cursor.timestamp : null);
+    const active = currentFindings(sessionReviews(reviews, sessionId, cwd), cursor ? cursor.timestamp : null);
     // (F 상당) high는 수락 보류 — 다음 full Stop이 정식으로 차단/안내한다.
     if (active.some((f) => f && f.severity === 'high')) return null;
     const effective = v.effective;
@@ -813,10 +807,9 @@ function tryAcceptPendingReview(
     );
     if (requiredDims.some((d) => !checkedDims.has(d))) return null;
     // 수락.
-    writeReviewCursor(cwd, getCurrentTurn(sessionId));
-    const claudeDir = ensureClaudeDir(cwd);
-    resetRetryCount(claudeDir, REVIEW_VALIDATE_COUNT_FILE);
-    resetRetryCount(claudeDir);
+    writeReviewCursor(cwd, getCurrentTurn(sessionId), sessionId);
+    resetRetryCount(sessionId, REVIEW_VALIDATE_COUNT_FILE);
+    resetRetryCount(sessionId);
     statusSnapshot.reviewPending = false;
     // 수락은 평소 기록하지 않지만, 이 경로는 신설이라 관측 가능성을 위해 남긴다.
     logGate(sessionId, 'review', 'warn', 'accept-on-stop-active');
@@ -850,6 +843,13 @@ function main(): void {
       const cwd = input.cwd ?? process.cwd();
       const sessionId = input.session_id ?? 'unknown';
       snapshotSessionId = sessionId;
+      // Layer 0 runs at most once per Stop. The stop_hook_active path checks it for a
+      //   warning and, after accepting a test result, continues to the full gates; running
+      //   it twice doubled the flush wait (past the 15 s hook timeout at the 8 s maximum)
+      //   and the bare-name walk (performance review, layer-1 test run).
+      let citationProblems: CitationProblem[] | undefined;
+      const citationCheck = (): CitationProblem[] =>
+        (citationProblems ??= checkCitations(sessionId, cwd, input.transcript_path));
 
       // (A) 턴 증가
       try {
@@ -890,21 +890,10 @@ function main(): void {
       }
 
       // (E1) 스냅샷: 카테고리/위험도(session-state에서, 현재 세션 것만).
-      try {
-        const statePath = resolvePath(cwd, '.claude', '.goodboy-session-state.json');
-        if (existsSync(statePath)) {
-          const st = JSON.parse(readFileSync(statePath, 'utf8')) as {
-            category?: string;
-            risk?: string;
-            sessionId?: string;
-          };
-          if (st && st.sessionId === sessionId) {
-            statusSnapshot.category = st.category ?? null;
-            statusSnapshot.risk = st.risk ?? null;
-          }
-        }
-      } catch {
-        // best-effort
+      const st = readSessionState(cwd, sessionId);
+      if (st) {
+        statusSnapshot.category = st.category ?? null;
+        statusSnapshot.risk = st.risk ?? null;
       }
 
       // (B) 무한루프 방지 — 단, 리뷰 수락은 여기서도 시도한다(v0.26.7).
@@ -917,9 +906,7 @@ function main(): void {
         // 층0: 이 경로에서는 절대 차단하지 않지만, 정정 후에도 여전히 실재하지 않는
         //   위치를 인용하고 있으면 사용자에게 보이도록 경고만 남긴다(무한 block 방지 유지).
         try {
-          const stillWrong = hallucinatedCitations(
-            checkCitations(sessionId, cwd, input.transcript_path),
-          );
+          const stillWrong = hallucinatedCitations(citationCheck());
           if (stillWrong.length > 0) {
             logGate(sessionId, 'claim', 'warn', 'still-hallucinated-on-stop-active');
             habitWarnings.push(
@@ -932,7 +919,7 @@ function main(): void {
         // 층1도 같은 이유로 여기서 수락을 시도한다 — 표준 경로("차단 → 테스트 실행 →
         //   턴 종료")의 종료가 항상 stop_hook_active라, 여기서 수락하지 않으면 결과가
         //   검증되지 않은 채 세션이 끝난다(라이브 실측).
-        const testAccepted = tryAcceptPendingTest(sessionId, cwd, ensureClaudeDir(cwd));
+        const testAccepted = tryAcceptPendingTest(sessionId, cwd);
         if (!testAccepted) {
           const acceptMsg = tryAcceptPendingReview(sessionId, cwd, input.transcript_path);
           emit(acceptMsg ? { systemMessage: acceptMsg } : {});
@@ -1022,7 +1009,7 @@ function main(): void {
       // (B3) H1-03 강제 자동 compact — 컨텍스트 점유율이 강제 임계(기본 50%) 이상이면
       //   자동 compact 신호 + decision:block으로 턴 종료를 막아 확실히 compact를 강제한다.
       //   무한 block은 stop_hook_active(위 B)와 MAX_RETRIES escape로 방지한다.
-      const force = maybeForceCompact(usage, cwd, sessionId);
+      const force = maybeForceCompact(usage, sessionId);
 
       // (B4) H1-01 긴 세션 경고 준비 — 강제가 발동했으면(force.forced) 스팸 방지로 생략.
       //   emit()이 이후 모든 출력 경로의 systemMessage에 habitWarnings를 덧붙인다.
@@ -1058,20 +1045,13 @@ function main(): void {
       //   턴 종료를 차단한다(편집→재검증 통과 시 PostToolUse가 마커를 지워 해제됨).
       //   - 세션 바인딩: 현재 세션이 남긴 마커만 신뢰(이월/커밋 잔재로 인한 오차단 방지).
       //   - 무한 block 방지: 전용 카운터 + MAX_RETRIES escape(초과 시 통과 + 사용자 알림).
-      const claudeDir = ensureClaudeDir(cwd);
-      const vf = (() => {
-        try {
-          return readValidationFailure(cwd);
-        } catch {
-          return null;
-        }
-      })();
-      statusSnapshot.validationFailed = !!(vf && vf.sessionId === sessionId);
-      if (vf && vf.sessionId === sessionId) {
+      const vf = readValidationFailure(sessionId); // this session's marker only
+      statusSnapshot.validationFailed = vf !== null;
+      if (vf) {
         const cmds = vf.commands.length > 0 ? vf.commands.join(', ') : '자동 검증';
-        const count = readRetryCount(claudeDir, VALIDATION_COUNT_FILE) + 1;
+        const count = readRetryCount(sessionId, VALIDATION_COUNT_FILE) + 1;
         if (count < MAX_RETRIES) {
-          writeRetryCount(claudeDir, count, VALIDATION_COUNT_FILE);
+          writeRetryCount(sessionId, count, VALIDATION_COUNT_FILE);
           logGate(sessionId, 'validation', 'deny', cmds);
           emit({
             decision: 'block',
@@ -1083,21 +1063,21 @@ function main(): void {
           return;
         }
         // 한계 초과 → 통과 + 사용자 알림 + 마커/카운터 정리(영구 차단 방지).
-        resetRetryCount(claudeDir, VALIDATION_COUNT_FILE);
-        clearValidationFailure(cwd);
+        resetRetryCount(sessionId, VALIDATION_COUNT_FILE);
+        clearValidationFailure(sessionId);
         logGate(sessionId, 'validation', 'warn', 'escape');
         habitWarnings.push(
-          `자동 검증 실패가 ${MAX_RETRIES}회 차단 후에도 해소되지 않아 이번 턴은 통과시킵니다. ` +
+          `자동 검증 실패가 ${ESCAPE_AFTER_BLOCKS}회 차단 후에도 해소되지 않아 이번 턴은 통과시킵니다. ` +
             `사용자 확인이 필요합니다. (실패: ${cmds})`,
         );
       } else {
         // 마커 없음/타 세션 마커 → 카운터 리셋(다음 실패는 새로 3회 기회).
-        resetRetryCount(claudeDir, VALIDATION_COUNT_FILE);
+        resetRetryCount(sessionId, VALIDATION_COUNT_FILE);
       }
 
       // (B5.5) 층0 — 인용 검증. **편집 유무와 무관하게** 매 턴 동작하는 유일한 게이트다.
       //   답변만 하는 턴(코드베이스 설명 등)은 이 게이트가 없으면 통째로 무검증이다.
-      const claimBlock = claimGate(sessionId, cwd, claudeDir, input.transcript_path);
+      const claimBlock = claimGate(sessionId, citationCheck);
       if (claimBlock) {
         emit(claimBlock);
         return;
@@ -1106,7 +1086,7 @@ function main(): void {
       // (B6) 층1 — 테스트 게이트. 리뷰보다 **먼저** 동작을 검증한다.
       //   리뷰(리팩토링·성능·보안)는 "동작은 맞다"를 전제로 하는 검토라, 테스트가
       //   통과하지 않은 코드를 리뷰하는 것은 순서가 뒤집힌 것이다.
-      const testBlock = testGate(sessionId, cwd, claudeDir);
+      const testBlock = testGate(sessionId, cwd);
       if (testBlock) {
         emit(testBlock);
         return;
@@ -1117,7 +1097,7 @@ function main(): void {
       //   고정 5턴 윈도우(BUG #2) 대신 커서 기반으로 정확한 per-feature 스코프를 얻는다.
       const cursor = (() => {
         try {
-          return readReviewCursor(cwd);
+          return readReviewCursor(cwd, sessionId);
         } catch {
           return null;
         }
@@ -1157,7 +1137,11 @@ function main(): void {
         logGate(sessionId, 'review', 'deny', 'no-review-file');
         emit({
           decision: 'block',
-          reason: `변경된 파일에 대해 리뷰가 필요합니다. /review-changes 슬래시 커맨드 또는 review-changes 서브에이전트를 호출하여 다음 파일을 리뷰하세요: ${preview}${more}`,
+          // A9: there is no /review-changes command; point to steps that exist.
+          reason:
+            `Review is required for the changed files: ${preview}${more}. ` +
+            `Get the required axes with \`bun "${CLI_PATH}" review-axes <files>\`, then run one ` +
+            'goodboy:review-changes subagent per axis (or use /request-review).',
         });
         return;
       }
@@ -1181,31 +1165,33 @@ function main(): void {
         }
       })();
       if (!v.ok) {
-        const count = readRetryCount(claudeDir, REVIEW_VALIDATE_COUNT_FILE) + 1;
+        const count = readRetryCount(sessionId, REVIEW_VALIDATE_COUNT_FILE) + 1;
         if (count < MAX_RETRIES) {
-          writeRetryCount(claudeDir, count, REVIEW_VALIDATE_COUNT_FILE);
+          writeRetryCount(sessionId, count, REVIEW_VALIDATE_COUNT_FILE);
           logGate(sessionId, 'review', 'deny', v.reason ?? 'invalid');
           emit({
             decision: 'block',
-            reason: `리뷰 검증 실패: ${v.reason ?? '알 수 없는 이유'}. /review-changes 를 다시 실행하세요. (재시도 ${count}/${MAX_RETRIES})`,
+            reason:
+              `Review validation failed: ${v.reason ?? 'unknown reason'}. Run the review again ` +
+              `(goodboy:review-changes per axis, or /request-review). (retry ${count}/${MAX_RETRIES})`,
           });
           return;
         }
         // 한계 초과 → 통과 + 사용자 알림. 커서 전진이 핵심 — 전진 없이는 다음 턴에
         // 같은 유령 파일 집합으로 재차단된다(v0.25.0 영구 데드락의 구조적 원인).
-        resetRetryCount(claudeDir, REVIEW_VALIDATE_COUNT_FILE);
-        writeReviewCursor(cwd, getCurrentTurn(sessionId));
+        resetRetryCount(sessionId, REVIEW_VALIDATE_COUNT_FILE);
+        writeReviewCursor(cwd, getCurrentTurn(sessionId), sessionId);
         statusSnapshot.reviewPending = false;
         logGate(sessionId, 'review', 'warn', 'validate-escape');
         emit({
           systemMessage:
-            `리뷰 검증이 ${MAX_RETRIES}회 차단 후에도 실패해 이번 턴은 통과시킵니다. ` +
+            `리뷰 검증이 ${ESCAPE_AFTER_BLOCKS}회 차단 후에도 실패해 이번 턴은 통과시킵니다. ` +
             `사용자 확인이 필요합니다. (사유: ${v.reason ?? '알 수 없음'})`,
         });
         return;
       }
       // 검증 통과 → 이 게이트의 카운터 리셋(다음 실패는 새로 3회 기회).
-      resetRetryCount(claudeDir, REVIEW_VALIDATE_COUNT_FILE);
+      resetRetryCount(sessionId, REVIEW_VALIDATE_COUNT_FILE);
 
       // 가정 검증(F1.5)/차원(F2)은 커버리지를 실제 구성한 리뷰들(effective) 기준으로
       //   평가한다 — 파일별 최신 리뷰가 이전 리뷰를 대체하는 의미론. 빈 경우(변경
@@ -1214,19 +1200,20 @@ function main(): void {
       // finding 평가(F/G)는 effective만으로는 부족(리뷰 지적 — 변경 집합 밖 파일만
       //   커버한 최신 리뷰의 high finding이 조용히 소실된다). 커서 이후의 모든 신뢰
       //   리뷰에서, 더 새로운 리뷰로 대체되지 않은 finding을 모아 평가한다(v0.26.6).
+      //   Only reviews of this session's files count (sessionReviews).
       const activeFindings = (() => {
         try {
-          return currentFindings(reviews, cursor ? cursor.timestamp : null);
+          return currentFindings(sessionReviews(reviews, sessionId, cwd), cursor ? cursor.timestamp : null);
         } catch {
           return effectiveReviews.flatMap((r) => (Array.isArray(r.findings) ? r.findings : []));
         }
       })();
 
-      // (F) 재시도 카운터 (high severity) — claudeDir은 (B5)에서 확보됨.
+      // (F) 재시도 카운터 (high severity).
       const highSev = activeFindings.filter((f) => f && f.severity === 'high');
       if (highSev.length > 0) {
-        const count = readRetryCount(claudeDir) + 1;
-        writeRetryCount(claudeDir, count);
+        const count = readRetryCount(sessionId) + 1;
+        writeRetryCount(sessionId, count);
         const issues = highSev
           .slice(0, 3)
           .map((f) => `${f.file}${f.line ? `:${f.line}` : ''} — ${f.issue}`)
@@ -1241,10 +1228,10 @@ function main(): void {
           return;
         }
         // 한계 초과 → 통과 + 사용자에게 알림. 리뷰 수락 → 커서 전진.
-        resetRetryCount(claudeDir);
-        writeReviewCursor(cwd, getCurrentTurn(sessionId));
+        resetRetryCount(sessionId);
+        writeReviewCursor(cwd, getCurrentTurn(sessionId), sessionId);
         emit({
-          systemMessage: `재시도 ${MAX_RETRIES}회를 초과했습니다. 사용자 확인이 필요합니다. (high severity: ${issues}${more})`,
+          systemMessage: `${ESCAPE_AFTER_BLOCKS}회 차단 후에도 해소되지 않았습니다(재시도 ${MAX_RETRIES}회째). 사용자 확인이 필요합니다. (high severity: ${issues}${more})`,
         });
         return;
       }
@@ -1277,9 +1264,9 @@ function main(): void {
         0,
       );
       if (declaredUnknowns > 0 && checkedAssumptions === 0) {
-        const count = readRetryCount(claudeDir) + 1;
+        const count = readRetryCount(sessionId) + 1;
         if (count < MAX_RETRIES) {
-          writeRetryCount(claudeDir, count);
+          writeRetryCount(sessionId, count);
           logGate(sessionId, 'review', 'deny', 'assumptions-unchecked');
           emit({
             decision: 'block',
@@ -1292,12 +1279,12 @@ function main(): void {
           return;
         }
         // 한계 초과 → 통과 + 사용자에게 알림. 리뷰 수락 → 커서 전진.
-        resetRetryCount(claudeDir);
-        writeReviewCursor(cwd, getCurrentTurn(sessionId));
+        resetRetryCount(sessionId);
+        writeReviewCursor(cwd, getCurrentTurn(sessionId), sessionId);
         statusSnapshot.reviewPending = false;
         emit({
           systemMessage:
-            `재시도 ${MAX_RETRIES}회를 초과했습니다. 사용자 확인이 필요합니다. ` +
+            `${ESCAPE_AFTER_BLOCKS}회 차단 후에도 해소되지 않았습니다(재시도 ${MAX_RETRIES}회째). 사용자 확인이 필요합니다. ` +
             `(추측/가정 ${declaredUnknowns}건이 리뷰에서 검증되지 않음)`,
         });
         return;
@@ -1318,10 +1305,10 @@ function main(): void {
       );
       const missingDims = requiredDims.filter((d) => !checkedDims.has(d));
       if (missingDims.length > 0) {
-        const count = readRetryCount(claudeDir) + 1;
+        const count = readRetryCount(sessionId) + 1;
         const dimList = missingDims.join(', ');
         if (count < MAX_RETRIES) {
-          writeRetryCount(claudeDir, count);
+          writeRetryCount(sessionId, count);
           logGate(sessionId, 'review', 'deny', `missing-dimensions: ${dimList}`);
           emit({
             decision: 'block',
@@ -1334,11 +1321,11 @@ function main(): void {
           return;
         }
         // 한계 초과 → 통과 + 사용자에게 알림. 리뷰 수락 → 커서 전진.
-        resetRetryCount(claudeDir);
-        writeReviewCursor(cwd, getCurrentTurn(sessionId));
+        resetRetryCount(sessionId);
+        writeReviewCursor(cwd, getCurrentTurn(sessionId), sessionId);
         emit({
           systemMessage:
-            `재시도 ${MAX_RETRIES}회를 초과했습니다. 사용자 확인이 필요합니다. ` +
+            `${ESCAPE_AFTER_BLOCKS}회 차단 후에도 해소되지 않았습니다(재시도 ${MAX_RETRIES}회째). 사용자 확인이 필요합니다. ` +
             `(리뷰가 다음 품질 차원을 평가하지 않음: ${dimList})`,
         });
         return;
@@ -1357,8 +1344,8 @@ function main(): void {
       }
       // 리뷰 수락(blocking high-severity 없음) → 커서 전진.
       //   이후 Stop에서는 이 턴 이후 편집만 리뷰 필요 대상이 된다.
-      resetRetryCount(claudeDir);
-      writeReviewCursor(cwd, getCurrentTurn(sessionId));
+      resetRetryCount(sessionId);
+      writeReviewCursor(cwd, getCurrentTurn(sessionId), sessionId);
       statusSnapshot.reviewPending = false;
 
       const out: HookOutput = {};

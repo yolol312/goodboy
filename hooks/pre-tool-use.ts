@@ -4,6 +4,8 @@
 import { existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve as resolvePath, sep } from 'node:path';
 import {
+  approvalMarkerPath,
+  approvalMarkerRelPath,
   assistantEntriesAfterLastText,
   bareCatDumpMessage,
   agentTranscriptPath,
@@ -14,6 +16,7 @@ import {
   classifyBareCatDump,
   classifyBashSearch,
   classifyBashWrite,
+  CLI_PATH,
   ensureSessionDir,
   envInt,
   envStr,
@@ -23,9 +26,13 @@ import {
   getRecentReadMtime,
   hasAssistantMessages,
   hasReasoningSection,
+  isPartialRead,
+  isReadOnlyBash,
   logGate,
   parseReasoningSection,
+  readSessionState,
   recordEdit,
+  type SessionState,
   wasFileEditedRecently,
   wasFileReadRecently,
 } from '../lib';
@@ -252,23 +259,28 @@ function emitPass(warnings: string[]): void {
 // assistantTextFromLine / extractRecentAssistantTexts는 lib/transcript-parser.ts로
 // 승격되었다(Stop hook의 추측-리뷰 연동 A2도 사용). 여기서는 import해서 쓴다.
 
-interface SessionState {
-  category?: string;
-  risk?: string;
-  turn?: number;
-  /** 2-B: 이 state를 기록한 세션 ID. 현재 세션과 다르면(다른 세션/리포에 커밋된 잔재) 무시한다. */
-  sessionId?: string;
-}
-
-function readSessionState(cwd: string): SessionState | null {
-  try {
-    const path = resolvePath(cwd, '.claude', '.goodboy-session-state.json');
-    if (!existsSync(path)) return null;
-    const raw = readFileSync(path, 'utf8');
-    return JSON.parse(raw) as SessionState;
-  } catch {
-    return null;
-  }
+/** Risk-gate deny text (A4). Names the cause and the only two exits. The agent cannot
+ *  create the approval marker itself — Bash/Write are exactly what this gate blocks — so
+ *  the old "create the marker and retry" instruction was a deadlock. The marker name is
+ *  this session's (A3), so the message prints it in full. */
+function riskDenyMessage(state: SessionState, sessionId: string): string {
+  const category = state.category ?? 'unknown';
+  const reason = state.riskReason ?? '';
+  const why = reason.startsWith('keyword:')
+    ? `the request contains the risky keyword "${reason.slice('keyword:'.length)}"`
+    : reason === 'default'
+      ? `/${category} is risky by default`
+      : reason === 'override'
+        ? 'the user set --risk risky'
+        : `task /${category}`;
+  return (
+    `This task is classified as risky (${why}); changes are blocked until the user approves. ` +
+    `Ask the user to approve, then have the user run \`! touch ${approvalMarkerRelPath('risk', sessionId)}\` ` +
+    '(you cannot create this file yourself: Bash/Write are blocked in a risky session; the ' +
+    'approval applies to this session only). ' +
+    'If the classification is wrong, the user can re-run the command with `--risk simple`. ' +
+    'Read-only inspection (git status/diff/log/show, ls, cat, head, tail) is still allowed.'
+  );
 }
 
 function main(): void {
@@ -444,7 +456,8 @@ function main(): void {
             //   정한다 — 마커 소비(삭제)와 편집 기록은 이후의 모든 deny 게이트(위험 게이트 D)를
             //   통과한 뒤에 수행한다(v0.27.1 리뷰 지적: D가 deny하면 마커만 소비되고
             //   실행되지 않은 쓰기가 유령 편집으로 기록되는 문제).
-            const approvalPath = resolvePath(cwd, '.claude', '.goodboy-bash-write-approved.txt');
+            // This session's marker only (A3): another session's approval is not consumed here.
+            const approvalPath = approvalMarkerPath(cwd, 'bash-write', sessionId);
             // 원자적 소비 — renameSync로 고유 경로에 이동한다. rename은 어떤 경합에서도
             //   정확히 한 프로세스만 성공한다(패자는 ENOENT). ⚠️ unlink로 구현하면 안
             //   된다: macOS에서 동시 unlink(2)가 같은 경로에 둘 다 성공해 병렬 이중
@@ -462,7 +475,7 @@ function main(): void {
             if (approved) {
               pendingBashWriteApproval = { markerPath: approvalPath, consumedPath, writes };
             } else {
-              const msg = bashWriteMessage(writes);
+              const msg = bashWriteMessage(writes, approvalMarkerRelPath('bash-write', sessionId));
               if (gate === 'warn') {
                 logGate(sessionId, 'bash-write', 'warn', `${writes.length}개`);
                 preWarnings.push(msg);
@@ -491,11 +504,13 @@ function main(): void {
       if (toolName === 'Read' && rereadScope !== null) {
         const gate = envStr('GOODBOY_REREAD_GATE', 'deny'); // deny | warn | off
         const filePath = (toolInput.file_path as string | undefined) ?? '';
-        // 부분 읽기(offset/limit)는 정당한 재-Read → 예외.
-        const isPartial = toolInput.offset !== undefined || toolInput.limit !== undefined;
-        if (gate !== 'off' && filePath && !isPartial) {
+        // 부분 읽기(offset/limit)는 정당한 재-Read → 예외. A7: PDF `pages` too — without it a
+        //   PDF over 20 pages could never be read past the first range.
+        if (gate !== 'off' && filePath && !isPartialRead(toolInput)) {
           const rereadMsg =
-            '이미 최근에 읽었고 파일이 안 바뀌었습니다. 앞서 읽은 내용을 참조하세요. (재-Read 방지, H2-01)';
+            'Already read recently and unchanged since; use the content you already have. ' +
+            'If it is no longer in your context, re-read only the part you need with offset/limit ' +
+            '(pages for PDFs) — partial reads are allowed. (re-Read gate, H2-01)';
           const blockReread = (() => {
             try {
               const absPath = resolvePath(cwd, filePath);
@@ -505,14 +520,15 @@ function main(): void {
               //   read 기록을 리셋(epoch)하므로 길게 잡아도 압축 직후 오차단이 없다.
               //   더 엄격하게(사실상 무제한) 하려면 env로 크게 설정한다.
               const withinTurns = envInt('GOODBOY_REREAD_WINDOW', 30);
-              // 최근에 읽지 않았으면 통과.
-              if (!wasFileReadRecently(sessionId, absPath, turn, withinTurns, rereadScope))
+              // 최근에 읽지 않았으면 통과. A7: only full reads count — after `Read(limit:20)` or
+              //   `head -n 3` the agent has not seen the file, so a full Read is not redundant.
+              if (!wasFileReadRecently(sessionId, absPath, turn, withinTurns, rereadScope, true))
                 return false;
               // 마지막 read 이후 편집됐으면 통과(내용이 바뀌었을 수 있음).
               if (wasFileEditedRecently(sessionId, absPath, turn, withinTurns, rereadScope))
                 return false;
               // 이전 read 시점 mtime을 모르면 비교 불가 → 통과(fail-open).
-              const prevMtime = getRecentReadMtime(sessionId, absPath, turn, withinTurns, rereadScope);
+              const prevMtime = getRecentReadMtime(sessionId, absPath, turn, withinTurns, rereadScope, true);
               if (prevMtime === null) return false;
               // 현재 mtime을 못 구하면 통과(fail-open).
               let curMtime: number | null = null;
@@ -568,7 +584,7 @@ function main(): void {
             emit(
               deny(
                 `게이트 산출물은 편집 도구로 직접 쓸 수 없습니다: ${rel}. ` +
-                  `\`bun \${CLAUDE_PLUGIN_ROOT}/lib/cli.ts ${cmd}\` 에 ${schema} JSON을 stdin으로 ` +
+                  `\`bun "${CLI_PATH}" ${cmd}\` 에 ${schema} JSON을 stdin으로 ` +
                   `파이프하세요 — CLI가 스키마를 검증하고 파일명·timestamp를 맞춥니다. ` +
                   `직접 쓴 파일은 형식이 달라 게이트가 읽지 못하고, "결과 없음"으로 계속 차단됩니다. ` +
                   `(산출물 쓰기 게이트 — 해제: GOODBOY_ARTIFACT_WRITE_GATE=off)`,
@@ -659,7 +675,9 @@ function main(): void {
       //   아래 판정은 그대로 하되 차단 대신 로그/1회 안내만 한다. deny만 차단·카운터를 쓴다.
       const reasoningMode = reasoningGateMode();
       const reasoningDenyMode = reasoningMode === 'deny';
-      if (isEditTool && !reasoningDocExempt && reasoningMode !== 'off') {
+      // Labeled so a "cannot judge" exit skips only this gate (A10). The old `emitPass(); return`
+      //   also skipped the risk gate (D), so a subagent Write in a risky session passed unapproved.
+      rationaleGate: if (isEditTool && !reasoningDocExempt && reasoningMode !== 'off') {
         // 서브에이전트의 편집은 "서브에이전트가 쓴 글"로 판정해야 한다.
         //   hook은 서브에이전트 호출에도 메인 transcript_path를 넘긴다 → 그대로 쓰면
         //   서브가 ## 추론을 아무리 써도 메인의 글만 검사되어 영구 차단된다(실측: 9회 출력, 8회 차단).
@@ -673,9 +691,8 @@ function main(): void {
           }
         }
         if (reasoningTranscript === null) {
-          // 서브에이전트 전용 기록을 찾지 못함 → 이 편집은 게이트하지 않는다.
-          emitPass(preWarnings);
-          return;
+          // 서브에이전트 전용 기록을 찾지 못함 → 이 편집은 근거 게이트만 건너뛴다.
+          break rationaleGate;
         }
         // (C-lag) 텍스트 플러시 지연 감지 (fail-open, v0.26.1) — 일부 하니스는 assistant
         //   텍스트 블록의 transcript 기록이 수십 초~수 분 지연된다(thinking/tool_use는 즉시 기록).
@@ -734,7 +751,7 @@ function main(): void {
         }
         const recentTexts = recentEntries.map((e) => e.text);
         // (C-escape v0.26.3) 섹션 미인식 처리 공용 경로 — 무언 편집/미인식 deny 모두
-        //   같은 카운터를 쓴다. 지연 모드면 차단하지 않고 경고만, 아니면 3회까지 deny 후
+        //   같은 카운터를 쓴다. 지연 모드면 차단하지 않고 경고만, 아니면 2회 deny 후 3번째에
         //   지연 모드로 전환한다. true를 반환하면 이번 편집을 통과시킨다는 뜻.
         const lagModeWarning =
           '근거 게이트 지연 모드: transcript 기록 지연이 확인된 세션이라 차단하지 않습니다. ' +
@@ -767,7 +784,8 @@ function main(): void {
             writeReasoningDenyCount(sessionId, reasoningScope, 0);
             logGate(sessionId, 'reasoning', 'warn', 'escape');
             preWarnings.push(
-              '근거 게이트가 3회 차단 후에도 섹션을 인식하지 못했습니다. transcript 기록 지연으로 보고 ' +
+              // Wording matches behavior (A9): the escape fires on the attempt after the last block.
+              `근거 게이트가 ${REASONING_DENY_ESCAPE - 1}회 차단 후에도 섹션을 인식하지 못했습니다. transcript 기록 지연으로 보고 ` +
                 '지연 모드로 전환합니다 — 이 세션에서는 편집을 더 이상 차단하지 않습니다. ## 근거 섹션은 계속 요약해 주세요.',
             );
             return true;
@@ -788,7 +806,7 @@ function main(): void {
               (n) =>
                 "편집 전에 '## 근거' 섹션에 결정 근거를 요약해 주세요. 4분류로: ### 사실 / ### 판단 / ### 가정 / ### 추측 ⚠️ . " +
                 '출력했는데도 이 메시지가 보이면 기록 반영이 지연된 것입니다 — 같은 도구 호출을 다시 시도하세요. ' +
-                `(결정 근거 기록 정책 — 무언 편집 불허, 재시도 ${n}/${REASONING_DENY_ESCAPE}, 3회 후 지연 모드로 통과)`,
+                `(결정 근거 기록 정책 — 무언 편집 불허, 재시도 ${n}/${REASONING_DENY_ESCAPE}, ${REASONING_DENY_ESCAPE - 1}회 차단 후 지연 모드로 통과)`,
             );
             if (!passed) return;
           } else if (reasoningTranscript !== '') {
@@ -803,7 +821,7 @@ function main(): void {
               (n) =>
                 "편집 전에 '## 근거' 섹션에 결정 근거를 요약해 주세요. 4분류로: ### 사실 / ### 판단 / ### 가정 / ### 추측 ⚠️ . " +
                 '주의: 방금 출력한 텍스트는 기록 반영이 지연되어 아직 인식되지 않을 수 있습니다 — 이미 출력했다면 같은 도구 호출을 그대로 다시 시도하세요. ' +
-                `(결정 근거 기록 정책, 재시도 ${n}/${REASONING_DENY_ESCAPE}, 3회 후 지연 모드로 통과)`,
+                `(결정 근거 기록 정책, 재시도 ${n}/${REASONING_DENY_ESCAPE}, ${REASONING_DENY_ESCAPE - 1}회 차단 후 지연 모드로 통과)`,
             );
             if (!passed) return;
           } else {
@@ -891,10 +909,19 @@ function main(): void {
       //     - 변경 도구(Edit/Write/MultiEdit/Bash)에만 건다(탐색/조회는 통과).
       //     - state.sessionId가 현재 세션과 일치할 때만 신뢰한다(다른 세션/커밋된 잔재는 무시).
       //       정상 흐름은 user-prompt-submit이 같은 세션에 state를 쓰므로 항상 일치한다.
+      //     - The state comes from this session's state dir (A3); the repo-level copy is a
+      //       single slot that another session's category command overwrote.
+      // Read-only Bash (git status, ls, cat, …) stays usable in a risky session (A4);
+      //   before, every Bash call was denied, so the agent could not even inspect the repo.
+      //   Checked only once the session is known to be risky: it scans the whole command.
       if (RISK_GATED_TOOLS.has(toolName)) {
-        const state = readSessionState(cwd);
-        if (state && state.risk === 'risky' && state.sessionId === sessionId) {
-          const approvedPath = resolvePath(cwd, '.claude', '.goodboy-risk-approved.txt');
+        const state = readSessionState(cwd, sessionId);
+        if (
+          state &&
+          state.risk === 'risky' &&
+          !(toolName === 'Bash' && typeof toolInput.command === 'string' && isReadOnlyBash(toolInput.command as string))
+        ) {
+          const approvedPath = approvalMarkerPath(cwd, 'risk', sessionId); // this session's (A3)
           if (!existsSync(approvedPath)) {
             // 위험 게이트가 deny하면, A1.7에서 원자 소비한 Bash 쓰기 승인 마커를 복원한다
             //   (v0.27.1/2: deny로 승인만 소진되는 문제와 병렬 이중 승인 TOCTOU를 함께 해소).
@@ -906,11 +933,7 @@ function main(): void {
               }
             }
             logGate(sessionId, 'risk', 'deny', state.category ?? 'unknown');
-            emit(
-              deny(
-                `이 작업은 위험도가 '위험'으로 분류되었습니다(${state.category ?? '미상'}). 사용자에게 진행 승인을 받은 후, .claude/.goodboy-risk-approved.txt 파일을 만들고 다시 시도하세요.`,
-              ),
-            );
+            emit(deny(riskDenyMessage(state, sessionId)));
             return;
           }
         }

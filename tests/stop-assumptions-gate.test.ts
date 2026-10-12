@@ -186,7 +186,8 @@ describe('Stop hook — 추측-리뷰 연동 (A2)', () => {
     seedSession(tmp, sessionId, 1, [DOC_FILE], cwd);
     writeReview(cwd, []);
     mkdirSync(join(cwd, '.claude'), { recursive: true });
-    writeFileSync(join(cwd, '.claude', '.goodboy-retry-count.txt'), '2', 'utf8');
+    // Retry counters are per session (A3): they live in the session state dir.
+    writeFileSync(join(tmp, `goodboy-session-${sessionId}`, '.goodboy-retry-count.txt'), '2', 'utf8');
     const tp = writeTranscript(cwd, REASONING_WITH_SPECULATION);
     const out = await runStop(tmp, cwd, sessionId, tp);
     expect(out.decision).toBeUndefined();

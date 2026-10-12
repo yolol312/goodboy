@@ -8,8 +8,9 @@ import {
   bashOutputFloodMessage,
   bashOutputWarnThresholds,
   classifyBashFlood,
-  classifyBashRead,
+  classifyBashReadDetailed,
   clearValidationFailure,
+  isPartialRead,
   envStr,
   extractBashOutput,
   getCurrentTurn,
@@ -17,6 +18,7 @@ import {
   readHabitState,
   recordEdit,
   recordRead,
+  recordValidationPass,
   recordWebFetch,
   safeMtime,
   wasUrlFetched,
@@ -89,25 +91,21 @@ interface RunResult {
   output: string;
   /** 검증 도구 자체를 찾을 수 없어 검증을 수행하지 못한 경우(환경 문제). 진짜 검증 실패와 구분한다. */
   unavailable?: boolean;
+  /** The command hit its time budget: inconclusive, never treated as a failure (A5). */
+  timedOut?: boolean;
 }
 
-/** 출력/종료코드가 "도구를 찾을 수 없음"(환경 문제)을 가리키는지 판정.
- *  진짜 검증 실패(타입에러 등)와 구분하기 위함. */
-export function looksUnavailable(output: string, exitCode: number | null | undefined): boolean {
-  // exit code 127 = command not found (POSIX 셸 관례)
-  if (exitCode === 127) return true;
-  const o = (output ?? '').toLowerCase();
-  const markers = [
-    'command not found',
-    'not found',
-    'no such file or directory',
-    'executable not found',
-    'enoent',
-  ];
-  return markers.some((m) => o.includes(m));
+/** "Tool not found" (an environment problem) vs. a genuine validation failure.
+ *  Only the shell's "command not found" exit code (127) counts (stabilization plan A5);
+ *  the output is no longer inspected (the parameter is kept for callers).
+ *  Output substrings such as "not found" or "ENOENT" also appear in genuine failures —
+ *  e.g. TS6053 "File '…' not found" — which used to be skipped as "tool unavailable".
+ *  Spawn-level ENOENT is detected separately in runCmd. */
+export function looksUnavailable(_output: string, exitCode: number | null | undefined): boolean {
+  return exitCode === 127;
 }
 
-function runCmd(cmd: string, cwd: string, timeoutMs: number): RunResult {
+export function runCmd(cmd: string, cwd: string, timeoutMs: number): RunResult {
   try {
     const stdout = execSync(cmd, {
       cwd,
@@ -130,6 +128,9 @@ function runCmd(cmd: string, cwd: string, timeoutMs: number): RunResult {
     const message = e.message ?? '';
     const output = [stdout, stderr, message].filter(Boolean).join('\n');
     const exitCode = typeof e.status === 'number' ? e.status : undefined;
+    // A slow but healthy check (e.g. a 33 s typecheck) used to leave a failure marker and
+    // block Stop on every edit. A timeout says nothing about the code: inconclusive.
+    if (e.code === 'ETIMEDOUT') return { cmd, ok: false, output, timedOut: true };
     // child_process ENOENT(스폰 자체 실패)도 도구 부재로 본다.
     const spawnEnoent = e.code === 'ENOENT';
     const unavailable = spawnEnoent || looksUnavailable(output, exitCode);
@@ -231,9 +232,14 @@ export function autoValidate(projectCwd: string): RunResult[] {
 export function buildValidationContext(results: RunResult[]): {
   context: string | undefined;
   blocked: boolean;
+  /** Commands that genuinely failed (not unavailable, not timed out) — the marker content. */
+  failedCmds: string[];
+  /** At least one check passed and none was inconclusive: safe to clear an old marker. */
+  confirmedPass: boolean;
 } {
-  const realFailures = results.filter((r) => !r.ok && !r.unavailable);
+  const realFailures = results.filter((r) => !r.ok && !r.unavailable && !r.timedOut);
   const unavailable = results.filter((r) => !r.ok && r.unavailable);
+  const timedOut = results.filter((r) => !r.ok && r.timedOut);
 
   const blocks: string[] = [];
   if (realFailures.length > 0) {
@@ -255,10 +261,18 @@ export function buildValidationContext(results: RunResult[]): {
       blocks.push(`자동 검증 도구를 찾을 수 없어 건너뜀: ${r.cmd}`);
     }
   }
+  if (timedOut.length > 0) {
+    if (blocks.length > 0) blocks.push('');
+    for (const r of timedOut) {
+      blocks.push(`Auto-validation timed out (inconclusive, not treated as a failure): ${r.cmd}`);
+    }
+  }
 
   const blocked = realFailures.length > 0;
   const context = blocks.length > 0 ? blocks.join('\n') : undefined;
-  return { context, blocked };
+  const failedCmds = realFailures.map((r) => r.cmd);
+  const confirmedPass = !blocked && timedOut.length === 0 && results.some((r) => r.ok);
+  return { context, blocked, failedCmds, confirmedPass };
 }
 
 /** H2-02 — Bash 실제 출력이 임계를 넘는지 판정해 사후 경고 문구를 만든다.
@@ -319,7 +333,8 @@ function main(): void {
             } catch {
               mtime = undefined;
             }
-            recordRead(sessionId, absFp, turn, mtime, agentId);
+            // A7: offset/limit/pages reads are partial; the re-Read gate ignores them.
+            recordRead(sessionId, absFp, turn, mtime, agentId, isPartialRead(toolInput));
           }
         } else if (toolName === 'Bash') {
           // Bash로 읽은 파일도 읽기로 기록한다. bypass permissions 모드에서는 시스템이
@@ -327,8 +342,8 @@ function main(): void {
           //   정확히 인용한 세션조차 읽기 이력이 0이 되어 read-before-edit이 오차단하고
           //   층0 인용 검증이 근거를 잃는다. 내용을 보여주는 명령만 인정한다(grep 제외).
           const command = (toolInput.command as string | undefined) ?? '';
-          for (const abs of classifyBashRead(command, cwd)) {
-            recordRead(sessionId, abs, turn, safeMtime(abs), agentId);
+          for (const { path: abs, partial } of classifyBashReadDetailed(command, cwd)) {
+            recordRead(sessionId, abs, turn, safeMtime(abs), agentId, partial);
           }
         } else if (toolName === 'Edit' || toolName === 'Write') {
           const fp = (toolInput.file_path as string | undefined) ?? '';
@@ -358,16 +373,20 @@ function main(): void {
       if (isEditTool && !failureFromResponse) {
         try {
           const results = autoValidate(cwd);
-          const { context, blocked } = buildValidationContext(results);
+          const { context, blocked, failedCmds, confirmedPass } = buildValidationContext(results);
           additionalContext = context;
           // (C1) 검증 실패를 Stop 게이트로 승격 — 실패 시 세션 바인딩 마커를 남기고,
           //   재검증이 통과하면 해제한다. 검증이 아예 안 돈 경우(results 비어있음)는
           //   마커를 건드리지 않는다(통과 확인 없이 해제하는 오해제 방지).
+          //   A5: a timeout or unavailable tool is no pass either — the marker stays as is.
+          //   A3: failures are per session; a pass is recorded for the project, because the
+          //   checks ran on the tree every session shares (lib/validation-state.ts).
+          const root = findProjectRoot(cwd)?.root;
           if (blocked) {
-            const failedCmds = results.filter((r) => !r.ok && !r.unavailable).map((r) => r.cmd);
-            writeValidationFailure(cwd, sessionId, failedCmds);
-          } else if (results.length > 0) {
-            clearValidationFailure(cwd);
+            writeValidationFailure(sessionId, failedCmds, root);
+          } else if (confirmedPass) {
+            clearValidationFailure(sessionId);
+            if (root) recordValidationPass(root, results.filter((r) => r.ok).map((r) => r.cmd));
           }
         } catch (err) {
           process.stderr.write(`[goodboy post-tool-use] validation error: ${String(err)}\n`);

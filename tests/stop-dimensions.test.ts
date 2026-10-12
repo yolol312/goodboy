@@ -133,9 +133,10 @@ describe('Stop hook — dimension coverage enforcement', () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, [FRONTEND_FILE], cwd);
     // Pre-seed retry counter at 2 so the next attempt (count=3) hits the cap.
-    const claudeDir = join(cwd, '.claude');
-    mkdirSync(claudeDir, { recursive: true });
-    writeFileSync(join(claudeDir, '.goodboy-retry-count.txt'), '2', 'utf8');
+    // Retry counters are per session (A3): they live in the session state dir.
+    const sessionDir = join(tmp, `goodboy-session-${sessionId}`);
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(join(sessionDir, '.goodboy-retry-count.txt'), '2', 'utf8');
     writeReview(cwd, baseReview(cwd, ['plan-completeness'])); // still missing ui-ux
     const out = await runStop(tmp, cwd, sessionId);
     expect(out.decision).toBeUndefined();

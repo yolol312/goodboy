@@ -254,7 +254,7 @@ PreToolUse의 근거 게이트는 코드 편집(Edit/Write/MultiEdit) 직전에 
 | env | 효과 |
 |---|---|
 | `GOODBOY_REASONING_GATE=warn` (기본) | 차단하지 않는다. 섹션이 없거나 비어 있으면 에이전트 스코프(메인/서브에이전트별)당 1회만 안내하고 이후는 게이트 로그만 남긴다. 텍스트 없이 바로 편집(무언 편집)은 로그만 |
-| `GOODBOY_REASONING_GATE=deny` | 섹션 미인식·무언 편집·빈 섹션을 차단 (3회 후 지연 모드 escape, 재시도 플러시 대기, 지연 확정 포함 — 아래 트러블슈팅 참조) |
+| `GOODBOY_REASONING_GATE=deny` | 섹션 미인식·무언 편집·빈 섹션을 차단 (2회 차단 후 3번째에 지연 모드 escape, 재시도 플러시 대기, 지연 확정 포함 — 아래 트러블슈팅 참조) |
 | `GOODBOY_REASONING_GATE=off` | 근거 게이트 전체를 끈다 |
 
 ## 위험도 게이트
@@ -269,14 +269,21 @@ PreToolUse의 근거 게이트는 코드 편집(Edit/Write/MultiEdit) 직전에 
 
 - **단순(simple)**: 자동 진행 — 결정 근거 기록만 필수
 - **중간(medium)**: 추측 카테고리에 항목 있으면 사용자 확인 권장
-- **위험(risky)**: 항상 사용자 승인 마커 (`.claude/.goodboy-risk-approved.txt`) 확인
+- **위험(risky)**: 항상 사용자 승인 마커 (`.claude/.goodboy-risk-approved-<세션 태그>.txt`) 확인
 
-사용자가 위험 작업 승인하려면:
+사용자가 위험 작업 승인하려면 **사용자가 직접** 마커를 만듭니다(Claude Code 프롬프트에서 `!` 접두로 실행).
+마커 이름에는 세션 태그(세션 ID 앞 8자)가 붙고, 정확한 명령은 차단 메시지에 그대로 나옵니다:
 
 ```bash
-touch .claude/.goodboy-risk-approved.txt
-# 또는 모델에게 "진행 승인" 명시 후 모델이 마커 생성
+! touch .claude/.goodboy-risk-approved-7d9ae000.txt   # 예시 — 차단 메시지의 명령을 쓰세요
 ```
+
+승인은 그 세션에만 적용됩니다. 같은 저장소의 다른 세션을 풀지 않고, 다른 세션의 새 작업이 이 승인을
+지우지도 않습니다. 위험 세션에서는 모델의 Bash/Write가 막혀 있어 모델은 마커를 만들 수 없습니다. 분류가 틀렸다면
+같은 커맨드를 `--risk simple`로 다시 실행하세요. 조회용 명령(`git status/diff/log/show`, `ls`, `cat`,
+`head`, `tail`)은 위험 세션에서도 허용됩니다. 단 파일을 쓰거나 프로그램을 실행하는 옵션(`--output`,
+`--ext-diff` 등)이 붙으면 허용하지 않습니다 — 승인 마커도 파일이라 모델의 자기 승인 경로가 되기 때문입니다.
+영문 키워드는 단어 단위로 판정합니다(`prod`는 위험, `product`는 아님).
 
 ## 설치 범위와 전환
 
@@ -336,7 +343,8 @@ claude plugin enable  goodboy@goodboy
 - 점유율 30%부터 +10%p마다 **컨텍스트 경고(H1-01)** 를 `systemMessage`로 띄우고, 점유율이
   **강제 임계(기본 50%, `GOODBOY_COMPACT_FORCE_PCT`)를 넘고 한도가 확정적이면 H1-03이
   턴 종료를 `decision:'block'`으로 막으며 `stopReason:'compact_needed'` 신호를 보낸다**
-  (권고가 아니라 강제 — 3회 후 escape로 통과, 한도 미확정이면 보류).
+  (권고가 아니라 강제 — 2회 차단 후 3번째에 escape로 통과하며, 그 세션에서는 사용률이 임계 밑으로
+  내려갈 때까지 다시 강제하지 않는다. 한도 미확정이면 보류).
 - 모델/환경과 무관하게 작동한다(transcript의 input + cache_read + cache_creation 토큰을 모델
   컨텍스트 한도로 나눠 계산. 1M 모델은 자동으로 1,000,000 한도로 인식).
 - **단 hook이 `/compact` 자체를 실행하지는 못한다** — 실제 압축은 사용자(또는
@@ -460,9 +468,16 @@ goodboy/                                # 플러그인 루트
 <project>/.claude/
 ├── reviews/                            # review-changes 결과 JSON (축별로 여러 개)
 ├── tests/                              # test-changes 결과 JSON
-└── (마커 파일들 — .goodboy-session-state.json, .goodboy-risk-approved.txt,
-    .goodboy-retry-count.txt, .goodboy-last-review.json, .goodboy-last-test.json 등)
+└── (승인 마커 — .goodboy-risk-approved-<세션 태그>.txt, .goodboy-bash-write-approved-<세션 태그>.txt,
+    작업 분류 기록 — .goodboy-session-state.json)
 ```
+
+세션별 상태(턴 번호, 읽기·편집 기록, 재시도 카운터, 리뷰·테스트 커서, 자동 검증 실패
+마커, 위험도 판정)는 `$TMPDIR/goodboy-session-<세션 ID>/`에 둡니다. 리뷰·테스트 커서는 작업
+디렉터리별로 따로 둡니다. 같은 저장소에서 여러 세션을 동시에 열어도 서로의 게이트 상태와 승인을
+덮어쓰지 않고, 다른 세션 리뷰의 high 지적이 이 세션을 막지도 않습니다. 자동 검증은 모든 세션이
+공유하는 작업 트리를 검사하므로, 한 세션에서 같은 검증 명령이 다시 통과하면 다른 세션에 남은 그 이전
+실패 기록도 풀립니다.
 
 ## 층1 테스트 게이트
 
@@ -514,7 +529,7 @@ dev-cycle을 쓰지 않는 프로젝트에서는 수용 기준이 비고, 단위
 `GOODBOY_TEST_GATE` = **`auto`(기본)** | `on` | `off`.
 
 `auto`는 **테스트를 돌릴 수단이 있을 때만** 강제한다. 무조건 켜면 인프라가 없는 저장소에서
-3회 차단 후 escape로 끝나는데, 그건 검증은 0이고 경고만 남는 결말이다(라이브 실측).
+2회 차단 후 escape로 끝나는데, 그건 검증은 0이고 경고만 남는 결말이다(라이브 실측).
 
 | 신호 | 예 |
 |---|---|
@@ -619,19 +634,18 @@ Agent 도구로 서브에이전트 호출 (예: general-purpose)
 
 ### "Stop이 차단됩니다 — 리뷰 필요"
 
-`/review-changes` 슬래시 커맨드를 실행하거나 review-changes 서브에이전트를 호출하세요:
-
-```
-Agent(general-purpose, "review-changes 스킬에 따라 다음 파일을 리뷰: <변경 파일 목록>")
-```
+차단 메시지에 나온 `review-axes` 명령으로 필요한 리뷰 축을 확인한 뒤, 축마다
+`goodboy:review-changes` 서브에이전트를 실행하세요. `/request-review` 를 쓰면 이 과정을 대신 진행합니다.
+(`/review-changes` 라는 슬래시 커맨드는 없습니다. 축 하나짜리 general-purpose 리뷰는 필수 차원 누락으로 다시 차단됩니다.)
 
 ### `.claude/reviews/*.json`이 쌓입니다
 
 리뷰 결과 파일은 Stop 리뷰 게이트의 판정 근거로, 유효창(기본 24시간) 안의 것만 읽힙니다.
 v0.27.5부터 보존 기간(기본 3일, `GOODBOY_REVIEW_RETENTION_MIN` 분 단위)이 지난 파일을
 Stop마다 자동 삭제합니다(`0`으로 비활성; 유효창보다 짧게 설정해도 유효한 리뷰는 지우지
-않습니다). `.claude/.goodboy-last-review.json`은 리뷰 커서(단일 파일)라 삭제하지 않습니다.
-git 추적에서 빼려면 프로젝트 `.gitignore`에 추가하세요:
+않습니다). 리뷰 커서는 세션 상태 디렉터리(`$TMPDIR/goodboy-session-<세션 ID>/`)에 있어
+이 정리와 무관합니다. 예전 버전이 남긴 `.claude/.goodboy-last-review.json` 등은 더 이상
+읽지 않으므로 지워도 됩니다. git 추적에서 빼려면 프로젝트 `.gitignore`에 추가하세요:
 
 ```
 .claude/reviews/
@@ -640,7 +654,9 @@ git 추적에서 빼려면 프로젝트 `.gitignore`에 추가하세요:
 
 ### "위험 작업이 차단됩니다"
 
-사용자 승인이 필요합니다. `touch .claude/.goodboy-risk-approved.txt`
+사용자 승인이 필요합니다. 차단 메시지에 나온 명령(`! touch .claude/.goodboy-risk-approved-<세션 태그>.txt`)을
+사용자가 직접 실행하세요(모델은 만들 수 없습니다). 예전 이름(`.goodboy-risk-approved.txt`)은 더 이상
+인정하지 않습니다. 분류가 틀렸다면 커맨드를 `--risk simple`로 다시 실행하세요.
 
 ### "Bash로 프로젝트 파일을 쓰려 합니다" 라며 차단됩니다
 
@@ -659,9 +675,9 @@ git 추적에서 빼려면 프로젝트 `.gitignore`에 추가하세요:
 **대량 범위 편집** (수백 줄 주석 블록 삭제 등 Edit의 old_string 재현이 비현실적인 경우):
 
 1. 권장 — Read로 범위를 확인한 뒤 **Write 도구로 파일 전체를 재작성**합니다.
-2. 사용자 승인을 받은 경우 — `touch .claude/.goodboy-bash-write-approved.txt` 후 같은
-   명령(`sed -i` 등)을 다시 실행하세요. **1회용** 승인이며, 대상 파일은 편집 기록에
-   남아 리뷰 추적·Stop 리뷰 게이트가 그대로 유지됩니다.
+2. 사용자 승인을 받은 경우 — 차단 메시지에 나온 `touch .claude/.goodboy-bash-write-approved-<세션 태그>.txt`
+   후 같은 명령(`sed -i` 등)을 다시 실행하세요. **1회용**이고 그 세션에만 적용되는 승인이며, 대상
+   파일은 편집 기록에 남아 리뷰 추적·Stop 리뷰 게이트가 그대로 유지됩니다.
 
 **한계**: `python -c "open('x','w')"` 처럼 인터프리터 내부에서 쓰는 경로는 잡지 못합니다.
 "무심코 우회"를 막는 것이 목적이며, 결심한 우회를 원천 봉쇄하지는 못합니다.
@@ -678,26 +694,35 @@ git 추적에서 빼려면 프로젝트 `.gitignore`에 추가하세요:
 ### "Stop이 차단됩니다 — 검증 게이트"
 
 자동 검증이 실패한 상태입니다. 실패한 검증(타입 에러 등)을 수정하세요 — 파일을 편집하면
-검증이 자동 재실행되고, 통과하면 차단이 해제됩니다. 3회 차단 후에는 사용자 확인 안내와 함께
-통과됩니다.
+검증이 자동 재실행되고, 통과하면 차단이 해제됩니다. 2회 차단 후 3번째에는 사용자 확인 안내와 함께
+통과됩니다. 검증 명령이 시간 제한을 넘기면 실패가 아니라 "판정 불가"로 보고 차단하지 않으며, 도구 부재는
+종료 코드 127일 때만 인정합니다.
 
 ### "Stop이 차단됩니다 — 층0 인용 검증"
 
 답변에서 인용한 `파일:줄`이 실재하지 않거나, 그 파일을 이 세션에서 읽은 기록이 없습니다.
 
-- **"그런 파일이 없습니다" / "N줄까지입니다"** → 확정 환각입니다. 파일을 실제로 읽어 확인하고
+- **"no such file" / "the file has only N lines"** → 확정 환각입니다. 파일을 실제로 읽어 확인하고
   인용을 정정하거나, 근거가 없으면 `## 근거 > 추측`으로 낮추세요.
-- **"읽은 기록이 없습니다"** → `Read`(또는 `cat`/`sed -n`)로 실제 확인한 뒤 답하세요.
+- **"no record of reading this file"** → `Read`(또는 `cat`/`sed -n`)로 실제 확인한 뒤 답하세요.
+- **"ambiguous file name"** → 같은 이름의 파일이 여러 개입니다. 저장소 기준 경로(`hooks/stop.ts:12`)로 쓰세요.
+- **"could not resolve this file name"** → 파일명만 쓴 인용을 확인하지 못했습니다. 저장소 기준 경로로 쓰세요.
 
-3회 차단 후에는 사용자 확인 안내와 함께 통과합니다. 끄기: `GOODBOY_CLAIM_GATE=off`
+범위(`a.ts:10-20`)와 목록(`a.ts:14,51`) 인용도 검사합니다. 디렉터리 없이 파일명만 쓴 인용은 저장소에
+그 이름의 파일이 하나뿐일 때 그 파일로 봅니다. 이 확인은 저장소 탐색이 끝까지 돌았을 때만 가능합니다.
+항목이 2만 개를 넘거나 탐색이 300ms를 넘는 큰 저장소, 또는 `node_modules`·`dist` 같은 제외 디렉터리에
+있을 수 있는 이름이면 "could not resolve"로 저장소 기준 경로를 요구합니다. 인용 뒤에 바로 붙은 `?`, `!`,
+`:열 번호`, 한글 조사(`a.ts:42에서`)도 인용으로 인식합니다. 2회 차단 후 3번째에는 사용자 확인 안내와 함께 통과합니다.
+끄기: `GOODBOY_CLAIM_GATE=off`
 
 ### "게이트 산출물은 편집 도구로 직접 쓸 수 없습니다"
 
 `.claude/tests/`·`.claude/reviews/`에 Write/Edit으로 직접 파일을 만들려 한 경우입니다.
-반드시 CLI를 거쳐야 합니다:
+반드시 CLI를 거쳐야 합니다. 차단 메시지에 CLI의 실제 절대경로가 들어 있습니다
+(Bash 안에서는 `${CLAUDE_PLUGIN_ROOT}` 가 비어 있어 그대로 쓰면 실패합니다):
 
 ```bash
-cat <<'JSON' | bun ${CLAUDE_PLUGIN_ROOT}/lib/cli.ts test-write     # 또는 review-write
+cat <<'JSON' | bun "<메시지에 나온 경로>/lib/cli.ts" test-write     # 또는 review-write
 { ... }
 JSON
 ```
@@ -721,7 +746,7 @@ JSON
 | "수용 기준이 커버되지 않았습니다" | `acceptance-list` 로 목록을 확인하고 채우세요 |
 | "아무것도 검증하지 않는 테스트 패턴" | `waitForTimeout`·빈 `catch`·항상 참인 단언을 제거하세요 |
 
-3회 차단 후에는 사용자 확인 안내와 함께 통과합니다. 테스트 인프라가 없는 프로젝트에서는
+2회 차단 후 3번째에는 사용자 확인 안내와 함께 통과합니다. 테스트 인프라가 없는 프로젝트에서는
 기본값 `auto`가 게이트를 알아서 끕니다(위 "언제 켜지는가"). 항상 끄려면 `GOODBOY_TEST_GATE=off`.
 
 ### 리뷰가 "필수 차원 누락"으로 계속 차단됩니다

@@ -25,6 +25,9 @@ interface TrackRecord {
   /** D2: 이 기록을 남긴 에이전트의 agent_id. 없으면 메인 에이전트('main' 스코프)로 취급.
    *  재-Read 게이트가 에이전트별로 공정하게 판정하기 위한 스코프 키(구버전 라인 하위호환). */
   agent?: string;
+  /** A7: the read showed only part of the file (offset/limit/pages, head, tail, sed -n).
+   *  A later full read of such a file is not a redundant re-read. Absent = full read. */
+  partial?: boolean;
 }
 
 /** 기록의 스코프 키. agent 필드 없는 구버전/메인 기록은 'main'. */
@@ -96,6 +99,7 @@ function readRecords(dir: string, fileName: string): TrackRecord[] {
           if (typeof parsed.mtime === 'number') rec.mtime = parsed.mtime;
           // D2: agent도 있을 때만 보존(없으면 메인 스코프로 취급).
           if (typeof parsed.agent === 'string' && parsed.agent !== '') rec.agent = parsed.agent;
+          if (parsed.partial === true) rec.partial = true;
           out.push(rec);
         }
       } catch {
@@ -108,6 +112,13 @@ function readRecords(dir: string, fileName: string): TrackRecord[] {
   }
 }
 
+/** A Read tool call that shows only part of the file (A7). Shared by PostToolUse (record)
+ *  and the PreToolUse re-Read exemption so the two cannot drift — the A7 bug was this
+ *  predicate missing `pages` in one of them. */
+export function isPartialRead(toolInput: Record<string, unknown>): boolean {
+  return toolInput.offset !== undefined || toolInput.limit !== undefined || toolInput.pages !== undefined;
+}
+
 /** Read 도구 호출 시 기록. PostToolUse hook이 호출.
  *  H2-01: mtime(파일 수정시각 mtimeMs)을 함께 기록하면 재-Read 게이트가
  *  "그 사이 파일이 바뀌었는지"를 판정할 수 있다. mtime 미지정도 허용(하위호환).
@@ -118,6 +129,7 @@ export function recordRead(
   turn: number,
   mtime?: number,
   agent?: string,
+  partial?: boolean,
 ): void {
   const dir = ensureSessionDir(sessionId);
   const record: TrackRecord = {
@@ -127,17 +139,21 @@ export function recordRead(
   };
   if (typeof mtime === 'number' && Number.isFinite(mtime)) record.mtime = mtime;
   if (typeof agent === 'string' && agent !== '') record.agent = agent;
+  if (partial === true) record.partial = true;
   appendRecord(dir, 'reads.jsonl', record);
 }
 
 /** filePath가 최근 withinTurns 안에 Read 됐는지 확인.
- *  agent 지정 시 그 에이전트 스코프의 기록만 본다(미지정 = 스코프 무시, 전체 매칭). */
+ *  agent 지정 시 그 에이전트 스코프의 기록만 본다(미지정 = 스코프 무시, 전체 매칭).
+ *  fullOnly: ignore partial reads (A7) — the re-Read gate must not treat "saw lines 1–20"
+ *  as "already has the whole file"; read-before-edit keeps accepting partial reads. */
 export function wasFileReadRecently(
   sessionId: string,
   filePath: string,
   currentTurn: number,
   withinTurns: number,
   agent?: string,
+  fullOnly?: boolean,
 ): boolean {
   const dir = ensureSessionDir(sessionId);
   const records = readRecords(dir, 'reads.jsonl');
@@ -145,6 +161,7 @@ export function wasFileReadRecently(
   const cutoff = currentTurn - withinTurns;
   for (const r of records) {
     if (agent !== undefined && recordScope(r) !== agent) continue;
+    if (fullOnly === true && r.partial === true) continue;
     if (r.file === target && r.turn >= cutoff && r.turn <= currentTurn) {
       return true;
     }
@@ -161,6 +178,7 @@ export function getRecentReadMtime(
   currentTurn: number,
   withinTurns: number,
   agent?: string,
+  fullOnly?: boolean,
 ): number | null {
   const dir = ensureSessionDir(sessionId);
   const records = readRecords(dir, 'reads.jsonl');
@@ -170,6 +188,7 @@ export function getRecentReadMtime(
   let bestTurn = -Infinity;
   for (const r of records) {
     if (agent !== undefined && recordScope(r) !== agent) continue;
+    if (fullOnly === true && r.partial === true) continue;
     if (
       r.file === target &&
       r.turn >= cutoff &&

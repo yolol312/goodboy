@@ -14,18 +14,25 @@
 // **`파일:줄` 형식만** 인용으로 본다. 백틱으로 감싼 경로(`package.json` 같은)는
 // 단순 언급일 수 있어 제외한다 — 오탐을 만들면 게이트 자체가 꺼진다.
 
-import { existsSync, readFileSync, statSync } from 'node:fs';
-import { isAbsolute, resolve as resolvePath, sep } from 'node:path';
+import { existsSync, readdirSync, readFileSync, statSync, type Dirent } from 'node:fs';
+import { isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
 
 export interface Citation {
   /** 원문에 쓰인 그대로의 경로 */
   raw: string;
   /** cwd 기준 절대경로 */
   abs: string;
+  /** First line referenced. */
   line: number;
+  /** Highest line referenced when the citation is a range or a list (A8). */
+  lastLine?: number;
+  /** The line part as written, e.g. "10-20" or "14,51". */
+  spec?: string;
+  /** A bare file name that matched several repo files (or could not be resolved). */
+  candidates?: string[];
 }
 
-export type CitationProblemKind = 'missing-file' | 'line-out-of-range' | 'unread';
+export type CitationProblemKind = 'missing-file' | 'line-out-of-range' | 'unread' | 'ambiguous';
 
 export interface CitationProblem {
   kind: CitationProblemKind;
@@ -38,7 +45,111 @@ export interface CitationProblem {
  *  경계 문자에 마크다운 강조(`*` `_`)를 포함한다 — 실측(P10)에서 모델이 인용을
  *  `**src/app.ts:3**` 로 굵게 써서 게이트가 통째로 놓쳤다. 강조는 인용을 **강조할 때**
  *  쓰는 표기라, 이걸 빼면 가장 단정적인 주장부터 빠져나간다. */
-const PATHY = /(?:^|[\s(`'"[*_])((?:\.{0,2}\/)?[\w.@-]+(?:\/[\w.@-]+)*\.[A-Za-z][\w]{0,9}):(\d{1,6})(?=[\s)`'"\],.;*_]|$)/g;
+// Ranges and lists are recognized only without spaces (`a.ts:10-20`, `a.ts:14,51`):
+// with spaces, prose such as "a.ts:5, 100 files" would read as a line list.
+// A citation may end in `?`, `!`, `:` (a column, `a.ts:12:5`) or Hangul, as in "a.ts:42에서"
+// (layer-1 test run: "Is the bug at src/nope.ts:42?" was not recognized, so the user's
+// question was not excluded and the honest answer "there is no src/nope.ts:42" was
+// blocked as a missing file).
+const PATHY =
+  /(?:^|[\s(`'"[*_])((?:\.{0,2}\/)?[\w.@-]+(?:\/[\w.@-]+)*\.[A-Za-z][\w]{0,9}):(\d{1,6}(?:[-–]\d{1,6})?(?:,\d{1,6}(?:[-–]\d{1,6})?)*)(?=[\s)`'"\],.;:?!*_ㄱ-ㆎ가-힣]|$)/g;
+
+/** Parses "12", "10-20", "14,51", "3-5, 9" (A8: ranges and lists used to slip through —
+ *  `a.ts:10-20` was not recognized at all and `a.ts:14,51` was checked as line 14 only).
+ *  Returns null for malformed specs such as reversed ranges. */
+function parseLineSpec(spec: string): { first: number; last: number } | null {
+  let first = Infinity;
+  let last = 0;
+  for (const part of spec.split(',')) {
+    const [lo, hi] = part.split(/[-–]/).map((s) => Number(s.trim()));
+    if (lo === undefined || !Number.isFinite(lo) || lo <= 0) return null;
+    const end = hi !== undefined && Number.isFinite(hi) ? hi : lo;
+    if (end < lo) return null;
+    first = Math.min(first, lo);
+    last = Math.max(last, end);
+  }
+  return Number.isFinite(first) ? { first, last } : null;
+}
+
+const SEARCH_SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', 'target', '.next', '.venv', 'vendor']);
+const SEARCH_ENTRY_BUDGET = 20_000;
+// Deep enough for Java/Maven package trees: one directory past the limit marks the whole
+// index incomplete (hallucination-axis review). Symlinks are not followed (a Dirent of a
+// link is not a directory), so the entry and time budgets bound the walk, not this.
+const SEARCH_DEPTH_LIMIT = 32;
+// Wall-clock cap on the walk. The Stop hook has 15 s for every gate, and directory reads
+// can be slow (performance review: 2–3.6 s per walk of a real ~/.gradle on a machine with a
+// file-monitoring agent). A walk cut short is incomplete, so its bare names come out as
+// "unresolvable" (cite the full path), never as hallucinations.
+const SEARCH_TIME_BUDGET_MS = 300;
+
+/** File-name index of the repo: one bounded walk shared by every bare-name citation
+ *  (a walk per citation took ~10 s for 50 citations in a 25k-file repo).
+ *  complete=false when the walk hit its entry, depth, or time limit; skippedDirs=true when
+ *  a skipped directory (node_modules, dist, …) existed, where a file could still live. */
+interface BasenameIndex {
+  byName: Map<string, string[]>;
+  complete: boolean;
+  skippedDirs: boolean;
+}
+
+/** Keeps the file-name index between extractCitations calls. The Stop hook passes one
+ *  cache for the answer and the user prompts it compares against, so the repo is walked
+ *  at most once per Stop — each call used to walk on its own, up to four walks per Stop
+ *  (performance review: 15.9–43.9 s on a directory-heavy tree). */
+export interface CitationCache {
+  root?: string;
+  index?: BasenameIndex;
+  /** Overrides SEARCH_TIME_BUDGET_MS (tests). */
+  timeBudgetMs?: number;
+}
+
+function basenameIndexFor(root: string, cache: CitationCache): BasenameIndex {
+  if (cache.index === undefined || cache.root !== root) {
+    cache.index = buildBasenameIndex(root, cache.timeBudgetMs ?? SEARCH_TIME_BUDGET_MS);
+    cache.root = root;
+  }
+  return cache.index;
+}
+
+function buildBasenameIndex(root: string, timeBudgetMs: number): BasenameIndex {
+  const byName = new Map<string, string[]>();
+  const deadline = Date.now() + timeBudgetMs;
+  let budget = SEARCH_ENTRY_BUDGET;
+  let depthLimited = false;
+  let timedOut = false;
+  let skippedDirs = false;
+  const walk = (dir: string, depth: number): void => {
+    if (budget <= 0 || timedOut) return;
+    if (depth > SEARCH_DEPTH_LIMIT) {
+      depthLimited = true;
+      return;
+    }
+    if (Date.now() > deadline) {
+      timedOut = true;
+      return;
+    }
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (--budget <= 0) return;
+      if (e.isDirectory()) {
+        if (SEARCH_SKIP_DIRS.has(e.name)) skippedDirs = true;
+        else walk(join(dir, e.name), depth + 1);
+      } else if (e.isFile()) {
+        const list = byName.get(e.name);
+        if (list) list.push(join(dir, e.name));
+        else byName.set(e.name, [join(dir, e.name)]);
+      }
+    }
+  };
+  walk(root, 0);
+  return { byName, complete: budget > 0 && !depthLimited && !timedOut, skippedDirs };
+}
 
 /**
  * 텍스트에서 `파일:줄` 인용을 뽑는다.
@@ -46,8 +157,9 @@ const PATHY = /(?:^|[\s(`'"[*_])((?:\.{0,2}\/)?[\w.@-]+(?:\/[\w.@-]+)*\.[A-Za-z]
  * - `hooks/stop.ts:673`, `` `lib/cli.ts:42` ``, `./src/a.ts:1` 모두 인식
  * - URL(`https://…:443`)은 스킴 뒤 `//` 때문에 경로 패턴과 맞지 않아 걸리지 않는다
  * - 절대경로는 cwd 밖일 수 있으므로 cwd 안의 것만 남긴다(게이트가 보는 범위)
+ * - Pass the same `cache` to several calls to walk the repo for bare names only once.
  */
-export function extractCitations(text: string, cwd: string): Citation[] {
+export function extractCitations(text: string, cwd: string, cache: CitationCache = {}): Citation[] {
   const out: Citation[] = [];
   if (typeof text !== 'string' || text === '') return out;
   const cwdAbs = (() => {
@@ -64,8 +176,9 @@ export function extractCitations(text: string, cwd: string): Citation[] {
   let m: RegExpExecArray | null;
   while ((m = PATHY.exec(text)) !== null) {
     const raw = m[1] ?? '';
-    const line = Number(m[2]);
-    if (raw === '' || !Number.isFinite(line) || line <= 0) continue;
+    const spec = (m[2] ?? '').replace(/\s+/g, '');
+    const lines = parseLineSpec(spec);
+    if (raw === '' || lines === null) continue;
     let abs: string;
     try {
       abs = isAbsolute(raw) ? resolvePath(raw) : resolvePath(cwdAbs, raw);
@@ -73,12 +186,42 @@ export function extractCitations(text: string, cwd: string): Citation[] {
       continue;
     }
     if (abs !== cwdAbs && !abs.startsWith(cwdAbs + sep)) continue;
-    const key = `${abs}:${line}`;
+    // A8: a bare file name ("stop.ts:916") resolves against the repo when it names exactly
+    //   one file there. It used to be checked at the repo root and reported as "no such
+    //   file" even when hooks/stop.ts existed.
+    //   Only a definite answer is acted on: one match from a complete walk resolves, and
+    //   "no such file" requires a complete walk that skipped nothing. Anything else (several
+    //   matches, an incomplete walk, or a skipped node_modules/dist that could hold the file)
+    //   is "unresolvable", which asks for the full path instead of claiming a hallucination.
+    let candidates: string[] | undefined;
+    if (!raw.includes('/') && !existsSync(abs)) {
+      const index = basenameIndexFor(cwdAbs, cache); // built only when a bare name needs it
+      const matches = index.byName.get(raw) ?? [];
+      const definite = index.complete && !index.skippedDirs;
+      if (matches.length === 1 && index.complete) abs = matches[0]!;
+      else if (matches.length > 1 || !(matches.length === 0 && definite)) {
+        candidates = matches.map((p) => relative(cwdAbs, p));
+      }
+    }
+    const c: Citation = { raw, abs, line: lines.first };
+    if (lines.last !== lines.first) c.lastLine = lines.last;
+    if (spec !== String(lines.first)) c.spec = spec;
+    if (candidates) c.candidates = candidates;
+    const key = citationKey(c);
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ raw, abs, line });
+    out.push(c);
   }
   return out;
+}
+
+/** Identity of a citation: file plus the line spec as written (ranges and lists included). */
+function citationKey(c: Citation): string {
+  return `${c.abs}:${c.spec ?? c.line}`;
+}
+
+function citationLabel(c: Citation): string {
+  return `${c.raw}:${c.spec ?? c.line}`;
 }
 
 /** 파일의 줄 수. 읽을 수 없으면 null. */
@@ -114,20 +257,33 @@ export function verifyCitations(
 ): CitationProblem[] {
   const problems: CitationProblem[] = [];
   for (const c of citations) {
+    const label = citationLabel(c);
+    if (c.candidates !== undefined) {
+      const shown = c.candidates.slice(0, 3);
+      problems.push({
+        kind: 'ambiguous',
+        citation: c,
+        detail:
+          c.candidates.length > 1
+            ? `${label} — ambiguous file name (${shown.join(', ')}${c.candidates.length > 3 ? ', …' : ''}); cite the repo-relative path.`
+            : `${label} — could not resolve this file name; cite the repo-relative path.`,
+      });
+      continue;
+    }
     const n = lineCount(c.abs);
     if (n === null) {
       problems.push({
         kind: 'missing-file',
         citation: c,
-        detail: `${c.raw}:${c.line} — 그런 파일이 없습니다.`,
+        detail: `${label} — no such file (paths are resolved from the repo root).`,
       });
       continue;
     }
-    if (c.line > n) {
+    if ((c.lastLine ?? c.line) > n) {
       problems.push({
         kind: 'line-out-of-range',
         citation: c,
-        detail: `${c.raw}:${c.line} — 그 파일은 ${n}줄까지입니다.`,
+        detail: `${label} — the file has only ${n} lines.`,
       });
       continue;
     }
@@ -136,7 +292,7 @@ export function verifyCitations(
         problems.push({
           kind: 'unread',
           citation: c,
-          detail: `${c.raw}:${c.line} — 이 세션에서 그 파일을 읽은 기록이 없습니다.`,
+          detail: `${label} — no record of reading this file in this session.`,
         });
       }
     }
@@ -156,14 +312,15 @@ export function excludeUserOriginated(
   citations: Citation[],
   userTexts: string[],
   cwd: string,
+  cache: CitationCache = {},
 ): Citation[] {
-  if (!Array.isArray(userTexts) || userTexts.length === 0) return citations;
+  if (citations.length === 0 || !Array.isArray(userTexts) || userTexts.length === 0) return citations;
   const fromUser = new Set<string>();
   for (const t of userTexts) {
-    for (const c of extractCitations(t, cwd)) fromUser.add(`${c.abs}:${c.line}`);
+    for (const c of extractCitations(t, cwd, cache)) fromUser.add(citationKey(c));
   }
   if (fromUser.size === 0) return citations;
-  return citations.filter((c) => !fromUser.has(`${c.abs}:${c.line}`));
+  return citations.filter((c) => !fromUser.has(citationKey(c)));
 }
 
 /** 확정 환각(파일 없음/줄 범위 밖)만 추린다. */
@@ -171,34 +328,32 @@ export function hallucinatedCitations(problems: CitationProblem[]): CitationProb
   return problems.filter((p) => p.kind === 'missing-file' || p.kind === 'line-out-of-range');
 }
 
-/** 근거 미확인(읽은 기록 없음)만 추린다. */
+/** 근거 미확인(읽은 기록 없음)만 추린다. Ambiguous names are unverifiable too, not hallucinations. */
 export function unreadCitations(problems: CitationProblem[]): CitationProblem[] {
-  return problems.filter((p) => p.kind === 'unread');
+  return problems.filter((p) => p.kind === 'unread' || p.kind === 'ambiguous');
 }
 
-export function citationBlockMessage(problems: CitationProblem[]): string {
+function problemList(problems: CitationProblem[]): string {
   const list = problems
     .slice(0, 5)
     .map((p) => `  - ${p.detail}`)
     .join('\n');
-  const more = problems.length > 5 ? `\n  … 외 ${problems.length - 5}건` : '';
+  return list + (problems.length > 5 ? `\n  … and ${problems.length - 5} more` : '');
+}
+
+export function citationBlockMessage(problems: CitationProblem[]): string {
   return (
-    `답변에서 실재하지 않는 위치를 인용했습니다:\n${list}${more}\n` +
-    `해당 파일을 실제로 읽어 확인한 뒤 인용을 정정하거나, 근거가 없으면 그 주장을 ` +
-    `\`## 근거 > 추측\` 으로 낮춰 다시 답하세요. (층0 인용 검증)`
+    `The answer cites locations that do not exist:\n${problemList(problems)}\n` +
+    'Read the file to check, then correct the citation. If there is no evidence, move the claim ' +
+    'under `## 근거 > 추측` and answer again. (layer-0 citation check)'
   );
 }
 
 export function unreadBlockMessage(problems: CitationProblem[], escalate: boolean): string {
-  const list = problems
-    .slice(0, 5)
-    .map((p) => `  - ${p.detail}`)
-    .join('\n');
-  const more = problems.length > 5 ? `\n  … 외 ${problems.length - 5}건` : '';
   const tail = escalate
-    ? `반복해서 해소되지 않았습니다 — review-changes 서브에이전트를 \`축: hallucination\` 으로 ` +
-      `호출해 인용한 주장들을 검증하고 결과를 기록하세요.`
-    : `그 파일을 Read(또는 cat/sed -n)로 실제 확인한 뒤 다시 답하세요. 확인 없이 쓴 것이면 ` +
-      `\`## 근거 > 추측\` 으로 분류하세요.`;
-  return `인용한 위치를 이 세션에서 확인한 기록이 없습니다:\n${list}${more}\n${tail} (층0 인용 검증)`;
+    ? 'This keeps recurring — run the review-changes subagent with `축: hallucination` to verify ' +
+      'the cited claims and record the result.'
+    : 'Read each cited file (Read, or cat/sed -n) and cite it by its repo-relative path, then answer ' +
+      'again. Claims you did not verify go under `## 근거 > 추측`.';
+  return `Cited locations could not be verified in this session:\n${problemList(problems)}\n${tail} (layer-0 citation check)`;
 }

@@ -46,6 +46,56 @@ describe('classifyBashWrite — 차단해야 하는 쓰기', () => {
     expect(denied('cd /proj && echo x > src/app.ts')).toEqual(['/proj/src/app.ts']);
   });
 
+  // A6: relative targets resolve against the directory `cd` moved to.
+  test('cd outside the project, then a relative write => not a project write', () => {
+    expect(denied('cd /tmp/scratch && cat > measure.ts')).toEqual([]);
+    expect(denied('cd "/tmp/my scratch"; echo x > a.ts')).toEqual([]);
+    expect(denied('cd /tmp/scratch && echo hi | tee out.ts')).toEqual([]);
+  });
+
+  test('cd into a project subdirectory still counts', () => {
+    expect(denied('cd src && echo x > app.ts')).toEqual(['/proj/src/app.ts']);
+    expect(denied('cd /tmp && cd /proj/src && echo x > app.ts')).toEqual(['/proj/src/app.ts']);
+  });
+
+  test('a write before the cd resolves against the original cwd', () => {
+    expect(denied('echo x > src/app.ts && cd /tmp')).toEqual(['/proj/src/app.ts']);
+  });
+
+  test('absolute targets ignore cd', () => {
+    expect(denied('cd /tmp && echo x > /proj/src/app.ts')).toEqual(['/proj/src/app.ts']);
+  });
+
+  test('cd to HOME or ~ resolves to the home directory (outside the project)', () => {
+    expect(denied('cd && echo x > a.ts')).toEqual([]);
+    expect(denied('cd ~/work && echo x > a.ts')).toEqual([]);
+  });
+
+  // Review of A6: never weaker than ignoring cd. Unknowable dirs fall back to the cwd.
+  test('cd to an unknowable dir ($VAR, ~user) falls back to the original cwd', () => {
+    expect(denied('cd $DIR && echo x > a.ts')).toEqual(['/proj/a.ts']);
+    expect(denied('cd ~bob && echo x > a.ts')).toEqual(['/proj/a.ts']);
+  });
+
+  test('a cd inside a subshell or command substitution does not leak out', () => {
+    expect(denied('(cd /tmp && ls) && echo x > src/app.ts')).toEqual(['/proj/src/app.ts']);
+    expect(denied('(cd /tmp); echo x > src/app.ts')).toEqual(['/proj/src/app.ts']);
+    expect(denied('echo $(cd /tmp && pwd) > src/app.ts')).toEqual(['/proj/src/app.ts']);
+    expect(denied('(cd /tmp && echo x > probe.ts)')).toEqual([]);
+  });
+
+  test('cd options and cd - are handled', () => {
+    expect(denied('cd -P /tmp && echo x > a.ts')).toEqual([]);
+    expect(denied('cd -- /tmp && echo x > a.ts')).toEqual([]);
+    expect(denied('cd /tmp && cd - && echo x > src/app.ts')).toEqual(['/proj/src/app.ts']);
+    expect(denied('cd - && echo x > src/app.ts')).toEqual(['/proj/src/app.ts']);
+  });
+
+  test('"cd" inside quotes or as part of a word is not a cd', () => {
+    expect(denied('echo "cd /tmp" && echo x > src/app.ts')).toEqual(['/proj/src/app.ts']);
+    expect(denied('abcd /tmp; echo x > src/app.ts')).toEqual(['/proj/src/app.ts']);
+  });
+
   test('여러 대상은 모두 보고한다', () => {
     const r = denied('echo a > src/a.ts; echo b > src/b.ts');
     expect(r.sort()).toEqual(['/proj/src/a.ts', '/proj/src/b.ts']);

@@ -331,7 +331,7 @@ describe('pre-tool-use reasoning gate — escape 카운터 (v0.26.1, 탈출구 �
 
     const third = await runHook(cwd, tp);
     expect(isBlocked(third)).toBe(false);
-    expect(third).toContain('3회 차단 후에도');
+    expect(third).toContain('2회 차단 후에도'); // A9: two blocks, then the escape
 
     // v0.26.2까지는 여기서 카운터가 리셋되어 4회째가 다시 1/3부터 차단됐다 —
     // 플러시 지연이 지속되는 동안 편집마다 deny 2회 + escape 1회가 반복(실측).

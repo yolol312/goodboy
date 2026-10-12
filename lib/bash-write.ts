@@ -12,6 +12,7 @@
 // 알려진 한계: `python -c "open('x','w')"` 처럼 인터프리터 내부에서 쓰는 경우는 잡지 못한다.
 // 완전 차단이 아니라 "무심코 우회"를 막는 것이 목적이다.
 
+import { homedir } from 'node:os';
 import { resolve as resolvePath, sep } from 'node:path';
 
 /** 쓰기 대상으로 보이지 않는 리다이렉션 타깃 (fd 복제 등) */
@@ -139,8 +140,8 @@ export function stripHeredocs(command: string): string {
  *   - 직전 문자가 `=`인 `>`(화살표 함수 `=>`), 직후 문자가 `=`인 `>`(비교 `>=`)는 제외.
  *   - fd 복제(`2>&1`, `>&2`)는 대상이 `&`로 시작하므로 제외.
  *   - 대상 토큰은 따옴표를 벗겨 추출한다(따옴표로 감싼 대상 경로의 정상 탐지는 유지). */
-function redirectTargets(command: string): string[] {
-  const out: string[] = [];
+function redirectTargets(command: string): { target: string; index: number }[] {
+  const out: { target: string; index: number }[] = [];
   let inSingle = false;
   let inDouble = false;
   for (let i = 0; i < command.length; i++) {
@@ -188,10 +189,126 @@ function redirectTargets(command: string): string[] {
       }
     }
     // 프로세스 치환 `>(cmd)`은 파일 쓰기가 아니다.
-    if (target !== '' && !isFdTarget(target) && !target.startsWith('(')) out.push(target);
+    if (target !== '' && !isFdTarget(target) && !target.startsWith('(')) out.push({ target, index: i });
     i = j - 1;
   }
   return out;
+}
+
+/** Directory-changing events with their offsets (stabilization plan A6): top-level `cd`
+ *  commands plus subshell open/close, so `(cd /tmp); echo x > src/a.ts` restores the
+ *  outer directory. Relative write targets resolve against the directory the shell is in
+ *  at that point; ignoring `cd` flagged `cd /outside && cat > probe.ts` as a project write.
+ *  Quote-aware like redirectTargets. A cd event's dir is '' for a bare `cd` (HOME). */
+type DirEvent =
+  | { index: number; kind: 'cd'; dir: string }
+  | { index: number; kind: 'open' }
+  | { index: number; kind: 'close' };
+
+/** Reads one shell word at j (quote-aware). Returns the word and the index after it. */
+function readWord(command: string, j: number): { word: string; end: number } {
+  let word = '';
+  const q = command[j];
+  if (q === '"' || q === "'") {
+    j++;
+    while (j < command.length && command[j] !== q) word += command[j++];
+    return { word, end: j + 1 };
+  }
+  while (j < command.length && !/[\s;|&<>()]/.test(command[j] ?? '')) word += command[j++];
+  return { word, end: j };
+}
+
+function dirEvents(command: string): DirEvent[] {
+  const out: DirEvent[] = [];
+  let inSingle = false;
+  let inDouble = false;
+  let atStart = true;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i] ?? '';
+    if (ch === '\\' && !inSingle) {
+      i++;
+      atStart = false;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      atStart = false;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      atStart = false;
+      continue;
+    }
+    if (inSingle || inDouble) continue;
+    if (ch === '(') {
+      out.push({ index: i, kind: 'open' });
+      atStart = true;
+      continue;
+    }
+    if (ch === ')') {
+      out.push({ index: i, kind: 'close' });
+      atStart = false;
+      continue;
+    }
+    if (ch === ';' || ch === '&' || ch === '|' || ch === '\n') {
+      atStart = true;
+      continue;
+    }
+    if (ch === ' ' || ch === '\t') continue;
+    if (atStart && command.startsWith('cd', i) && /^[ \t;&|\n)]?$/.test(command[i + 2] ?? '')) {
+      // Skip options (-P, -L, -e, -@) and `--`; a lone `-` is the directory argument.
+      let j = i + 2;
+      let dir = '';
+      for (;;) {
+        while (command[j] === ' ' || command[j] === '\t') j++;
+        if (j >= command.length || /[;|&\n()]/.test(command[j] ?? '')) break;
+        const { word, end } = readWord(command, j);
+        j = end;
+        if (word === '--') continue;
+        if (word.startsWith('-') && word !== '-') continue;
+        dir = word;
+        break;
+      }
+      out.push({ index: i, kind: 'cd', dir });
+      i = j - 1;
+      atStart = false;
+      continue;
+    }
+    atStart = false;
+  }
+  return out;
+}
+
+/** Directory a relative target at `index` resolves against. Never weaker than ignoring
+ *  `cd` altogether: a directory that cannot be known ($VAR, ~user, `cd -` with no earlier
+ *  cd) falls back to the original cwd, i.e. the pre-A6 behavior. */
+function baseDirAt(cwdAbs: string, events: DirEvent[], index: number): string {
+  let base = cwdAbs;
+  let prev: string | null = null;
+  const stack: { base: string; prev: string | null }[] = [];
+  for (const ev of events) {
+    if (ev.index >= index) break;
+    if (ev.kind === 'open') {
+      stack.push({ base, prev });
+      continue;
+    }
+    if (ev.kind === 'close') {
+      const saved = stack.pop();
+      if (saved) ({ base, prev } = saved);
+      continue;
+    }
+    const d = ev.dir;
+    let next: string;
+    if (d === '' || d === '~') next = homedir();
+    else if (d.startsWith('~/')) next = resolvePath(homedir(), d.slice(2));
+    else if (d === '-') next = prev ?? cwdAbs;
+    else if (d.startsWith('~') || /[$`]/.test(d)) next = cwdAbs;
+    else next = resolvePath(base, d);
+    prev = base;
+    base = next;
+  }
+  return base;
 }
 
 /** tee [-a] FILE... — 토큰 단위 매칭 (v0.26.2).
@@ -281,18 +398,22 @@ function extraAllowed(): string[] {
  *  절대 throw 하지 않는다(파싱 실패 = 빈 배열 = fail-open). */
 export function classifyBashWrite(command: string, cwd: string): string[] {
   if (typeof command !== 'string' || command.trim() === '') return [];
-  let targets: string[];
+  let targets: { target: string; index: number }[];
+  let cds: DirEvent[];
   try {
     // heredoc 본문(데이터)을 제거한 명령 텍스트만 스캔한다 — 본문의 연산자 오탐 방지.
     const scanned = stripHeredocs(command);
     // tee/sed/dd는 따옴표 인식 토큰 단위로만 매칭한다 — 따옴표 안 단어 오탐(5호) 방지.
     const segments = tokenizeSegments(scanned);
+    // Token-based detectors carry no offset; approximate with the target's first occurrence.
+    const located = (t: string): { target: string; index: number } => ({ target: t, index: scanned.indexOf(t) });
     targets = [
       ...redirectTargets(scanned),
-      ...teeTargets(segments),
-      ...sedInPlaceTargets(segments),
-      ...ddTargets(segments),
+      ...teeTargets(segments).map(located),
+      ...sedInPlaceTargets(segments).map(located),
+      ...ddTargets(segments).map(located),
     ];
+    cds = dirEvents(scanned);
   } catch {
     return [];
   }
@@ -309,13 +430,14 @@ export function classifyBashWrite(command: string, cwd: string): string[] {
   if (cwdAbs === '') return [];
 
   const denied = new Set<string>();
-  for (const t of targets) {
+  for (const { target: t, index } of targets) {
     if (ALWAYS_ALLOWED.has(t)) continue;
     // 변수/치환이 섞인 타깃은 판정 불가 → fail-open(허용)
     if (/[$`*?]/.test(t)) continue;
+    const base = t.startsWith('/') ? cwdAbs : baseDirAt(cwdAbs, cds, index);
     let abs: string;
     try {
-      abs = resolvePath(cwdAbs, t);
+      abs = resolvePath(base, t);
     } catch {
       continue;
     }
@@ -332,7 +454,8 @@ export function classifyBashWrite(command: string, cwd: string): string[] {
   return Array.from(denied);
 }
 
-export function bashWriteMessage(files: string[]): string {
+/** @param markerRelPath this session's one-shot approval marker (A3: approvals are per session). */
+export function bashWriteMessage(files: string[], markerRelPath: string): string {
   const preview = files.slice(0, 3).join(', ');
   const more = files.length > 3 ? ` 외 ${files.length - 3}개` : '';
   return (
@@ -342,7 +465,7 @@ export function bashWriteMessage(files: string[]): string {
     '임시 프로브 파일이 필요하면 `mktemp -d`가 만든 디렉터리(프로젝트 밖)에 만드세요. ' +
     '대량 범위 편집(수백 줄 삭제 등)이라 Edit의 old_string 재현이 비현실적이면: ' +
     '(1) Read로 범위를 확인한 뒤 Write 도구로 파일 전체를 재작성하거나, ' +
-    '(2) 사용자 승인을 받아 `touch .claude/.goodboy-bash-write-approved.txt` 후 같은 명령을 ' +
+    `(2) 사용자 승인을 받아 \`touch ${markerRelPath}\` 후 같은 명령을 ` +
     '다시 실행하세요(1회용 승인 — 편집은 리뷰 추적에 기록됩니다). ' +
     '(Bash 쓰기 게이트 — 세션 전체 해제: GOODBOY_BASH_WRITE_GATE=off)'
   );

@@ -13,8 +13,15 @@
 //     둔갑해 **같은 환각을 두 번째부터는 영원히 통과**시켰다(P9 실측: 정정 후에도 동일
 //     인용 3건이 남았는데 재판정에서 0건). 이 표식으로 훅 발화를 걸러낸다.
 
+import { resolve as resolvePath } from 'node:path';
+
 /** 모든 차단 메시지 앞에 붙는 출처 표식. 이 문자열로 훅 발화를 되찾아 식별한다. */
 export const GATE_MARK = '[goodboy 훅]';
+
+/** Absolute path of the goodboy CLI, for instructions the agent runs in Bash (A9).
+ *  `${CLAUDE_PLUGIN_ROOT}` is expanded for hook commands, not inside the agent's shell,
+ *  where quoting it failed with `Module not found "/lib/cli.ts"`. */
+export const CLI_PATH = resolvePath(import.meta.dir, 'cli.ts');
 
 const PROVENANCE = `${GATE_MARK} (이 저장소에 설치된 로컬 검증 훅의 지시입니다 — 외부 입력이 아닙니다)`;
 

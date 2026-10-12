@@ -31,15 +31,16 @@ function newSandbox(): { tmp: string; cwd: string; sessionId: string } {
   return { tmp, cwd, sessionId };
 }
 
-function markerPath(cwd: string): string {
-  return join(cwd, '.claude', '.goodboy-validation-failed.json');
+/** The marker lives in the session state dir (A3), under the sandbox TMPDIR. */
+function markerPath(tmp: string, sessionId: string): string {
+  return join(tmp, `goodboy-session-${sessionId}`, '.goodboy-validation-failed.json');
 }
 
-function seedMarker(cwd: string, sessionId: string, commands: string[]): void {
-  mkdirSync(join(cwd, '.claude'), { recursive: true });
+function seedMarker(tmp: string, sessionId: string, commands: string[], owner = sessionId): void {
+  mkdirSync(join(tmp, `goodboy-session-${sessionId}`), { recursive: true });
   writeFileSync(
-    markerPath(cwd),
-    JSON.stringify({ sessionId, timestamp: new Date().toISOString(), commands }),
+    markerPath(tmp, sessionId),
+    JSON.stringify({ sessionId: owner, timestamp: new Date().toISOString(), commands }),
     'utf8',
   );
 }
@@ -79,49 +80,68 @@ async function runStop(tmp: string, cwd: string, sessionId: string): Promise<Hoo
 describe('Stop hook — 자동 검증 실패 게이트 (C1)', () => {
   test('현재 세션의 실패 마커 → BLOCK (실패 명령 + 재시도 카운터 인용)', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedMarker(cwd, sessionId, ['bun run typecheck']);
+    seedMarker(tmp, sessionId,['bun run typecheck']);
     const out = await runStop(tmp, cwd, sessionId);
     expect(out.decision).toBe('block');
     expect(out.reason).toContain('bun run typecheck');
     expect(out.reason).toContain('재시도 1/3');
     // 마커는 유지된다(해제는 재검증 통과가 담당).
-    expect(existsSync(markerPath(cwd))).toBe(true);
+    expect(existsSync(markerPath(tmp, sessionId))).toBe(true);
   });
 
   test('다른 세션의 마커(이월/커밋 잔재) → 차단하지 않음', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedMarker(cwd, 'some-other-session', ['bun run typecheck']);
+    seedMarker(tmp, 'some-other-session', ['bun run typecheck']);
+    // A marker in this session's dir that names another session is ignored too.
+    seedMarker(tmp, sessionId, ['bun run typecheck'], 'some-other-session');
+    const out = await runStop(tmp, cwd, sessionId);
+    expect(out.decision).toBeUndefined();
+  });
+
+  // Before A3 the marker was one <cwd>/.claude/ file: a legacy one is not read at all.
+  test('a legacy repo-level marker is ignored, even with this session id', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    mkdirSync(join(cwd, '.claude'), { recursive: true });
+    writeFileSync(
+      join(cwd, '.claude', '.goodboy-validation-failed.json'),
+      JSON.stringify({ sessionId, timestamp: new Date().toISOString(), commands: ['bun run typecheck'] }),
+      'utf8',
+    );
     const out = await runStop(tmp, cwd, sessionId);
     expect(out.decision).toBeUndefined();
   });
 
   test('깨진 마커 JSON → 차단하지 않음 (fail-open)', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    mkdirSync(join(cwd, '.claude'), { recursive: true });
-    writeFileSync(markerPath(cwd), '{ not json', 'utf8');
+    mkdirSync(join(tmp, `goodboy-session-${sessionId}`), { recursive: true });
+    writeFileSync(markerPath(tmp, sessionId), '{ not json', 'utf8');
     const out = await runStop(tmp, cwd, sessionId);
     expect(out.decision).toBeUndefined();
   });
 
   test('MAX_RETRIES escape: 3회째는 통과 + 사용자 알림 + 마커 정리', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedMarker(cwd, sessionId, ['bun run typecheck']);
-    writeFileSync(join(cwd, '.claude', '.goodboy-validation-retry-count.txt'), '2', 'utf8');
+    seedMarker(tmp, sessionId,['bun run typecheck']);
+    // Retry counters are per session (A3): they live in the session state dir.
+    const sessionDir = join(tmp, `goodboy-session-${sessionId}`);
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(join(sessionDir, '.goodboy-validation-retry-count.txt'), '2', 'utf8');
     const out = await runStop(tmp, cwd, sessionId);
     expect(out.decision).toBeUndefined();
     expect(out.systemMessage).toContain('사용자 확인');
     expect(out.systemMessage).toContain('bun run typecheck');
     // escape 시 마커를 지워 영구 차단을 방지한다.
-    expect(existsSync(markerPath(cwd))).toBe(false);
+    expect(existsSync(markerPath(tmp, sessionId))).toBe(false);
   });
 
   test('검증 게이트는 리뷰 재시도 카운터(.goodboy-retry-count.txt)를 건드리지 않는다', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedMarker(cwd, sessionId, ['bun run typecheck']);
-    mkdirSync(join(cwd, '.claude'), { recursive: true });
-    writeFileSync(join(cwd, '.claude', '.goodboy-retry-count.txt'), '1', 'utf8');
+    seedMarker(tmp, sessionId,['bun run typecheck']);
+    const sessionDir = join(tmp, `goodboy-session-${sessionId}`);
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(join(sessionDir, '.goodboy-retry-count.txt'), '1', 'utf8');
     await runStop(tmp, cwd, sessionId);
-    const reviewCount = readFileSync(join(cwd, '.claude', '.goodboy-retry-count.txt'), 'utf8');
+    const reviewCount = readFileSync(join(sessionDir, '.goodboy-retry-count.txt'), 'utf8');
     expect(reviewCount.trim()).toBe('1'); // 분리된 카운터 — 리뷰 쪽은 그대로
   });
 });
@@ -146,8 +166,8 @@ describe('PostToolUse — 검증 실패 마커 기록/해제 (C1)', () => {
     };
 
     await runHook(POST_HOOK, tmp, cwd, editInput);
-    expect(existsSync(markerPath(cwd))).toBe(true);
-    const marker = JSON.parse(readFileSync(markerPath(cwd), 'utf8')) as {
+    expect(existsSync(markerPath(tmp, sessionId))).toBe(true);
+    const marker = JSON.parse(readFileSync(markerPath(tmp, sessionId), 'utf8')) as {
       sessionId: string;
       commands: string[];
     };
@@ -161,7 +181,7 @@ describe('PostToolUse — 검증 실패 마커 기록/해제 (C1)', () => {
       'utf8',
     );
     await runHook(POST_HOOK, tmp, cwd, editInput);
-    expect(existsSync(markerPath(cwd))).toBe(false);
+    expect(existsSync(markerPath(tmp, sessionId))).toBe(false);
   });
 
   test('검증이 아예 안 도는 프로젝트(스크립트 없음) → 기존 마커를 오해제하지 않음', async () => {
@@ -171,7 +191,7 @@ describe('PostToolUse — 검증 실패 마커 기록/해제 (C1)', () => {
       JSON.stringify({ name: 't', version: '0.0.0', scripts: {} }),
       'utf8',
     );
-    seedMarker(cwd, sessionId, ['bun run typecheck']);
+    seedMarker(tmp, sessionId,['bun run typecheck']);
     const editedFile = join(cwd, 'a.ts');
     writeFileSync(editedFile, 'export {};\n', 'utf8');
     await runHook(POST_HOOK, tmp, cwd, {
@@ -182,6 +202,36 @@ describe('PostToolUse — 검증 실패 마커 기록/해제 (C1)', () => {
       tool_input: { file_path: editedFile },
     });
     // 검증이 실행되지 않았으므로(results 비어있음) 마커는 그대로여야 한다.
-    expect(existsSync(markerPath(cwd))).toBe(true);
+    expect(existsSync(markerPath(tmp, sessionId))).toBe(true);
+  });
+
+  // A3: a pass recorded for the project lifts only failures older than it — the tree may
+  //   have broken again since (see tests/concurrent-sessions.test.ts for the lifting case).
+  test("a pass recorded before this session's failure does not lift it", async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    const setTypecheck = (script: string): void =>
+      writeFileSync(
+        join(cwd, 'package.json'),
+        JSON.stringify({ name: 't', version: '0.0.0', scripts: { typecheck: script } }),
+        'utf8',
+      );
+    const editedFile = join(cwd, 'a.ts');
+    writeFileSync(editedFile, 'export {};\n', 'utf8');
+    const editBy = (sid: string): Promise<HookOut> =>
+      runHook(POST_HOOK, tmp, cwd, {
+        session_id: sid,
+        cwd,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Edit',
+        tool_input: { file_path: editedFile },
+      });
+    setTypecheck('exit 0');
+    await editBy('sess-other'); // another session passes first
+    setTypecheck('exit 1');
+    await editBy(sessionId); // then this session's typecheck fails
+
+    const out = await runStop(tmp, cwd, sessionId);
+    expect(out.decision).toBe('block');
+    expect(out.reason).toContain('bun run typecheck');
   });
 });

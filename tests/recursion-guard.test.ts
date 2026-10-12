@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import {
@@ -124,8 +124,18 @@ describe('recursion-guard checkRecursionGuard', () => {
 
   test('fail-open: 상태 저장 불가 상황에서도 통과 (빈 sessionId)', () => {
     // 어떤 입력이든 예외를 던지지 않고 blocked=false 를 낼 수 있어야 한다.
-    const r = checkRecursionGuard('', 'anything');
-    expect(r.blocked).toBe(false);
+    // Runs against a private TMPDIR: the empty id maps to one state dir shared by every run,
+    // so 5+ suite runs within a minute tripped the same-prompt limit (layer-1 test run).
+    const prev = process.env.TMPDIR;
+    const tmp = mkdtempSync(join(tmpdir(), 'goodboy-rg-empty-'));
+    process.env.TMPDIR = tmp;
+    try {
+      expect(checkRecursionGuard('', 'anything').blocked).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = prev;
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
 

@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { TEST_CURSOR_FILE, cursorFileName } from '../lib/review-cursor';
 
 const STOP_HOOK = resolve(import.meta.dir, '..', 'hooks', 'stop.ts');
 const tmpDirs: string[] = [];
@@ -30,6 +31,15 @@ function newSandbox(): { tmp: string; cwd: string; sessionId: string } {
   tmpDirs.push(cwd);
   const sessionId = `sess-${Math.random().toString(36).slice(2)}`;
   return { tmp, cwd, sessionId };
+}
+
+/** The test cursor lives in the session state dir (A3), one file per project directory. */
+function testCursorPath(tmp: string, sessionId: string, cwd: string): string {
+  return join(
+    tmp,
+    `goodboy-session-${sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_')}`,
+    cursorFileName(TEST_CURSOR_FILE, cwd),
+  );
 }
 
 function seedSession(tmp: string, sessionId: string, turn: number, editFiles: string[], cwd: string): void {
@@ -161,6 +171,21 @@ describe('Stop hook — 층1 테스트 게이트', () => {
     expect(out.reason).toContain('test-changes');
   });
 
+  // Layer-1 test run: isTestFile() saw the absolute path, so for a repo that lives under a
+  //   tests/ directory every file was a "test file" and layer 1 never fired.
+  test('a repo that lives under a tests/ directory is still gated', async () => {
+    const { tmp, cwd: parent, sessionId } = newSandbox();
+    const cwd = join(parent, 'tests', 'proj');
+    mkdirSync(cwd, { recursive: true });
+    seedSession(tmp, sessionId, 3, [CODE_FILE, 'tests/a.test.ts'], cwd);
+
+    const out = await runStop(tmp, cwd, sessionId);
+    expect(out.decision).toBe('block');
+    expect(out.reason).toContain('테스트가 없습니다');
+    expect(out.reason).toContain('a.ts');
+    expect(out.reason).not.toContain('a.test.ts'); // the repo's own test file is still exempt
+  });
+
   // 라이브 실측: 문서만 고친 턴에 README.md·agents/*.md·skills/*.md 5개를 두고
   // "테스트되지 않은 변경 파일"로 차단했다. 해소할 방법이 없어 escape로만 끝난다.
   test('문서만 바뀐 턴은 발동하지 않는다', async () => {
@@ -213,7 +238,7 @@ describe('Stop hook — 층1 테스트 게이트', () => {
 
     const out = await runStop(tmp, cwd, sessionId);
     expect(out.decision).toBeUndefined();
-    expect(existsSync(join(cwd, '.claude', '.goodboy-last-test.json'))).toBe(true);
+    expect(existsSync(testCursorPath(tmp, sessionId, cwd))).toBe(true);
   });
 
   test('변경 파일을 커버하지 않으면 BLOCK', async () => {
@@ -382,11 +407,11 @@ describe('Stop hook — 층1 테스트 게이트', () => {
     });
     const out = JSON.parse((await new Response(proc.stdout).text()) || '{}') as StopOut;
     await proc.exited;
-    expect(existsSync(join(cwd, '.claude', '.goodboy-last-test.json'))).toBe(true); // 커서 전진
+    expect(existsSync(testCursorPath(tmp, sessionId, cwd))).toBe(true); // 커서 전진
     // 층1은 통과했고(테스트 사유가 아니고), 층2가 리뷰를 요구한다.
     expect(out.reason ?? '').not.toContain('테스트가 없습니다');
     expect(out.decision).toBe('block');
-    expect(out.reason ?? '').toContain('리뷰');
+    expect(out.reason ?? '').toContain('Review is required');
   });
 
   test('stop_hook_active 경로에서 조건 미달이면 수락하지 않는다 (차단도 안 함)', async () => {
@@ -416,7 +441,7 @@ describe('Stop hook — 층1 테스트 게이트', () => {
     const out = JSON.parse((await new Response(proc.stdout).text()) || '{}') as StopOut;
     await proc.exited;
     expect(out.decision).toBeUndefined();
-    expect(existsSync(join(cwd, '.claude', '.goodboy-last-test.json'))).toBe(false);
+    expect(existsSync(testCursorPath(tmp, sessionId, cwd))).toBe(false);
   });
 
   test('MAX_RETRIES escape: 3회째는 통과 + 커서 전진(영구 차단 방지)', async () => {
@@ -434,7 +459,7 @@ describe('Stop hook — 층1 테스트 게이트', () => {
     // 자기 사유로 막는 것은 정상이므로 decision이 아니라 **사유**로 판정한다.
     const third = await runStop(tmp, cwd, sessionId);
     expect(third.reason ?? '').not.toContain('테스트가 없습니다');
-    expect(existsSync(join(cwd, '.claude', '.goodboy-last-test.json'))).toBe(true);
+    expect(existsSync(testCursorPath(tmp, sessionId, cwd))).toBe(true);
   });
 });
 

@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { REVIEW_CURSOR_FILE, cursorFileName } from '../lib/review-cursor';
 
 const STOP_HOOK = resolve(import.meta.dir, '..', 'hooks', 'stop.ts');
 const tmpDirs: string[] = [];
@@ -101,7 +102,13 @@ async function runStop(tmp: string, cwd: string, sessionId: string): Promise<Sto
   }
 }
 
-const cursorPath = (cwd: string): string => join(cwd, '.claude', '.goodboy-last-review.json');
+/** The review cursor lives in the session state dir (A3), one file per project directory. */
+const cursorPath = (tmp: string, sessionId: string, cwd: string): string =>
+  join(
+    tmp,
+    `goodboy-session-${sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_')}`,
+    cursorFileName(REVIEW_CURSOR_FILE, cwd),
+  );
 
 describe('Stop hook — validateReview 실패 게이트 escape (결함 D)', () => {
   test('커버리지 실패는 1·2회 차단(재시도 카운터), 3회째 통과 + 커서 전진', async () => {
@@ -112,19 +119,20 @@ describe('Stop hook — validateReview 실패 게이트 escape (결함 D)', () =
     // 1회: block, 재시도 1/3
     const out1 = await runStop(tmp, cwd, sessionId);
     expect(out1.decision).toBe('block');
-    expect(out1.reason).toContain('리뷰 검증 실패');
-    expect(out1.reason).toContain('재시도 1/3');
+    expect(out1.reason).toContain('Review validation failed');
+    expect(out1.reason).toContain('retry 1/3');
+    expect(out1.reason).not.toContain('/review-changes'); // A9: no such command
 
     // 2회: block, 재시도 2/3
     const out2 = await runStop(tmp, cwd, sessionId);
     expect(out2.decision).toBe('block');
-    expect(out2.reason).toContain('재시도 2/3');
+    expect(out2.reason).toContain('retry 2/3');
 
     // 3회째: escape → 통과 + 사용자 확인 알림 + 커서 전진(데드락 해소).
     const out3 = await runStop(tmp, cwd, sessionId);
     expect(out3.decision).toBeUndefined();
     expect(out3.systemMessage).toContain('사용자 확인');
     // 커서 파일이 생겨 다음 턴에 같은 유령 집합으로 재차단되지 않는다.
-    expect(existsSync(cursorPath(cwd))).toBe(true);
+    expect(existsSync(cursorPath(tmp, sessionId, cwd))).toBe(true);
   });
 });

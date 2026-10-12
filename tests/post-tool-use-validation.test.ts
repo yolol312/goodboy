@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { autoValidateMode, buildValidationContext, looksUnavailable } from '../hooks/post-tool-use';
+import { autoValidateMode, buildValidationContext, looksUnavailable, runCmd } from '../hooks/post-tool-use';
 
 const HOOK = resolve(import.meta.dir, '..', 'hooks', 'post-tool-use.ts');
 const tmpDirs: string[] = [];
@@ -22,16 +22,22 @@ describe('looksUnavailable (#5)', () => {
   test('exit code 127 => unavailable', () => {
     expect(looksUnavailable('whatever', 127)).toBe(true);
   });
-  test('"command not found" => unavailable', () => {
-    expect(looksUnavailable('sh: tsc: command not found', 1)).toBe(true);
-  });
-  test('"No such file or directory" => unavailable', () => {
-    expect(looksUnavailable('bun: No such file or directory', 1)).toBe(true);
+  test('localized shell message with 127 => unavailable', () => {
+    // bun run / npm run both propagate the shell's 127; the message itself may be localized.
+    expect(looksUnavailable('bash: 줄 1: tsc: 명령을 찾을 수 없음', 127)).toBe(true);
   });
   test('a real type error is NOT unavailable', () => {
     expect(
       looksUnavailable("a.ts(3,1): error TS2322: Type 'string' is not assignable", 2),
     ).toBe(false);
+  });
+  // A5: output substrings used to classify genuine failures as "tool unavailable".
+  test('TS6053 "File not found" with a failing exit code is a real failure', () => {
+    expect(looksUnavailable("error TS6053: File '/repo/src/missing.ts' not found.", 2)).toBe(false);
+  });
+  test('"No such file or directory" / ENOENT in output with exit 1 is a real failure', () => {
+    expect(looksUnavailable('Error: ENOENT: no such file or directory, open fixture.json', 1)).toBe(false);
+    expect(looksUnavailable('sh: tsc: command not found', 1)).toBe(false);
   });
 });
 
@@ -71,6 +77,44 @@ describe('buildValidationContext (#5)', () => {
     ]);
     expect(blocked).toBe(false);
     expect(context).toBeUndefined();
+  });
+
+  test('runCmd maps a real timeout to timedOut, a missing tool to unavailable, a failure to neither', () => {
+    const slow = runCmd('sleep 2', tmpdir(), 200);
+    expect(slow.timedOut).toBe(true);
+    expect(slow.unavailable).toBeFalsy();
+    const missing = runCmd('definitely-missing-tool-xyz', tmpdir(), 5000);
+    expect(missing.unavailable).toBe(true);
+    const failing = runCmd(`sh -c "echo \\"error TS6053: File 'x.ts' not found.\\" >&2; exit 2"`, tmpdir(), 5000);
+    expect(failing.ok).toBe(false);
+    expect(failing.unavailable).toBeFalsy();
+    expect(failing.timedOut).toBeFalsy();
+  });
+
+  // A5: a slow but healthy check must not leave a failure marker on every edit.
+  test('timeout => NOT blocked, noted as inconclusive, and not a confirmed pass', () => {
+    const { context, blocked, failedCmds, confirmedPass } = buildValidationContext([
+      { cmd: 'bun run typecheck', ok: false, output: 'spawnSync /bin/sh ETIMEDOUT', timedOut: true },
+    ]);
+    expect(blocked).toBe(false);
+    expect(failedCmds).toEqual([]);
+    // A timeout must not clear an earlier real-failure marker.
+    expect(confirmedPass).toBe(false);
+    expect(context).toContain('timed out');
+    expect(context).toContain('bun run typecheck');
+  });
+
+  test('failedCmds excludes unavailable and timed-out commands; a real pass is confirmed', () => {
+    const mixed = buildValidationContext([
+      { cmd: 'bun run typecheck', ok: false, output: 'x', unavailable: true },
+      { cmd: 'bun run lint', ok: false, output: 'slow', timedOut: true },
+      { cmd: 'bun run test', ok: false, output: 'real failure' },
+    ]);
+    expect(mixed.failedCmds).toEqual(['bun run test']);
+    expect(buildValidationContext([{ cmd: 'bun run typecheck', ok: true, output: '' }]).confirmedPass).toBe(true);
+    expect(
+      buildValidationContext([{ cmd: 'bun run typecheck', ok: false, output: '', unavailable: true }]).confirmedPass,
+    ).toBe(false);
   });
 });
 

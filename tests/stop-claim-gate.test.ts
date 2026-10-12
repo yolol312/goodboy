@@ -115,7 +115,7 @@ describe('Stop hook — 층0 인용 검증 게이트', () => {
     const out = await runStop(tmp, cwd, sessionId, tp);
     expect(out.decision).toBe('block');
     expect(out.reason).toContain('src/nope.ts:42');
-    expect(out.reason).toContain('그런 파일이 없습니다');
+    expect(out.reason).toContain('no such file');
   });
 
   test('줄 범위를 넘는 인용을 차단한다', async () => {
@@ -126,7 +126,30 @@ describe('Stop hook — 층0 인용 검증 게이트', () => {
 
     const out = await runStop(tmp, cwd, sessionId, tp);
     expect(out.decision).toBe('block');
-    expect(out.reason).toContain('5줄까지');
+    expect(out.reason).toContain('only 5 lines');
+  });
+
+  // A8: a range past the end of the file is caught (ranges used to be invisible).
+  test('a range citation past the end of the file is blocked', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    const dir = seedTurnOnly(tmp, sessionId, 3);
+    seedRead(dir, resolve(cwd, 'src/a.ts'), 3);
+    const tp = writeTranscript(cwd, 'See `src/a.ts:3-40` for the flow.');
+
+    const out = await runStop(tmp, cwd, sessionId, tp);
+    expect(out.decision).toBe('block');
+    expect(out.reason).toContain('src/a.ts:3-40');
+  });
+
+  // A8: a bare file name that names one repo file is not "no such file".
+  test('a unique bare file name that was read passes', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    const dir = seedTurnOnly(tmp, sessionId, 3);
+    seedRead(dir, resolve(cwd, 'src/a.ts'), 3);
+    const tp = writeTranscript(cwd, 'It is handled in a.ts:3.');
+
+    const out = await runStop(tmp, cwd, sessionId, tp);
+    expect(out.decision).toBeUndefined();
   });
 
   test('유효한 인용 + 읽은 기록이 있으면 통과한다', async () => {
@@ -149,7 +172,7 @@ describe('Stop hook — 층0 인용 검증 게이트', () => {
 
     const out = await runStop(tmp, cwd, sessionId, tp);
     expect(out.decision).toBe('block');
-    expect(out.reason).toContain('읽은 기록이 없습니다');
+    expect(out.reason).toContain('no record of reading');
   });
 
   test('읽기 기록이 통째로 없으면 C3를 생략한다 (압축 직후 오차단 방지)', async () => {
