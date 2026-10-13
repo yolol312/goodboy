@@ -5,7 +5,7 @@
 // dev-cycle 템플릿은 빈 표와 `<화면 이름>` 자리표시자를 그대로 남긴 채 시작한다.
 
 import { describe, expect, test, afterEach } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -20,6 +20,7 @@ import {
   isPlaceholderCell,
   parseCurrentVersion,
   prototypeContractWarnings,
+  readAcceptance,
   requiredAcceptanceCriteria,
 } from '../lib/acceptance';
 
@@ -419,5 +420,157 @@ describe('findDevCycleArtifacts / requiredAcceptanceCriteria', () => {
     });
     const ids = requiredAcceptanceCriteria(cwd).map((c) => c.id);
     expect(ids).toEqual(['PT-STRUCT']);
+  });
+});
+
+// F1: dev-cycle documents may be written in English (language policy, 2026-10-12).
+const ENGLISH_UIUX = [
+  '# UI/UX',
+  '',
+  '## Screens',
+  '',
+  '| Screen | Kind | Path |',
+  '|---|---|---|',
+  '| Settings | New | /settings |',
+  '| Board | changed | / |',
+  '| Login | unchanged | /login |',
+  '| <screen name> | new / changed / unchanged | <path> |',
+  '',
+  '## Changed screens — What changes',
+  '',
+  '| Screen | Before | This version |',
+  '|---|---|---|',
+  '| Board | flat list | grouped by status |',
+  '',
+  '## Components',
+  '',
+  '| Component | Kind | Variants | States | Used on |',
+  '|---|---|---|---|---|',
+  '| TaskCard | new | compact | empty, error, loading | Board |',
+  '| Avatar | Unchanged | - | - | Board |',
+].join('\n');
+
+describe('English dev-cycle documents (F1)', () => {
+  test('the current version is read from `Current version`, in any case', () => {
+    expect(parseCurrentVersion('- **Current version**: v0.4\n- **Current stage**: 2\n')).toBe('v0.4');
+    expect(parseCurrentVersion('- **current Version**: v0.4\n')).toBe('v0.4');
+    expect(parseCurrentVersion('- **Current version**: <v0.1>\n')).toBe(null);
+  });
+
+  test('an empty version value does not read the next line', () => {
+    expect(parseCurrentVersion('- **현재 버전**:\n- **현재 단계**: 1\n')).toBe(null);
+    expect(parseCurrentVersion('- **Current version**:\n- **Current stage**: 1\n')).toBe(null);
+  });
+
+  test('the English legend row is a placeholder', () => {
+    expect(isPlaceholderCell('new / changed / unchanged')).toBe(true);
+    expect(isPlaceholderCell('New / Changed')).toBe(true);
+    expect(isPlaceholderCell('new')).toBe(false);
+  });
+
+  test('screens, changes and components come from English headings and kinds', () => {
+    const ids = extractUiuxCriteria(ENGLISH_UIUX).map((c) => c.id);
+    expect(ids).toEqual(['UIUX-NEW-1', 'UIUX-CHG-1', 'UIUX-COMP-1', 'UIUX-STATE-1', 'UIUX-STATE-2', 'UIUX-STATE-3']);
+    const descriptions = extractUiuxCriteria(ENGLISH_UIUX).map((c) => c.description).join('\n');
+    expect(descriptions).toContain('Settings');
+    expect(descriptions).toContain('grouped by status');
+    expect(descriptions).not.toContain('Avatar'); // unchanged
+    expect(descriptions).not.toContain('Login'); // unchanged
+  });
+
+  test('a project with English CYCLE.md and UIUX.md yields its criteria', () => {
+    const cwd = newSandbox();
+    mkdirSync(join(cwd, 'docs', 'versions', 'v0.4'), { recursive: true });
+    writeFileSync(join(cwd, 'docs', 'CYCLE.md'), '# Cycle\n\n- **Current version**: v0.4\n- **Current stage**: 6\n', 'utf8');
+    writeFileSync(join(cwd, 'docs', 'versions', 'v0.4', 'UIUX.md'), ENGLISH_UIUX, 'utf8');
+    expect(findDevCycleArtifacts(cwd)?.version).toBe('v0.4');
+    expect(requiredAcceptanceCriteria(cwd).map((c) => c.id)).toContain('UIUX-NEW-1');
+  });
+
+  test('English headings match in any case', () => {
+    const lower = ENGLISH_UIUX.replace('## Screens', '## screens').replace('## Components', '## COMPONENTS');
+    expect(extractUiuxCriteria(lower).map((c) => c.id)).toContain('UIUX-NEW-1');
+    expect(extractUiuxCriteria(lower).map((c) => c.id)).toContain('UIUX-COMP-1');
+  });
+
+  test('a Korean section still wins over an English one in a mixed document', () => {
+    const mixed = `## 화면 목록\n\n| 화면 | 구분 |\n|---|---|\n| 설정 | 신규 |\n\n${ENGLISH_UIUX}`;
+    const news = extractUiuxCriteria(mixed).filter((c) => c.source === 'uiux-new');
+    expect(news.map((c) => c.description).join('\n')).toContain('설정');
+    expect(news).toHaveLength(1);
+  });
+});
+
+// One reading gives the Stop its gate switch, its criteria and the F2 warning (round 3).
+describe('readAcceptance: the problem it reports (F2)', () => {
+  function project(cycle: string | null, uiux?: string): string {
+    const cwd = newSandbox();
+    if (cycle === null) return cwd;
+    mkdirSync(join(cwd, 'docs', 'versions', 'v0.1'), { recursive: true });
+    writeFileSync(join(cwd, 'docs', 'CYCLE.md'), cycle, 'utf8');
+    if (uiux !== undefined) writeFileSync(join(cwd, 'docs', 'versions', 'v0.1', 'UIUX.md'), uiux, 'utf8');
+    return cwd;
+  }
+  const UNREADABLE_TABLES = '## Pantallas\n\n| Pantalla | Tipo |\n|---|---|\n| Ajustes | nuevo |\n';
+
+  test('nothing to report: no dev-cycle, criteria found, a placeholder version, or no UI documents yet', () => {
+    expect(readAcceptance(project(null))).toEqual({ devCycle: false, criteria: [], problem: null });
+    const found = readAcceptance(project('- **현재 버전**: v0.1\n', ENGLISH_UIUX));
+    expect(found.devCycle).toBe(true);
+    expect(found.criteria.length).toBeGreaterThan(0);
+    expect(found.problem).toBeNull();
+    expect(readAcceptance(project('- **현재 버전**: <v0.1>\n'))).toEqual({ devCycle: false, criteria: [], problem: null });
+    // stage 1–2: the version folder exists, UIUX.md and the prototype do not yet
+    expect(readAcceptance(project('- **현재 버전**: v0.1\n'))).toEqual({ devCycle: true, criteria: [], problem: null });
+  });
+
+  test('a CYCLE.md without a current-version line in either language', () => {
+    expect(readAcceptance(project('- **Version now**: v0.1\n'))).toEqual({
+      devCycle: false,
+      criteria: [],
+      problem: { kind: 'no-version-key' },
+    });
+  });
+
+  test('UIUX.md whose tables are not recognized', () => {
+    const reading = readAcceptance(project('- **현재 버전**: v0.1\n', UNREADABLE_TABLES));
+    expect(reading.devCycle).toBe(true);
+    expect(reading.criteria).toEqual([]);
+    const problem = reading.problem;
+    expect(problem?.kind).toBe('no-criteria');
+    expect(problem?.kind === 'no-criteria' ? problem.files.map((f) => f.endsWith('UIUX.md')) : []).toEqual([true]);
+  });
+
+  // Round 3 (final security review): an unreadable CYCLE.md looked like no dev-cycle at all.
+  test.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'a CYCLE.md that exists but cannot be read is reported',
+    () => {
+      const cwd = project('- **현재 버전**: v0.1\n', ENGLISH_UIUX);
+      const cycle = join(cwd, 'docs', 'CYCLE.md');
+      chmodSync(cycle, 0o000);
+      try {
+        expect(readAcceptance(cwd)).toEqual({ devCycle: false, criteria: [], problem: { kind: 'unreadable', files: [cycle] } });
+      } finally {
+        chmodSync(cycle, 0o644);
+      }
+    },
+  );
+
+  test('requiredAcceptanceCriteria is the reading’s criteria', () => {
+    const cwd = project('- **현재 버전**: v0.1\n', ENGLISH_UIUX);
+    expect(requiredAcceptanceCriteria(cwd)).toEqual(readAcceptance(cwd).criteria);
+  });
+});
+
+// Round 3 (refactoring review): the legend regex is built from the kind words, so the
+//   two lists of kinds cannot drift apart.
+describe('a legend left in a kind cell', () => {
+  test('any mix of the kind words in either language is a placeholder', () => {
+    for (const cell of ['new / changed / unchanged', 'NEW / Changed', '신규 / changed', 'unchanged/new']) {
+      expect(isPlaceholderCell(cell)).toBe(true);
+    }
+    for (const cell of ['new', 'new / old', 'changed screens']) {
+      expect(isPlaceholderCell(cell)).toBe(false);
+    }
   });
 });

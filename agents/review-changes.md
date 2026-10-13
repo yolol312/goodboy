@@ -52,6 +52,7 @@ model: inherit
 
 - `hallucination` 축은 **변경 내용과 무관하게 항상** 돈다. 무엇을 고쳤든 환각은 확인해야 한다.
 - 축이 지정되지 않았으면 **전 축을 순서대로** 수행한다(단일 실행 폴백).
+  - In that single run, also add `hallucination` to `dimensions_checked`: it marks that section A ran. A finding clears only when the axes that raised it review the file again, and the Stop reads those axes from `dimensions_checked`. Without the marker, a hallucination finding of this run counts as a finding of the other axes.
 - `dimensions_checked` 에는 **자기 축에서 실제로 평가한 차원만** 적는다. 남의 축 차원을 적는 것은 거짓 기록이다. Stop hook이 모든 축의 결과를 **합집합**으로 보므로, 자기 것만 정직하게 적으면 커버리지가 채워진다.
 - 담당 차원 중 이번 변경이 트리거하지 않은 것(예: HTTP 서버 코드가 없으면 `web-hardening`)은 적지 않는다. Stop hook이 요구하는 차원만 채우면 된다.
 

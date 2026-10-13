@@ -444,6 +444,43 @@ describe('Stop hook — 층1 테스트 게이트', () => {
     expect(existsSync(testCursorPath(tmp, sessionId, cwd))).toBe(false);
   });
 
+  // Round 3: the accept takes its criteria from the Stop's one dev-cycle reading. No test
+  //   noticed when that check was dropped (mutant M109).
+  test('stop_hook_active: a result that leaves a dev-cycle criterion uncovered is not accepted', async () => {
+    const accepted = async (acceptance: Array<Record<string, unknown>>): Promise<boolean> => {
+      const { tmp, cwd, sessionId } = newSandbox();
+      seedSession(tmp, sessionId, 3, [CODE_FILE], cwd);
+      mkdirSync(join(cwd, 'docs', 'versions', 'v0.1'), { recursive: true });
+      writeFileSync(join(cwd, 'docs', 'CYCLE.md'), '- **현재 버전**: v0.1\n', 'utf8');
+      writeFileSync(
+        join(cwd, 'docs', 'versions', 'v0.1', 'UIUX.md'),
+        '## 화면 목록\n\n| 화면 | 구분 |\n|---|---|\n| 설정 | 신규 |\n',
+        'utf8',
+      );
+      const tf = makeTestFile(cwd, 'tests/a.test.ts');
+      writeTestResult(cwd, { testedFiles: [resolve(cwd, CODE_FILE)], testFiles: [tf], acceptance });
+      const proc = Bun.spawn(['bun', STOP_HOOK], {
+        cwd,
+        env: { ...process.env, TMPDIR: tmp, HOME: tmp },
+        stdin: new TextEncoder().encode(
+          JSON.stringify({ session_id: sessionId, cwd, hook_event_name: 'Stop', stop_hook_active: true }),
+        ),
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      await new Response(proc.stdout).text();
+      await proc.exited;
+      return existsSync(testCursorPath(tmp, sessionId, cwd));
+    };
+    expect(await accepted([goodAcceptance()])).toBe(false); // UIUX-NEW-1 uncovered
+    const screen = goodAcceptance({
+      id: 'UIUX-NEW-1',
+      description: '설정 화면',
+      mutation: { command: 'remove the settings route', output: '1 failed', detected: true }, // a UI criterion needs one
+    });
+    expect(await accepted([goodAcceptance(), screen])).toBe(true);
+  }, 30_000);
+
   test('MAX_RETRIES escape: 3회째는 통과 + 커서 전진(영구 차단 방지)', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 3, [CODE_FILE], cwd);
@@ -538,10 +575,14 @@ describe('Stop hook — 층1 테스트 게이트 활성 판정 (auto)', () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, ['src/a.ts'], cwd);
     mkdirSync(join(cwd, 'docs', 'versions', 'v0.1'), { recursive: true });
-    writeFileSync(join(cwd, 'docs', 'CYCLE.md'), '# 사이클\n\n- 현재 버전: v0.1\n', 'utf8');
+    // The key in bold, as dev-cycle writes it. Without the bold the documents were never
+    //   recognized, and the block this test saw came from the review gate (round-3 closing
+    //   refactoring review).
+    writeFileSync(join(cwd, 'docs', 'CYCLE.md'), '# 사이클\n\n- **현재 버전**: v0.1\n', 'utf8');
 
     const out = await runAuto(tmp, cwd, sessionId);
     expect(out.decision).toBe('block');
+    expect(out.reason ?? '').toContain('테스트 게이트'); // layer 1, not the review gate
   });
 
   test('off 는 안내도 하지 않는다', async () => {

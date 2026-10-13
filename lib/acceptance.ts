@@ -8,6 +8,12 @@
 //   docs/versions/<VER>/UIUX.md          화면 목록 · 변경 화면 표
 //   docs/versions/<VER>/prototype/       확정된 프로토타입(= 시각/동작 정답지)
 //
+// Keys are read in Korean and English (stabilization plan F1), since the language policy
+// lets these documents be written in English: `현재 버전`/`Current version`,
+// `화면 목록`/`Screens` or `Screen list`, `무엇이 달라지는가`/`What changes`, `컴포넌트`/`Components`, and
+// the kinds `신규`/`new`, `변경`/`changed`, `그대로`/`unchanged`. Before, English documents
+// read as "no dev-cycle artifacts", and the acceptance criteria silently dropped to zero.
+//
 // 프로토타입 규격(~/.claude/skills/dev-cycle/assets/PROTOTYPE-SPEC.md)의 "대조 계약"이
 // 이 파서의 전제다:
 //   - 프로토타입 전용 UI는 `pt-` 접두 예약. 앱 마크업은 `pt-` 접두를 쓰지 않는다.
@@ -49,14 +55,30 @@ export interface DevCycleArtifacts {
   uiuxPath: string | null;
 }
 
+type Kind = 'new' | 'changed' | 'unchanged';
+const KIND_WORDS: Record<Kind, string[]> = {
+  new: ['신규', 'new'],
+  changed: ['변경', 'changed'],
+  unchanged: ['그대로', 'unchanged'],
+};
+
+/** A table's kind cell (`신규` / `new`, …), in either language and any case. */
+function isKind(cell: string, kind: Kind): boolean {
+  return KIND_WORDS[kind].includes((cell ?? '').trim().toLowerCase());
+}
+
+// The template's legend left in a cell ("신규 / 변경 / 그대로", "new / changed / unchanged"),
+//   built from KIND_WORDS so that a kind word added there is recognized here too.
+const ANY_KIND = Object.values(KIND_WORDS).flat().join('|');
+const LEGEND_CELL = new RegExp(`^(?:${ANY_KIND})(?:\\s*\\/\\s*(?:${ANY_KIND}))+$`, 'i');
+
 /** 템플릿 플레이스홀더/빈 칸 판정. `<화면 이름>`, `신규 / 변경 / 그대로`, 빈 문자열, `-`. */
 export function isPlaceholderCell(cell: string): boolean {
   const s = (cell ?? '').trim();
   if (s === '' || s === '-') return true;
   // <...> 로 감싼 템플릿 자리표시자
   if (/^<[^>]*>$/.test(s)) return true;
-  // 범례를 그대로 남긴 칸 ("신규 / 변경 / 그대로")
-  if (/^(신규|변경|그대로)(\s*\/\s*(신규|변경|그대로))+$/.test(s)) return true;
+  if (LEGEND_CELL.test(s)) return true;
   return false;
 }
 
@@ -89,15 +111,24 @@ function headingText(line: string): string {
  * 기준으로 둔갑하고 진짜 표의 상태 기준이 **조용히 사라졌다.** 크래시가 아니라
  * 오탑재라 더 나쁘다. 폴백은 `'무엇이 달라지는가'`(실제 제목은
  * `## 변경 화면 — 무엇이 달라지는가`)처럼 처음부터 부분 일치를 전제한 호출을 위해 남긴다.
+ * The fallback skips headings that contain any of `avoid`: those of another section.
  */
-export function extractTableRows(markdown: string, headingIncludes: string): string[][] {
+export function extractTableRows(
+  markdown: string,
+  headingIncludes: string,
+  ignoreCase = false,
+  avoid: string[] = [],
+): string[][] {
   const lines = (markdown ?? '').split(/\r?\n/);
-  const target = headingIncludes.trim();
+  const fold = (s: string): string => (ignoreCase ? s.toLowerCase() : s);
+  const target = fold(headingIncludes.trim());
   // 정확 일치 제목이 **존재하는지**로 먼저 판정한다. "행이 비면 폴백"이 아니다 —
   //   정확 일치 절의 표가 비어 있을 때 엉뚱한 절로 새는 것을 막아야 한다.
-  const hasExact = lines.some((l) => /^##\s/.test(l) && headingText(l) === target);
+  const hasExact = lines.some((l) => /^##\s/.test(l) && fold(headingText(l)) === target);
   const matches = (line: string): boolean =>
-    hasExact ? headingText(line) === target : line.includes(headingIncludes);
+    hasExact
+      ? fold(headingText(line)) === target
+      : fold(line).includes(fold(headingIncludes)) && !avoid.some((a) => fold(line).includes(fold(a)));
 
   let inSection = false;
   let seenHeaderRow = false;
@@ -133,9 +164,29 @@ export function extractTableRows(markdown: string, headingIncludes: string): str
   return rows;
 }
 
-/** docs/CYCLE.md 에서 `- **현재 버전**: v0.1` 값을 뽑는다. 플레이스홀더면 null. */
+/** The rows of a section headed in Korean or English: those of the first heading, in
+ *  order, whose table has rows. English headings match in any case. */
+function extractTableRowsAny(markdown: string, headings: string[], avoid: string[] = []): string[][] {
+  for (const heading of headings) {
+    const rows = extractTableRows(markdown, heading, true, avoid);
+    if (rows.length > 0) return rows;
+  }
+  return [];
+}
+
+// `Screen list` is the literal English of 화면 목록; without it that heading matched nothing
+//   and its new screens were dropped with no warning (round-3 final hallucination review).
+const SCREENS_HEADINGS = ['화면 목록', 'Screens', 'Screen list'];
+const CHANGES_HEADINGS = ['무엇이 달라지는가', 'What changes'];
+const COMPONENTS_HEADINGS = ['컴포넌트', 'Components'];
+
+// [ \t] rather than \s: with an empty value, \s* ran past the line end and read the next
+//   line (`- **현재 단계**: 1`) as the version.
+const CURRENT_VERSION_LINE = /^[ \t]*[-*][ \t]*\*\*(?:현재 버전|current version)\*\*[ \t]*:[ \t]*(.*)$/im;
+
+/** docs/CYCLE.md 에서 `- **현재 버전**: v0.1` (or `- **Current version**: v0.1`) 값을 뽑는다. 플레이스홀더면 null. */
 export function parseCurrentVersion(cycleMd: string): string | null {
-  const m = /^\s*[-*]\s*\*\*현재 버전\*\*\s*:\s*(.+)$/m.exec(cycleMd ?? '');
+  const m = CURRENT_VERSION_LINE.exec(cycleMd ?? '');
   if (!m) return null;
   const v = m[1].trim();
   if (v === '') return null;
@@ -147,12 +198,26 @@ export function parseCurrentVersion(cycleMd: string): string | null {
   return v;
 }
 
+/** docs/CYCLE.md: its text, `missing`, or `unreadable` when it exists but cannot be read. */
+function readCycleMd(cwd: string): { text: string } | 'missing' | 'unreadable' {
+  const cyclePath = resolvePath(cwd, 'docs', 'CYCLE.md');
+  try {
+    if (!existsSync(cyclePath)) return 'missing';
+    return { text: readFileSync(cyclePath, 'utf8') };
+  } catch {
+    return 'unreadable';
+  }
+}
+
 /** 프로젝트에서 dev-cycle 산출물을 찾는다. 없으면 null. */
 export function findDevCycleArtifacts(cwd: string): DevCycleArtifacts | null {
+  const cycle = readCycleMd(cwd);
+  return typeof cycle === 'string' ? null : artifactsFrom(cwd, cycle.text);
+}
+
+function artifactsFrom(cwd: string, cycleMd: string): DevCycleArtifacts | null {
   try {
-    const cyclePath = resolvePath(cwd, 'docs', 'CYCLE.md');
-    if (!existsSync(cyclePath)) return null;
-    const version = parseCurrentVersion(readFileSync(cyclePath, 'utf8'));
+    const version = parseCurrentVersion(cycleMd);
     if (!version) return null;
     const versionDir = resolvePath(cwd, 'docs', 'versions', version);
     if (!existsSync(versionDir)) return null;
@@ -179,13 +244,16 @@ export function findDevCycleArtifacts(cwd: string): DevCycleArtifacts | null {
 export function extractUiuxCriteria(uiuxMd: string): AcceptanceCriterion[] {
   const out: AcceptanceCriterion[] = [];
 
-  const screens = extractTableRows(uiuxMd, '화면 목록');
+  // The changes heading names screens too (`## Changed screens — What changes`). Without an
+  //   exact `## Screens`, the partial match fell on it and read the changes as the screen
+  //   list (found in round 3).
+  const screens = extractTableRowsAny(uiuxMd, SCREENS_HEADINGS, CHANGES_HEADINGS);
   let newIdx = 0;
   for (const cells of screens) {
     const name = cells[0] ?? '';
     const kind = cells[1] ?? '';
     if (isPlaceholderCell(name)) continue;
-    if (kind.trim() !== '신규') continue;
+    if (!isKind(kind, 'new')) continue;
     newIdx += 1;
     out.push({
       id: `UIUX-NEW-${newIdx}`,
@@ -194,7 +262,7 @@ export function extractUiuxCriteria(uiuxMd: string): AcceptanceCriterion[] {
     });
   }
 
-  const changes = extractTableRows(uiuxMd, '무엇이 달라지는가');
+  const changes = extractTableRowsAny(uiuxMd, CHANGES_HEADINGS);
   let chgIdx = 0;
   for (const cells of changes) {
     const screen = cells[0] ?? '';
@@ -240,7 +308,7 @@ const DATA_STATES: Array<{ key: string; label: string; re: RegExp }> = [
  */
 export function extractComponentCriteria(uiuxMd: string): AcceptanceCriterion[] {
   const out: AcceptanceCriterion[] = [];
-  const rows = extractTableRows(uiuxMd ?? '', '컴포넌트');
+  const rows = extractTableRowsAny(uiuxMd ?? '', COMPONENTS_HEADINGS);
   let compIdx = 0;
   let stateIdx = 0;
 
@@ -249,8 +317,7 @@ export function extractComponentCriteria(uiuxMd: string): AcceptanceCriterion[] 
     // 이름 칸으로만 거른다. 템플릿의 상태 범례("default·hover·disabled …")는
     //   isPlaceholderCell 이 못 잡아서, 행 전체 판정만 믿으면 빈 이름이 새어 들어온다.
     if (isPlaceholderCell(name)) continue;
-    const kind = (cells[1] ?? '').trim();
-    if (kind === '그대로') continue;
+    if (isKind(cells[1] ?? '', 'unchanged')) continue;
 
     const variants = cells[2] ?? '';
     const states = cells[3] ?? '';
@@ -382,13 +449,7 @@ export function extractPrototypeCriteria(html: string): AcceptanceCriterion[] {
   return out;
 }
 
-/**
- * 이 프로젝트에서 테스트가 반드시 커버해야 하는 수용 기준 전체.
- * dev-cycle 산출물이 없으면 빈 배열(= 커버리지 강제 없음).
- */
-export function requiredAcceptanceCriteria(cwd: string): AcceptanceCriterion[] {
-  const art = findDevCycleArtifacts(cwd);
-  if (!art) return [];
+function criteriaOf(art: DevCycleArtifacts): AcceptanceCriterion[] {
   const out: AcceptanceCriterion[] = [];
   if (art.uiuxPath) {
     try {
@@ -405,4 +466,71 @@ export function requiredAcceptanceCriteria(cwd: string): AcceptanceCriterion[] {
     }
   }
   return out;
+}
+
+export type AcceptanceProblem =
+  /** docs/CYCLE.md exists but has no current-version line in either language. */
+  | { kind: 'no-version-key' }
+  /** docs/CYCLE.md exists but cannot be read (permissions, a directory). */
+  | { kind: 'unreadable'; files: string[] }
+  /** UIUX.md or the prototype exists, but no criterion came out of it. */
+  | { kind: 'no-criteria'; files: string[] };
+
+/** What layer 1 reads from the dev-cycle documents, with docs/CYCLE.md read once. */
+export interface AcceptanceReading {
+  /** Whether the dev-cycle artifacts of a current version exist (findDevCycleArtifacts):
+   *  in auto mode they switch layer 1 on. */
+  devCycle: boolean;
+  /** 이 프로젝트에서 테스트가 반드시 커버해야 하는 수용 기준 전체. dev-cycle 산출물이
+   *  없으면 빈 배열(= 커버리지 강제 없음). */
+  criteria: AcceptanceCriterion[];
+  /**
+   * Why a project with dev-cycle documents yields no acceptance criteria, or null.
+   *
+   * Null when there is nothing to report:
+   * - no docs/CYCLE.md;
+   * - criteria found;
+   * - a placeholder version (the cycle has not started);
+   * - a missing version folder (dev-cycle reports that itself);
+   * - a stage before UIUX.md and the prototype exist.
+   *
+   * Layer 1 shows the problem as a warning (stabilization plan F2). An unrecognized key or
+   * heading made the criteria drop to zero with no sign, and in auto mode it turned the
+   * test gate off. A version that really has no new or changed screens also lands on
+   * `no-criteria`, which is why this is a warning and not a block.
+   */
+  problem: AcceptanceProblem | null;
+}
+
+/** Nothing to read: no dev-cycle documents, or layer 1 switched off. */
+export const NO_ACCEPTANCE: AcceptanceReading = { devCycle: false, criteria: [], problem: null };
+
+/** The Stop takes one reading per run for the gate switch, the criteria and the F2
+ *  warning. Separate calls read docs/CYCLE.md up to five times and parsed UIUX.md and the
+ *  prototype twice (round-3 refactoring review). */
+export function readAcceptance(cwd: string): AcceptanceReading {
+  try {
+    const cycle = readCycleMd(cwd);
+    if (cycle === 'missing') return NO_ACCEPTANCE;
+    if (cycle === 'unreadable') {
+      return { ...NO_ACCEPTANCE, problem: { kind: 'unreadable', files: [resolvePath(cwd, 'docs', 'CYCLE.md')] } };
+    }
+    if (!CURRENT_VERSION_LINE.test(cycle.text)) return { ...NO_ACCEPTANCE, problem: { kind: 'no-version-key' } };
+    const art = artifactsFrom(cwd, cycle.text);
+    if (!art) return NO_ACCEPTANCE;
+    const criteria = criteriaOf(art);
+    const files = [art.uiuxPath, art.prototypePath].filter((p): p is string => p !== null);
+    return {
+      devCycle: true,
+      criteria,
+      problem: criteria.length === 0 && files.length > 0 ? { kind: 'no-criteria', files } : null,
+    };
+  } catch {
+    return NO_ACCEPTANCE;
+  }
+}
+
+/** readAcceptance(cwd).criteria, for a caller that needs nothing else. */
+export function requiredAcceptanceCriteria(cwd: string): AcceptanceCriterion[] {
+  return readAcceptance(cwd).criteria;
 }

@@ -2,13 +2,22 @@
 // Stop hook — 턴 증가, 리뷰 강제/검증, 재시도 카운터, 커서/차원 검사
 
 import { isAbsolute, relative, resolve as resolvePath, sep } from 'node:path';
-import type { CitationCache, CitationProblem, ReviewFinding, ReviewResult, StatusSnapshot } from '../lib';
+import type {
+  AcceptanceProblem,
+  AcceptanceReading,
+  CitationCache,
+  CitationProblem,
+  ReviewFinding,
+  ReviewResult,
+  StatusSnapshot,
+} from '../lib';
 import {
   citationBlockMessage,
   CLI_PATH,
   clearReadRecords,
   clearValidationFailure,
   compactForcePct,
+  countDeclaredUnknowns,
   currentFindings,
   envInt,
   envStr,
@@ -27,15 +36,17 @@ import {
   verifyCitations,
   wasFileReadRecently,
   detectTestInfrastructure,
+  axesOfDimensions,
   failingSuites,
-  findDevCycleArtifacts,
+  fileModifiedAt,
   findRecentReviewFiles,
   findRecentTestFiles,
   missingTestFiles,
   pruneOldReviewFiles,
   pruneOldTestFiles,
+  NO_ACCEPTANCE,
+  readAcceptance,
   readTestCursor,
-  requiredAcceptanceCriteria,
   scanForbiddenPatterns,
   uncoveredCriteria,
   validateEvidence,
@@ -507,16 +518,28 @@ function testWindowMinutes(): number {
  * 아무것도 검증하지 못하면서 경고만 남는, 게이트의 최악 결말이다. 반대로 dev-cycle
  * 산출물이 있으면(요구사항·프로토타입이 확정된 작업) 인프라 유무와 무관하게 켠다.
  * 테스트를 새로 도입해서라도 검증해야 하는 상황이기 때문이다.
+ *
+ * `acceptance` is the Stop's one reading of the dev-cycle documents (NO_ACCEPTANCE when
+ * the mode is off), which also gives the criteria and the F2 warning.
  */
-function testGateActive(cwd: string): { active: boolean; evidence: string } {
-  const mode = envStr('GOODBOY_TEST_GATE', 'auto');
+function testGateActive(cwd: string, acceptance: AcceptanceReading): { active: boolean; evidence: string } {
+  const mode = testGateMode();
   if (mode === 'off') return { active: false, evidence: 'off' };
   if (mode === 'on') return { active: true, evidence: 'on' };
-  if (findDevCycleArtifacts(cwd) !== null) {
+  if (acceptance.devCycle) {
     return { active: true, evidence: 'dev-cycle 산출물' };
   }
   const infra = detectTestInfrastructure(cwd);
   return { active: infra.present, evidence: infra.evidence };
+}
+
+function testGateMode(): string {
+  return envStr('GOODBOY_TEST_GATE', 'auto');
+}
+
+/** The dev-cycle reading for this Stop: none when layer 1 is off, so the F2 warning stays quiet. */
+function acceptanceFor(cwd: string): AcceptanceReading {
+  return testGateMode() === 'off' ? NO_ACCEPTANCE : readAcceptance(cwd);
 }
 
 /**
@@ -536,6 +559,34 @@ function needsTestCoverage(file: string, cwd: string): boolean {
   return !isTestFile(scoped) && !isDocFile(scoped);
 }
 
+/** (F2) When code was edited: dev-cycle documents exist but yield no acceptance criteria.
+ *  Unrecognized keys or headings used to drop the criteria to zero with no sign, and in
+ *  auto mode turn layer 1 off. The warning shows once per session; the reading behind it
+ *  is the one the gate takes its criteria from. Not a block: a version without new or
+ *  changed screens gives zero criteria legitimately. */
+function warnAcceptanceProblem(sessionId: string, cwd: string, problem: AcceptanceProblem | null): void {
+  if (problem === null) return;
+  try {
+    const state = readHabitState(sessionId);
+    if (state.acceptanceProblemWarned === true) return;
+    state.acceptanceProblemWarned = true;
+    writeHabitState(sessionId, state);
+    logGate(sessionId, 'test', 'warn', `acceptance: ${problem.kind}`);
+    habitWarnings.push(
+      problem.kind === 'no-version-key'
+        ? 'docs/CYCLE.md 에서 현재 버전 줄(`- **현재 버전**:` 또는 `- **Current version**:`)을 찾지 ' +
+            '못했습니다 — 층1이 수용 기준을 읽지 못합니다.'
+        : problem.kind === 'unreadable'
+          ? 'docs/CYCLE.md 를 읽을 수 없습니다(권한 등) — 층1이 수용 기준을 읽지 못합니다.'
+          : `dev-cycle 문서(${problem.files.map((f) => relative(cwd, f)).join(', ')})에서 수용 기준을 ` +
+            '하나도 읽지 못했습니다 — 표 제목(`화면 목록`/`Screens` 등)이나 구분 값(`신규`/`new` 등)을 ' +
+            '확인하세요. 이번 버전에 신규·변경 화면이 정말 없다면 무시해도 됩니다.',
+    );
+  } catch {
+    // fail-open
+  }
+}
+
 /**
  * (층1) stop_hook_active 조기 return 경로의 **비차단** 테스트 수락 시도.
  *
@@ -551,12 +602,14 @@ function needsTestCoverage(file: string, cwd: string): boolean {
  *          "직전 차단이 해소됐다"를 알고 다음 층(리뷰)까지 이어서 판정한다.
  */
 function tryAcceptPendingTest(sessionId: string, cwd: string): boolean {
-  if (!testGateActive(cwd).active) return false;
+  if (testGateMode() === 'off') return false;
   try {
     const cursor = readTestCursor(cwd, sessionId);
     const cursorTurn = cursor ? cursor.turn : 0;
     const recentEdits = getEditsSince(sessionId, cursorTurn, cwd).filter((f) => needsTestCoverage(f, cwd));
     if (recentEdits.length === 0) return false;
+    const acceptance = acceptanceFor(cwd);
+    if (!testGateActive(cwd, acceptance).active) return false;
     const results = findRecentTestFiles(resolvePath(cwd, '.claude', 'tests'), testWindowMinutes());
     if (results.length === 0) return false;
     const changedEdits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd).filter((e) =>
@@ -569,7 +622,7 @@ function tryAcceptPendingTest(sessionId: string, cwd: string): boolean {
     if (missingTestFiles(effective)) return false;
     if (validateEvidence(effective)) return false;
     if (scanForbiddenPatterns(effective.flatMap((r) => r.test_files ?? [])).length > 0) return false;
-    if (uncoveredCriteria(effective, requiredAcceptanceCriteria(cwd)).length > 0) return false;
+    if (uncoveredCriteria(effective, acceptance.criteria).length > 0) return false;
     // 수락.
     resetRetryCount(sessionId, TEST_COUNT_FILE);
     writeTestCursor(cwd, getCurrentTurn(sessionId), sessionId);
@@ -600,7 +653,6 @@ function tryAcceptPendingTest(sessionId: string, cwd: string): boolean {
  * @returns block 출력(차단) 또는 null(통과/게이트 비활성)
  */
 function testGate(sessionId: string, cwd: string): HookOutput | null {
-  const gate = testGateActive(cwd);
   try {
     const cursor = readTestCursor(cwd, sessionId);
     const cursorTurn = cursor ? cursor.turn : 0;
@@ -610,6 +662,11 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
       statusSnapshot.testPending = false;
       return null;
     }
+    // One reading per Stop serves the gate switch, the F2 warning (also while the gate is
+    //   inactive) and the criteria check below.
+    const acceptance = acceptanceFor(cwd);
+    const gate = testGateActive(cwd, acceptance);
+    warnAcceptanceProblem(sessionId, cwd, acceptance.problem);
     // 비활성 판정은 **편집이 있을 때** 알린다 — 편집도 없는 턴에 "테스트 층이 꺼져 있다"고
     //   말해봐야 소음이다. 조용히 꺼져 있으면 사용자가 층의 부재를 눈치채지 못한다.
     if (!gate.active) {
@@ -706,8 +763,7 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
       );
     }
 
-    const required = requiredAcceptanceCriteria(cwd);
-    const uncovered = uncoveredCriteria(effective, required);
+    const uncovered = uncoveredCriteria(effective, acceptance.criteria);
     if (uncovered.length > 0) {
       const list = uncovered
         .slice(0, 3)
@@ -744,46 +800,81 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
  *  findings still must not vanish silently, which was the v0.26.6 blind spot (round-2
  *  layer-1 F7). Rules that keep a finding from being lost:
  *  - The edited set is the raw edit history, so a file moved or deleted afterwards still
- *    counts (mv/rm are not recorded edits).
+ *    counts (mv/rm are not recorded edits). A review that names only the new path of a
+ *    moved file is foreign: the new path is not in the history.
  *  - A finding naming an edited file counts even when its review listed other files.
- *  - Supersession runs over every review, so a newer review of the flagged file clears a
- *    finding wherever it came from.
- *  Those were the round-2 security review's high finding. */
+ *  - Supersession runs over every review, whichever session wrote it, under the rule of
+ *    currentFindings: a file the finding's review covered changed after it, and reviews
+ *    written after the change list the flagged file and cover every axis of that review.
+ *  - Every way the Stop moves the review cursor shows the foreign findings: the passes
+ *    and the escapes. The next Stop starts after the cursor and never sees them again.
+ *  Those were the round-2 security review's high finding and round-3 review findings.
+ *  `source` maps each finding to its review, for the axes a block reason names. */
 function splitFindings(
   reviews: ReviewResult[],
   sessionId: string,
   cwd: string,
   cursorTimestamp: string | null,
-): { own: ReviewFinding[]; foreign: ReviewFinding[] } {
+): { own: ReviewFinding[]; foreign: ReviewFinding[]; source: Map<ReviewFinding, ReviewResult> } {
   const { files, firstEditAt } = getEditHistory(sessionId);
   const mine = new Set(files.map((f) => resolvePath(f)));
   const names = (r: ReviewResult): unknown[] => [
     ...(Array.isArray(r.reviewed_files) ? r.reviewed_files : []),
     ...(Array.isArray(r.findings) ? r.findings.map((f) => f?.file) : []),
   ];
-  const ownFindings = new Set(
-    reviews
-      .filter((r) => names(r).some((f) => typeof f === 'string' && mine.has(resolvePath(cwd, f))))
-      .flatMap((r) => (Array.isArray(r.findings) ? r.findings : [])),
-  );
-  const own = currentFindings(reviews, cursorTimestamp).filter((f) => ownFindings.has(f));
-  // Reviews older than this session's first edit cannot be about its work.
+  const ownFindings = new Set<ReviewFinding>();
+  const source = new Map<ReviewFinding, ReviewResult>();
+  for (const r of reviews) {
+    const found = Array.isArray(r.findings) ? r.findings : [];
+    for (const f of found) source.set(f, r);
+    if (names(r).some((f) => typeof f === 'string' && mine.has(resolvePath(cwd, f)))) {
+      for (const f of found) ownFindings.add(f);
+    }
+  }
+  const open = currentFindings(reviews, cursorTimestamp, (file) => fileModifiedAt(resolvePath(cwd, file)));
+  // Reviews older than this session's first edit cannot be about its work. A finding's
+  //   superseders are newer than its review, so one call serves both bounds.
   const foreignSince =
     [cursorTimestamp, firstEditAt].filter((t): t is string => typeof t === 'string' && t !== '').sort().pop() ??
     null;
-  const foreign = currentFindings(reviews, foreignSince).filter(
-    (f) => !ownFindings.has(f) && f.severity === 'high',
-  );
-  return { own, foreign };
+  return {
+    own: open.filter((f) => ownFindings.has(f)),
+    foreign: open.filter(
+      (f) =>
+        !ownFindings.has(f) &&
+        f.severity === 'high' &&
+        (foreignSince === null || (source.get(f)?.timestamp ?? '') > foreignSince),
+    ),
+    source,
+  };
 }
 
-/** "[sev] file:line — issue; …" for up to three findings, for a systemMessage. */
-function findingsSummary(findings: ReviewFinding[]): string {
+/** The axes whose re-review can clear `findings` (their reviews' axes), for a block reason. */
+function axesToReReview(findings: ReviewFinding[], source: Map<ReviewFinding, ReviewResult>): string {
+  const axes = new Set<string>();
+  for (const f of findings) {
+    const dims = source.get(f)?.dimensions_checked;
+    for (const a of axesOfDimensions(Array.isArray(dims) ? dims : [])) axes.add(a);
+  }
+  return [...axes].join(', ');
+}
+
+/** "[sev] file:line — issue; …" for up to three findings, for a systemMessage. Without
+ *  the tag when the caller has said the severity already. */
+function findingsSummary(findings: ReviewFinding[], tagged = true): string {
   const shown = findings
     .slice(0, 3)
-    .map((f) => `[${f.severity}] ${f.file}${f.line ? `:${f.line}` : ''} — ${f.issue}`)
+    .map((f) => `${tagged ? `[${f.severity}] ` : ''}${f.file}${f.line ? `:${f.line}` : ''} — ${f.issue}`)
     .join('; ');
   return findings.length > 3 ? `${shown} (외 ${findings.length - 3}개)` : shown;
+}
+
+/** The foreign high findings as a note, or ''. "편집 기록에 없는" rather than "편집하지
+ *  않은": a file this session moved is foreign under its new path. */
+function foreignNote(foreign: ReviewFinding[]): string {
+  return foreign.length > 0
+    ? `이 세션의 편집 기록에 없는 파일에 대한 high 지적(차단하지 않음): ${findingsSummary(foreign)}`
+    : '';
 }
 
 /** The note a passing Stop shows: own medium/low findings, then the foreign ones. */
@@ -791,10 +882,33 @@ function passNote(prefix: string, own: ReviewFinding[], foreign: ReviewFinding[]
   const parts: string[] = [];
   const others = own.filter((f) => f && f.severity !== 'high');
   if (others.length > 0) parts.push(`${prefix} 참고할 발견사항: ${findingsSummary(others)}`);
-  if (foreign.length > 0) {
-    parts.push(`이 세션이 편집하지 않은 파일에 대한 high 지적(차단하지 않음): ${findingsSummary(foreign)}`);
-  }
+  const note = foreignNote(foreign);
+  if (note !== '') parts.push(note);
   return parts.join(' / ');
+}
+
+/** An escape's message with the foreign findings appended: the escape moves the cursor too. */
+function withForeignNote(message: string, foreign: ReviewFinding[]): string {
+  const note = foreignNote(foreign);
+  return note === '' ? message : `${message} / ${note}`;
+}
+
+/** Assumptions and speculations declared in the latest rationale section of the transcript,
+ *  without placeholder items such as `- 없음` (countDeclaredUnknowns). 0 when there is no
+ *  section or the transcript cannot be read (fail-open). */
+function declaredUnknownsIn(transcriptPath: string | undefined): number {
+  try {
+    if (!transcriptPath) return 0;
+    for (const t of extractRecentAssistantTexts(transcriptPath, 50)) {
+      if (hasReasoningSection(t)) {
+        const sec = parseReasoningSection(t);
+        return sec ? countDeclaredUnknowns(sec) : 0;
+      }
+    }
+    return 0;
+  } catch {
+    return 0;
+  }
 }
 
 /** (v0.26.7, v0.26.8 보강) stop_hook_active 조기 return 경로의 비차단 리뷰 수락 시도.
@@ -832,20 +946,7 @@ function tryAcceptPendingReview(
     if (own.some((f) => f && f.severity === 'high')) return null;
     const effective = v.effective;
     // (F1.5 상당) 추측/가정을 선언했는데 리뷰가 가정 검증을 안 했으면 수락 보류.
-    const declaredUnknowns = (() => {
-      try {
-        if (!transcriptPath) return 0;
-        for (const t of extractRecentAssistantTexts(transcriptPath, 50)) {
-          if (hasReasoningSection(t)) {
-            const sec = parseReasoningSection(t);
-            return sec ? sec.speculations.length + sec.assumptions.length : 0;
-          }
-        }
-        return 0;
-      } catch {
-        return 0;
-      }
-    })();
+    const declaredUnknowns = declaredUnknownsIn(transcriptPath);
     const checkedAssumptions = effective.reduce(
       (sum, r) =>
         sum + (Array.isArray(r.unknown_assumptions_checked) ? r.unknown_assumptions_checked.length : 0),
@@ -1220,14 +1321,23 @@ function main(): void {
         }
         // 한계 초과 → 통과 + 사용자 알림. 커서 전진이 핵심 — 전진 없이는 다음 턴에
         // 같은 유령 파일 집합으로 재차단된다(v0.25.0 영구 데드락의 구조적 원인).
+        const escapedForeign = (() => {
+          try {
+            return splitFindings(reviews, sessionId, cwd, cursor ? cursor.timestamp : null).foreign;
+          } catch {
+            return [] as ReviewFinding[];
+          }
+        })();
         resetRetryCount(sessionId, REVIEW_VALIDATE_COUNT_FILE);
         writeReviewCursor(cwd, getCurrentTurn(sessionId), sessionId);
         statusSnapshot.reviewPending = false;
         logGate(sessionId, 'review', 'warn', 'validate-escape');
         emit({
-          systemMessage:
+          systemMessage: withForeignNote(
             `리뷰 검증이 ${ESCAPE_AFTER_BLOCKS}회 차단 후에도 실패해 이번 턴은 통과시킵니다. ` +
-            `사용자 확인이 필요합니다. (사유: ${v.reason ?? '알 수 없음'})`,
+              `사용자 확인이 필요합니다. (사유: ${v.reason ?? '알 수 없음'})`,
+            escapedForeign,
+          ),
         });
         return;
       }
@@ -1242,13 +1352,14 @@ function main(): void {
       //   커버한 최신 리뷰의 high finding이 조용히 소실된다). 커서 이후의 모든 신뢰
       //   리뷰에서, 더 새로운 리뷰로 대체되지 않은 finding을 모아 평가한다(v0.26.6).
       //   Findings about this session's files gate; the others are shown as a note (A3, splitFindings).
-      const { own: activeFindings, foreign: foreignFindings } = (() => {
+      const { own: activeFindings, foreign: foreignFindings, source: findingSource } = (() => {
         try {
           return splitFindings(reviews, sessionId, cwd, cursor ? cursor.timestamp : null);
         } catch {
           return {
             own: effectiveReviews.flatMap((r) => (Array.isArray(r.findings) ? r.findings : [])),
             foreign: [] as ReviewFinding[],
+            source: new Map<ReviewFinding, ReviewResult>(),
           };
         }
       })();
@@ -1258,24 +1369,28 @@ function main(): void {
       if (highSev.length > 0) {
         const count = readRetryCount(sessionId) + 1;
         writeRetryCount(sessionId, count);
-        const issues = highSev
-          .slice(0, 3)
-          .map((f) => `${f.file}${f.line ? `:${f.line}` : ''} — ${f.issue}`)
-          .join('; ');
-        const more = highSev.length > 3 ? ` (외 ${highSev.length - 3}개)` : '';
+        const issues = findingsSummary(highSev, false);
         if (count < MAX_RETRIES) {
           logGate(sessionId, 'review', 'deny', 'high-severity');
+          const axes = axesToReReview(highSev, findingSource);
           emit({
             decision: 'block',
-            reason: `high severity 발견사항을 수정하세요: ${issues}${more}. (재시도 ${count}/${MAX_RETRIES})`,
+            reason:
+              `high severity 발견사항을 수정하세요: ${issues}. A finding clears when, after the fix, ` +
+              `the review axes that raised it (${axes || 'unknown'}) review the flagged file again. ` +
+              `(재시도 ${count}/${MAX_RETRIES})`,
           });
           return;
         }
         // 한계 초과 → 통과 + 사용자에게 알림. 리뷰 수락 → 커서 전진.
         resetRetryCount(sessionId);
         writeReviewCursor(cwd, getCurrentTurn(sessionId), sessionId);
+        statusSnapshot.reviewPending = false; // the cursor moved, as on the other escapes
         emit({
-          systemMessage: `${ESCAPE_AFTER_BLOCKS}회 차단 후에도 해소되지 않았습니다(재시도 ${MAX_RETRIES}회째). 사용자 확인이 필요합니다. (high severity: ${issues}${more})`,
+          systemMessage: withForeignNote(
+            `${ESCAPE_AFTER_BLOCKS}회 차단 후에도 해소되지 않았습니다(재시도 ${MAX_RETRIES}회째). 사용자 확인이 필요합니다. (high severity: ${issues})`,
+            foreignFindings,
+          ),
         });
         return;
       }
@@ -1287,21 +1402,7 @@ function main(): void {
       //   추론 섹션 탐색: 최근 assistant 텍스트에서 가장 최근 섹션 1개(현재 작업의 것으로 근사 —
       //   추론 게이트가 편집마다 최근 3턴 내 섹션을 요구하므로 최신 섹션이 현재 작업에 해당).
       //   fail-open: transcript 파싱 실패/섹션 없음 → 검사 생략.
-      const declaredUnknowns = (() => {
-        try {
-          if (!input.transcript_path) return 0;
-          const texts = extractRecentAssistantTexts(input.transcript_path, 50);
-          for (const t of texts) {
-            if (hasReasoningSection(t)) {
-              const sec = parseReasoningSection(t);
-              return sec ? sec.speculations.length + sec.assumptions.length : 0;
-            }
-          }
-          return 0;
-        } catch {
-          return 0;
-        }
-      })();
+      const declaredUnknowns = declaredUnknownsIn(input.transcript_path);
       const checkedAssumptions = effectiveReviews.reduce(
         (sum, r) =>
           sum + (Array.isArray(r.unknown_assumptions_checked) ? r.unknown_assumptions_checked.length : 0),
@@ -1327,9 +1428,11 @@ function main(): void {
         writeReviewCursor(cwd, getCurrentTurn(sessionId), sessionId);
         statusSnapshot.reviewPending = false;
         emit({
-          systemMessage:
+          systemMessage: withForeignNote(
             `${ESCAPE_AFTER_BLOCKS}회 차단 후에도 해소되지 않았습니다(재시도 ${MAX_RETRIES}회째). 사용자 확인이 필요합니다. ` +
-            `(추측/가정 ${declaredUnknowns}건이 리뷰에서 검증되지 않음)`,
+              `(추측/가정 ${declaredUnknowns}건이 리뷰에서 검증되지 않음)`,
+            foreignFindings,
+          ),
         });
         return;
       }
@@ -1367,10 +1470,13 @@ function main(): void {
         // 한계 초과 → 통과 + 사용자에게 알림. 리뷰 수락 → 커서 전진.
         resetRetryCount(sessionId);
         writeReviewCursor(cwd, getCurrentTurn(sessionId), sessionId);
+        statusSnapshot.reviewPending = false;
         emit({
-          systemMessage:
+          systemMessage: withForeignNote(
             `${ESCAPE_AFTER_BLOCKS}회 차단 후에도 해소되지 않았습니다(재시도 ${MAX_RETRIES}회째). 사용자 확인이 필요합니다. ` +
-            `(리뷰가 다음 품질 차원을 평가하지 않음: ${dimList})`,
+              `(리뷰가 다음 품질 차원을 평가하지 않음: ${dimList})`,
+            foreignFindings,
+          ),
         });
         return;
       }

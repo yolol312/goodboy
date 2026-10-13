@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
   currentFindings,
+  fileModifiedAt,
+  findRecentReviewFiles,
   highSeverityFindings,
   pruneOldReviewFiles,
   validateReview,
@@ -274,6 +276,159 @@ describe('currentFindings (v0.26.6, finding 단위 대체 의미론)', () => {
       timestamp: future,
     });
     expect(currentFindings([forged], null).length).toBe(0);
+  });
+});
+
+// Round 3: what supersedes a finding. A newer review of the flagged file used to clear it
+//   whatever it checked: in the per-axis flow a later clean axis cleared another axis's high
+//   finding, and a re-run with no change cleared it too (security review). The final
+//   reviews of the round then showed that matching dimensions left the hallucination axis
+//   (no dimensions) open and made a re-review of the fixed file alone never enough, and that
+//   reviews written before the change still counted.
+describe('currentFindings: what supersedes a finding (round 3)', () => {
+  const at = (min: number): string => new Date(Date.parse('2026-01-01T10:00:00.000Z') + min * 60_000).toISOString();
+  const SECURITY = ['security-secrets', 'security-authz', 'error-path', 'proto-pollution'];
+  /** The finding's review, at minute 0. */
+  const flagged = (dims: string[], files = ['/repo/a.ts']): ReviewResult =>
+    review({
+      reviewed_files: files,
+      findings: [{ file: '/repo/a.ts', issue: 'token logged', severity: 'high' }],
+      timestamp: at(0),
+      dimensions_checked: dims,
+    });
+  const later = (dims: string[], min: number): ReviewResult =>
+    review({ reviewed_files: ['/repo/a.ts'], timestamp: at(min), dimensions_checked: dims });
+  /** File mtimes, in minutes after the finding's review (null: missing). Others are older. */
+  const mtimes =
+    (changes: Record<string, number | null>) =>
+    (file: string): number | null => {
+      if (!(file in changes)) return Date.parse(at(-60));
+      const min = changes[file];
+      return min === null || min === undefined ? null : Date.parse(at(min));
+    };
+  const fixedAt1 = mtimes({ '/repo/a.ts': 1 });
+
+  test("another axis's newer review does not clear the finding, even after a change", () => {
+    expect(currentFindings([later(['refactoring-quality'], 2), flagged(SECURITY)], null, fixedAt1)).toHaveLength(1);
+  });
+
+  test('the same axis clears it after the change, also with fewer dimensions', () => {
+    expect(currentFindings([later(SECURITY, 2), flagged(SECURITY)], null, fixedAt1)).toHaveLength(0);
+    expect(currentFindings([later(['security-secrets'], 2), flagged(SECURITY)], null, fixedAt1)).toHaveLength(0);
+  });
+
+  test('without a change, a re-review of the same axis does not clear it', () => {
+    expect(currentFindings([later(SECURITY, 2), flagged(SECURITY)], null, mtimes({}))).toHaveLength(1);
+  });
+
+  test('a review written before the change does not count', () => {
+    // Re-reviewed at minute 2, changed at minute 3: the re-review saw the old file.
+    expect(currentFindings([later(SECURITY, 2), flagged(SECURITY)], null, mtimes({ '/repo/a.ts': 3 }))).toHaveLength(1);
+  });
+
+  test('a hallucination-axis finding (no dimensions) needs a hallucination re-review', () => {
+    expect(
+      currentFindings([later(SECURITY, 2), later(['refactoring-quality'], 2), flagged([])], null, fixedAt1),
+    ).toHaveLength(1);
+    expect(currentFindings([later([], 2), flagged([])], null, fixedAt1)).toHaveLength(0);
+    expect(currentFindings([later([], 2), flagged(SECURITY)], null, fixedAt1)).toHaveLength(1);
+  });
+
+  test('per-axis re-reviews together clear a finding of a review that covered several axes', () => {
+    const both = flagged([...SECURITY, 'refactoring-quality']);
+    expect(currentFindings([later(SECURITY, 2), both], null, fixedAt1)).toHaveLength(1);
+    expect(currentFindings([later(['refactoring-quality'], 3), later(SECURITY, 2), both], null, fixedAt1)).toHaveLength(0);
+  });
+
+  test('a change to another file the review covered counts: the fix was in the caller', () => {
+    const withCaller = flagged(SECURITY, ['/repo/a.ts', '/repo/caller.ts']);
+    expect(currentFindings([later(SECURITY, 2), withCaller], null, mtimes({ '/repo/caller.ts': 1 }))).toHaveLength(0);
+    // A file the review did not cover does not.
+    expect(currentFindings([later(SECURITY, 2), flagged(SECURITY)], null, mtimes({ '/repo/other.ts': 1 }))).toHaveLength(1);
+  });
+
+  test('a missing flagged file counts as changed right after the review', () => {
+    expect(currentFindings([later(SECURITY, 2), flagged(SECURITY)], null, mtimes({ '/repo/a.ts': null }))).toHaveLength(0);
+  });
+
+  // Round 3 (closing security and hallucination reviews): every axis lists the change set,
+  //   deleted paths included. Counting a missing listed file made a clean re-run enough.
+  test('another listed file that is missing is no change', () => {
+    const withDeleted = flagged(SECURITY, ['/repo/a.ts', '/repo/old.ts']);
+    expect(currentFindings([later(SECURITY, 2), withDeleted], null, mtimes({ '/repo/old.ts': null }))).toHaveLength(1);
+  });
+
+  // The single run that does every axis marks the hallucination axis (agents/review-changes.md).
+  test('the `hallucination` marker: the single run that does every axis', () => {
+    const singleRun = flagged([...SECURITY, 'refactoring-quality', 'performance', 'hallucination']);
+    // Its finding needs a hallucination re-review too; the other axes are not enough.
+    expect(
+      currentFindings([later([...SECURITY, 'refactoring-quality', 'performance'], 2), singleRun], null, fixedAt1),
+    ).toHaveLength(1);
+    expect(
+      currentFindings([later([], 3), later([...SECURITY, 'refactoring-quality', 'performance'], 2), singleRun], null, fixedAt1),
+    ).toHaveLength(0);
+    // And a single run re-review clears a hallucination-axis finding.
+    expect(currentFindings([later([...SECURITY, 'hallucination'], 2), flagged([])], null, fixedAt1)).toHaveLength(0);
+  });
+
+  test('a dimension of no known axis is matched only by a review that lists it', () => {
+    expect(currentFindings([later(SECURITY, 2), flagged(['custom-check'])], null, fixedAt1)).toHaveLength(1);
+    expect(currentFindings([later(['custom-check'], 2), flagged(['custom-check'])], null, fixedAt1)).toHaveLength(0);
+  });
+
+  test('no file is looked at while no newer review of the axes lists the flagged file', () => {
+    const asked: string[] = [];
+    currentFindings([later(['refactoring-quality'], 2), flagged(SECURITY)], null, (file) => {
+      asked.push(file);
+      return null;
+    });
+    expect(asked).toEqual([]);
+  });
+});
+
+describe('fileModifiedAt (round 3)', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    while (dirs.length) rmSync(dirs.pop()!, { recursive: true, force: true });
+  });
+
+  test("the file's mtime, or null for a missing file", () => {
+    const dir = mkdtempSync(join(tmpdir(), 'goodboy-fma-'));
+    dirs.push(dir);
+    const file = join(dir, 'a.ts');
+    writeFileSync(file, 'x', 'utf8');
+    const at = new Date('2026-01-01T10:00:00Z');
+    utimesSync(file, at, at);
+    expect(fileModifiedAt(file)).toBe(at.getTime());
+    expect(fileModifiedAt(join(dir, 'gone.ts'))).toBeNull();
+  });
+});
+
+// Round 3 (final security review): any string Date.parse reads used to pass the trust check,
+//   while the gates order timestamps as strings. A review stamped '9' sorted after every
+//   ISO time and stayed fresh for every later edit.
+describe('review timestamps on read (round 3)', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    while (dirs.length) rmSync(dirs.pop()!, { recursive: true, force: true });
+  });
+
+  test('an ISO time is stored in toISOString form; any other form drops the review', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'goodboy-rts-'));
+    dirs.push(dir);
+    const base = { reviewed_files: ['/repo/a.ts'], category: 'fix-bug', findings: [], verdict: 'pass' };
+    writeFileSync(join(dir, 'offset.json'), JSON.stringify({ ...base, timestamp: '2026-10-13T12:00:00+09:00' }));
+    writeFileSync(join(dir, 'nine.json'), JSON.stringify({ ...base, timestamp: '9' }));
+    writeFileSync(join(dir, 'words.json'), JSON.stringify({ ...base, timestamp: '9 Jan 2026' }));
+    const read = findRecentReviewFiles(dir, 60);
+    expect(read.map((r) => r.timestamp)).toEqual(['2026-10-13T03:00:00.000Z']);
+  });
+
+  test('validateReview applies the same rule', () => {
+    const r = validateReview(review({ timestamp: '9 Jan 2026', reviewed_files: ['/repo/a.ts'] }), ['/repo/a.ts']);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain('유효한 ISO 시각이 아닙니다');
   });
 });
 

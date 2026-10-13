@@ -12,6 +12,7 @@
 
 import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { canonicalTimestamp, isTrustedTimestamp } from './trusted-time';
 import type { AcceptanceCoverage, TestResult, Verdict } from './types';
 import type { AcceptanceCriterion } from './acceptance';
 // 변경 파일 + 마지막 편집 시각. 리뷰 게이트와 같은 타입을 쓴다(같은 커버리지 의미론).
@@ -33,7 +34,10 @@ function safeReadTest(path: string): TestResult | null {
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<TestResult>;
     if (typeof parsed !== 'object' || parsed === null) return null;
-    if (typeof parsed.timestamp !== 'string') return null;
+    // Stored in one format, so the string comparisons below follow time order (as for reviews).
+    const timestamp = canonicalTimestamp(parsed.timestamp);
+    if (timestamp === null) return null;
+    parsed.timestamp = timestamp;
     if (!Array.isArray(parsed.tested_files)) return null;
     if (typeof parsed.category !== 'string') return null;
     if (!Array.isArray(parsed.test_files)) return null;
@@ -229,9 +233,7 @@ export interface TestValidation {
 }
 
 function hasTrustedTimestamp(r: TestResult, nowMs: number): boolean {
-  const ms = typeof r.timestamp === 'string' ? Date.parse(r.timestamp) : NaN;
-  const SKEW_MS = 5 * 60_000;
-  return Number.isFinite(ms) && ms <= nowMs + SKEW_MS;
+  return isTrustedTimestamp(r.timestamp, nowMs);
 }
 
 /**

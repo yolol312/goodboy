@@ -23,3 +23,4 @@ export * from './gate-message';
 export * from './retry-counter';
 export * from './session-state';
 export * from './approval-marker';
+export * from './trusted-time';

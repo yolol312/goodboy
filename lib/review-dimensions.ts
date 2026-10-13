@@ -61,6 +61,35 @@ export function axesFor(changedFiles: string[]): ReviewAxis[] {
   return axes;
 }
 
+/**
+ * The axes a review covered, read from its dimensions_checked. A review without
+ * dimensions is the hallucination axis: that is what the axis writes (and what reviews
+ * from before dimensions_checked look like). A dimension of no known axis stands for
+ * itself, so it is matched only by a review that lists it too. The marker `hallucination`
+ * names the axis inside a review that also has dimensions: the single run that does every
+ * axis lists it (agents/review-changes.md). Without the marker that run's hallucination
+ * findings read as findings of the other axes (round-3 closing reviews).
+ *
+ * Supersession matches axes, not dimensions: each axis lists only the dimensions that its
+ * file set triggers, so a re-review of the fixed file alone lists fewer of them
+ * (round-3 final security and hallucination reviews).
+ */
+export function axesOfDimensions(dims: readonly string[]): string[] {
+  if (dims.length === 0) return ['hallucination'];
+  const out = new Set<string>();
+  for (const d of dims) {
+    if (d === 'hallucination') {
+      out.add('hallucination');
+      continue;
+    }
+    const axis = (Object.keys(AXIS_DIMENSIONS) as ReviewAxis[]).find((a) =>
+      (AXIS_DIMENSIONS[a] as string[]).includes(d),
+    );
+    out.add(axis ?? `dimension:${d}`);
+  }
+  return [...out];
+}
+
 /** 프론트엔드/클라이언트 표면을 건드리는 파일.
  *  HTML/CSS/JSX/TSX/Vue/Svelte, 또는 클라이언트 JS(파일명에 client 포함). */
 function isFrontendFile(lower: string): boolean {

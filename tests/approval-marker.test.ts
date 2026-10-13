@@ -1,7 +1,7 @@
 // lib/approval-marker.ts — per-session approval marker names (A3).
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -65,4 +65,55 @@ describe('risk approval withdrawal (A3)', () => {
     expect(existsSync(otherSession)).toBe(true);
     expect(existsSync(keep)).toBe(true);
   });
+
+  // Round 3 (refactoring review): the list was one JSON array that each note rewrote. A
+  //   concurrent note (a subagent in another cwd) or a torn write lost the paths noted
+  //   before it, and a lost path is an approval the next task does not withdraw.
+  test('a torn write does not lose the paths noted before it', () => {
+    const repo = mkdtempSync(join(box, 'repo-'));
+    const dirs = ['a', 'b', 'c'].map((d) => join(repo, d));
+    const markers = dirs.map((d) => approvalMarkerPath(d, 'risk', 'sess-t'));
+    for (const d of dirs) mkdirSync(join(d, '.claude'), { recursive: true });
+    for (const m of markers) writeFileSync(m, '', 'utf8');
+    noteRiskApprovalPath('sess-t', markers[0]!);
+    noteRiskApprovalPath('sess-t', markers[1]!);
+    const list = readdirSync(join(box, 'goodboy-session-sess-t')).find((f) => f.startsWith('risk-approval-paths'));
+    appendFileSync(join(box, 'goodboy-session-sess-t', list!), '\n"/half-writ', 'utf8'); // a record cut short
+    noteRiskApprovalPath('sess-t', markers[2]!);
+    withdrawRiskApprovals('sess-t', repo);
+    for (const m of markers) expect(existsSync(m)).toBe(false);
+  });
+
+  // Layer-1 round 4: with each process noting whenever it got there, a list rewritten whole
+  //   on each note (read, add, write) failed in 1 of 10 runs and the pre-fix JSON array in
+  //   7 of 10. Here every process waits for one start time, so the notes overlap: both
+  //   failed 10 of 10 runs.
+  test('notes that start at the same instant are all kept', async () => {
+    const repo = mkdtempSync(join(box, 'repo-'));
+    const markers = Array.from({ length: 12 }, (_, i) => {
+      const d = join(repo, `pkg${i}`);
+      mkdirSync(join(d, '.claude'), { recursive: true });
+      const m = approvalMarkerPath(d, 'risk', 'sess-b');
+      writeFileSync(m, '', 'utf8');
+      return m;
+    });
+    const lib = join(import.meta.dir, '..', 'lib', 'approval-marker.ts');
+    const startAt = Date.now() + 2_000; // after every process has loaded the module
+    await Promise.all(
+      markers.map(async (m) => {
+        const proc = Bun.spawn(
+          [
+            'bun',
+            '-e',
+            `const { noteRiskApprovalPath } = await import(${JSON.stringify(lib)}); ` +
+              `while (Date.now() < ${startAt}); noteRiskApprovalPath('sess-b', ${JSON.stringify(m)});`,
+          ],
+          { env: { ...process.env, TMPDIR: box }, stdout: 'ignore', stderr: 'ignore' },
+        );
+        await proc.exited;
+      }),
+    );
+    withdrawRiskApprovals('sess-b', repo);
+    expect(markers.filter((m) => existsSync(m))).toEqual([]);
+  }, 30_000);
 });

@@ -9,7 +9,7 @@
 // and it is the gates' fallback when the session copy is missing or unusable (see
 // readSessionState).
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
 
@@ -30,14 +30,22 @@ export const SESSION_STATE_FILE = '.goodboy-session-state.json';
  *  from the caller. Each write is attempted on its own. With an unwritable $TMPDIR the
  *  repo-level copy is what keeps the risk gate on; writing it only after a successful
  *  session write left neither copy, and risky commands ran ungated (round-2 review).
- *  Throws only when neither copy could be written. */
+ *  A session copy that cannot be overwritten (EACCES) is removed, so the gates fall back to
+ *  the repo copy with the new task instead of reading the previous task's risk from it
+ *  (round-3 security review). Throws only when neither copy could be written. */
 export function writeSessionState(cwd: string, sessionId: string, state: Omit<SessionState, 'sessionId'>): void {
   const json = JSON.stringify({ ...state, sessionId }, null, 2);
+  const sessionCopy = join(ensureSessionDir(sessionId), SESSION_STATE_FILE);
   let sessionError: unknown = null;
   try {
-    writeFileSync(join(ensureSessionDir(sessionId), SESSION_STATE_FILE), json, 'utf8');
+    writeFileSync(sessionCopy, json, 'utf8');
   } catch (err) {
     sessionError = err;
+    try {
+      unlinkSync(sessionCopy);
+    } catch {
+      // usually there is no copy; one that cannot be removed either still names the old task
+    }
   }
   try {
     mkdirSync(resolvePath(cwd, '.claude'), { recursive: true });
@@ -56,7 +64,10 @@ export function writeSessionState(cwd: string, sessionId: string, state: Omit<Se
  *  - the session copy is broken JSON, or names another session (a sanitized-id collision).
  *  Falling back keeps the risk gate on; returning null would turn it off. Either copy
  *  counts only when it names this session, so another session's state, even one
- *  committed to the repo, never applies. */
+ *  committed to the repo, never applies. A usable session copy always wins. The repo copy
+ *  is writable by the agent, and letting a newer updatedAt win let a planted copy with a
+ *  later time beat the fresh risky task (round-3 final security review); a failed session
+ *  write removes the session copy instead (writeSessionState). */
 export function readSessionState(cwd: string, sessionId: string): SessionState | null {
   try {
     return (

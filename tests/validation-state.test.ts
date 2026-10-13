@@ -103,6 +103,37 @@ describe('validation failure marker (A3)', () => {
     expect(readValidationFailure('sess-a')).not.toBeNull();
   });
 
+  // Round 3 (refactoring review): the start times compared as ISO strings, unlike the other
+  //   trusted timestamps. A time written with an offset then sorted wrong.
+  test('start times compare as times, not as strings', () => {
+    const inOffset = (ms: number, offsetMin: number): string => {
+      const local = new Date(ms + offsetMin * 60_000).toISOString().slice(0, 23);
+      const abs = Math.abs(offsetMin);
+      const hh = String(Math.floor(abs / 60)).padStart(2, '0');
+      const mm = String(abs % 60).padStart(2, '0');
+      return `${local}${offsetMin < 0 ? '-' : '+'}${hh}:${mm}`;
+    };
+    writeValidationFailure('sess-a', ['bun run typecheck'], '/repo');
+    const failedAt = Date.parse(readValidationFailure('sess-a')!.timestamp);
+    // A second before the failure, written later in the alphabet: not a pass since.
+    recordValidationPass('/repo', ['bun run typecheck'], inOffset(failedAt - 1000, 9 * 60));
+    expect(readValidationFailure('sess-a')).not.toBeNull();
+    // A second after it, written earlier in the alphabet: a pass since. The record keeps it
+    //   over the earlier one, so the merge compares times too.
+    recordValidationPass('/repo', ['bun run typecheck'], inOffset(failedAt + 1000, -5 * 60));
+    expect(readValidationFailure('sess-a')).toBeNull();
+  });
+
+  // Round 3 (final refactoring review): an entry beyond the clock skew (a clock set back)
+  //   outranked every later real pass, so none was recorded and the failure kept blocking.
+  test('a recorded start time beyond the clock skew is replaced by the next real pass', () => {
+    recordValidationPass('/repo', ['bun run typecheck'], '2999-01-01T00:00:00.000Z');
+    writeValidationFailure('sess-a', ['bun run typecheck'], '/repo');
+    tick();
+    pass('/repo', ['bun run typecheck']);
+    expect(readValidationFailure('sess-a')).toBeNull();
+  });
+
   test('a failure without commands is never stale', () => {
     writeValidationFailure('sess-a', [], '/repo');
     tick();

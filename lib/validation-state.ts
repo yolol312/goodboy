@@ -31,6 +31,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync,
 import { tmpdir } from 'node:os';
 import { join, resolve as resolvePath } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
+import { isTrustedTimestamp } from './trusted-time';
 
 export interface ValidationFailureState {
   sessionId: string;
@@ -42,8 +43,6 @@ export interface ValidationFailureState {
 
 export const VALIDATION_FAILURE_FILE = '.goodboy-validation-failed.json';
 const VALIDATION_PASS_FILE = 'validation-passed.json';
-/** A recorded pass may start at most this far ahead of this clock (skew); later ones are forged. */
-const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
 function markerPath(sessionId: string): string {
   return join(ensureSessionDir(sessionId), VALIDATION_FAILURE_FILE);
@@ -117,7 +116,9 @@ export function recordValidationPass(root: string, commands: string[], startedAt
     const passes = readPasses(dir);
     for (const cmd of stringList(commands)) {
       const prev = passes[cmd];
-      if (prev === undefined || startedAt > prev) passes[cmd] = startedAt;
+      // As times, like passedSince. An entry beyond the clock skew (a clock set back) is
+      //   replaced: kept, it outranked every later real pass (round-3 final refactoring review).
+      if (!isTrustedTimestamp(prev) || Date.parse(startedAt) > Date.parse(prev)) passes[cmd] = startedAt;
     }
     // Write, then rename into place: a concurrent reader never sees a half-written file.
     const staged = join(dir, `${VALIDATION_PASS_FILE}.${process.pid}.tmp`);
@@ -164,13 +165,14 @@ export function readValidationFailure(sessionId: string): ValidationFailureState
  *  time beyond this clock's skew is not trusted. A failure without commands is never
  *  stale: there is nothing to match. */
 function passedSince(root: string, since: string, commands: string[]): boolean {
-  if (commands.length === 0) return false;
+  const sinceMs = Date.parse(since);
+  if (commands.length === 0 || !Number.isFinite(sinceMs)) return false;
   const dir = projectStateDir(root);
   if (dir === null) return false;
   const passes = readPasses(dir);
-  const latest = new Date(Date.now() + MAX_CLOCK_SKEW_MS).toISOString();
+  const nowMs = Date.now();
   return commands.every((cmd) => {
     const startedAt = passes[cmd];
-    return typeof startedAt === 'string' && startedAt > since && startedAt <= latest;
+    return isTrustedTimestamp(startedAt, nowMs) && Date.parse(startedAt) > sinceMs;
   });
 }

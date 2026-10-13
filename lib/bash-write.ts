@@ -15,14 +15,10 @@
 import { homedir } from 'node:os';
 import { resolve as resolvePath, sep } from 'node:path';
 
-/** 쓰기 대상으로 보이지 않는 리다이렉션 타깃 (fd 복제 등) */
-function isFdTarget(target: string): boolean {
-  return target.startsWith('&');
-}
-
 /** 세그먼트 토큰 중 리다이렉션 연산자(> <) 자리를 표시하는 마커.
- *  공백을 포함해 정상 토큰과 절대 충돌하지 않는다. tee/sed의 파일 인자 수집은
- *  이 마커에서 멈춘다(`tee a.ts > /dev/null`의 /dev/null 오수집 방지). */
+ *  공백을 포함해 정상 토큰과 절대 충돌하지 않는다. The token after it is the operator's
+ *  target, which the tee/sed/dd argument scan skips (`tee a.ts > /dev/null` must not
+ *  collect /dev/null; redirectTargets owns redirection targets). */
 export const OP_TOKEN = ' op ';
 
 /** 따옴표 인식 토크나이저 (v0.26.2, 실측 오탐 5호 대응).
@@ -76,6 +72,9 @@ export function tokenizeSegments(command: string): string[][] {
       if (i + 1 < command.length) cur += command[++i];
       continue;
     }
+    // In `&>` and `&>>` (stdout and stderr) the `&` belongs to the operator; it does not
+    //   end the command.
+    if (ch === '&' && command[i + 1] === '>') continue;
     if (ch === ';' || ch === '|' || ch === '&' || ch === '\n') {
       pushSegment();
       continue;
@@ -86,6 +85,11 @@ export function tokenizeSegments(command: string): string[][] {
       if (!curQuoted && /^\d+$/.test(cur)) cur = '';
       pushToken();
       if (tokens[tokens.length - 1] !== OP_TOKEN) tokens.push(OP_TOKEN);
+      // `2>&1`, `>&2`, `<&3`, `>|` and zsh's `>&|` are one operator. Read as a separator, the
+      //   `&` or `|` cut the command in two, and the file after it was lost (round-3 security
+      //   review). (`>>|` arrives here at its second `>`.)
+      if (command[i + 1] === '&') i++;
+      if (ch === '>' && command[i + 1] === '|') i++;
       continue;
     }
     if (ch === ' ' || ch === '\t') {
@@ -105,34 +109,200 @@ export function tokenizeSegments(command: string): string[][] {
  *  그 지점부터 "줄 전체가 종결자와 일치하는 줄"까지를 제거한다. 단 `<<DELIM`이 있던
  *  줄의 나머지(`cat <<EOF > src/a.ts`의 `> src/a.ts`)는 명령이므로 스캔 대상으로 남긴다.
  *  종결자를 못 찾으면(열린 heredoc) 나머지 전체를 본문으로 간주한다.
- *  `<<<`(herestring)는 heredoc이 아니다. `<<`는 리다이렉션 연산자로 취급하지 않는다. */
+ *  `<<<`(herestring)는 heredoc이 아니다. `<<`는 리다이렉션 연산자로 취급하지 않는다.
+ *
+ *  Round 3 (final and closing security reviews, compared with real bash and zsh):
+ *  - A `<<` inside quotes, in a comment or in arithmetic (`$(( ))`, `(( ))`, `$[ ]`) opens
+ *    no heredoc. Taken as one, it hid every later line from the scan (`git log
+ *    --format='%H <<EOF'` then a write).
+ *  - Inside double quotes, `$( … )` is shell syntax again, so the heredoc of `git commit -m
+ *    "$(cat <<'EOF' … )"` is found and its body dropped.
+ *  - The delimiter is the whole shell word with its quotes removed (`EOF-1`, `"E O F"`). The
+ *    word-character prefix (`EOF`) waited for a line that never came.
+ *  - Comments are dropped from the scanned text: their `>` writes nothing. A `#` starts one
+ *    only at the start of a word, so not after an escaped blank (`a\ #b`) or right after a
+ *    command substitution (`$(echo a)#b`). */
 export function stripHeredocs(command: string): string {
-  const lines = command.split('\n');
-  const out: string[] = [];
+  const n = command.length;
+  let out = '';
+  // Where the scan is: shell syntax (the top level or a command substitution `$( … )`) or a
+  //   double-quoted string. A substitution inside double quotes is shell syntax again, with
+  //   its own quotes, comments and heredocs: Claude Code's `git commit -m "$(cat <<'EOF' …
+  //   EOF\n)"`. Read as an opaque string, that body was scanned as commands (round-3 closing
+  //   security review). `parens` counts plain parentheses inside a substitution.
+  const frames: Array<{ quoted: boolean; parens: number }> = [{ quoted: false, parens: 0 }];
+  let inSingle = false;
+  let wordStart = true; // a `#` here starts a comment
+  // Heredocs opened on the current line; their bodies start after its newline.
+  const pending: Array<{ delim: string; stripTabs: boolean }> = [];
+  const emit = (s: string, startsWord: boolean): void => {
+    out += s;
+    wordStart = startsWord;
+  };
   let i = 0;
-  while (i < lines.length) {
-    let line = lines[i] ?? '';
-    // 한 줄에 여러 heredoc(`cat <<A <<B`)이 있을 수 있어 반복 수집.
-    const delims: Array<{ delim: string; stripTabs: boolean }> = [];
-    let m: RegExpExecArray | null;
-    while ((m = /(?<!<)<<(?!<)(-?)\s*(['"]?)(\w+)\2/.exec(line)) !== null) {
-      delims.push({ delim: m[3] ?? '', stripTabs: m[1] === '-' });
-      // 연산자+종결자 표기를 명령 텍스트에서 제거(공백으로 치환) — 줄의 나머지는 유지.
-      line = line.slice(0, m.index) + ' ' + line.slice(m.index + m[0].length);
+  while (i < n) {
+    const ch = command[i] ?? '';
+    const frame = frames[frames.length - 1]!;
+    if (inSingle) {
+      emit(ch, false);
+      if (ch === "'") inSingle = false;
+      i++;
+      continue;
     }
-    out.push(line);
-    i++;
-    // 본문 스킵: 각 heredoc 순서대로, 줄 전체가 종결자와 일치하는 줄까지 소비.
-    for (const { delim, stripTabs } of delims) {
-      while (i < lines.length) {
-        const body = lines[i] ?? '';
-        const cmp = stripTabs ? body.replace(/^\t+/, '') : body;
-        i++;
-        if (cmp === delim) break;
+    if (frame.quoted) {
+      if (ch === '\\' && i + 1 < n) {
+        emit(ch + command[i + 1], false);
+        i += 2;
+        continue;
+      }
+      if (command.startsWith('$((', i)) {
+        const end = arithmeticEnd(command, i);
+        emit(command.slice(i, end), false);
+        i = end;
+        continue;
+      }
+      if (command.startsWith('$(', i)) {
+        frames.push({ quoted: false, parens: 0 });
+        emit('$(', true);
+        i += 2;
+        continue;
+      }
+      if (ch === '"') frames.pop();
+      emit(ch, false);
+      i++;
+      continue;
+    }
+    if (ch === '\\' && i + 1 < n) {
+      emit(ch + command[i + 1], false); // an escaped blank does not end the word
+      i += 2;
+      continue;
+    }
+    if (ch === "'") {
+      inSingle = true;
+      emit(ch, false);
+      i++;
+      continue;
+    }
+    if (ch === '"') {
+      frames.push({ quoted: true, parens: 0 });
+      emit(ch, false);
+      i++;
+      continue;
+    }
+    // Arithmetic, where `<<` is a shift: `$(( … ))`, the `(( … ))` command and `$[ … ]`.
+    if (command.startsWith('$((', i) || command.startsWith('$[', i) || (wordStart && command.startsWith('((', i))) {
+      const end = arithmeticEnd(command, i);
+      emit(command.slice(i, end), false);
+      i = end;
+      continue;
+    }
+    // A command or process substitution: its `)` does not end the word (`cat <(echo a)#x`).
+    if (command.startsWith('$(', i) || command.startsWith('<(', i) || command.startsWith('>(', i)) {
+      frames.push({ quoted: false, parens: 0 });
+      emit(command.slice(i, i + 2), true);
+      i += 2;
+      continue;
+    }
+    if (ch === '(') {
+      frame.parens++;
+      emit(ch, true);
+      i++;
+      continue;
+    }
+    if (ch === ')') {
+      if (frames.length > 1 && frame.parens === 0) {
+        frames.pop(); // the end of `$( … )`, which is part of a word: `$(echo a)#b` has no comment
+        emit(ch, false);
+      } else {
+        if (frame.parens > 0) frame.parens--;
+        emit(ch, true);
+      }
+      i++;
+      continue;
+    }
+    if (ch === '#' && wordStart) {
+      while (i < n && command[i] !== '\n') i++; // a comment, up to the newline
+      continue;
+    }
+    if (command.startsWith('<<<', i)) {
+      emit('<<<', true);
+      i += 3;
+      continue;
+    }
+    if (command.startsWith('<<', i)) {
+      let j = i + 2;
+      const stripTabs = command[j] === '-';
+      if (stripTabs) j++;
+      while (command[j] === ' ' || command[j] === '\t') j++;
+      const { word, end } = heredocDelimiter(command, j);
+      if (word !== '') {
+        // 연산자+종결자 표기를 명령 텍스트에서 제거(공백으로 치환) — 줄의 나머지는 유지.
+        pending.push({ delim: word, stripTabs });
+        emit(' ', true);
+        i = end;
+        continue;
       }
     }
+    if (ch === '\n' && pending.length > 0) {
+      emit('\n', true);
+      i++;
+      // 본문 스킵: 각 heredoc 순서대로, 줄 전체가 종결자와 일치하는 줄까지 소비.
+      for (const { delim, stripTabs } of pending.splice(0)) {
+        while (i < n) {
+          const nl = command.indexOf('\n', i);
+          const line = command.slice(i, nl === -1 ? n : nl);
+          i = nl === -1 ? n : nl + 1;
+          if ((stripTabs ? line.replace(/^\t+/, '') : line) === delim) break;
+        }
+      }
+      continue;
+    }
+    emit(ch, /[\s;&|<>]/.test(ch));
+    i++;
   }
-  return out.join('\n');
+  return out;
+}
+
+/** The index after an arithmetic expression starting at `i` (`$((`, `((` or `$[`). */
+function arithmeticEnd(command: string, i: number): number {
+  if (command.startsWith('$[', i)) {
+    const close = command.indexOf(']', i + 2);
+    return close === -1 ? command.length : close + 1;
+  }
+  let j = i + (command[i] === '$' ? 3 : 2);
+  let depth = 0;
+  for (; j < command.length; j++) {
+    if (command[j] === '(') depth++;
+    else if (command[j] === ')') {
+      if (depth > 0) depth--;
+      else if (command[j + 1] === ')') return j + 2;
+    }
+  }
+  return command.length;
+}
+
+/** A heredoc delimiter at `j`: one shell word, quotes removed. Returns '' when there is none. */
+function heredocDelimiter(command: string, j: number): { word: string; end: number } {
+  let word = '';
+  while (j < command.length) {
+    const c = command[j] ?? '';
+    if (c === "'" || c === '"') {
+      const close = command.indexOf(c, j + 1);
+      if (close === -1) return { word: word + command.slice(j + 1), end: command.length };
+      word += command.slice(j + 1, close);
+      j = close + 1;
+      continue;
+    }
+    if (c === '\\' && j + 1 < command.length) {
+      word += command[j + 1];
+      j += 2;
+      continue;
+    }
+    if (/[\s;&|<>()]/.test(c)) break;
+    word += c;
+    j++;
+  }
+  return { word, end: j };
 }
 
 /** 리다이렉션(> >> &> 2>) 타깃 — 따옴표 상태를 추적하는 문자 단위 스캐너 (v0.26.1).
@@ -141,7 +311,7 @@ export function stripHeredocs(command: string): string {
  *  비교 연산자(`>=`)를 리다이렉션으로 오탐했다(전부 실측). 규칙:
  *   - 작은따옴표/큰따옴표 안의 `>`는 무시한다.
  *   - 직전 문자가 `=`인 `>`(화살표 함수 `=>`), 직후 문자가 `=`인 `>`(비교 `>=`)는 제외.
- *   - fd 복제(`2>&1`, `>&2`)는 대상이 `&`로 시작하므로 제외.
+ *   - fd 복제(`2>&1`, `>&2`)는 제외. A word after `>&` that is not a number or `-` is a file.
  *   - 대상 토큰은 따옴표를 벗겨 추출한다(따옴표로 감싼 대상 경로의 정상 탐지는 유지). */
 function redirectTargets(command: string): { target: string; index: number }[] {
   const out: { target: string; index: number }[] = [];
@@ -166,14 +336,18 @@ function redirectTargets(command: string): { target: string; index: number }[] {
     if (i > 0 && command[i - 1] === '=') continue; // 화살표 함수 `=>`
     let j = i + 1;
     if (command[j] === '>') j++; // `>>` append
+    if (command[j] === '|') j++; // `>|`, zsh `>>|`: write despite noclobber; the target was read as ''
     if (command[j] === '=') {
       i = j; // 비교 연산자 `>=`
       continue;
     }
-    if (command[j] === '&') {
-      i = j; // fd 복제 `>&2`, `2>&1`
-      continue;
-    }
+    // `>&2`, `2>&1` and `>&-` duplicate or close a descriptor. Any other word after `>&`
+    //   (zsh also `>&|`) is a file that gets stdout and stderr, like `&>`: `echo x >& src/a.ts`
+    //   writes it. So is `2-` in `>&2-`: bash moves the descriptor, but zsh, this user's shell,
+    //   writes a file named `2-` (round-3 closing hallucination review).
+    const dup = command[j] === '&';
+    if (dup) j++;
+    if (dup && command[j] === '|') j++;
     while (command[j] === ' ' || command[j] === '\t' || command[j] === '\n') j++;
     // 대상 토큰 추출(따옴표 인식)
     let target = '';
@@ -191,8 +365,10 @@ function redirectTargets(command: string): { target: string; index: number }[] {
         j++;
       }
     }
-    // 프로세스 치환 `>(cmd)`은 파일 쓰기가 아니다.
-    if (target !== '' && !isFdTarget(target) && !target.startsWith('(')) out.push({ target, index: i });
+    // 프로세스 치환 `>(cmd)`은 파일 쓰기가 아니다. A quoted target such as `"&a.ts"` is a file:
+    //   the `&`-prefix exception that once skipped it is gone (round-3 final refactoring review).
+    const fd = dup && /^(?:\d+|-)$/.test(target);
+    if (target !== '' && !fd && !target.startsWith('(')) out.push({ target, index: i });
     i = j - 1;
   }
   return out;
@@ -314,15 +490,29 @@ function baseDirAt(cwdAbs: string, events: DirEvent[], index: number): string {
   return base;
 }
 
+/** A segment's words without its redirections: each OP_TOKEN and the target after it. The
+ *  shell takes a redirection anywhere in a command, so file arguments can follow one. The
+ *  scans used to stop at the first operator: with the fd-number fix, `sed -i … 2>/dev/null
+ *  src/a.ts` and `tee 2>/dev/null src/a.ts` collected nothing and were allowed (round-3
+ *  security review). redirectTargets reads the redirection targets themselves. */
+function wordsOf(tokens: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i] === OP_TOKEN) i++;
+    else out.push(tokens[i] ?? '');
+  }
+  return out;
+}
+
 /** tee [-a] FILE... — 토큰 단위 매칭 (v0.26.2).
  *  따옴표 안 문자열은 하나의 토큰이므로 그 속의 'tee' 단어는 절대 매칭되지 않는다. */
 function teeTargets(segments: string[][]): string[] {
   const out: string[] = [];
-  for (const tokens of segments) {
-    const idx = tokens.findIndex((t) => t === 'tee' || t.endsWith('/tee'));
+  for (const segment of segments) {
+    const words = wordsOf(segment);
+    const idx = words.findIndex((t) => t === 'tee' || t.endsWith('/tee'));
     if (idx < 0) continue;
-    for (const t of tokens.slice(idx + 1)) {
-      if (t === OP_TOKEN) break; // 리다이렉션 대상은 redirectTargets 소관
+    for (const t of words.slice(idx + 1)) {
       if (t === '' || t.startsWith('-')) continue;
       out.push(t);
     }
@@ -341,14 +531,14 @@ function looksLikeSedScript(t: string): boolean {
 /** sed -i ... FILE (in-place 편집) — 토큰 단위 매칭 (v0.26.2). */
 function sedInPlaceTargets(segments: string[][]): string[] {
   const out: string[] = [];
-  for (const tokens of segments) {
-    const sedIdx = tokens.findIndex((t) => t === 'sed' || t.endsWith('/sed'));
+  for (const segment of segments) {
+    const words = wordsOf(segment);
+    const sedIdx = words.findIndex((t) => t === 'sed' || t.endsWith('/sed'));
     if (sedIdx < 0) continue;
-    const rest = tokens.slice(sedIdx + 1);
+    const rest = words.slice(sedIdx + 1);
     // -i, -i.bak, -i '' (BSD), 결합 옵션(-ie) 모두 in-place
     if (!rest.some((t) => /^-\w*i/.test(t))) continue;
     for (const t of rest) {
-      if (t === OP_TOKEN) break; // 리다이렉션 이후는 sed 파일 인자가 아니다
       if (t === '' || t.startsWith('-')) continue;
       if (looksLikeSedScript(t)) continue;
       out.push(t);
@@ -360,11 +550,11 @@ function sedInPlaceTargets(segments: string[][]): string[] {
 /** dd of=FILE — 토큰 단위 매칭 (v0.26.2). */
 function ddTargets(segments: string[][]): string[] {
   const out: string[] = [];
-  for (const tokens of segments) {
-    const idx = tokens.findIndex((t) => t === 'dd' || t.endsWith('/dd'));
+  for (const segment of segments) {
+    const words = wordsOf(segment);
+    const idx = words.findIndex((t) => t === 'dd' || t.endsWith('/dd'));
     if (idx < 0) continue;
-    for (const t of tokens.slice(idx + 1)) {
-      if (t === OP_TOKEN) break;
+    for (const t of words.slice(idx + 1)) {
       if (t.startsWith('of=')) {
         const target = t.slice(3);
         if (target !== '') out.push(target);

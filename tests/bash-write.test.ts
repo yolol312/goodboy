@@ -261,3 +261,90 @@ describe('classifyBashWrite — v0.26.2 실측 오탐 5호: 따옴표 안 tee/se
     expect(denied("sed -i 's/a/b/' '2'>/dev/null")).toEqual(['/proj/2']);
   });
 });
+
+// Round 3 (final security review, compared with real bash 5.3 and zsh 5.9): a `<<` in quotes
+//   or in a comment opened a heredoc, and the delimiter was only its word-character prefix.
+//   Either way every later line went unscanned, so a write there was allowed.
+describe('classifyBashWrite — heredoc detection (round 3)', () => {
+  test('a `<<` inside quotes, in a comment or in arithmetic opens no heredoc', () => {
+    expect(denied("echo '<<EOF' > /dev/null\necho x > src/a.ts")).toEqual(['/proj/src/a.ts']);
+    expect(denied('echo "<<EOF"\necho x > src/a.ts')).toEqual(['/proj/src/a.ts']);
+    expect(denied("git log --format='%H <<EOF'\necho x > src/a.ts")).toEqual(['/proj/src/a.ts']);
+    expect(denied('true # <<EOF\necho x > src/a.ts')).toEqual(['/proj/src/a.ts']);
+    expect(denied('echo $((1<<2))\necho x > src/a.ts')).toEqual(['/proj/src/a.ts']);
+  });
+
+  test('the delimiter is the whole word, quotes removed', () => {
+    expect(denied('cat <<EOF-1\nhello > x\nEOF-1\necho x > src/a.ts')).toEqual(['/proj/src/a.ts']);
+    expect(denied('cat <<"E O F"\nbody > c.ts\nE O F\necho x > src/d.ts')).toEqual(['/proj/src/d.ts']);
+    expect(denied('cat <<A <<B\na > 1\nA\nb > 2\nB\necho x > src/e.ts')).toEqual(['/proj/src/e.ts']);
+  });
+
+  test('bodies stay unscanned, and the operator line is scanned', () => {
+    expect(denied("cat > src/a.ts <<'EOF'\nconst f = (x) => x >= 1;\nEOF")).toEqual(['/proj/src/a.ts']);
+    expect(denied('cat <<-EOF\n\tbody > b.ts\n\tEOF\necho ok')).toEqual([]);
+    expect(denied('cat <<EOF | tee src/a.ts\nbody\nEOF')).toEqual(['/proj/src/a.ts']);
+    expect(denied("cat <<<'herestring > x' > /tmp/y")).toEqual([]);
+    expect(denied("cat <<<'x'\necho y > src/a.ts")).toEqual(['/proj/src/a.ts']); // `<<<` is no heredoc
+  });
+
+  // Round 3 (closing security review): read as one opaque string, the double-quoted
+  //   `$( … )` kept its heredoc body, which was then scanned as commands. That is how
+  //   Claude Code writes commit messages and PR bodies.
+  test('a heredoc inside `"$( … )"` is found: commit messages and PR bodies are not scanned', () => {
+    const commit =
+      "git commit -m \"$(cat <<'EOF'\nfix: the \"a > b\" check | tee y\n\nIt's 5\" wide -> ok\n\n" +
+      'Co-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)"';
+    expect(denied(commit)).toEqual([]);
+    expect(denied(`${commit}\necho x > src/a.ts`)).toEqual(['/proj/src/a.ts']);
+    expect(denied("gh pr create --title t --body \"$(cat <<'EOF'\n## Summary\n- a > b\nEOF\n)\"")).toEqual([]);
+    expect(denied('x=$(cat <<EOF\nbody > z\nEOF\n)\necho "$x" > src/a.ts')).toEqual(['/proj/src/a.ts']);
+  });
+
+  test('arithmetic hides no lines: `(( … ))` and `$[ … ]`', () => {
+    expect(denied('(( y = 1 << 3 ))\necho x > src/a.ts')).toEqual(['/proj/src/a.ts']);
+    expect(denied('echo $[1<<3]\necho x > src/a.ts')).toEqual(['/proj/src/a.ts']);
+  });
+
+  test('a comment writes nothing; `#` inside a word is no comment', () => {
+    expect(denied('true # > src/a.ts')).toEqual([]);
+    expect(denied('for f in a b; do echo $f; done # done > src/x.ts')).toEqual([]);
+    expect(denied('echo a#b > src/a.ts')).toEqual(['/proj/src/a.ts']);
+    expect(denied('echo ${#arr} > src/a.ts')).toEqual(['/proj/src/a.ts']);
+    expect(denied('echo a\\ #b > src/a.ts')).toEqual(['/proj/src/a.ts']); // after an escaped blank
+    expect(denied('(echo a) # > src/a.ts')).toEqual([]); // after a subshell, a new word
+  });
+});
+
+describe('classifyBashWrite — more redirection forms (round 3)', () => {
+  test("zsh's `>>|` and `>&|` write; so does `>&2-`, which zsh reads as the file 2-", () => {
+    expect(denied('echo x >>| src/a.ts')).toEqual(['/proj/src/a.ts']);
+    expect(denied('echo x >&| src/a.ts')).toEqual(['/proj/src/a.ts']);
+    expect(denied("sed -i 's/a/b/' >>| /dev/null src/a.ts")).toEqual(['/proj/src/a.ts']);
+    expect(denied('echo x | tee >&| /dev/null src/a.ts')).toEqual(['/proj/src/a.ts']);
+    expect(denied('cmd >&2-')).toEqual(['/proj/2-']);
+    expect(denied('cmd 2>&1-')).toEqual(['/proj/1-']);
+  });
+
+  test('a quoted target that starts with `&` is a file', () => {
+    expect(denied('echo x > "&a.ts"')).toEqual(['/proj/&a.ts']);
+  });
+});
+
+// Layer-1 round 5, compared with real bash 5.3, bash 3.2 and zsh 5.9.
+describe('classifyBashWrite — comments and quotes, more cases (layer-1 round 5)', () => {
+  // A `#` starts a comment only at the start of a word. After the `)` that closes `$( … )`,
+  //   `$(( … ))` or `<( … )` the word goes on, and all three shells write src/a.ts here.
+  //   Read as a comment, the redirection after it went unscanned and the write was allowed.
+  test('a `#` right after `$( … )`, `$(( … ))` or `<( … )` is part of the word, not a comment', () => {
+    expect(denied('echo $(echo a)#b > src/a.ts')).toEqual(['/proj/src/a.ts']);
+    expect(denied('echo $((1))#b > src/a.ts')).toEqual(['/proj/src/a.ts']);
+    expect(denied('cat <(echo a)#x > src/a.ts')).toEqual(['/proj/src/a.ts']);
+  });
+
+  // No test noticed when the escape inside double quotes was dropped: `\"` then closed the
+  //   string, and the `<<EOF` after it hid every later line.
+  test('a `<<` after an escaped quote inside double quotes opens no heredoc', () => {
+    expect(denied('echo "a\\"b <<EOF" > /dev/null\necho x > src/a.ts')).toEqual(['/proj/src/a.ts']);
+  });
+});

@@ -2,6 +2,8 @@
 
 import { readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { axesOfDimensions } from './review-dimensions';
+import { canonicalTimestamp, isTrustedTimestamp, MAX_CLOCK_SKEW_MS } from './trusted-time';
 import type { ReviewFinding, ReviewResult, Verdict } from './types';
 
 function isVerdict(v: unknown): v is Verdict {
@@ -13,7 +15,10 @@ function safeReadReview(path: string): ReviewResult | null {
     const raw = readFileSync(path, 'utf8');
     const parsed = JSON.parse(raw) as Partial<ReviewResult>;
     if (typeof parsed !== 'object' || parsed === null) return null;
-    if (typeof parsed.timestamp !== 'string') return null;
+    // Stored in one format, so the string comparisons below follow time order.
+    const timestamp = canonicalTimestamp(parsed.timestamp);
+    if (timestamp === null) return null;
+    parsed.timestamp = timestamp;
     if (!Array.isArray(parsed.reviewed_files)) return null;
     if (typeof parsed.category !== 'string') return null;
     if (!Array.isArray(parsed.findings)) return null;
@@ -179,12 +184,14 @@ export function validateReview(
   // (E 보안) timestamp 자체 검증 — staleness는 하한만 보므로, 미래 시각을 쓰면
   //   "앞으로 생길 편집까지 이미 리뷰됨"으로 게이트가 우회된다(라이브에서 시도 관측).
   //   쓰기 시점(cli.ts: 서버 시각 강제)과 검증 시점(여기) 두 겹으로 방어한다.
-  const SKEW_MS = 5 * 60_000; // 정상적인 시계 오차 허용치
-  const reviewMs = typeof result.timestamp === 'string' ? Date.parse(result.timestamp) : NaN;
+  // The readers' rule (canonicalTimestamp): an ISO date-time only. Any string Date.parse
+  //   reads used to pass here, '9 Jan 2026' included (round-3 closing refactoring review).
+  const canonical = canonicalTimestamp(result.timestamp);
+  const reviewMs = canonical === null ? NaN : Date.parse(canonical);
   if (!Number.isFinite(reviewMs)) {
     return { ok: false, reason: `리뷰 timestamp가 유효한 ISO 시각이 아닙니다(${String(result.timestamp)}).` };
   }
-  if (reviewMs > Date.now() + SKEW_MS) {
+  if (reviewMs > Date.now() + MAX_CLOCK_SKEW_MS) {
     return {
       ok: false,
       reason: `리뷰 timestamp가 미래입니다(${result.timestamp}) — 게이트 우회로 간주해 거부합니다.`,
@@ -234,9 +241,7 @@ export interface CoverageResult extends ValidationResult {
 
 /** 리뷰 timestamp가 유효한 ISO이고 미래(+스큐)가 아닌지. 미래면 위조 의심으로 제외. */
 function hasTrustedTimestamp(r: ReviewResult, nowMs: number): boolean {
-  const ms = typeof r.timestamp === 'string' ? Date.parse(r.timestamp) : NaN;
-  const SKEW_MS = 5 * 60_000;
-  return Number.isFinite(ms) && ms <= nowMs + SKEW_MS;
+  return isTrustedTimestamp(r.timestamp, nowMs);
 }
 
 /** 파일별 커버리지: 각 변경 파일에 대해 "그 파일의 마지막 편집보다 나중이고 그 파일을
@@ -342,38 +347,97 @@ export function highSeverityFindings(result: ReviewResult): ReviewFinding[] {
   return result.findings.filter((f) => f && f.severity === 'high');
 }
 
+/** When `file` was last modified (epoch ms), or null when it does not exist. Supersession
+ *  asks it: a newer review clears a finding only when there was a change to review. */
+export type ModifiedAt = (file: string) => number | null;
+
+/** The default ModifiedAt: the file's mtime, with the path resolved as the review paths are. */
+export function fileModifiedAt(file: string): number | null {
+  try {
+    return statSync(normalizePath(file)).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
 /** 커서(마지막 수락) 이후의 신뢰 리뷰들에서 "아직 유효한" finding을 모은다 (v0.26.6).
  *
  *  리뷰 지적(사각지대) 대응: finding 평가를 effective(커버리지 구성 리뷰)로만 하면,
  *  변경 집합 밖 파일만 커버한 최신 리뷰의 high finding이 조용히 소실된다.
- *  여기서는 finding 단위로 판정한다 — 그 finding의 파일을 커버하는 더 새로운 리뷰가
- *  있으면 대체(superseded)된 것으로 제외(수정 후 재리뷰 의미론), 아니면 유효.
+ *  여기서는 finding 단위로 판정한다 — 대체(superseded, 수정 후 재리뷰 의미론)된 것은
+ *  제외하고 나머지는 유효. A finding is superseded (fixed, then re-reviewed) when:
+ *   - a file its review covered changed after that review: the flagged file, or another
+ *     file of its reviewed_files (a fix in the caller). A missing file counts as changed
+ *     right after the review;
+ *   - reviews written after that change list the flagged file; and
+ *   - together they cover every axis of the finding's review (axesOfDimensions: a review
+ *     without dimensions is the hallucination axis).
+ *  The v0.26.6 rule took any newer review of the file. In the parallel per-axis flow every
+ *  axis lists every changed file, so a high finding survived only if its axis wrote last:
+ *  a clean refactoring review cleared a security high, and a re-run with no change cleared
+ *  it too (round-3 security review). Matching dimensions instead of axes left the
+ *  hallucination axis (no dimensions) unprotected and made a re-review of the fixed file
+ *  alone, which lists fewer dimensions, never enough. Counting reviews from before the
+ *  change let a bare `touch` clear a finding with the batch's later axes (round-3 final
+ *  reviews).
  *  sinceTimestamp(리뷰 커서의 수락 시각) 이전 리뷰는 이미 표면화/수락된 것이므로 제외
  *  — escape로 수락된 finding이 다음 턴마다 재출현해 게이트를 재차단하는 퇴행을 막는다. */
 export function currentFindings(
   reviews: ReviewResult[],
   sinceTimestamp: string | null,
+  modifiedAt: ModifiedAt = fileModifiedAt,
 ): ReviewFinding[] {
   if (!Array.isArray(reviews) || reviews.length === 0) return [];
   const nowMs = Date.now();
-  const pool = reviews.filter(
-    (r) =>
-      hasTrustedTimestamp(r, nowMs) &&
-      (typeof sinceTimestamp !== 'string' || sinceTimestamp === '' || r.timestamp > sinceTimestamp),
-  );
+  const sinceMs = typeof sinceTimestamp === 'string' && sinceTimestamp !== '' ? Date.parse(sinceTimestamp) : NaN;
+  // Per review, once: its time, the files it lists and its axes. Resolving reviewed_files
+  //   inside the finding loop made the Stop quadratic in the number of reviews (12 s at 800,
+  //   round-3 final performance review).
+  const pool = reviews
+    .filter((r) => hasTrustedTimestamp(r, nowMs))
+    .map((r) => ({
+      r,
+      ms: Date.parse(r.timestamp),
+      files: new Set((r.reviewed_files ?? []).map((f) => normalizePath(f))),
+      axes: axesOfDimensions(Array.isArray(r.dimensions_checked) ? r.dimensions_checked : []),
+    }))
+    .filter((e) => !(e.ms <= sinceMs));
+  const mtimes = new Map<string, number | null>();
+  const mtimeOf = (file: string): number | null => {
+    const key = normalizePath(file);
+    if (!mtimes.has(key)) mtimes.set(key, modifiedAt(file));
+    return mtimes.get(key) ?? null;
+  };
+  // The axes that reviews newer than `afterMs` and listing `key` cover together.
+  const axesAfter = (afterMs: number, key: string): Set<string> => {
+    const out = new Set<string>();
+    for (const o of pool) if (o.ms > afterMs && o.files.has(key)) for (const a of o.axes) out.add(a);
+    return out;
+  };
   const out: ReviewFinding[] = [];
-  for (const r of pool) {
-    if (!Array.isArray(r.findings)) continue;
-    for (const f of r.findings) {
+  for (const e of pool) {
+    if (!Array.isArray(e.r.findings)) continue;
+    for (const f of e.r.findings) {
       if (!f || typeof f.file !== 'string') continue;
       const key = normalizePath(f.file);
-      const superseded = pool.some(
-        (o) =>
-          o !== r &&
-          o.timestamp > r.timestamp &&
-          (o.reviewed_files ?? []).some((rf) => normalizePath(rf) === key),
-      );
-      if (!superseded) out.push(f);
+      const covers = (axes: Set<string>): boolean => e.axes.every((a) => axes.has(a));
+      // Cheap test first: without newer reviews of its axes the finding stays, and no file
+      //   is stat'ed.
+      if (!covers(axesAfter(e.ms, key))) {
+        out.push(f);
+        continue;
+      }
+      let changedAt = Infinity;
+      for (const file of [f.file, ...(e.r.reviewed_files ?? [])]) {
+        const m = mtimeOf(file);
+        // Only the flagged file's absence is a change (deleted or moved). Another listed file
+        //   may have been missing when the review was written (a path the change deleted, a
+        //   typo), and counting it made one clean re-run enough (round-3 closing reviews).
+        if (m === null) {
+          if (normalizePath(file) === key) changedAt = Math.min(changedAt, e.ms);
+        } else if (m > e.ms) changedAt = Math.min(changedAt, m);
+      }
+      if (changedAt === Infinity || !covers(axesAfter(changedAt, key))) out.push(f);
     }
   }
   return out;

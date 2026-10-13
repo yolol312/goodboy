@@ -12,6 +12,7 @@ import {
   detectTestInfrastructure,
   evidenceProblems,
   failingSuites,
+  findRecentTestFiles,
   isDocFile,
   isTestFile,
   missingTestFiles,
@@ -488,5 +489,18 @@ describe('detectTestInfrastructure', () => {
     const cwd = newSandbox();
     writeFileSync(join(cwd, 'package.json'), '{ broken', 'utf8');
     expect(detectTestInfrastructure(cwd).present).toBe(false);
+  });
+});
+
+// Round 3 (final security review): the same string-order problem as for reviews. A result
+//   stamped '9' sorted after every ISO time and covered every later edit.
+describe('test result timestamps on read (round 3)', () => {
+  test('an ISO time is stored in toISOString form; any other form drops the result', () => {
+    const dir = newSandbox();
+    const base = { ...result(), timestamp: undefined };
+    writeFileSync(join(dir, 'offset.json'), JSON.stringify({ ...base, timestamp: '2026-10-13T12:00:00+09:00' }));
+    writeFileSync(join(dir, 'nine.json'), JSON.stringify({ ...base, timestamp: '9' }));
+    writeFileSync(join(dir, 'words.json'), JSON.stringify({ ...base, timestamp: '9 Jan 2026' }));
+    expect(findRecentTestFiles(dir, 60).map((r) => r.timestamp)).toEqual(['2026-10-13T03:00:00.000Z']);
   });
 });
