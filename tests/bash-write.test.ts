@@ -250,4 +250,14 @@ describe('classifyBashWrite — v0.26.2 실측 오탐 5호: 따옴표 안 tee/se
     expect(denied('echo x | tee /tmp/out.txt > /dev/null')).toEqual([]);
     expect(denied('echo x | tee src/a.ts > /dev/null')).toEqual(['/proj/src/a.ts']);
   });
+
+  test('the fd number of a redirection is not a file argument', () => {
+    // Seen live: denied as a write to "./2".
+    expect(denied("sed -i '' -e '/^run/d' /tmp/mut.sh 2>/dev/null")).toEqual([]);
+    expect(denied('echo x | tee /tmp/out.txt 2>/dev/null')).toEqual([]);
+    expect(denied("sed -i 's/a/b/' src/app.ts 2>/dev/null")).toEqual(['/proj/src/app.ts']);
+    expect(denied('echo x 2> src/err.ts')).toEqual(['/proj/src/err.ts']); // the target still counts
+    // In bash a quoted fd number is a word: `'2'>/dev/null` is the file 2, then a stdout redirect.
+    expect(denied("sed -i 's/a/b/' '2'>/dev/null")).toEqual(['/proj/2']);
+  });
 });

@@ -2,7 +2,7 @@
 // Stop hook — 턴 증가, 리뷰 강제/검증, 재시도 카운터, 커서/차원 검사
 
 import { isAbsolute, relative, resolve as resolvePath, sep } from 'node:path';
-import type { CitationCache, CitationProblem, ReviewResult, StatusSnapshot } from '../lib';
+import type { CitationCache, CitationProblem, ReviewFinding, ReviewResult, StatusSnapshot } from '../lib';
 import {
   citationBlockMessage,
   CLI_PATH,
@@ -43,6 +43,7 @@ import {
   writeTestCursor,
   getContextUsage,
   getCurrentTurn,
+  getEditHistory,
   getEditsSince,
   getEditsWithLastTimestampSince,
   hasReasoningSection,
@@ -731,18 +732,69 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
   }
 }
 
-/** Reviews about this session's work: they cover at least one file the session edited.
- *  `.claude/reviews/` is shared by every session in the repo, and since cursors are per
- *  session, a session without a cursor saw every open finding in the window — another
- *  session's high finding (even one that session had escaped) blocked a clean review here
- *  (hallucination-axis review). Findings are evaluated over these reviews only. */
-function sessionReviews(reviews: ReviewResult[], sessionId: string, cwd: string): ReviewResult[] {
-  const mine = new Set(getEditsSince(sessionId, 0, cwd).map((f) => resolvePath(f)));
-  return reviews.filter((r) =>
-    (Array.isArray(r.reviewed_files) ? r.reviewed_files : []).some(
-      (f) => typeof f === 'string' && mine.has(resolvePath(cwd, f)),
-    ),
+/** Open findings, split by whose work they are about (A3).
+ *  - own: from reviews that name a file this session edited, in reviewed_files or in a
+ *    finding, whichever session wrote them. These gate the Stop.
+ *  - foreign: the high findings of the other reviews written since this session's first
+ *    edit. These are shown as a note only. Their medium/low findings are not shown: they
+ *    never blocked anyone, and another session's notes are only noise here.
+ *  `.claude/reviews/` is shared by every session in the repo. Since cursors are per session,
+ *  a session without a cursor used to see every open finding in the window, so another
+ *  session's high finding blocked a clean review here (hallucination-axis review). Those
+ *  findings still must not vanish silently, which was the v0.26.6 blind spot (round-2
+ *  layer-1 F7). Rules that keep a finding from being lost:
+ *  - The edited set is the raw edit history, so a file moved or deleted afterwards still
+ *    counts (mv/rm are not recorded edits).
+ *  - A finding naming an edited file counts even when its review listed other files.
+ *  - Supersession runs over every review, so a newer review of the flagged file clears a
+ *    finding wherever it came from.
+ *  Those were the round-2 security review's high finding. */
+function splitFindings(
+  reviews: ReviewResult[],
+  sessionId: string,
+  cwd: string,
+  cursorTimestamp: string | null,
+): { own: ReviewFinding[]; foreign: ReviewFinding[] } {
+  const { files, firstEditAt } = getEditHistory(sessionId);
+  const mine = new Set(files.map((f) => resolvePath(f)));
+  const names = (r: ReviewResult): unknown[] => [
+    ...(Array.isArray(r.reviewed_files) ? r.reviewed_files : []),
+    ...(Array.isArray(r.findings) ? r.findings.map((f) => f?.file) : []),
+  ];
+  const ownFindings = new Set(
+    reviews
+      .filter((r) => names(r).some((f) => typeof f === 'string' && mine.has(resolvePath(cwd, f))))
+      .flatMap((r) => (Array.isArray(r.findings) ? r.findings : [])),
   );
+  const own = currentFindings(reviews, cursorTimestamp).filter((f) => ownFindings.has(f));
+  // Reviews older than this session's first edit cannot be about its work.
+  const foreignSince =
+    [cursorTimestamp, firstEditAt].filter((t): t is string => typeof t === 'string' && t !== '').sort().pop() ??
+    null;
+  const foreign = currentFindings(reviews, foreignSince).filter(
+    (f) => !ownFindings.has(f) && f.severity === 'high',
+  );
+  return { own, foreign };
+}
+
+/** "[sev] file:line — issue; …" for up to three findings, for a systemMessage. */
+function findingsSummary(findings: ReviewFinding[]): string {
+  const shown = findings
+    .slice(0, 3)
+    .map((f) => `[${f.severity}] ${f.file}${f.line ? `:${f.line}` : ''} — ${f.issue}`)
+    .join('; ');
+  return findings.length > 3 ? `${shown} (외 ${findings.length - 3}개)` : shown;
+}
+
+/** The note a passing Stop shows: own medium/low findings, then the foreign ones. */
+function passNote(prefix: string, own: ReviewFinding[], foreign: ReviewFinding[]): string {
+  const parts: string[] = [];
+  const others = own.filter((f) => f && f.severity !== 'high');
+  if (others.length > 0) parts.push(`${prefix} 참고할 발견사항: ${findingsSummary(others)}`);
+  if (foreign.length > 0) {
+    parts.push(`이 세션이 편집하지 않은 파일에 대한 high 지적(차단하지 않음): ${findingsSummary(foreign)}`);
+  }
+  return parts.join(' / ');
 }
 
 /** (v0.26.7, v0.26.8 보강) stop_hook_active 조기 return 경로의 비차단 리뷰 수락 시도.
@@ -775,9 +827,9 @@ function tryAcceptPendingReview(
     const changedEdits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd);
     const v = validateReviewCoverage(reviews, changedEdits);
     if (!v.ok) return null;
-    const active = currentFindings(sessionReviews(reviews, sessionId, cwd), cursor ? cursor.timestamp : null);
+    const { own, foreign } = splitFindings(reviews, sessionId, cwd, cursor ? cursor.timestamp : null);
     // (F 상당) high는 수락 보류 — 다음 full Stop이 정식으로 차단/안내한다.
-    if (active.some((f) => f && f.severity === 'high')) return null;
+    if (own.some((f) => f && f.severity === 'high')) return null;
     const effective = v.effective;
     // (F1.5 상당) 추측/가정을 선언했는데 리뷰가 가정 검증을 안 했으면 수락 보류.
     const declaredUnknowns = (() => {
@@ -813,15 +865,9 @@ function tryAcceptPendingReview(
     statusSnapshot.reviewPending = false;
     // 수락은 평소 기록하지 않지만, 이 경로는 신설이라 관측 가능성을 위해 남긴다.
     logGate(sessionId, 'review', 'warn', 'accept-on-stop-active');
-    // (G 상당) medium/low finding은 조용히 소비하지 않고 표면화한다(v0.26.8).
-    const others = active.filter((f) => f && f.severity !== 'high');
-    if (others.length === 0) return '';
-    const sev = others
-      .slice(0, 3)
-      .map((f) => `[${f.severity}] ${f.file}${f.line ? `:${f.line}` : ''} — ${f.issue}`)
-      .join('; ');
-    const more = others.length > 3 ? ` (외 ${others.length - 3}개)` : '';
-    return `리뷰 통과(수락). 참고할 발견사항: ${sev}${more}`;
+    // (G 상당) medium/low finding은 조용히 소비하지 않고 표면화한다(v0.26.8). The same holds
+    //   for findings from reviews of files this session did not edit (A3).
+    return passNote('리뷰 통과(수락).', own, foreign);
   } catch {
     // fail-open — 수락 시도 실패가 조기 return 경로를 막지 않는다.
     return null;
@@ -1043,7 +1089,8 @@ function main(): void {
 
       // (B5) C1 — 자동 검증 실패 게이트. PostToolUse가 남긴 실패 마커가 살아 있으면
       //   턴 종료를 차단한다(편집→재검증 통과 시 PostToolUse가 마커를 지워 해제됨).
-      //   - 세션 바인딩: 현재 세션이 남긴 마커만 신뢰(이월/커밋 잔재로 인한 오차단 방지).
+      //   - Session binding: the marker lives in this session's state dir and must name
+      //     this session; a later project-wide pass of its commands makes it stale (A3).
       //   - 무한 block 방지: 전용 카운터 + MAX_RETRIES escape(초과 시 통과 + 사용자 알림).
       const vf = readValidationFailure(sessionId); // this session's marker only
       statusSnapshot.validationFailed = vf !== null;
@@ -1071,7 +1118,7 @@ function main(): void {
             `사용자 확인이 필요합니다. (실패: ${cmds})`,
         );
       } else {
-        // 마커 없음/타 세션 마커 → 카운터 리셋(다음 실패는 새로 3회 기회).
+        // No marker, another session's, or a stale one (a later pass) → 카운터 리셋(다음 실패는 새로 3회 기회).
         resetRetryCount(sessionId, VALIDATION_COUNT_FILE);
       }
 
@@ -1095,13 +1142,7 @@ function main(): void {
       // (C) 변경 검사 — 마지막으로 수락된 리뷰(커서) 이후 편집된 파일만 본다.
       //   커서 부재(첫 리뷰) → turn 0 = 세션 시작 이후 모든 편집.
       //   고정 5턴 윈도우(BUG #2) 대신 커서 기반으로 정확한 per-feature 스코프를 얻는다.
-      const cursor = (() => {
-        try {
-          return readReviewCursor(cwd, sessionId);
-        } catch {
-          return null;
-        }
-      })();
+      const cursor = readReviewCursor(cwd, sessionId); // never throws: null when unreadable
       // 커서 부재(첫 리뷰) → baseline 0: getEditsSince(>=0)로 세션 전체 편집을 포함.
       const cursorTurn = cursor ? cursor.turn : 0;
       // withinDir=cwd: 프로젝트 안의 파일만 리뷰 대상. 리뷰 에이전트의 프로브 파일은
@@ -1200,12 +1241,15 @@ function main(): void {
       // finding 평가(F/G)는 effective만으로는 부족(리뷰 지적 — 변경 집합 밖 파일만
       //   커버한 최신 리뷰의 high finding이 조용히 소실된다). 커서 이후의 모든 신뢰
       //   리뷰에서, 더 새로운 리뷰로 대체되지 않은 finding을 모아 평가한다(v0.26.6).
-      //   Only reviews of this session's files count (sessionReviews).
-      const activeFindings = (() => {
+      //   Findings about this session's files gate; the others are shown as a note (A3, splitFindings).
+      const { own: activeFindings, foreign: foreignFindings } = (() => {
         try {
-          return currentFindings(sessionReviews(reviews, sessionId, cwd), cursor ? cursor.timestamp : null);
+          return splitFindings(reviews, sessionId, cwd, cursor ? cursor.timestamp : null);
         } catch {
-          return effectiveReviews.flatMap((r) => (Array.isArray(r.findings) ? r.findings : []));
+          return {
+            own: effectiveReviews.flatMap((r) => (Array.isArray(r.findings) ? r.findings : [])),
+            foreign: [] as ReviewFinding[],
+          };
         }
       })();
 
@@ -1331,17 +1375,8 @@ function main(): void {
         return;
       }
 
-      // (G) medium/low only — 통과 + 알림
-      const otherFindings = activeFindings.filter((f) => f && f.severity !== 'high');
-      let systemMessage: string | undefined;
-      if (otherFindings.length > 0) {
-        const sev = otherFindings
-          .slice(0, 3)
-          .map((f) => `[${f.severity}] ${f.file}${f.line ? `:${f.line}` : ''} — ${f.issue}`)
-          .join('; ');
-        const more = otherFindings.length > 3 ? ` (외 ${otherFindings.length - 3}개)` : '';
-        systemMessage = `리뷰 통과. 참고할 발견사항: ${sev}${more}`;
-      }
+      // (G) medium/low only — 통과 + 알림 (plus findings about files this session did not edit, A3)
+      const systemMessage = passNote('리뷰 통과.', activeFindings, foreignFindings) || undefined;
       // 리뷰 수락(blocking high-severity 없음) → 커서 전진.
       //   이후 Stop에서는 이 턴 이후 편집만 리뷰 필요 대상이 된다.
       resetRetryCount(sessionId);

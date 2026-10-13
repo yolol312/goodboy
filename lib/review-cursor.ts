@@ -32,6 +32,8 @@ export interface ReviewCursor {
   sessionId: string;
 }
 
+// Name bases, not file names: the file is cursorFileName(base, cwd), one per project
+// directory. A path built from the base alone points at a file nothing writes.
 export const REVIEW_CURSOR_FILE = '.goodboy-last-review';
 // 층1 테스트 게이트 커서. 리뷰와 **분리**한다 — 공유하면 리뷰 수락이 테스트 요구까지
 // 지워버려, 테스트 없이 리뷰만 돌리면 통과하는 우회가 생긴다.

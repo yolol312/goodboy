@@ -80,7 +80,8 @@ const SEARCH_DEPTH_LIMIT = 32;
 // Wall-clock cap on the walk. The Stop hook has 15 s for every gate, and directory reads
 // can be slow (performance review: 2–3.6 s per walk of a real ~/.gradle on a machine with a
 // file-monitoring agent). A walk cut short is incomplete, so its bare names come out as
-// "unresolvable" (cite the full path), never as hallucinations.
+// "unresolvable" (cite the full path), never as hallucinations. The cap is checked before
+// each directory is read, so one huge directory can overrun it by its own read time.
 const SEARCH_TIME_BUDGET_MS = 300;
 
 /** File-name index of the repo: one bounded walk shared by every bare-name citation

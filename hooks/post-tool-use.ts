@@ -372,6 +372,8 @@ function main(): void {
       const failureFromResponse = detectFailureFromResponse(toolResponse);
       if (isEditTool && !failureFromResponse) {
         try {
+          // Taken before the checks read the tree: a pass vouches only for edits made before it started.
+          const startedAt = new Date().toISOString();
           const results = autoValidate(cwd);
           const { context, blocked, failedCmds, confirmedPass } = buildValidationContext(results);
           additionalContext = context;
@@ -386,7 +388,7 @@ function main(): void {
             writeValidationFailure(sessionId, failedCmds, root);
           } else if (confirmedPass) {
             clearValidationFailure(sessionId);
-            if (root) recordValidationPass(root, results.filter((r) => r.ok).map((r) => r.cmd));
+            if (root) recordValidationPass(root, results.filter((r) => r.ok).map((r) => r.cmd), startedAt);
           }
         } catch (err) {
           process.stderr.write(`[goodboy post-tool-use] validation error: ${String(err)}\n`);

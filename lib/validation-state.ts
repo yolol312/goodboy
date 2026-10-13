@@ -10,11 +10,14 @@
 //     It used to be one <cwd>/.claude/ file for every session: another session's failing
 //     validation replaced this session's marker with one this session ignores, and the
 //     failed check stopped blocking this session's turn.
-//   - A confirmed pass is recorded per project root (recordValidationPass). The checks run
-//     on the working tree that every session of the project shares, so a later pass of
-//     the same commands in any session makes an older failure stale. The single file got
+//   - A confirmed pass is recorded per project root (recordValidationPass), one entry per
+//     command. The checks run on the working tree that every session of the project
+//     shares. So a failure is stale once every one of its commands has passed, in any
+//     session, in a run that started after the failure was recorded. The single file got
 //     that right by deleting the marker; per-session markers alone re-blocked a session
-//     after another session had fixed the tree (hallucination-axis review).
+//     after another session had fixed the tree (hallucination-axis review). The start
+//     time, not the finish time, is what counts: a check that began before the breaking
+//     edit can finish after it and still pass (round-2 review).
 // 형식: { sessionId, timestamp, commands: string[], root? }
 //
 // The marker names its session, and a mismatch is ignored (the dir name is only a
@@ -24,7 +27,7 @@
 // 마커를 못 읽으면 차단하지 않는다.
 
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve as resolvePath } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
@@ -39,17 +42,51 @@ export interface ValidationFailureState {
 
 export const VALIDATION_FAILURE_FILE = '.goodboy-validation-failed.json';
 const VALIDATION_PASS_FILE = 'validation-passed.json';
+/** A recorded pass may start at most this far ahead of this clock (skew); later ones are forged. */
+const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
 function markerPath(sessionId: string): string {
   return join(ensureSessionDir(sessionId), VALIDATION_FAILURE_FILE);
 }
 
-/** Per-project state dir, outside the repo so a pass on every edit causes no file churn. */
-function projectStateDir(root: string): string {
+/** Per-project state dir, outside the repo so a pass on every edit causes no file churn.
+ *  Unlike a session dir, its name can be computed from the project path. So on a shared
+ *  /tmp another local user can create it first and plant a pass or a symlink. On POSIX it
+ *  is trusted only as a real directory that this user owns, with no group or other
+ *  access. Otherwise this returns null and no pass is recorded or read. That fails closed:
+ *  the failure keeps blocking until its own session passes or escapes. */
+function projectStateDir(root: string): string | null {
   const key = createHash('sha256').update(resolvePath(root)).digest('hex').slice(0, 16);
   const dir = join(tmpdir(), `goodboy-project-${key}`);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  return dir;
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const st = lstatSync(dir); // lstat: a symlink to a directory is not a directory here
+    if (!st.isDirectory()) return null;
+    if (typeof process.getuid === 'function' && (st.uid !== process.getuid() || (st.mode & 0o077) !== 0)) {
+      return null;
+    }
+    return dir;
+  } catch {
+    return null;
+  }
+}
+
+/** The pass record: command → ISO start time of its latest passing run. One entry per
+ *  command, so a later pass of other commands (typecheck only) does not erase a pass of
+ *  this one (round-2 layer-1 F4). */
+function readPasses(dir: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  try {
+    const p = JSON.parse(readFileSync(join(dir, VALIDATION_PASS_FILE), 'utf8')) as { passes?: unknown } | null;
+    if (p && typeof p.passes === 'object' && p.passes !== null && !Array.isArray(p.passes)) {
+      for (const [cmd, startedAt] of Object.entries(p.passes as Record<string, unknown>)) {
+        if (typeof startedAt === 'string') out[cmd] = startedAt;
+      }
+    }
+  } catch {
+    // no record, or an unreadable one: no passes
+  }
+  return out;
 }
 
 function stringList(v: unknown): string[] {
@@ -71,14 +108,21 @@ export function writeValidationFailure(sessionId: string, commands: string[], ro
   }
 }
 
-/** Records a confirmed pass of `commands` in the project at `root`, for every session. */
-export function recordValidationPass(root: string, commands: string[]): void {
+/** Records, for every session, that `commands` passed in the project at `root`, in a run
+ *  that started at `startedAt` (ISO). */
+export function recordValidationPass(root: string, commands: string[], startedAt: string): void {
   try {
-    writeFileSync(
-      join(projectStateDir(root), VALIDATION_PASS_FILE),
-      JSON.stringify({ timestamp: new Date().toISOString(), commands: stringList(commands) }),
-      'utf8',
-    );
+    const dir = projectStateDir(root);
+    if (dir === null) return;
+    const passes = readPasses(dir);
+    for (const cmd of stringList(commands)) {
+      const prev = passes[cmd];
+      if (prev === undefined || startedAt > prev) passes[cmd] = startedAt;
+    }
+    // Write, then rename into place: a concurrent reader never sees a half-written file.
+    const staged = join(dir, `${VALIDATION_PASS_FILE}.${process.pid}.tmp`);
+    writeFileSync(staged, JSON.stringify({ passes }), 'utf8');
+    renameSync(staged, join(dir, VALIDATION_PASS_FILE));
   } catch {
     // best-effort — without the record, an older failure keeps blocking until its own
     //   session passes or escapes (fail-closed).
@@ -96,7 +140,7 @@ export function clearValidationFailure(sessionId: string): void {
 }
 
 /** 마커 읽기. 없거나 형식이 깨졌으면 null(차단하지 않음). Null as well for a marker
- *  that names another session, or one a later pass of the same commands made stale. */
+ *  that names another session, or one that later passes of its commands made stale. */
 export function readValidationFailure(sessionId: string): ValidationFailureState | null {
   try {
     const path = markerPath(sessionId);
@@ -116,17 +160,17 @@ export function readValidationFailure(sessionId: string): ValidationFailureState
   }
 }
 
-/** True when the project recorded a pass of every one of `commands` after `since`. */
+/** True when every one of `commands` passed in a run that started after `since`. A start
+ *  time beyond this clock's skew is not trusted. A failure without commands is never
+ *  stale: there is nothing to match. */
 function passedSince(root: string, since: string, commands: string[]): boolean {
-  try {
-    const p = JSON.parse(readFileSync(join(projectStateDir(root), VALIDATION_PASS_FILE), 'utf8')) as {
-      timestamp?: unknown;
-      commands?: unknown;
-    } | null;
-    if (!p || typeof p.timestamp !== 'string' || p.timestamp <= since) return false;
-    const passed = stringList(p.commands);
-    return commands.every((c) => passed.includes(c));
-  } catch {
-    return false;
-  }
+  if (commands.length === 0) return false;
+  const dir = projectStateDir(root);
+  if (dir === null) return false;
+  const passes = readPasses(dir);
+  const latest = new Date(Date.now() + MAX_CLOCK_SKEW_MS).toISOString();
+  return commands.every((cmd) => {
+    const startedAt = passes[cmd];
+    return typeof startedAt === 'string' && startedAt > since && startedAt <= latest;
+  });
 }

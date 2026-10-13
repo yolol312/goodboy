@@ -203,41 +203,7 @@ describe('Stop hook — bare-name walk (layer 0 performance)', () => {
   // two checks in one Stop. They must share the walk ("at most once per Stop").
   test('a stop_hook_active Stop that accepts a pending test result still walks once', async () => {
     const box = newBox();
-    const sessionId = `sess-${Math.random().toString(36).slice(2)}`;
-    const sessionDir = join(box.tmp, `goodboy-session-${sessionId}`);
-    mkdirSync(sessionDir, { recursive: true });
-    writeFileSync(join(sessionDir, 'turn.txt'), '2', 'utf8');
-    writeFileSync(
-      join(sessionDir, 'edits.jsonl'),
-      JSON.stringify({ file: join(box.cwd, 'src', 'a.ts'), turn: 2, timestamp: new Date().toISOString() }) + '\n',
-      'utf8',
-    );
-    const testFile = join(box.cwd, 'tests', 'a.test.ts');
-    mkdirSync(join(box.cwd, 'tests'), { recursive: true });
-    writeFileSync(testFile, 'test("x", () => { expect(1).toBe(1); });\n', 'utf8');
-    mkdirSync(join(box.cwd, '.claude', 'tests'), { recursive: true });
-    writeFileSync(
-      join(box.cwd, '.claude', 'tests', 'result.json'),
-      JSON.stringify({
-        timestamp: new Date(Date.now() + 60_000).toISOString(),
-        tested_files: [join(box.cwd, 'src', 'a.ts')],
-        category: 'fix-bug',
-        test_files: [testFile],
-        environment: { mode: 'none', command: 'none', evidence: 'library' },
-        suites: [{ name: 'unit', command: 'bun test', passed: 1, failed: 0, output: '1 pass' }],
-        acceptance: [
-          {
-            id: 'AC-1',
-            description: 'the fix works',
-            test: 'tests/a.test.ts',
-            red: { command: 'bun test (before the fix)', output: '1 fail', exit_code: 1 },
-            green: { command: 'bun test', output: '1 pass', exit_code: 0 },
-          },
-        ],
-        verdict: 'pass',
-      }),
-      'utf8',
-    );
+    const sessionId = seedPendingTestResult(box);
     const tp = writeTranscript(box, ['Where does the flow start?'], 'It starts at a.ts:1.');
 
     const run = await runStop(box, tp, { GOODBOY_TEST_GATE: 'on' }, { sessionId, stopHookActive: true });
@@ -246,4 +212,76 @@ describe('Stop hook — bare-name walk (layer 0 performance)', () => {
     expect(run.out.reason).toContain('Review is required');
     expect(walks(box, run)).toBe(1);
   });
+
+  // The same path with an answer that is not in the transcript yet: layer 0 polls for the
+  // flush before it checks anything. Two checks waited twice — at the 8 s maximum that is
+  // past the 15 s Stop timeout. Each wait leaves one flush-wait entry in the gate log.
+  test('a stop_hook_active Stop that accepts a pending test result waits for the flush once', async () => {
+    const box = newBox();
+    const sessionId = seedPendingTestResult(box);
+    const tp = join(box.tmp, 'pending-transcript.jsonl');
+    writeFileSync(
+      tp,
+      [
+        JSON.stringify({ type: 'user', message: { role: 'user', content: 'Where does the flow start?' } }),
+        JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'It starts at a.ts:1.' }] } }),
+        // The latest prompt, whose answer has not been flushed yet.
+        JSON.stringify({ type: 'user', message: { role: 'user', content: 'And where does it end?' } }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+
+    const run = await runStop(
+      box,
+      tp,
+      { GOODBOY_TEST_GATE: 'on', GOODBOY_CLAIM_FLUSH_WAIT_MS: '400' },
+      { sessionId, stopHookActive: true },
+    );
+    expect(run.out.decision).toBe('block');
+    expect(run.out.reason).toContain('Review is required');
+    const log = readFileSync(join(box.tmp, `goodboy-session-${sessionId}`, 'gate-log.jsonl'), 'utf8');
+    expect(log).toContain('continue-to-review-after-accept');
+    expect(log.split('\n').filter((l) => l.includes('flush-wait-'))).toHaveLength(1);
+  });
 });
+
+/** A session with one edit at turn 2 and a passing layer-1 result for it that no Stop has
+ *  accepted yet. Returns the session id. */
+function seedPendingTestResult(box: Box): string {
+  const sessionId = `sess-${Math.random().toString(36).slice(2)}`;
+  const sessionDir = join(box.tmp, `goodboy-session-${sessionId}`);
+  mkdirSync(sessionDir, { recursive: true });
+  writeFileSync(join(sessionDir, 'turn.txt'), '2', 'utf8');
+  writeFileSync(
+    join(sessionDir, 'edits.jsonl'),
+    JSON.stringify({ file: join(box.cwd, 'src', 'a.ts'), turn: 2, timestamp: new Date().toISOString() }) + '\n',
+    'utf8',
+  );
+  const testFile = join(box.cwd, 'tests', 'a.test.ts');
+  mkdirSync(join(box.cwd, 'tests'), { recursive: true });
+  writeFileSync(testFile, 'test("x", () => { expect(1).toBe(1); });\n', 'utf8');
+  mkdirSync(join(box.cwd, '.claude', 'tests'), { recursive: true });
+  writeFileSync(
+    join(box.cwd, '.claude', 'tests', 'result.json'),
+    JSON.stringify({
+      timestamp: new Date(Date.now() + 60_000).toISOString(),
+      tested_files: [join(box.cwd, 'src', 'a.ts')],
+      category: 'fix-bug',
+      test_files: [testFile],
+      environment: { mode: 'none', command: 'none', evidence: 'library' },
+      suites: [{ name: 'unit', command: 'bun test', passed: 1, failed: 0, output: '1 pass' }],
+      acceptance: [
+        {
+          id: 'AC-1',
+          description: 'the fix works',
+          test: 'tests/a.test.ts',
+          red: { command: 'bun test (before the fix)', output: '1 fail', exit_code: 1 },
+          green: { command: 'bun test', output: '1 pass', exit_code: 0 },
+        },
+      ],
+      verdict: 'pass',
+    }),
+    'utf8',
+  );
+  return sessionId;
+}

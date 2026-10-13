@@ -362,6 +362,21 @@ export function getEditsSince(
   return Array.from(out);
 }
 
+/** Every file this session ever edited, plus when it first edited one. Unlike
+ *  getEditsSince, no review-scope filter applies: a file the session later moved or
+ *  deleted, or one outside the Stop's cwd, is still this session's work. The Stop uses
+ *  it to tell which reviews are about this session (A3). */
+export function getEditHistory(sessionId: string): { files: string[]; firstEditAt: string | null } {
+  const records = readRecords(ensureSessionDir(sessionId), 'edits.jsonl');
+  const files = new Set<string>();
+  let firstEditAt: string | null = null;
+  for (const r of records) {
+    files.add(r.file);
+    if (firstEditAt === null || r.timestamp < firstEditAt) firstEditAt = r.timestamp;
+  }
+  return { files: Array.from(files), firstEditAt };
+}
+
 /** withinDir가 주어지면 파일이 그 디렉터리 하위인지 판정. 없으면 항상 true. */
 function isWithin(file: string, withinDir?: string): boolean {
   if (!withinDir) return true;

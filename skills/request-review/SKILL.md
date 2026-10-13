@@ -76,7 +76,7 @@ required_inputs:
 
 - 단순(simple): 자동 진행 게이트 — 결정 근거 기록만 필수
 - 중간(medium): 추측 카테고리에 항목이 있으면 사용자 확인 게이트
-- 위험(risky): 항상 사용자 승인 마커(`.claude/.goodboy-risk-approved.txt`)가 있어야 편집 가능. 사용자에게 "진행 승인" 명시 요청.
+- 위험(risky): 항상 이 세션의 사용자 승인 마커(`.claude/.goodboy-risk-approved-<세션 태그>.txt` — 정확한 경로와 명령은 위험 게이트의 거부 메시지에 표시됨)가 있어야 편집 가능. 사용자에게 "진행 승인" 명시 요청.
 
 `--risk <level>` 인자로 override 가능. 예: `/request-review --risk medium <기준>` (보안 리뷰 등 더 엄격하게 가져가고 싶을 때)
 

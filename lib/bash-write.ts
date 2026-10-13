@@ -81,6 +81,9 @@ export function tokenizeSegments(command: string): string[][] {
       continue;
     }
     if (ch === '>' || ch === '<') {
+      // The fd number of `2>/dev/null` belongs to the operator. As a token it was read as a
+      //   file argument: `sed -i '' -e … f 2>/dev/null` was denied as a write to "./2".
+      if (!curQuoted && /^\d+$/.test(cur)) cur = '';
       pushToken();
       if (tokens[tokens.length - 1] !== OP_TOKEN) tokens.push(OP_TOKEN);
       continue;

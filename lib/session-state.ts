@@ -5,8 +5,9 @@
 // <project>/.claude/.goodboy-session-state.json is a single slot: another session's category
 // command in the same repo overwrote it, and this session's risk gate — which trusts only
 // state carrying its own sessionId — silently stopped applying. The repo-level file is
-// still written because the review/test subagents read the task category from it, and it
-// is read back only when the session copy is missing (see readSessionState).
+// still written, for two reasons: the review/test subagents read the task category from it,
+// and it is the gates' fallback when the session copy is missing or unusable (see
+// readSessionState).
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
@@ -25,26 +26,37 @@ export interface SessionState {
 
 export const SESSION_STATE_FILE = '.goodboy-session-state.json';
 
-/** Writes this session's state; the session id is stamped here, not taken from the caller.
- *  Throws only when the session copy (the one the gates read) cannot be written. The
- *  repo-level copy is informational and best-effort. */
+/** Writes this session's state to both copies; the session id is stamped here, not taken
+ *  from the caller. Each write is attempted on its own. With an unwritable $TMPDIR the
+ *  repo-level copy is what keeps the risk gate on; writing it only after a successful
+ *  session write left neither copy, and risky commands ran ungated (round-2 review).
+ *  Throws only when neither copy could be written. */
 export function writeSessionState(cwd: string, sessionId: string, state: Omit<SessionState, 'sessionId'>): void {
   const json = JSON.stringify({ ...state, sessionId }, null, 2);
-  writeFileSync(join(ensureSessionDir(sessionId), SESSION_STATE_FILE), json, 'utf8');
+  let sessionError: unknown = null;
+  try {
+    writeFileSync(join(ensureSessionDir(sessionId), SESSION_STATE_FILE), json, 'utf8');
+  } catch (err) {
+    sessionError = err;
+  }
   try {
     mkdirSync(resolvePath(cwd, '.claude'), { recursive: true });
     writeFileSync(resolvePath(cwd, '.claude', SESSION_STATE_FILE), json, 'utf8');
   } catch {
-    // best-effort — a read-only checkout must not lose the session copy or the caller's
-    //   follow-up steps (approval reset, counter reset).
+    // A read-only checkout still has the session copy, which the gates read first.
+    if (sessionError !== null) throw sessionError;
   }
 }
 
 /** This session's task state, or null when there is none (no category command yet).
- *  Falls back to the repo-level copy when the session copy is missing — $TMPDIR not
- *  writable, or the session began on a plugin version that wrote only the repo-level file
- *  (/reload-plugins switches versions mid-session). Either copy counts only when it names
- *  this session, so another session's state, even one committed to the repo, never applies. */
+ *  Falls back to the repo-level copy when the session copy is missing or unusable:
+ *  - $TMPDIR is not writable;
+ *  - the session began on a plugin version that wrote only the repo-level file
+ *    (/reload-plugins switches versions mid-session);
+ *  - the session copy is broken JSON, or names another session (a sanitized-id collision).
+ *  Falling back keeps the risk gate on; returning null would turn it off. Either copy
+ *  counts only when it names this session, so another session's state, even one
+ *  committed to the repo, never applies. */
 export function readSessionState(cwd: string, sessionId: string): SessionState | null {
   try {
     return (

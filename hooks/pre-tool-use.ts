@@ -17,6 +17,7 @@ import {
   classifyBashSearch,
   classifyBashWrite,
   CLI_PATH,
+  ensureApprovalDir,
   ensureSessionDir,
   envInt,
   envStr,
@@ -29,6 +30,7 @@ import {
   isPartialRead,
   isReadOnlyBash,
   logGate,
+  noteRiskApprovalPath,
   parseReasoningSection,
   readSessionState,
   recordEdit,
@@ -476,6 +478,7 @@ function main(): void {
               pendingBashWriteApproval = { markerPath: approvalPath, consumedPath, writes };
             } else {
               const msg = bashWriteMessage(writes, approvalMarkerRelPath('bash-write', sessionId));
+              ensureApprovalDir(cwd); // so the printed `touch` works in a repo without .claude/
               if (gate === 'warn') {
                 logGate(sessionId, 'bash-write', 'warn', `${writes.length}개`);
                 preWarnings.push(msg);
@@ -909,8 +912,9 @@ function main(): void {
       //     - 변경 도구(Edit/Write/MultiEdit/Bash)에만 건다(탐색/조회는 통과).
       //     - state.sessionId가 현재 세션과 일치할 때만 신뢰한다(다른 세션/커밋된 잔재는 무시).
       //       정상 흐름은 user-prompt-submit이 같은 세션에 state를 쓰므로 항상 일치한다.
-      //     - The state comes from this session's state dir (A3); the repo-level copy is a
-      //       single slot that another session's category command overwrote.
+      //     - The state comes from this session's state dir (A3). The repo-level copy, a
+      //       single slot that another session's category command can overwrite, is read
+      //       only as a fallback and only when it names this session (readSessionState).
       // Read-only Bash (git status, ls, cat, …) stays usable in a risky session (A4);
       //   before, every Bash call was denied, so the agent could not even inspect the repo.
       //   Checked only once the session is known to be risky: it scans the whole command.
@@ -922,7 +926,10 @@ function main(): void {
           !(toolName === 'Bash' && typeof toolInput.command === 'string' && isReadOnlyBash(toolInput.command as string))
         ) {
           const approvedPath = approvalMarkerPath(cwd, 'risk', sessionId); // this session's (A3)
+          // Remembered so the next category command withdraws it, wherever the cwd is then.
+          noteRiskApprovalPath(sessionId, approvedPath);
           if (!existsSync(approvedPath)) {
+            ensureApprovalDir(cwd); // so the user's `! touch` works in a repo without .claude/
             // 위험 게이트가 deny하면, A1.7에서 원자 소비한 Bash 쓰기 승인 마커를 복원한다
             //   (v0.27.1/2: deny로 승인만 소진되는 문제와 병렬 이중 승인 TOCTOU를 함께 해소).
             if (pendingBashWriteApproval !== null) {

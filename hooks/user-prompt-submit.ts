@@ -1,10 +1,9 @@
 #!/usr/bin/env bun
 // UserPromptSubmit hook — 슬래시 커맨드 필수요소 검증 + 위험도 사전 분류
 
-import { existsSync, unlinkSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import {
-  approvalMarkerPath,
   ASK_WHEN_UNCLEAR_INSTRUCTION,
   buildRequiredInputsChecklist,
   CONCISE_INSTRUCTION,
@@ -15,6 +14,7 @@ import {
   parseSkillFrontmatter,
   resetRetryCount,
   wantsDetail,
+  withdrawRiskApprovals,
   writeSessionState,
 } from '../lib';
 
@@ -208,12 +208,9 @@ function main(): void {
         // 새 작업 시작 → 이전 risk 승인 마커 삭제, 재시도 카운터 리셋. Both come before the
         //   state write so a failed write cannot skip them (security review: a read-only
         //   repo copy used to leave the old approval in place for the new risky task).
-        //   This session's marker and counters only — approvals are per session (A3).
-        try {
-          unlinkSync(approvalMarkerPath(cwd, 'risk', sessionId));
-        } catch {
-          // best-effort — usually there is no marker
-        }
+        //   This session's markers and counters only — approvals are per session (A3) —
+        //   including markers under other directories the session's gate looked in.
+        withdrawRiskApprovals(sessionId, cwd);
         resetRetryCount(sessionId);
         // 2-B: 세션 바인딩. pre-tool-use 위험 게이트가 다른 세션/커밋된 잔재 state를 무시하게 한다.
         //   The gates read the session-dir copy, so another session's command cannot replace it (A3).
