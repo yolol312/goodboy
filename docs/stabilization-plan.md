@@ -22,7 +22,8 @@ core gates can switch off silently, false positives can deadlock a session, and
 
 ## 2. Principles
 
-1. **Feature freeze** — no new gates until v1.0.
+1. **Feature freeze** — no new gates until v1.0. Exception: track G (§10), approved by
+   the user on 2026-10-14.
 2. **Test first** — every fix lands with a regression test that fails before the fix.
 3. **Measure before trading cost against detection.**
 4. **Proportional cost** — guardrail overhead scales with change size and risk.
@@ -37,8 +38,9 @@ so work is released in batches:
 
 | Version | Contents |
 |---|---|
-| v0.30.0 | A (fixes) + F1–F4 (language-policy prerequisites) |
-| v0.31.0 | B (cost) + C (measurement) + F5–F8 |
+| v0.30.0 | A (fixes) + F1–F4 (language-policy prerequisites), released 2026-10-13 |
+| v0.31.0 | G (routing: rules, roles, tools), which also covers B2, B3 and F7 |
+| v0.32.0 | the rest of B (cost) + C (measurement) + F5, F8 |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
 
 ## 4. A — Fix silent failures and deadlocks
@@ -123,7 +125,7 @@ README, CHANGELOG, and user-visible output stay Korean (product UI for Korean us
   Known static-analysis limit of the A6 `cd` tracking: a `cd` that does not take effect
   (`false && cd /tmp; …`, a failing `cd`) can hide a project write. The gate targets
   casual bypass, not an adversarial model.
-- Per-session recursion-guard cap (the observed incident pattern, identical prompts, is already caught).
+- Per-session recursion-guard cap (the observed incident pattern, identical prompts, is already caught). Moved to G (§10.7).
 - Performance lows from the A-phase review, none with practical impact today:
   build the layer-0 bare-name index from `git ls-files` (complete in large repos; the
   A8 walk stops at 300 ms and then asks for the full path); the A6 `cd` replay grows
@@ -182,18 +184,311 @@ Side effects found before enabling it:
 | F2 | Warn when dev-cycle artifacts exist but zero acceptance criteria are extracted. Done: shown once per session with code edits; also when `docs/CYCLE.md` has no current-version line in either language, or exists but cannot be read. The test gate takes one reading of the documents per Stop (`readAcceptance`) for its on/off switch, the criteria and the warning | 1 |
 | F3 | English rationale section: accept `## Rationale` and `### Facts / Judgments / Assumptions / Speculation`; keep "Reasoning" out of guidance text. Done; guidance text never used "Reasoning". Found on the way: a label followed by a description (`### 사실 (검증됨)`, the skills' own template) matched nothing, so every bucket was empty and the Stop's assumption-review link never fired; the first word is now the label. With the labels parsed, the link counted placeholder items (`- 없음`, which the rationale gate asks for) as declared assumptions and blocked clean reviews; it now skips them, also with a short note after them (`- 없음 (모두 확인)`), while the rationale gate still counts them as content | 4 |
 | F4 | Precedence rules in the global policy (done) | 3, 5 |
-| F5 | Measure tokens, Korean vs English, for the per-prompt injection and both agent definitions; go/no-go for F7/F8 | 9 |
+| F5 | Measure tokens, Korean vs English, for the per-prompt injection and both agent definitions; go/no-go for F8. F7 no longer waits for it: G writes the new injection and agent definitions in English from the start, as the language policy requires, and F5 measures the result after the fact | 9 |
 | F6 | Global policy applied (done), with a temporary clause that keeps tool-parsed Korean keys verbatim until F1/F3 ship | 1, 2, 4 |
-| F7 | Translate high-frequency model-facing text: per-prompt injection (with B3), `agents/review-changes.md`, `agents/test-changes.md`, English JSON output | cost |
+| F7 | Translate high-frequency model-facing text: per-prompt injection (with B3), `agents/review-changes.md`, `agents/test-changes.md`, English JSON output. Moved to G: G1 rewrites the injection, G2 replaces both agent definitions with English ones | cost |
 | F8 | Translate the remaining hook deny/block reasons and update the affected tests (A4/A7/A8/A9 already translated the messages they touched) | 7 |
 | F9 | dev-cycle: English templates (keys per F1), Korean key-decision summary at each gate, preview HTML `lang` (`en` for docs, the product language for prototypes), check Chrome translation on `file://` previews | 3, 8 |
 | F10 | Verify with tests and `/verify`: same behavior, no safeguard flags | 9 |
 
-After F1 and F3 ship, remove the temporary "tool-parsed keys" clause from the global policy.
+The temporary "tool-parsed keys" clause was removed from the global policy on 2026-10-14,
+after v0.30.0 (F1, F3) was installed; dev-cycle routing reads `Current stage` as well.
 
-Order: A → F1–F4 → B with F5–F8 → F9 → C, D.
+Order: A → F1–F4 → G → B with F5, F8 → F9 → C, D.
 
-## 10. Exit criteria for v1.0
+## 10. G — Routing: rules, roles and tools
+
+Added 2026-10-14 with the user's approval, as the one exception to the feature freeze.
+It takes over B2 (single reviewer by default), B3 (per-prompt text only for task prompts),
+F7 (English agent definitions and injection) and the per-session recursion-guard cap in E.
+
+### 10.1 Why
+
+- Local transcripts, 2026-06-24..10-14 (871 sessions; counted with one-off scripts, not
+  reproducible from the repo):
+
+  | Called | Count |
+  |---|---|
+  | general-purpose subagent | 297 (mostly web research; also implementation, audits, app start/stop, commits, docs, diff summaries) |
+  | review-changes | 277 (many re-review rounds) |
+  | Explore | 54 |
+  | test-changes | 52 |
+  | goodboy skills, typed by the user | 3 |
+  | skill calls inside 800 subagent transcripts | 2 |
+
+- Both agents run `model: inherit` with no effort, so every delegation runs at the main
+  session's model and effort, whatever the job.
+- Typed namespaced commands skip category pre-classification: `SLASH_REGEX` in
+  `hooks/user-prompt-submit.ts` has no `:`, so `/goodboy:migrate` never matches. It also
+  matches a command inside pasted text. A category registered by a follow-up prompt resets
+  approvals and retries.
+- The `migrate` skill contradicts itself ("execute the migration" vs "stop at the dry run").
+- Nested subagents are on by default (3 levels). Only concurrency is capped (20 at once,
+  M6); nothing caps the total number of agents a session spawns by default. A runaway
+  re-delegation loop (about 6,000 delegations of one "run pytest" task, 2026-06-14) is the
+  failure to prevent.
+- Escapes that pass a rule after a written reason or a number of retries were used to skip
+  work that could have been done.
+
+### 10.2 Model
+
+- **Hooks are rules.** A rule passes on evidence. When it is not met, the hook blocks and
+  names what satisfies it. A rule the model can always satisfy has no model-side escape
+  (no written reason, no retry count); only the user can override it. A requirement that
+  may be impossible (no test runner, no browser, a host that cannot be reached) ends in an
+  evidence-backed `BLOCKED` result, and the user gets a Korean notice every time.
+- **Agents are roles**, each with a fixed job, model, effort and tool allowlist. The main
+  session coordinates.
+- **Skills are tools.** Tool skills hold the know-how and are shared by the main session and
+  agents. Workflow skills compose tool skills and agents for the main session.
+- Teams (`research`, `build`, `review`, `test`) are a naming grouping only, unrelated to
+  Claude Code's agent-teams feature.
+
+### 10.3 Agents (24)
+
+Names are `<team>-<role>`; leads end in `-lead`. Tools: R = Read/Grep/Glob, B = Bash,
+W = Write/Edit, J = writes its own result JSON only, Web = WebSearch/WebFetch,
+Br = browser through Bash (Playwright), A(…) = the members a lead may call.
+
+| Team | Agent | Job | Model / effort | Tools |
+|---|---|---|---|---|
+| research | research-lead | split a large question, run members in parallel, merge | opus / medium | R, A(web, code, cause) |
+| research | research-web | external docs, prices, limits, versions; a URL per fact | sonnet / medium | R, Web |
+| research | research-code | diff summaries, module maps, impact analysis | sonnet / medium | R, B |
+| research | research-cause | root-cause hypotheses with evidence, no fixes | opus / high | R, B |
+| build | build-backend | server logic, API, data access | sonnet / high (opus per call when risky) | R, B, W |
+| build | build-frontend | components, skins, CSS; screenshots | sonnet / high | R, B, W, Br |
+| build | build-data | schema, migrations, SQL | opus / high | R, B, W |
+| build | build-infra | containers, CI, server config; never production | sonnet / high | R, B, W |
+| build | build-docs | docs, guides, dev-cycle artifacts | sonnet / medium | R, W |
+| build | build-run | long builds and full runs | haiku / low | R, B |
+| review | review-lead | pick axes, run members in parallel, merge one summary | sonnet / high | R, B, J, A(the 7 reviewers) |
+| review | review-all | one-pass all-axes review (was review-changes) | sonnet / high | R, B, J |
+| review | review-spec | requirements and acceptance criteria vs implementation | sonnet / high | R, B, J |
+| review | review-quality | design, duplication, performance (not lint territory) | sonnet / medium | R, B, J |
+| review | review-security | authN/authZ, injection, secrets, dependencies | opus / high | R, B, J |
+| review | review-ui | design tokens and prototype match, states, accessibility | sonnet / medium | R, B, J, Br |
+| review | review-infra | config safety, exposed ports, rollback | sonnet / high | R, B, J |
+| review | review-evidence | hallucination check, facts vs assumptions | opus / high | R, B, J |
+| test | test-lead | pick the needed tests, start one shared environment | sonnet / high | R, B, J, A(unit, spec, ui, security) |
+| test | test-unit | unit and integration tests, mutation probes (was test-changes) | sonnet / high | R, B, W (test files), J |
+| test | test-spec | acceptance criteria as E2E flows | sonnet / high | R, B, W (test files), J, Br |
+| test | test-ui | browser checks against the prototype, state reproduction | sonnet / high | R, B, J, Br |
+| test | test-security | dynamic attacks against a local sandbox only | opus / high | R, B, J |
+| test | test-probe | experiments during work (repro, CSP/CORS, limits) | sonnet / high | R, B, Web, Br |
+
+- Members never get the Agent tool. Agents use tool skills, never workflow skills.
+- Agent files stay thin: role, limits, model, effort, tool-skill list. Procedures live in
+  tool skills.
+- Every reference to an agent name comes from the policy table, so the two renames are one
+  change each.
+- No `permissionMode`: plugin agents ignore it (M5). Tool allowlists and goodboy hooks are
+  the limits, including who may call whom and which tool skills an agent may use (M5, M9).
+- An agent joins routing only after a capability check shows it produces its artifact.
+  Leads are enabled last, after the delegation guards pass their tests.
+
+### 10.4 Skills
+
+Format for every goodboy skill: English, one purpose, inputs → steps → output → done
+criteria, a "use when" description, and a machine-checkable artifact so a hook can tell
+the skill was applied. Skills ask the user nothing; they return `BLOCKED` with the question.
+
+Workflow skills (main session):
+
+| Skill | Was | Effort |
+|---|---|---|
+| add-feature | add-feature | high |
+| fix-bug | fix-bug | high |
+| diagnose-failure | debug | high |
+| refactor-code | refactor | high |
+| prepare-migration | migrate (production apply is authorized separately) | xhigh |
+| write-doc | write-doc | medium |
+| request-review | request-review | low |
+| setup-statusline | setup-statusline (user-invoked only) | low |
+
+Tool skills (hidden from the menu; main session and agents):
+
+| Skill | Effort | Used by |
+|---|---|---|
+| write-migration | xhigh | build-data, prepare-migration |
+| isolate-cause | high | research-cause, diagnose-failure |
+| write-api-contract | high | build-backend, build-frontend, add-feature |
+| edit-infra-safely | high | build-infra |
+| check-spec-coverage | high | review-spec, test-spec |
+| check-security | high | review-security, review-all |
+| check-infra-config | high | review-infra |
+| check-evidence | high | review-evidence, review-all |
+| write-regression-test | high | test-unit, fix-bug |
+| probe-runtime | high | test-probe, research-cause |
+| attack-sandbox | high | test-security |
+| cite-sources | medium | research-web |
+| summarize-diff | medium | research-code, reviewers |
+| follow-design-tokens | medium | build-frontend, review-ui |
+| check-code-quality | medium | review-quality, review-all |
+| check-ui-states | medium | review-ui, test-ui |
+| run-e2e | medium | test-spec, test-ui |
+| record-review | low | reviewers |
+| record-tests | low | testers |
+| run-long-command | low | build-run |
+| run-codex-review | low | review-lead, review-all |
+| measure-coverage | low | test-unit, test-spec |
+| follow-agent-rules | none (preload) | every agent |
+
+- The existing eight skills shrink to about 30–50 lines each (setup-statusline stays as is).
+  The migrate contradiction is fixed in prepare-migration.
+- `/verify` stays repo-only under that name and gains scenarios for the new rules.
+- Skill rule: a main-session code edit needs a workflow skill invoked in the current task
+  (read from the transcript). When none fits, the main session records a skill-gap note
+  (skills considered, why each did not fit, what skill would) and goes on. Reviews check
+  that the note is honest; the monthly review uses the notes to improve or add skills.
+  There is no catch-all skill.
+
+### 10.5 Effort and model
+
+- A skill or agent that declares an effort runs at it. When it ends, the session is back at
+  the user's own setting (skill effort lasts the invoking turn, agent effort the agent's
+  run). Applied without a prompt, with a one-line notice; `GOODBOY_SKILL_EFFORT=auto|ask`.
+- Skills never set a model, to keep the prompt cache.
+- Advice:
+  - SessionStart (new and resumed sessions): configuration warnings only, such as
+    `CLAUDE_CODE_EFFORT_LEVEL` or `CLAUDE_CODE_SUBAGENT_MODEL` overriding everything, or the
+    spawn-depth setting.
+  - Before the first action of a new or resumed task: `effort.level` against the policy.
+  - During work, on signals: raise after the same rule blocks twice, repeated test failures
+    or high findings; lower for doc-only stretches. Shown at the end of the turn.
+  - Agent dispatch: model and effort checked against the policy table; the applied effort
+    is logged.
+  - Advice repeats only when the recommendation changes. No permission-mode advice.
+
+### 10.6 Stop rules
+
+- R1: when unsure, the main session asks; a subagent returns `BLOCKED` with the question.
+- R2: never act on live external or production systems. Retarget to a sandbox or temporary
+  target; otherwise ask, or return `BLOCKED` with the command for the user to run.
+- Hook backstop, `.goodboy/hosts`:
+  - `allow` (dev, staging, sandbox): mutating calls pass, also from subagents.
+  - `production`: always blocked; the user's approval marker lifts it.
+  - unlisted: a subagent's mutating call is blocked with a retarget hint; the main
+    session gets advice.
+  - Built in: loopback, `localhost`, `.test`, `.invalid`, `.example` are allowed. Private
+    IP ranges are not. Reads (GET) always pass.
+- Subagents get R1 and R2 from the `follow-agent-rules` preload, since per-prompt text does
+  not reach them.
+
+### 10.7 Delegation guards
+
+- Depth 2: main → lead → member. A lead calls only its own members, and its calls are
+  rewritten to run in the foreground so it can merge the results (M15); members and other
+  agents cannot delegate; `claude -p` from Bash is blocked; inside a subagent the guard
+  fails closed.
+- Caps in the policy table, tunable: 8 agents per task, 6 per lead call, 3 at once, 40 per
+  session. A spent budget ends the work as incomplete, never as passed.
+- The same role on the same scope runs again only with evidence: a scope file changed since
+  the last run; the last result was `BLOCKED` for an environment reason, or is missing (one
+  retry each); an escalation to a stronger model or effort (once); or a new user request
+  since. Otherwise the call is denied with a pointer to the existing result.
+- When leads are enabled, the recursion rule in the user's `~/.claude/CLAUDE.md` becomes
+  "only `-lead` agents call their own members" (with the user's OK).
+
+### 10.8 Review and test additions
+
+- Dispatch from the policy table: a small change gets one `review-all`; a large or risky one
+  gets `review-lead` with per-axis members. Lint stays in hooks, CI and pre-commit.
+- Codex second opinion (`run-codex-review`): when `GOODBOY_CODEX=on`, each review round also
+  runs the local Codex CLI on the diff, read-only, in the background. Off by default, since
+  it sends the diff to OpenAI under the user's own Codex login. Results use the review JSON
+  with `source: "codex"` and are handled like any other finding. When Codex is missing, not
+  logged in, over 10 minutes or failing, the round records `skipped` with the error output
+  and goes on.
+- Coverage, measured and recorded, not a gate (`measure-coverage`):
+  - line and branch coverage from the project's own tool (bun, vitest, jest, pytest-cov,
+    JaCoCo, go cover); nothing is installed, and a missing tool is recorded as
+    `unavailable` with the reason;
+  - changed-line coverage: the report (lcov, Cobertura, JaCoCo XML, Go profile) against the
+    diff, in `lib/diff-coverage.ts`;
+  - JS coverage of E2E runs on Chromium;
+  - mutation detection rate.
+  - The existing coverage checks (acceptance criteria, changed files, review axes) stay.
+  - A warning when a code file in `tested_files` has no executed changed line. Whether it
+    becomes a block is decided after a month of data.
+
+### 10.9 Monthly review
+
+- Per agent and skill: calls, tokens, accepted and dismissed findings, misroutes, `BLOCKED`
+  results, skill-gap notes; Codex findings and tokens as their own row.
+- Thresholds start a review, never an automatic removal: fewer than 3 calls in 90 days;
+  over 20 % misroutes across at least 20 calls; over 30 % incorrect across at least 20
+  findings; over 20 % agent-caused incomplete runs.
+- Before the first review: a result envelope (`run_id`, role, policy version, status) in
+  every agent result; a disposition ledger (the main session records dispositions, the user
+  spot-checks); a report command; a seeded-defect corpus to measure misses.
+
+### 10.10 Hooks and libraries
+
+| Event | Change |
+|---|---|
+| SessionStart (new) | configuration warnings; record the model |
+| PreToolUse, Agent | delegation guards; model and effort check; dispatch log |
+| PreToolUse, Bash | block `claude -p`; R2; deny writes from read-only roles |
+| PreToolUse, Write/Edit | role limits and result-path limits; skill rule |
+| PreToolUse, search | relax H2-03 so small searches run in the main session |
+| UserPromptSubmit | task prompts only: R1/R2/delegation lines and a skill or agent suggestion; fixed slash regex; a task is registered once; argument-free commands allowed; the risk gate only from commands the user typed |
+| Stop | effort advice; review and test messages from the policy table; accept evidence-backed `BLOCKED`; defer the review and test gates while `background_tasks` lists running agents (M10) |
+| PostToolUse, Agent | completion status into the log |
+
+- Libraries: `lib/routing-policy.ts` (one table of roles, models, efforts, tools, caps and
+  review/test dispatch), `lib/outward-command.ts`, `lib/diff-coverage.ts`, the gate log
+  extended with dispatch and completion records, and `lib/recursion-guard.ts` as a session
+  budget.
+- Contract tests use independent fixtures, not the policy table itself.
+- New env: `GOODBOY_SPAWN_GATE`, `GOODBOY_SPAWN_LIMIT`, `GOODBOY_SPAWN_LIMIT_LEAD`,
+  `GOODBOY_OUTWARD_GATE`, `GOODBOY_ROUTING_GATE`, `GOODBOY_SKILL_GATE`,
+  `GOODBOY_SKILL_EFFORT`, `GOODBOY_CODEX`. Repo config lives under `.goodboy/`. Renames of
+  existing names wait for D1.
+
+### 10.11 Steps
+
+Branch `feat/g-routing`. After each step: tests, typecheck, one all-axes review, one
+`/verify` probe, README (Korean) updated, and the user's OK before the next step.
+
+| Step | Contents |
+|---|---|
+| G0 | This plan; the measurements in §10.12 |
+| G1 | Rules (§10.5–10.7, §10.10), tests first. The audit of existing reason- and count-based escapes comes last |
+| G2 | Tool skills and the 24 agents together, since agents depend on the skills; the two renames; capability checks; leads enabled last |
+| G3 | Workflow skills: slimmed, renamed, effort set |
+
+### 10.12 Step-0 measurements
+
+Measured 2026-10-14 on Claude Code 2.1.299 and codex-cli 0.162.1. Method: `claude -p` in a
+scratch git repo with `--setting-sources project,local` (the installed goodboy off) and a
+probe plugin whose hooks log every payload; main session on haiku, probe agents with and
+without model/effort.
+
+| # | Question | Result | Decision |
+|---|---|---|---|
+| M1 | Does a subagent without `effort` inherit the main session's effort? | Yes (`high` in, `high` in the agent). An agent's `effort: low` applies (`low` on its tool events) | the policy table sets effort on every agent |
+| M2 | Does skill-frontmatter effort apply to the invoking turn and revert after it? | Yes. From the Skill call to the end of that turn, including tool calls after the skill's own steps; the next turn is back at the session value. Inside an agent, the skill's effort stays for the agent's remaining run | §10.5 holds; agents should call low-effort tool skills last or not at all |
+| M3 | Can PreToolUse `updatedInput` on Agent set model or effort? | Yes. A hook rewrite to sonnet/low ran the agent on `claude-sonnet-5-5` at `low` | dispatch enforces the policy table instead of advising |
+| M4 | Does hook input inside a subagent identify the agent? | Yes: `agent_id` and `agent_type` (`<plugin>:<agent>`, e.g. `goodboy:review-all`) on every tool event; `SubagentStart`/`SubagentStop` exist, the latter with `agent_transcript_path` | role limits are enforceable per agent |
+| M5 | Which plugin-agent frontmatter keys apply? | `model` yes, `effort` yes, `tools` yes (no Write when not listed), `skills` preload yes. `Agent(…)` allowlist no: a lead with `Agent(probe-plain)` or `Agent(probe:probe-plain)` launched another agent. `permissionMode` no: `acceptEdits` on a plugin agent left Write denied in a `default` session | goodboy hooks enforce who may call whom; `permissionMode` is dropped from §10.3 |
+| M6 | Is there a cap on concurrent agents? | Yes: `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`, default 20, error "Concurrent subagent limit reached … Do not retry". Depth default 3 (`CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`, may be changed remotely). `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` exists; default not found | goodboy keeps its own lower caps (§10.7) |
+| M7 | Does ExitPlanMode return to bypassPermissions? | Not measurable headless: plan-mode tools are absent in `-p` | prepare-migration asks for approval in chat; plan mode is not used |
+| M8 | Do subagents receive CLAUDE.md? | Yes (a project CLAUDE.md canary was answered without reading files) | follow-agent-rules does not repeat CLAUDE.md |
+| M9 | Does `Skill(name)` in an agent's tools restrict which skills it can call? | No, with bare or namespaced names: the agent ran a skill not in the list | goodboy hooks enforce tool-skill access (PreToolUse on Skill with `agent_type`) |
+| M10 | Can a Stop hook tell that background agents are still running? | Yes: Stop and SubagentStop carry `background_tasks` (`id`, `type`, `status`, `description`, `agent_type`) and `session_crons`. Agents run in the background unless the call sets `run_in_background: false`, and each background completion reaches the main session as a UserPromptSubmit whose prompt is a `<task-notification>` block | Stop defers the review/test gates while agents run; UserPromptSubmit treats task notifications as non-user prompts (no injection, no task registration, never "a new user request") |
+| M11 | Does an effort change invalidate the prompt cache? | No: high → low on a resumed session read 48.5k cached tokens and wrote 2.6k; the turn before, low (left by a skill) → high, read 43.4k and wrote 2.6k. Both reused the whole cached prefix | effort advice has no cache cost |
+| M12 | What does the hook payload hold for a typed `/plugin:skill …` command? | The raw text, e.g. `/probe:probe-b hello there` | the slash regex accepts `:` |
+| M13 | Codex CLI | `codex login status` exits 0 ("Logged in using ChatGPT"). `codex review --uncommitted` (also `--base`, `--commit`) runs without prompts; a 5-line diff took 91 s and found the planted off-by-one as `[P1] … file:line`. Failures exit 1: the configured default model was rejected for a ChatGPT login (logged in `m13-default-model.err`), and once the model was "at capacity" (seen in the session; that log was overwritten by the successful run). No token count is printed | run-codex-review passes the model explicitly (`GOODBOY_CODEX_MODEL`), parses `[P0]`–`[P3]`, and records `skipped` with stderr on a non-zero exit; tokens are not tracked for Codex |
+| M14 | Can a lead merge its members' results? | Only with foreground calls. With background calls (the default), the lead's turn ended after launching both members, their completions went to the main session, and no merge arrived. With `run_in_background: false` (m5) the lead got each result in its own turn and merged them | see M15 |
+| M15 | Can a hook force a lead's member calls into the foreground, and do they still run in parallel? | Yes. A PreToolUse rewrite to `run_in_background: false` on Agent calls made by an agent: two calls in one message started 0.25 s apart, ran at the same time (about 3 s each), and the lead returned both results merged | the delegation guard rewrites every agent-made Agent call to the foreground |
+
+So the lead design in §10.3 and §10.7 stands: leads dispatch their own members, in parallel
+and in the foreground, enforced by the PreToolUse rewrite. The fallbacks considered were
+(a) a lead that only plans and merges while the main session dispatches, (b) leads polling
+result files, and (c) no leads.
+
+## 11. Exit criteria for v1.0
 
 - No known high-severity issues; CI green on macOS and Linux.
 - Core-decision mutation survival ≤ 1 of the 15 in the appendix.
@@ -201,13 +496,13 @@ Order: A → F1–F4 → B with F5–F8 → F9 → C, D.
 - Four weeks without a fix chain in one area (three or more consecutive fixes).
 - One person other than the author installs, updates, and removes goodboy using only the docs.
 
-## 11. Corrections to improvement-plan.md
+## 12. Corrections to improvement-plan.md
 
 - §2.2.4 state scoping must also cover repo-level state (cursors, retry counters), not only `agent_id`.
 - §2.2.5 "PreToolUse warnings never reach the agent" was contradicted once on 2026-10-12
   (a subagent received rationale-gate guidance). Re-measure before relying on it; it affects the H2-03 default.
 
-## 12. Assumptions
+## 13. Assumptions
 
 - Supported OS: macOS and Linux (the launcher is a sh script).
 - 0.x allows state-file format changes; legacy files are ignored rather than migrated.
