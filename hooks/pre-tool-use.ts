@@ -86,6 +86,8 @@ import {
   pushTestMessage,
   revisionTree,
   commitIssueDenial,
+  inGoodboySessionDir,
+  markerWriteDenial,
 } from '../lib';
 
 interface PreToolInput {
@@ -573,6 +575,17 @@ function main(): void {
         if (why !== null) {
           logGate(sessionId, 'commit-issue', 'deny', why.slice(0, 80));
           emit({ ...deny(why), systemMessage: '[goodboy] 이슈 번호가 없는 커밋을 막았어요. 메시지에 이슈 번호(예: ABC-123, #123)를 넣어야 커밋돼요.' });
+          return;
+        }
+      }
+
+      // (A0.796) Project mode (track H §14.2): only the user marks a directory non-project
+      //   (lib/project-mode.ts), in the main session and in agents.
+      if (toolName === 'Write' || toolName === 'Edit' || toolName === 'MultiEdit' || toolName === 'Bash') {
+        const why = markerWriteDenial(sessionId, toolName, toolInput, cwd);
+        if (why !== null) {
+          logGate(sessionId, 'project-mode', 'deny', 'marker without user evidence');
+          emit(deny(why));
           return;
         }
       }
@@ -1110,6 +1123,18 @@ function main(): void {
       //   자기 형식으로 Write했다. 스키마가 달라 게이트가 읽지 못하니 "결과 없음"으로
       //   계속 차단되고 프로젝트에는 쓰레기 파일만 쌓였다(haiku는 산문 지시를 무시).
       //   CLI(test-write/review-write)는 스키마를 검증하고 파일명·timestamp를 맞춘다.
+      // (B0-session) goodboy's own session state ($TMPDIR/goodboy-session-*) is written by its
+      //   hooks only: an edit-tool write there would forge evidence or a cursor (H1 review: a
+      //   Write of marker-evidence.jsonl passed; only Bash was bracketed by the state guard).
+      if (isEditTool || toolName === 'NotebookEdit') {
+        const target = typeof toolInput.file_path === 'string' ? toolInput.file_path : typeof toolInput.notebook_path === 'string' ? toolInput.notebook_path : '';
+        if (target && inGoodboySessionDir(resolvePath(cwd, target))) {
+          logGate(sessionId, 'state-write', 'deny', target.slice(-80));
+          emit(deny("This edits goodboy's own session state (goodboy-session-*). The gates decide from it; leave it alone and satisfy the gate instead."));
+          return;
+        }
+      }
+
       if (isEditTool && envStr('GOODBOY_ARTIFACT_WRITE_GATE', 'on') !== 'off') {
         const filePath = (toolInput.file_path as string | undefined) ?? '';
         if (filePath) {

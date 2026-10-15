@@ -8,13 +8,16 @@
 import {
   appendFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
+  readlinkSync,
+  realpathSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 interface TrackRecord {
   file: string;
@@ -42,6 +45,45 @@ function sessionDir(sessionId: string): string {
   // sessionId에 path traversal 위험 문자가 있을 수 있으니 소독
   const safe = (sessionId ?? 'unknown').replace(/[^a-zA-Z0-9_\-]/g, '_');
   return join(tmpdir(), `goodboy-session-${safe}`);
+}
+
+/** True for a path inside any goodboy session state dir (`$TMPDIR/goodboy-session-*`), also
+ *  through the real path of $TMPDIR (`/var` is `/private/var` on macOS). */
+export function inGoodboySessionDir(absPath: string): boolean {
+  const roots = new Set([tmpdir()]);
+  try {
+    roots.add(realpathSync(tmpdir()));
+  } catch {
+    // no real path
+  }
+  // Follow symlinks by hand, so a dangling one (its target not made yet) is judged by where it
+  //   points (H1 review round 2: a link to the not-yet-written evidence log passed).
+  let linked = absPath;
+  for (let hop = 0; hop < 8; hop++) {
+    try {
+      if (!lstatSync(linked).isSymbolicLink()) break;
+      linked = resolve(dirname(linked), readlinkSync(linked));
+    } catch {
+      break;
+    }
+  }
+  let target = linked;
+  try {
+    target = realpathSync(linked);
+  } catch {
+    try {
+      target = realpathSync(dirname(linked)) + sep + basename(linked);
+    } catch {
+      // the dir does not exist yet: compare the spelled path
+    }
+  }
+  for (const root of roots) {
+    for (const p of [absPath, linked, target]) {
+      const rel = relative(root, p);
+      if (!rel.startsWith('..') && !isAbsolute(rel) && /^goodboy-session-[^/\\]*(?:[/\\]|$)/.test(rel)) return true;
+    }
+  }
+  return false;
 }
 
 /** 세션별 상태 디렉터리 보장. /tmp/goodboy-session-<sessionId>/ */

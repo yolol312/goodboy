@@ -16,8 +16,30 @@ import { ensureSessionDir } from './file-tracker';
 import { segmentChanging } from './outward-command';
 import { safeToolUseId } from './approval-marker';
 
-const GUARDED = /^(?:edits\.jsonl|dispatch-log\.jsonl|skill-evidence\.jsonl|commit-issue-pins\.json|\.goodboy-last-(?:review|test)-[0-9a-f]+\.json|\.goodboy-validation-failed\.json)$/;
+const GUARDED = /^(?:edits\.jsonl|dispatch-log\.jsonl|skill-evidence\.jsonl|commit-issue-pins\.json|marker-evidence\.jsonl|project-mode-pin\.json|\.goodboy-last-(?:review|test)-[0-9a-f]+\.json|\.goodboy-validation-failed\.json)$/;
 const CURSOR = /^\.goodboy-last-(?:review|test)-[0-9a-f]+\.json$/;
+/** Evidence logs: a line added during a model Bash call would be forged evidence (a skill run,
+ *  the user's non-project answer), so these keep only their old lines, and one the call
+ *  created is removed (track H). The exception is a skill-gap note: the skill rule asks the
+ *  model to record it through `cli.ts skill-gap` from Bash, and it is the model's own note
+ *  (H1 review: dropping it kept the skill rule denying). */
+const EVIDENCE = /^(?:skill-evidence|marker-evidence)\.jsonl$/;
+
+function keptEvidenceLine(name: string, line: string): boolean {
+  if (name !== 'skill-evidence.jsonl') return false;
+  try {
+    return (JSON.parse(line) as { k?: unknown }).k === 'skill-gap';
+  } catch {
+    return false;
+  }
+}
+
+/** An evidence log's text with only the lines a Bash call may add kept after `before`. */
+function evidenceText(name: string, before: string, now: string | null): string {
+  const oldLines = new Set(before.split('\n'));
+  const added = (now ?? '').split('\n').filter((l) => l !== '' && !oldLines.has(l) && keptEvidenceLine(name, l));
+  return before + added.map((l) => `${l}\n`).join('');
+}
 const SNAP_PREFIX = 'bash-guard-';
 const MAX_BYTES = 16 * 1024 * 1024;
 
@@ -80,7 +102,13 @@ function restoreFrom(sessionId: string, snap: string): string[] {
       } catch {
         now = null;
       }
-      if (name.endsWith('.jsonl')) {
+      if (EVIDENCE.test(name)) {
+        const want = evidenceText(name, before, now);
+        if (want !== now) {
+          writeFileSync(p, want, 'utf8');
+          restored.push(name);
+        }
+      } else if (name.endsWith('.jsonl')) {
         // Append-only: every old line must still be there, in front.
         if (now !== null && now.startsWith(before)) continue;
         const oldLines = new Set(before.split('\n'));
@@ -95,14 +123,17 @@ function restoreFrom(sessionId: string, snap: string): string[] {
       // this file could not be put back; the others still are
     }
   }
-  // A cursor the call created would accept work without a review or test.
+  // A cursor the call created would accept work without a review or test; an evidence log it
+  //   created would be forged evidence.
   try {
     for (const name of readdirSync(dir)) {
-      if (CURSOR.test(name) && !had.has(name)) {
+      if ((CURSOR.test(name) || EVIDENCE.test(name)) && !had.has(name)) {
         const created = statSync(join(dir, name)).mtimeMs;
         const t = (JSON.parse(readFileSync(join(snap, '.index.json'), 'utf8')) as { t?: number }).t ?? 0;
         if (created >= t - 1000) {
-          unlinkSync(join(dir, name));
+          const kept = EVIDENCE.test(name) ? evidenceText(name, '', readFileSync(join(dir, name), 'utf8')) : '';
+          if (kept === '') unlinkSync(join(dir, name));
+          else writeFileSync(join(dir, name), kept, 'utf8');
           restored.push(name);
         }
       }

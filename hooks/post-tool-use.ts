@@ -33,6 +33,8 @@ import {
   writeHabitState,
   writeValidationFailure,
   afterBash,
+  answerChoseNonProject,
+  recordMarkerEvidence,
 } from '../lib';
 
 interface PostToolInput {
@@ -329,6 +331,10 @@ function main(): void {
       if (toolName === 'Agent' || toolName === 'Task') {
         const rec = agentCallRecord(input.tool_use_id ?? null, toolResponse, Date.now());
         if (rec) appendDispatchLog(sessionId, rec);
+      }
+      // (H1) The user chose "non-project" in an AskUserQuestion answer (lib/project-mode.ts).
+      if (toolName === 'AskUserQuestion' && !input.agent_type && answerChoseNonProject(toolResponse)) {
+        recordMarkerEvidence(sessionId, 'answered');
       }
       // (A0.5) Skill rule evidence (track G §10.4): the main session invoked a workflow skill.
       //   A skill that runs at its own effort says so in one line (§10.5).

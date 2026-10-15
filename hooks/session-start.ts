@@ -5,6 +5,7 @@
 // file contents read or edited before it left the context. Never blocks.
 
 import { pinCommitIssueSettings } from '../lib/commit-issue';
+import { pinProjectMode } from '../lib/project-mode';
 import { clearReadRecords } from '../lib/file-tracker';
 
 interface SessionStartInput {
@@ -64,6 +65,9 @@ if (import.meta.main) {
         } catch {
           // best-effort: without pins, a later file counts only when unchanged since the session dir was made
         }
+        // …and the project mode its cwd has now (lib/project-mode.ts; not on compact, which
+        //   would trust a marker written during the session).
+        pinProjectMode(sessionId, input.cwd ?? process.cwd());
       }
       const warnings = source === 'startup' || source === 'resume' ? configWarnings(process.env) : [];
       process.stdout.write(JSON.stringify(warnings.length > 0 ? { systemMessage: warnings.join('\n') } : {}));

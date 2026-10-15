@@ -696,7 +696,16 @@ file every session reads first, splits every check into `ai` (evidence decides) 
   cwd counts: no inheritance, and `~/.claude/CLAUDE.md` is never read for this.
 - The marker is written only with user evidence: the user typed `goodboy: non-project` in a
   prompt, or an AskUserQuestion answer in this session chose an option containing
-  `non-project`. Otherwise PreToolUse denies the Edit, Write or Bash that adds it.
+  `non-project`. PreToolUse denies an Edit, Write or Bash redirect that adds it without that
+  evidence, as early feedback; what holds is the session pin (H1 review: `cp`, interpreters,
+  another letter case and symlinks wrote it anyway). SessionStart (startup, resume, clear;
+  not compact) pins the cwd's mode, and a marker that appears during the session counts only
+  with the evidence; removing it always counts; a symlinked CLAUDE.md says nothing. The
+  evidence log is gate state that a model Bash call can only lose lines from (the state
+  guard keeps only a `cli.ts skill-gap` note it adds to the skill evidence), and edit tools
+  may not write any goodboy session state (a gap since G1: cursors could be written too).
+  Known limits: a marker written in one session counts in the next; evidence the user gives
+  while a model Bash call is open can be lost with that call's restore (stricter only).
 - Non-project mode turns off the policy read gate, the docs rule and the test gate. The
   review gate stays (evidence and hallucination checks included), and so do R2, the spawn
   and recursion guards and write-bypass detection.

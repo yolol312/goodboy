@@ -13,6 +13,7 @@ import type {
   TestResult,
 } from '../lib';
 import { agentName, ROUTE } from '../lib/routing-policy';
+import { projectMode } from '../lib/project-mode';
 import {
   citationBlockMessage,
   CLI_PATH,
@@ -537,10 +538,12 @@ function testWindowMinutes(): number {
  * `acceptance` is the Stop's one reading of the dev-cycle documents (NO_ACCEPTANCE when
  * the mode is off), which also gives the criteria and the F2 warning.
  */
-function testGateActive(cwd: string, acceptance: AcceptanceReading): { active: boolean; evidence: string } {
+function testGateActive(cwd: string, acceptance: AcceptanceReading, sessionId: string): { active: boolean; evidence: string } {
   const mode = testGateMode();
   if (mode === 'off') return { active: false, evidence: 'off' };
   if (mode === 'on') return { active: true, evidence: 'on' };
+  // (H1) A directory its CLAUDE.md marks non-project has no test gate; the review stays.
+  if (projectMode(cwd, sessionId) === 'non-project') return { active: false, evidence: 'non-project directory' };
   if (acceptance.devCycle) {
     return { active: true, evidence: 'dev-cycle 산출물' };
   }
@@ -712,7 +715,7 @@ function tryAcceptPendingTest(sessionId: string, cwd: string): boolean {
     const recentEdits = getEditsSince(sessionId, cursorTurn, cwd).filter((f) => needsTestCoverage(f, cwd));
     if (recentEdits.length === 0) return false;
     const acceptance = acceptanceFor(cwd);
-    if (!testGateActive(cwd, acceptance).active) return false;
+    if (!testGateActive(cwd, acceptance, sessionId).active) return false;
     const results = findRecentTestFiles(resolvePath(cwd, '.claude', 'tests'), testWindowMinutes());
     if (results.length === 0) return false;
     const changedEdits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd).filter((e) =>
@@ -764,7 +767,7 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
     // One reading per Stop serves the gate switch, the F2 warning (also while the gate is
     //   inactive) and the criteria check below.
     const acceptance = acceptanceFor(cwd);
-    const gate = testGateActive(cwd, acceptance);
+    const gate = testGateActive(cwd, acceptance, sessionId);
     warnAcceptanceProblem(sessionId, cwd, acceptance.problem);
     // 비활성 판정은 **편집이 있을 때** 알린다 — 편집도 없는 턴에 "테스트 층이 꺼져 있다"고
     //   말해봐야 소음이다. 조용히 꺼져 있으면 사용자가 층의 부재를 눈치채지 못한다.

@@ -17,6 +17,8 @@ import {
   OUTWARD_EFFECT_INSTRUCTION,
   parseSkillFrontmatter,
   parseSlashCommand,
+  promptHasMarker,
+  recordMarkerEvidence,
   recordSkillEvidence,
   resetRetryCount,
   wantsDetail,
@@ -137,6 +139,8 @@ function main(): void {
       // (G1) A real user prompt starts a new delegation budget and is evidence that the same
       //   agent may run again (lib/spawn-guard.ts).
       appendDispatchLog(sessionId, { k: 'prompt', t: Date.now() });
+      // (H1) The user typed the non-project marker: the model may write it (lib/project-mode.ts).
+      if (promptHasMarker(prompt)) recordMarkerEvidence(sessionId, 'typed');
 
       // (H5-04) 간결-우선 지시(소프트 규칙 — 모델 유도용). 상세 요청 신호가 있으면 주입하지 않는다.
       //   env GOODBOY_CONCISE_DEFAULT=on|off (기본 on). 슬래시/일반 프롬프트 모두에 적용.
