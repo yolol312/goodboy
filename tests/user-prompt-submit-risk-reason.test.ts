@@ -106,7 +106,7 @@ describe('user-prompt-submit — riskReason in the session state (A4)', () => {
 
   test('a command that is risky by default, without keywords, is recorded as default', async () => {
     const box = newSandbox();
-    await submit(box, '/migrate rename the users.email column');
+    await submit(box, '/prepare-migration rename the users.email column');
     const st = readState(box);
     expect(st.risk).toBe('risky');
     expect(st.riskReason).toBe('default');
@@ -152,7 +152,7 @@ describe('concurrent sessions in one repo (A3)', () => {
   test("another session's category command does not lift this session's risk gate", async () => {
     const a = newSandbox();
     const b: Box = { ...a, sessionId: `sess-${Math.random().toString(36).slice(2)}` }; // same repo
-    await submit(a, '/migrate rename the users.email column');
+    await submit(a, '/prepare-migration rename the users.email column');
     await submit(b, '/fix-bug add a product search page');
     expect(readState(a).sessionId).toBe(b.sessionId); // the repo-level slot now holds B
 
@@ -167,9 +167,9 @@ describe('concurrent sessions in one repo (A3)', () => {
   test("approvals are per session: B's command keeps A's approval, and A's approval does not unlock B", async () => {
     const a = newSandbox();
     const b: Box = { ...a, sessionId: `sess-${Math.random().toString(36).slice(2)}` }; // same repo
-    await submit(a, '/migrate rename the users.email column');
+    await submit(a, '/prepare-migration rename the users.email column');
     writeFileSync(join(a.cwd, approvalMarkerRelPath('risk', a.sessionId)), '', 'utf8'); // the user approves A
-    await submit(b, '/migrate drop the legacy table');
+    await submit(b, '/prepare-migration drop the legacy table');
     expect(existsSync(join(a.cwd, approvalMarkerRelPath('risk', a.sessionId)))).toBe(true);
 
     const outA = await preTool(a, 'Bash', { command: 'npm run migrate' });
@@ -184,7 +184,7 @@ describe('concurrent sessions in one repo (A3)', () => {
     const box = newSandbox();
     mkdirSync(join(box.cwd, '.claude', '.goodboy-session-state.json'), { recursive: true }); // write fails
     writeFileSync(join(box.cwd, approvalMarkerRelPath('risk', box.sessionId)), '', 'utf8'); // old approval
-    await submit(box, '/migrate rename the users.email column');
+    await submit(box, '/prepare-migration rename the users.email column');
     expect(existsSync(join(box.cwd, approvalMarkerRelPath('risk', box.sessionId)))).toBe(false);
     const out = await preTool(box, 'Bash', { command: 'npm run migrate' });
     expect(out.hookSpecificOutput?.permissionDecision).toBe('deny');
@@ -192,10 +192,10 @@ describe('concurrent sessions in one repo (A3)', () => {
 
   test('each session keeps its own copy of the state in its session dir', async () => {
     const a = newSandbox();
-    await submit(a, '/migrate rename the users.email column');
+    await submit(a, '/prepare-migration rename the users.email column');
     const copy = JSON.parse(
       readFileSync(join(a.tmp, `goodboy-session-${a.sessionId}`, '.goodboy-session-state.json'), 'utf8'),
     ) as SessionState;
-    expect(copy).toMatchObject({ category: 'migrate', risk: 'risky', riskReason: 'default', sessionId: a.sessionId });
+    expect(copy).toMatchObject({ category: 'prepare-migration', risk: 'risky', riskReason: 'default', sessionId: a.sessionId });
   });
 });

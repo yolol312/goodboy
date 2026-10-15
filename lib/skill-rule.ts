@@ -19,23 +19,25 @@ import { join } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
 import { bareSkillName } from './role-limits';
 
-/** Workflow skills that count as evidence: today's names and the G3 renames. */
+/** Workflow skills that count as evidence (the G3 names). */
 export const WORKFLOW_SKILLS: readonly string[] = [
   'add-feature',
   'fix-bug',
-  'debug',
   'diagnose-failure',
-  'refactor',
   'refactor-code',
-  'migrate',
   'prepare-migration',
   'write-doc',
   'request-review',
 ];
 
+/** The pre-G3 names a session started before an upgrade may still invoke. They count only
+ *  with the `goodboy:` prefix: bare, `debug` is Claude Code's own bundled skill (G3 review). */
+const LEGACY_WORKFLOW_SKILLS: readonly string[] = ['debug', 'refactor', 'migrate'];
+
 /** bareSkillName strips only `goodboy:`, so `other:fix-bug` matches nothing. */
 export function isWorkflowSkill(skill: string): boolean {
-  return WORKFLOW_SKILLS.includes(bareSkillName(skill));
+  const name = bareSkillName(skill);
+  return WORKFLOW_SKILLS.includes(name) || (skill.startsWith('goodboy:') && LEGACY_WORKFLOW_SKILLS.includes(name));
 }
 
 export interface SkillGapNote {
@@ -129,7 +131,7 @@ export function appendSkillGapLog(entry: { ts: string; session: string; cwd: str
 
 /** Deny text: invoke a workflow skill, delegate, or record why none fits. */
 export function skillRuleMessage(cliPath: string, sessionId: string): string {
-  const names = ['add-feature', 'fix-bug', 'debug', 'refactor', 'migrate', 'write-doc'].map((n) => `goodboy:${n}`).join(', ');
+  const names = ['add-feature', 'fix-bug', 'diagnose-failure', 'refactor-code', 'prepare-migration', 'write-doc'].map((n) => `goodboy:${n}`).join(', ');
   return (
     'A code edit in the main session needs a workflow skill for this change (skill rule). ' +
     `Invoke the one that fits with the Skill tool (${names}), or delegate the edit to an agent. ` +

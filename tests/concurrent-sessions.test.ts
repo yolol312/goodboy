@@ -305,13 +305,13 @@ describe('two sessions in one repo — task state (A3)', () => {
 
   test("the Stop snapshot and the statusline keep this session's category after another session's command", async () => {
     const repo = newRepo();
-    await submit(repo, 'sess-a', '/migrate rename the users.email column');
+    await submit(repo, 'sess-a', '/prepare-migration rename the users.email column');
     await submit(repo, 'sess-b', '/fix-bug add a product search page');
 
     await stop(repo, 'sess-a');
-    expect(snapshot(repo, 'sess-a')).toMatchObject({ category: 'migrate', risk: 'risky' });
+    expect(snapshot(repo, 'sess-a')).toMatchObject({ category: 'prepare-migration', risk: 'risky' });
     const line = await run(repo, STATUSLINE, { session_id: 'sess-a' });
-    expect(line).toContain('🔴migrate');
+    expect(line).toContain('🔴prepare-migration');
 
     await stop(repo, 'sess-b');
     expect(snapshot(repo, 'sess-b')).toMatchObject({ category: 'fix-bug', risk: 'simple' });

@@ -46,12 +46,13 @@ interface HookOutput {
   };
 }
 
+/** The category commands (the workflow skills, G3 names). */
 const KNOWN_CATEGORIES = new Set([
   'fix-bug',
   'add-feature',
-  'refactor',
-  'migrate',
-  'debug',
+  'refactor-code',
+  'prepare-migration',
+  'diagnose-failure',
   'write-doc',
   'request-review',
 ]);

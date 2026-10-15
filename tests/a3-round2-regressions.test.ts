@@ -170,10 +170,10 @@ describe('F1 — skills name the approval marker the gate checks', () => {
 });
 
 describe('F2 — the risk gate with an unwritable $TMPDIR', () => {
-  test('a /migrate task is still gated when $TMPDIR is not writable', async () => {
+  test('a /prepare-migration task is still gated when $TMPDIR is not writable', async () => {
     const repo = newRepo();
     chmodSync(repo.tmp, 0o500);
-    await hook(repo, UPS, { session_id: 'sess-ro', hook_event_name: 'UserPromptSubmit', prompt: '/migrate rename the users.email column' });
+    await hook(repo, UPS, { session_id: 'sess-ro', hook_event_name: 'UserPromptSubmit', prompt: '/prepare-migration rename the users.email column' });
     expect(await riskDecision(repo, 'sess-ro', 'npm run migrate')).toBe('deny');
   }, 30_000);
 
@@ -382,13 +382,13 @@ describe('L4 — a risk approval given under another cwd', () => {
     const pkg = join(repo.cwd, 'pkg');
     mkdirSync(pkg, { recursive: true });
     const sid = 'sess-l4';
-    await hook(repo, UPS, { session_id: sid, hook_event_name: 'UserPromptSubmit', prompt: '/migrate add a column' });
+    await hook(repo, UPS, { session_id: sid, hook_event_name: 'UserPromptSubmit', prompt: '/prepare-migration add a column' });
     expect(await riskDecision(repo, sid, 'npm run migrate', pkg)).toBe('deny'); // the gate looks under pkg/
     writeFileSync(join(pkg, approvalMarkerRelPath('risk', sid)), '', 'utf8'); // the user approves there
     expect(await riskDecision(repo, sid, 'npm run migrate', pkg)).toBeUndefined();
 
     // A new task, submitted from the repo root: the approval under pkg/ is withdrawn too.
-    await hook(repo, UPS, { session_id: sid, hook_event_name: 'UserPromptSubmit', prompt: '/migrate drop a column' });
+    await hook(repo, UPS, { session_id: sid, hook_event_name: 'UserPromptSubmit', prompt: '/prepare-migration drop a column' });
     expect(existsSync(join(pkg, approvalMarkerRelPath('risk', sid)))).toBe(false);
     expect(await riskDecision(repo, sid, 'npm run migrate', pkg)).toBe('deny');
   }, 30_000);

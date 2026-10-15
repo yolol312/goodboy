@@ -95,7 +95,7 @@ describe('the risk deny in a directory without .claude/ (A3)', () => {
     const repo = mkdtempSync(join(box, 'repo-'));
     const pkg = join(repo, 'pkg');
     mkdirSync(pkg, { recursive: true });
-    await run(repo, UPS, { hook_event_name: 'UserPromptSubmit', prompt: '/migrate add a column' });
+    await run(repo, UPS, { hook_event_name: 'UserPromptSubmit', prompt: '/prepare-migration add a column' });
     expect(existsSync(join(pkg, '.claude'))).toBe(false);
 
     const denied = await bash(pkg, 'npm run migrate'); // the session works in pkg/ now

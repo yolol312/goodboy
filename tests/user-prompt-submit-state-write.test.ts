@@ -112,7 +112,7 @@ describe('a new category command when the repo-level state cannot be written (A3
 
   test('the old approval is gone and the new risky task is gated', async () => {
     const repo = newRepo();
-    await submit(repo, SESS_A, '/migrate rename the users.email column');
+    await submit(repo, SESS_A, '/prepare-migration rename the users.email column');
     const deny = await bash(repo, SESS_A, 'npm run migrate');
     const marker = /! touch (\S+?)`/.exec(deny.reason)?.[1] ?? '';
     expect(marker).not.toBe('');
@@ -121,7 +121,7 @@ describe('a new category command when the repo-level state cannot be written (A3
 
     rmSync(join(repo.cwd, '.claude', '.goodboy-session-state.json'), { force: true });
     blockRepoLevelState(repo);
-    await submit(repo, SESS_A, '/migrate drop the legacy table'); // a new risky task
+    await submit(repo, SESS_A, '/prepare-migration drop the legacy table'); // a new risky task
     expect(existsSync(join(repo.cwd, marker))).toBe(false);
     expect((await bash(repo, SESS_A, 'npm run migrate')).denied).toBe(true);
   }, 30_000);

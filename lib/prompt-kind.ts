@@ -4,10 +4,10 @@
 //   - M10: each background-agent completion reaches the main session as a UserPromptSubmit
 //     whose prompt is a `<task-notification>` block. It is not a user request: no guidance,
 //     no task registration, and never "a new user request" for the delegation guard.
-//   - M12: a typed command arrives verbatim, e.g. `/goodboy:migrate add a column`.
+//   - M12: a typed command arrives verbatim, e.g. `/goodboy:prepare-migration add a column`.
 
 export interface SlashCommand {
-  /** Plugin namespace (`goodboy` in `/goodboy:migrate`), or null for a bare `/migrate`. */
+  /** Plugin namespace (`goodboy` in `/goodboy:prepare-migration`), or null for a bare `/prepare-migration`. */
   namespace: string | null;
   name: string;
   /** Everything after the name, trimmed; may span lines. Empty when none was given. */

@@ -155,7 +155,7 @@ describe('the risk gate through the fallback (A3)', () => {
       await submit(cwd, '/fix-bug the login redirect loops');
       expect(await riskDecision(cwd, 'npm run migrate')).toBe('pass');
       chmodSync(join(ensureSessionDir(SID), SESSION_STATE_FILE), 0o444); // EACCES on the next write
-      await submit(cwd, '/migrate rename the users.email column');
+      await submit(cwd, '/prepare-migration rename the users.email column');
       expect(await riskDecision(cwd, 'npm run migrate')).toBe('deny');
     },
     30_000,

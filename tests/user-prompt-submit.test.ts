@@ -87,7 +87,7 @@ describe('user-prompt-submit argument-free category commands (G1; B1 used to blo
   });
 
   test('빈 커맨드도 작업으로 등록한다 (위험 게이트가 적용되도록)', async () => {
-    const { cwd } = await runHook('/migrate');
+    const { cwd } = await runHook('/prepare-migration');
     const { existsSync } = await import('node:fs');
     expect(existsSync(join(cwd, '.claude', '.goodboy-session-state.json'))).toBe(true);
   });

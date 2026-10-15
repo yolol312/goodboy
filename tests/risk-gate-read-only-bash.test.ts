@@ -73,7 +73,7 @@ async function bashDecision(box: Box, command: string): Promise<string> {
 describe('risk gate — read-only Bash in a risky session', () => {
   test('read-only commands pass; writes, also behind a read-only prefix, are denied', async () => {
     const box = newBox();
-    await run(UPS, box, { hook_event_name: 'UserPromptSubmit', prompt: '/migrate rename the users.email column' });
+    await run(UPS, box, { hook_event_name: 'UserPromptSubmit', prompt: '/prepare-migration rename the users.email column' });
 
     const decisions: Record<string, string> = {};
     for (const c of ['git status', 'git log --oneline -3', 'ls -la', 'echo hi', 'git status > out.txt', 'git status && rm -rf src']) {

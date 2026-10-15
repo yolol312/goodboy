@@ -1,4 +1,4 @@
-// Task state set by a category command (/fix-bug, /migrate, …): category and risk level.
+// Task state set by a category command (/fix-bug, /prepare-migration, …): category and risk level.
 //
 // UserPromptSubmit writes it; the PreToolUse risk gate and the Stop status snapshot read it.
 // They read the copy in the session state dir (stabilization plan A3). The repo-level

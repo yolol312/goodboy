@@ -72,15 +72,15 @@ POSIX 셸을 전제하므로 **Git for Windows 설치가 필수**입니다. 이�
 
 7개 카테고리:
 
-- `/fix-bug <설명>` — 버그 수정
-- `/add-feature <설명>` — 기능 추가
-- `/refactor <설명>` — 리팩토링
-- `/migrate <설명>` — 마이그레이션 (위험도: 위험)
-- `/debug <증상>` — 디버깅
-- `/write-doc <주제>` — 문서 작성
-- `/request-review <기준>` — 리뷰 요청
+- `/fix-bug <설명>` — 버그 수정 (effort high)
+- `/add-feature <설명>` — 기능 추가 (effort high)
+- `/refactor-code <설명>` — 리팩토링 (effort high, 구 `/refactor`)
+- `/prepare-migration <설명>` — 마이그레이션 준비: 작성·롤백·로컬 dry run까지, 공유·운영 환경 적용은 사용자가 직접 (위험도: 위험, effort xhigh, 구 `/migrate`)
+- `/diagnose-failure <증상>` — 원인 진단, 수정은 `/fix-bug`로 (effort high, 구 `/debug`)
+- `/write-doc <주제>` — 문서 작성 (effort medium)
+- `/request-review <기준>` — 리뷰 요청 (effort low)
 
-각 카테고리에 위험도 override 가능: `/fix-bug --risk risky <설명>`
+각 스킬은 적힌 effort로 그 턴만 실행된다(끝나면 원래 설정). 각 카테고리에 위험도 override 가능: `/fix-bug --risk risky <설명>`
 
 ### 일반 프롬프트의 부족-입력 질문 유도 (B2)
 
@@ -479,9 +479,9 @@ goodboy/                                # 플러그인 루트
 ├── skills/                             # 작업 카테고리 7종 + 설치 스킬
 │   ├── fix-bug/SKILL.md
 │   ├── add-feature/SKILL.md
-│   ├── refactor/SKILL.md
-│   ├── migrate/SKILL.md
-│   ├── debug/SKILL.md
+│   ├── refactor-code/SKILL.md
+│   ├── prepare-migration/SKILL.md
+│   ├── diagnose-failure/SKILL.md
 │   ├── write-doc/SKILL.md
 │   ├── request-review/SKILL.md
 │   ├── setup-statusline/SKILL.md       # 상태바 설치/연동

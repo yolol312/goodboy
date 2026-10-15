@@ -113,8 +113,8 @@ function touchInCwd(repo: Repo, rel: string): void {
 describe('risk approval — the deny message names the marker that unlocks this session (A3)', () => {
   test('touching the printed path unlocks this session only', async () => {
     const repo = newRepo();
-    await submit(repo, SESS_A, '/migrate rename the users.email column');
-    await submit(repo, SESS_B, '/migrate drop the legacy table');
+    await submit(repo, SESS_A, '/prepare-migration rename the users.email column');
+    await submit(repo, SESS_B, '/prepare-migration drop the legacy table');
 
     const a = await bash(repo, SESS_A, 'npm run migrate');
     expect(a.denied).toBe(true);
@@ -132,7 +132,7 @@ describe('risk approval — the deny message names the marker that unlocks this 
 
   test('the pre-A3 shared marker name unlocks no session', async () => {
     const repo = newRepo();
-    await submit(repo, SESS_A, '/migrate rename the users.email column');
+    await submit(repo, SESS_A, '/prepare-migration rename the users.email column');
     writeFileSync(join(repo.cwd, '.claude', '.goodboy-risk-approved.txt'), '', 'utf8');
     expect((await bash(repo, SESS_A, 'npm run migrate')).denied).toBe(true);
     expect(existsSync(join(repo.cwd, '.claude', '.goodboy-risk-approved.txt'))).toBe(true);
@@ -175,7 +175,7 @@ describe('Bash write approval — one shot, for the session the message names (A
   //   The restore has to put back this session's marker, under this session's name.
   test("in a risky session the risk gate's deny puts this session's write approval back", async () => {
     const repo = newRepo();
-    await submit(repo, SESS_A, '/migrate rename the users.email column');
+    await submit(repo, SESS_A, '/prepare-migration rename the users.email column');
     const write = await bash(repo, SESS_A, 'echo hi > src/a.ts');
     expect(write.denied).toBe(true);
     const writeMarker = printedMarker(write.reason, '! touch ');

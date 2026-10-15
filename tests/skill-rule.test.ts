@@ -120,7 +120,7 @@ describe('the rule in the hooks', () => {
 
   test('a typed workflow command is evidence', async () => {
     const s = setup();
-    await s.hook('user-prompt-submit', { prompt: '/goodboy:refactor split the parser' });
+    await s.hook('user-prompt-submit', { prompt: '/goodboy:refactor-code split the parser' });
     expect((await s.write('src/a.ts')).denied).toBe(false);
   });
 
@@ -131,7 +131,7 @@ describe('the rule in the hooks', () => {
     expect(bad.stderr).toContain('considered');
     expect((await s.write('src/a.ts')).denied).toBe(true);
     const ok = await s.cli({
-      considered: [{ skill: 'refactor', why_not: 'behavior changes on purpose here' }],
+      considered: [{ skill: 'refactor-code', why_not: 'behavior changes on purpose here' }],
       would_fit: 'a skill for policy-table edits',
       task: 'tune the caps',
     });
@@ -171,7 +171,7 @@ describe('the rule in the hooks', () => {
   test('skill-gap without --session or with a non-JSON note fails and records nothing', async () => {
     const s = setup();
     const note = JSON.stringify({
-      considered: [{ skill: 'refactor', why_not: 'behavior changes on purpose here' }],
+      considered: [{ skill: 'refactor-code', why_not: 'behavior changes on purpose here' }],
       would_fit: 'a skill for policy-table edits',
     });
     const noSession = await s.cliRaw([], note);

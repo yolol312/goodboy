@@ -68,9 +68,9 @@ describe('task notifications are not user prompts (M10)', () => {
 
 describe('a workflow command is a task prompt', () => {
   test('it carries the R2 stop rule too (hallucination review: only general prompts had it)', async () => {
-    const { out } = await runHook('/goodboy:migrate rename the users.email column');
+    const { out } = await runHook('/goodboy:prepare-migration rename the users.email column');
     expect(ctx(out)).toContain('stop rule R2');
-    const { out: off } = await runHook('/goodboy:migrate rename the users.email column', { GOODBOY_OUTWARD_GATE: 'off' });
+    const { out: off } = await runHook('/goodboy:prepare-migration rename the users.email column', { GOODBOY_OUTWARD_GATE: 'off' });
     expect(ctx(off)).not.toContain('stop rule R2');
   });
 });

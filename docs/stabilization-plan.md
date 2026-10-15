@@ -616,7 +616,7 @@ Branch `feat/g-routing`. After each step: tests, typecheck, one all-axes review,
 | G0 | This plan; the measurements in §10.12 |
 | G1 | Rules (§10.5–10.7, §10.10), tests first. The audit of existing reason- and count-based escapes comes last. Done 2026-10-14; the user added the push test check and the read-before-edit knowledge rules during the step. B3 note: skipping per-prompt text for short prompts was rejected, since a short prompt can be a new, vague task |
 | G2 | Tool skills and the 24 agents together, since agents depend on the skills; the two renames; capability checks; leads enabled last. Done 2026-10-15: two review and two test rounds (sonnet, narrow), the capability check M19, and a /verify probe (the Stop test gate names goodboy:test-unit). Leads are written but not routed until their own check |
-| G3 | Workflow skills: slimmed, renamed, effort set |
+| G3 | Workflow skills: slimmed, renamed, effort set. Done 2026-10-15: the seven workflow skills are 35–50 lines, English (the menu description, the questions for the user and the rationale headings stay Korean), with `effort` from §10.4; `debug`, `refactor` and `migrate` became `diagnose-failure`, `refactor-code` and `prepare-migration`; the prompt hook registers the new names, and the skill rule still counts the old ones for sessions started before an upgrade. prepare-migration ends at a local dry run and hands the apply and rollback commands to the user (the old skill both ran the migration and said a person triggers it) |
 
 ### 10.12 Step-0 measurements
 

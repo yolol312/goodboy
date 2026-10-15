@@ -73,8 +73,10 @@ describe('PostToolUse: skill effort notice', () => {
     expect(differs.json.systemMessage).toContain('xhigh');
     expect((await post(cwd, base, 'goodboy:write-migration', 'xhigh')).json.systemMessage).toBeUndefined();
     expect((await post(cwd, base, 'goodboy:write-migration', 'medium', {}, { GOODBOY_SKILL_EFFORT: 'off' })).json.systemMessage).toBeUndefined();
-    // fix-bug sets no effort of its own; a subagent and another plugin's skill get no notice.
-    expect((await post(cwd, base, 'goodboy:fix-bug', 'medium')).json.systemMessage).toBeUndefined();
+    // setup-statusline sets no effort of its own (fix-bug does since G3: high); a subagent and
+    //   another plugin's skill get no notice.
+    expect((await post(cwd, base, 'goodboy:setup-statusline', 'medium')).json.systemMessage).toBeUndefined();
+    expect((await post(cwd, base, 'goodboy:fix-bug', 'medium')).json.systemMessage).toContain('fix-bug 스킬은 effort high');
     expect((await post(cwd, base, 'goodboy:write-migration', 'medium', { agent_type: 'goodboy:test-unit', agent_id: 'a1' })).json.systemMessage).toBeUndefined();
     expect((await post(cwd, base, 'other:write-migration', 'medium')).json.systemMessage).toBeUndefined();
   });
