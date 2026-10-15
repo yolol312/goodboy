@@ -87,7 +87,9 @@ import {
   revisionTree,
   commitIssueDenial,
   inGoodboySessionDir,
+  isRequiredKnowledgeFile,
   markerWriteDenial,
+  policyReadDenial,
 } from '../lib';
 
 interface PreToolInput {
@@ -404,6 +406,19 @@ function main(): void {
       let pendingOutwardApproval: { markerPath: string; what: string } | null = null;
       // (A0.87) The user's push-test approval this hand-off may use, consumed at the end.
       let pendingPushTestApproval: { markerPath: string; what: string } | null = null;
+
+      // (A00) Policy read gate (track H §14.3): until the main session has read the project's
+      //   knowledge files in full, its other tools wait (lib/project-knowledge.ts). First of
+      //   all, so delegating (Agent/Task, allowed by the delegation guard below) is no way past
+      //   it (H2 review).
+      {
+        const why = policyReadDenial({ sessionId, cwd, turn: getCurrentTurn(sessionId), toolName, toolInput, agentType: input.agent_type });
+        if (why !== null) {
+          logGate(sessionId, 'policy-read', 'deny', toolName);
+          emit(deny(why));
+          return;
+        }
+      }
 
       // (A0) 재귀 폭주 방어 — Agent/Task 호출에 한해, 60초 슬라이딩 윈도우로
       //   총 호출 상한/동일 프롬프트 반복을 검사한다. agent_type 존재 여부와
@@ -1060,7 +1075,8 @@ function main(): void {
         const filePath = (toolInput.file_path as string | undefined) ?? '';
         // 부분 읽기(offset/limit)는 정당한 재-Read → 예외. A7: PDF `pages` too — without it a
         //   PDF over 20 pages could never be read past the first range.
-        if (gate !== 'off' && filePath && !isPartialRead(toolInput)) {
+        // The project's knowledge files may always be read again (the policy read gate asks for them).
+        if (gate !== 'off' && filePath && !isPartialRead(toolInput) && !isRequiredKnowledgeFile(cwd, resolvePath(cwd, filePath))) {
           const rereadMsg =
             'Already read recently and unchanged since; use the content you already have. ' +
             'If it is no longer in your context, re-read only the part you need with offset/limit ' +

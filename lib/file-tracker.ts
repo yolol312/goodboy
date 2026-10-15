@@ -32,6 +32,9 @@ interface TrackRecord {
   /** A7: the read showed only part of the file (offset/limit/pages, head, tail, sed -n).
    *  A later full read of such a file is not a redundant re-read. Absent = full read. */
   partial?: boolean;
+  /** A partial Read's first and last line (track H: partial reads that together cover a file
+   *  count as a full read for the policy read gate). Absent when unknown. */
+  range?: [number, number];
 }
 
 /** 기록의 스코프 키. agent 필드 없는 구버전/메인 기록은 'main'. */
@@ -143,6 +146,8 @@ function readRecords(dir: string, fileName: string): TrackRecord[] {
           // D2: agent도 있을 때만 보존(없으면 메인 스코프로 취급).
           if (typeof parsed.agent === 'string' && parsed.agent !== '') rec.agent = parsed.agent;
           if (parsed.partial === true) rec.partial = true;
+          const range = parsed.range;
+          if (Array.isArray(range) && range.length === 2 && range.every((n) => Number.isInteger(n) && n > 0)) rec.range = [range[0]!, range[1]!];
           out.push(rec);
         }
       } catch {
@@ -173,6 +178,7 @@ export function recordRead(
   mtime?: number,
   agent?: string,
   partial?: boolean,
+  range?: [number, number],
 ): void {
   const dir = ensureSessionDir(sessionId);
   const record: TrackRecord = {
@@ -183,7 +189,52 @@ export function recordRead(
   if (typeof mtime === 'number' && Number.isFinite(mtime)) record.mtime = mtime;
   if (typeof agent === 'string' && agent !== '') record.agent = agent;
   if (partial === true) record.partial = true;
+  if (partial === true && range && range.every((n) => Number.isInteger(n) && n > 0)) record.range = range;
   appendRecord(dir, 'reads.jsonl', record);
+}
+
+/** What a Read call showed, from its result when it says (`file: {startLine, numLines,
+ *  totalLines}`): a Read without offset/limit shows at most the first 2000 lines, so a longer
+ *  file read that way is partial (H2 review). Without those fields, from the input. */
+export function readShownRange(toolInput: Record<string, unknown>, toolResponse: unknown): { partial: boolean; range?: [number, number] } {
+  const f = (toolResponse as { file?: { startLine?: unknown; numLines?: unknown; totalLines?: unknown } } | null)?.file;
+  const start = Number(f?.startLine);
+  const num = Number(f?.numLines);
+  const total = Number(f?.totalLines);
+  if (Number.isInteger(start) && Number.isInteger(num) && Number.isInteger(total) && start >= 1 && num >= 0) {
+    if (start === 1 && num >= total) return { partial: false };
+    return num > 0 ? { partial: true, range: [start, start + num - 1] } : { partial: true };
+  }
+  const range = readRangeOf(toolInput);
+  return isPartialRead(toolInput) ? (range ? { partial: true, range } : { partial: true }) : { partial: false };
+}
+
+/** The line range a Read call shows: from `offset` (1-based) for `limit` lines (2000 when
+ *  unset, the Read tool's default), or null for a full read or a PDF page range. */
+export function readRangeOf(toolInput: Record<string, unknown>): [number, number] | null {
+  if (toolInput.offset === undefined && toolInput.limit === undefined) return null;
+  if (toolInput.pages !== undefined) return null;
+  const start = Math.max(1, Math.floor(Number(toolInput.offset ?? 1)) || 1);
+  const limit = Math.max(1, Math.floor(Number(toolInput.limit ?? 2000)) || 2000);
+  return [start, start + limit - 1];
+}
+
+/** The main-scope (or `agent`) reads of a file's version with mtime `mtime`, after the last
+ *  compaction: whether one was full, and the line ranges of the partial ones. */
+export function readRangesSince(sessionId: string, filePath: string, mtime: number, agent = MAIN_SCOPE): { full: boolean; ranges: [number, number][] } {
+  const dir = ensureSessionDir(sessionId);
+  const target = normalize(filePath);
+  const epoch = knowledgeEpoch(dir);
+  let full = false;
+  const ranges: [number, number][] = [];
+  for (const r of readRecords(dir, 'reads.jsonl')) {
+    if (r.file !== target || recordScope(r) !== agent) continue;
+    if (epoch !== '' && r.timestamp <= epoch) continue;
+    if (typeof r.mtime !== 'number' || Math.abs(r.mtime - mtime) > 1) continue;
+    if (!r.partial) full = true;
+    else if (r.range) ranges.push(r.range);
+  }
+  return { full, ranges };
 }
 
 /** filePath가 최근 withinTurns 안에 Read 됐는지 확인.

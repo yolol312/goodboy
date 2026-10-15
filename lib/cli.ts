@@ -23,6 +23,7 @@ import type {
 } from './types';
 import { workTreeState } from './push-test';
 import { diffCoverageOf } from './diff-coverage';
+import { knowledgeRoot, validateKnowledge } from './project-knowledge';
 import {
   findDevCycleArtifacts,
   prototypeContractWarnings,
@@ -665,7 +666,7 @@ async function cmdSkillGap(cwd: string, args: string[]): Promise<void> {
 
 const USAGE =
   '사용법: bun lib/cli.ts <command> [args...]\n' +
-  '명령: review-write | test-write | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>]';
+  '명령: review-write | test-write | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>] | knowledge-check';
 
 async function main(): Promise<void> {
   const cwd = process.cwd();
@@ -696,6 +697,13 @@ async function main(): Promise<void> {
       case 'diff-coverage':
         cmdDiffCoverage(cwd, args);
         break;
+      case 'knowledge-check': {
+        // The keep-project-knowledge skill's done criteria (track H §14.3).
+        const problems = validateKnowledge(knowledgeRoot(cwd).root);
+        process.stdout.write(JSON.stringify(problems.length === 0 ? { ok: true } : { ok: false, problems }) + '\n');
+        if (problems.length > 0) process.exitCode = 1;
+        break;
+      }
       default:
         fail(`알 수 없는 명령: ${command}\n${USAGE}`);
     }

@@ -34,6 +34,7 @@ import {
   writeValidationFailure,
   afterBash,
   answerChoseNonProject,
+  readShownRange,
   recordMarkerEvidence,
 } from '../lib';
 
@@ -366,8 +367,10 @@ function main(): void {
             } catch {
               mtime = undefined;
             }
-            // A7: offset/limit/pages reads are partial; the re-Read gate ignores them.
-            recordRead(sessionId, absFp, turn, mtime, agentId, isPartialRead(toolInput));
+            // A7: offset/limit/pages reads are partial; the re-Read gate ignores them. Their line
+            //   range is kept for the policy read gate (track H).
+            const shown = readShownRange(toolInput, toolResponse);
+            recordRead(sessionId, absFp, turn, mtime, agentId, shown.partial, shown.range);
           }
         } else if (toolName === 'Bash') {
           // Bash로 읽은 파일도 읽기로 기록한다. bypass permissions 모드에서는 시스템이

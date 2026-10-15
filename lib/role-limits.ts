@@ -30,9 +30,10 @@ export function isTestPath(rel: string): boolean {
   return isTestFile(rel) || TEST_DIR_EXTRA.test(rel) || TEST_FILE_EXTRA.test(rel) || TEST_CONFIG.test(rel);
 }
 
-/** A doc by extension (layer 1's isDocFile) or anything under docs/ (images, diagrams). */
+/** A doc by extension (layer 1's isDocFile), anything under docs/ (images, diagrams), or the
+ *  project's doc map (`.goodboy/docs.json`, track H). */
 export function isDocPath(rel: string): boolean {
-  return isDocFile(rel) || DOC_DIR.test(rel);
+  return isDocFile(rel) || DOC_DIR.test(rel) || /(?:^|\/)\.goodboy\/docs\.json$/.test(rel);
 }
 
 /** Why the role may not write this file, or null when it may. */

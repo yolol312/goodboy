@@ -734,6 +734,13 @@ file every session reads first, splits every check into `ai` (evidence decides) 
   about the `human` and unknown items, write both files); update mode at task end applies the
   change, records the human decisions of the task and refreshes `checked`. Done when the files
   exist, every entry has source, date and tag, and docs.json marks policy.md session-start.
+- Built in H2 (`lib/project-knowledge.ts`): the root is the nearest directory with
+  policy.md from the cwd up, else the git top-level; a missing policy.md gets the
+  create-mode notice only, not a block (every project would stop on upgrade otherwise). The
+  read evidence is the read log, now with the line range of a partial Read; the newest read
+  or own edit must be of the file as it is now (same mtime), after the last compaction.
+  `build-docs` runs the skill (it gained Bash for `cli.ts knowledge-check`, and its write
+  scope takes `.goodboy/docs.json`).
 
 ### 14.4 Decision authority (H3)
 

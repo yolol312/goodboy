@@ -69,6 +69,7 @@ describe('skillDenial', () => {
     expect(skillDenial(role('review-security'), 'write-migration')).toContain('only its tool skills');
     expect(skillDenial(role('test-unit'), 'goodboy:fix-bug')).toContain('Workflow skills');
     expect(skillDenial(role('test-unit'), 'other:record-tests')).not.toBeNull();
-    expect(skillDenial(role('build-docs'), 'record-tests')).toContain('(none)');
+    expect(skillDenial(role('test-lead'), 'record-tests')).toContain('(none)');
+    expect(skillDenial(role('build-docs'), 'keep-project-knowledge')).toBeNull();
   });
 });

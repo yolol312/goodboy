@@ -265,7 +265,18 @@ AskUserQuestion에서 `non-project`가 들어간 답을 고른 경우에만 모�
 모드를 쓴다: 세션 중에 생긴 줄은 위 근거가 있어야 효과가 있다(어떤 방법으로 썼든). 줄을 지우는 것은 바로
 적용된다. 편집 도구로 goodboy의 세션 상태(`$TMPDIR/goodboy-session-*`)를 쓰는 것도 막는다.
 
-#### 에이전트 24개와 도구 스킬 23개
+#### 프로젝트 지식 파일과 읽기 게이트 (v0.32.0, 트랙 H)
+
+프로젝트마다 `.goodboy/policy.md`(정책과 지난 결정, 항목마다 `decide: ai|human`·출처·날짜·확인일)와
+`.goodboy/docs.json`(문서 지도: 문서별로 다루는 코드 경로와 세션 시작 시 읽을지)을 git으로 관리한다.
+세션이 시작되면(새 세션, 재개, `/clear`, 압축 후) 먼저 읽을 파일을 알려 주고, 메인 세션이 그 파일을 끝까지
+읽기 전에는 다른 도구를 막는다(Read, AskUserQuestion, ToolSearch, `keep-project-knowledge` 스킬은 허용,
+나눠 읽은 범위가 파일 전체를 덮으면 인정, 읽은 뒤 다른 곳에서 바뀌면 다시 읽기). 서브에이전트는 해당 없음
+(메인이 필요한 정책을 프롬프트로 넘긴다). 정책 파일이 없으면 `keep-project-knowledge` 스킬로 먼저 만들라고
+안내한다(프로젝트인지 한 번 묻고, 저장소를 살펴 초안을 만든 뒤 사람이 정할 항목만 묻는다). 정책 파일은 200줄
+예산이 있다. 끄기: `GOODBOY_POLICY_GATE=off`. 완료 확인: `bun lib/cli.ts knowledge-check`.
+
+#### 에이전트 24개와 도구 스킬 24개
 
 에이전트 이름은 `<팀>-<역할>`이고 리드는 `-lead`로 끝난다(전체 표: 계획서 §10.3). 리뷰 게이트는
 `goodboy:review-all`(구 review-changes), 테스트 게이트와 push 확인은 `goodboy:test-unit`(구 test-changes)을
@@ -495,7 +506,7 @@ goodboy/                                # 플러그인 루트
 │   ├── write-doc/SKILL.md
 │   ├── request-review/SKILL.md
 │   ├── setup-statusline/SKILL.md       # 상태바 설치/연동
-│   └── <도구 스킬 23개>/SKILL.md        # 에이전트가 쓰는 절차 (check-*, record-*, run-*, write-* …)
+│   └── <도구 스킬 24개>/SKILL.md        # 에이전트가 쓰는 절차 (check-*, record-*, run-*, write-* …, keep-project-knowledge)
 ├── agents/                             # 에이전트 24개 (research-*, build-*, review-*, test-*)
 │   ├── test-unit.md                    # 층1 — 테스트 작성/실행·red-green·커버리지 (구 test-changes)
 │   └── review-all.md                   # 층2 — 전 축 또는 축 하나 리뷰 (구 review-changes)

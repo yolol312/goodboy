@@ -6,6 +6,7 @@
 
 import { pinCommitIssueSettings } from '../lib/commit-issue';
 import { pinProjectMode } from '../lib/project-mode';
+import { knowledgeSessionNotice } from '../lib/project-knowledge';
 import { clearReadRecords } from '../lib/file-tracker';
 
 interface SessionStartInput {
@@ -70,7 +71,21 @@ if (import.meta.main) {
         pinProjectMode(sessionId, input.cwd ?? process.cwd());
       }
       const warnings = source === 'startup' || source === 'resume' ? configWarnings(process.env) : [];
-      process.stdout.write(JSON.stringify(warnings.length > 0 ? { systemMessage: warnings.join('\n') } : {}));
+      // (H2) Every source, project mode: the project's knowledge files to read first, or the
+      //   skill to create them (lib/project-knowledge.ts).
+      let knowledge: { context?: string; systemMessage?: string } = {};
+      if (sessionId && (process.env.GOODBOY_POLICY_GATE ?? 'on').trim().toLowerCase() !== 'off') {
+        try {
+          knowledge = knowledgeSessionNotice(input.cwd ?? process.cwd(), sessionId);
+        } catch {
+          knowledge = {};
+        }
+      }
+      const messages = [...warnings, ...(knowledge.systemMessage ? [knowledge.systemMessage] : [])];
+      const out: Record<string, unknown> = {};
+      if (messages.length > 0) out.systemMessage = messages.join('\n');
+      if (knowledge.context) out.hookSpecificOutput = { hookEventName: 'SessionStart', additionalContext: knowledge.context };
+      process.stdout.write(JSON.stringify(out));
     })
     .catch(() => {
       process.stdout.write('{}');

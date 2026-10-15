@@ -40,7 +40,7 @@ export const ROLES: readonly RoleSpec[] = [
   { name: 'build-frontend', team: 'build', model: 'sonnet', effort: 'high', writes: 'code', toolSkills: ['write-api-contract', 'follow-design-tokens'] },
   { name: 'build-data', team: 'build', model: 'opus', effort: 'high', writes: 'code', toolSkills: ['write-migration'] },
   { name: 'build-infra', team: 'build', model: 'sonnet', effort: 'high', writes: 'code', toolSkills: ['edit-infra-safely'] },
-  { name: 'build-docs', team: 'build', model: 'sonnet', effort: 'medium', writes: 'docs', toolSkills: [] },
+  { name: 'build-docs', team: 'build', model: 'sonnet', effort: 'medium', writes: 'docs', toolSkills: ['keep-project-knowledge'] },
   { name: 'build-run', team: 'build', model: 'haiku', effort: 'low', writes: 'none', toolSkills: ['run-long-command'] },
   { name: 'review-lead', team: 'review', model: 'sonnet', effort: 'high', writes: 'result', members: REVIEWERS, toolSkills: ['summarize-diff', 'record-review', 'run-codex-review'] },
   { name: 'review-all', team: 'review', model: 'sonnet', effort: 'high', writes: 'result', toolSkills: ['summarize-diff', 'record-review', 'check-security', 'check-evidence', 'check-code-quality', 'check-ui-states', 'follow-design-tokens', 'run-codex-review'] },

@@ -61,7 +61,10 @@ const TOOL_SKILLS: Record<string, string | null> = {
   'run-codex-review': 'low',
   'measure-coverage': 'low',
   'follow-agent-rules': null,
+  // Track H (§14.3): also user-invocable.
+  'keep-project-knowledge': 'high',
 };
+const USER_INVOCABLE_TOOL_SKILLS = new Set(['keep-project-knowledge']);
 
 function frontmatter(path: string): { fields: Record<string, string>; body: string; lines: number } {
   const text = readFileSync(path, 'utf8');
@@ -108,14 +111,14 @@ describe('the 24 agents', () => {
   }
 });
 
-describe('the 23 tool skills', () => {
+describe('the 24 tool skills (23 from G2, keep-project-knowledge from H2)', () => {
   for (const [name, effort] of Object.entries(TOOL_SKILLS)) {
     test(`${name}: format`, () => {
       const path = join(ROOT, 'skills', name, 'SKILL.md');
       expect(existsSync(path)).toBe(true);
       const { fields, body, lines } = frontmatter(path);
       expect(fields.name).toBe(name);
-      expect(fields['user-invocable']).toBe('false');
+      expect(fields['user-invocable']).toBe(USER_INVOCABLE_TOOL_SKILLS.has(name) ? 'true' : 'false');
       expect<string | null>(fields.effort ?? null).toEqual(effort);
       expect((fields.description ?? '').length).toBeGreaterThan(30);
       expect(fields.when_to_use ?? '').toMatch(/^Use|^Preloaded/);
@@ -126,7 +129,8 @@ describe('the 23 tool skills', () => {
       // Members never delegate; tool skills are English (quoted product words aside).
       expect(body).not.toMatch(/\bAgent\(/);
       const hangul = body.match(/[가-힣]+/g) ?? [];
-      expect(hangul.filter((w) => !['근거', '확인', '필요'].includes(w))).toEqual([]);
+      // Allowed: the rationale heading, the "확인 필요" option, and AskUserQuestion labels.
+      expect(hangul.filter((w) => !['근거', '확인', '필요', '프로젝트', '아님'].includes(w))).toEqual([]);
     });
   }
 });
