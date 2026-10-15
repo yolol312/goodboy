@@ -39,8 +39,8 @@ so work is released in batches:
 | Version | Contents |
 |---|---|
 | v0.30.0 | A (fixes) + F1–F4 (language-policy prerequisites), released 2026-10-13 |
-| v0.31.0 | G (routing: rules, roles, tools), which also covers B2, B3 and F7 |
-| v0.32.0 | the rest of B (cost) + C (measurement) + F5, F8 |
+| v0.31.0 | G (routing: rules, roles, tools), which also covers B2, B3 and F7. Prepared 2026-10-15 on `feat/g-routing` (G0 1312639, G1 bf9c5b9, G2 8e46b84, G3 891c2ef, version bump); the merge and the push to `main` (the release) wait for the user |
+| v0.32.0 | the rest of B (cost) + C (measurement) + F5, F8, and track H (knowledge; branch `feat/h-knowledge`, stacked on `feat/g-routing`) |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
 
 ## 4. A — Fix silent failures and deadlocks
