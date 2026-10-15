@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { approvalMarkerRelPath } from '../lib/approval-marker';
 
 const STOP_HOOK = resolve(import.meta.dir, '..', 'hooks', 'stop.ts');
 const tmpDirs: string[] = [];
@@ -62,6 +63,14 @@ function writeReview(cwd: string, review: Record<string, unknown>): void {
   writeFileSync(join(reviewsDir, 'review.json'), JSON.stringify(review), 'utf8');
 }
 
+/** The user's one-use Stop override (track G): what `! touch <marker>` creates. */
+function approveStop(cwd: string, sessionId: string): string {
+  const p = join(cwd, approvalMarkerRelPath('stop', sessionId));
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, '', 'utf8');
+  return p;
+}
+
 interface StopOut {
   decision?: string;
   reason?: string;
@@ -118,7 +127,7 @@ describe('Stop hook — dimension coverage enforcement', () => {
     const out = await runStop(tmp, cwd, sessionId);
     expect(out.decision).toBe('block');
     expect(out.reason).toContain('ui-ux-accessibility');
-    expect(out.reason).toContain('재시도 1/3');
+    expect(out.reason).toContain('(block 1)');
   });
 
   test('PASSES when all required dimensions are present', async () => {
@@ -129,19 +138,34 @@ describe('Stop hook — dimension coverage enforcement', () => {
     expect(out.decision).toBeUndefined();
   });
 
-  test('retry-cap escape: after MAX_RETRIES the missing dimension is allowed with systemMessage', async () => {
+  // Track G: no retry cap. The 3rd Stop in a row blocks like the 1st.
+  test('no retry cap: the 3rd Stop in a row still blocks and tells the user about the marker', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, [FRONTEND_FILE], cwd);
-    // Pre-seed retry counter at 2 so the next attempt (count=3) hits the cap.
-    // Retry counters are per session (A3): they live in the session state dir.
+    // Two blocks already happened. Retry counters are per session (A3): session state dir.
     const sessionDir = join(tmp, `goodboy-session-${sessionId}`);
     mkdirSync(sessionDir, { recursive: true });
     writeFileSync(join(sessionDir, '.goodboy-retry-count.txt'), '2', 'utf8');
     writeReview(cwd, baseReview(cwd, ['plan-completeness'])); // still missing ui-ux
     const out = await runStop(tmp, cwd, sessionId);
+    expect(out.decision).toBe('block');
+    expect(out.reason).toContain('ui-ux-accessibility');
+    expect(out.reason).toContain('(block 3)');
+    expect(out.reason).toContain('only the user can let this Stop pass');
+    expect(out.systemMessage ?? '').toContain(`! touch ${approvalMarkerRelPath('stop', sessionId)}`);
+    expect(out.systemMessage ?? '').not.toContain('GOODBOY_'); // review gates have no env switch
+  });
+
+  test("the user's Stop marker lets the missing dimension pass once", async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 1, [FRONTEND_FILE], cwd);
+    writeReview(cwd, baseReview(cwd, ['plan-completeness'])); // still missing ui-ux
+    const marker = approveStop(cwd, sessionId);
+    const out = await runStop(tmp, cwd, sessionId);
     expect(out.decision).toBeUndefined();
-    expect(out.systemMessage).toContain('ui-ux-accessibility');
-    expect(out.systemMessage).toContain('재시도 3회');
+    expect(out.systemMessage ?? '').toContain('ui-ux-accessibility');
+    expect(out.systemMessage ?? '').toContain('사용자 승인 마커로 이번 턴의');
+    expect(existsSync(marker)).toBe(false); // used once
   });
 
   test('BACKWARD COMPAT: old review (no dimensions_checked) + change requiring no dimensions → no block, no crash', async () => {

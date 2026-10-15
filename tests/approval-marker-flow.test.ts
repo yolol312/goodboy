@@ -144,7 +144,8 @@ describe('Bash write approval — one shot, for the session the message names (A
     const repo = newRepo();
     const first = await bash(repo, SESS_A, 'echo hi > src/a.ts');
     expect(first.denied).toBe(true);
-    const marker = printedMarker(first.reason, '`touch ');
+    // Track G: the message asks the user to run `! touch <path>`.
+    const marker = printedMarker(first.reason, '! touch ');
     expect(marker).toBe('.claude/.goodboy-bash-write-approved-7d9ae000.txt');
 
     // .claude/ is created here on purpose: in a repo without one the printed command fails
@@ -177,7 +178,7 @@ describe('Bash write approval — one shot, for the session the message names (A
     await submit(repo, SESS_A, '/migrate rename the users.email column');
     const write = await bash(repo, SESS_A, 'echo hi > src/a.ts');
     expect(write.denied).toBe(true);
-    const writeMarker = printedMarker(write.reason, '`touch ');
+    const writeMarker = printedMarker(write.reason, '! touch ');
     touchInCwd(repo, writeMarker);
 
     const denied = await bash(repo, SESS_A, 'echo hi > src/a.ts');

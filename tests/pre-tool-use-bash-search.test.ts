@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { classifyBashSearch } from '../lib/token-habits';
+import { bashSearchPaths, classifyBashSearch, searchScopeIsSmall } from '../lib/token-habits';
 
 // H2-03: Bash 재귀 코드베이스 탐색 강제 위임.
 //   - classifyBashSearch 단위 판정
@@ -121,9 +121,13 @@ function isDenied(o: Out): boolean {
   return o.hookSpecificOutput?.permissionDecision === 'deny';
 }
 
+// The scratch repo is empty, so the small-scope relaxation (track G) would allow every search;
+// these tests pin it off (0) to check the gate itself. Its own tests are below.
+const NO_SMALL = { GOODBOY_BASH_SEARCH_SMALL: '0' };
+
 describe('pre-tool-use H2-03 Bash search gate (integration)', () => {
   test('DENY: 메인 세션의 재귀 탐색(grep -r)', async () => {
-    const out = await runBash('grep -r "foo" .');
+    const out = await runBash('grep -r "foo" .', { env: NO_SMALL });
     expect(isDenied(out)).toBe(true);
     expect(out.hookSpecificOutput?.permissionDecisionReason).toContain('H2-03');
   });
@@ -149,8 +153,71 @@ describe('pre-tool-use H2-03 Bash search gate (integration)', () => {
   });
 
   test('WARN 모드: 차단하지 않고 경고(systemMessage)에 H2-03', async () => {
-    const out = await runBash('grep -r foo .', { env: { GOODBOY_BASH_SEARCH_GATE: 'warn' } });
+    const out = await runBash('grep -r foo .', { env: { GOODBOY_BASH_SEARCH_GATE: 'warn', ...NO_SMALL } });
     expect(isDenied(out)).toBe(false);
     expect(out.systemMessage ?? '').toContain('H2-03');
+  });
+});
+
+describe('H2-03 small-scope relaxation (track G)', () => {
+  const REPO = resolve(import.meta.dir, '..');
+
+  test('bashSearchPaths reads the paths a search covers', () => {
+    expect(bashSearchPaths('grep -rn -E "a|b" --include=*.ts hooks lib | grep -v x')).toEqual(['hooks', 'lib']);
+    expect(bashSearchPaths('grep -r -e foo -e bar src')).toEqual(['src']);
+    expect(bashSearchPaths('rg -t ts foo')).toEqual(['.']);
+    expect(bashSearchPaths('git grep -n foo -- lib')).toEqual(['lib']);
+    expect(bashSearchPaths('find tests -name "*.ts"')).toEqual(['tests']);
+    expect(bashSearchPaths('ls -la')).toBeNull();
+  });
+
+  test('searchScopeIsSmall counts files with a limit; globs are never small', () => {
+    expect(searchScopeIsSmall(['hooks'], REPO, 50)).toBe(true);
+    expect(searchScopeIsSmall(['.'], REPO, 50)).toBe(false);
+    expect(searchScopeIsSmall(['nope-dir'], REPO, 1)).toBe(true);
+    expect(searchScopeIsSmall(['src/*'], REPO, 1000)).toBe(false);
+  });
+
+  test('a small explicit scope runs in the main session; a large one is still delegated', async () => {
+    const small = await runBash(`grep -rn foo ${join(REPO, 'hooks')} | grep -v bar`);
+    expect(isDenied(small)).toBe(false);
+    const large = await runBash(`grep -rn foo ${REPO} | grep -v bar`);
+    expect(isDenied(large)).toBe(true);
+  });
+
+  // Source bug found in the G1 test round (lib/token-habits.ts searchScopeIsSmall): a path the
+  // shell expands (~, $VAR, $(...), backticks) does not exist as written, so the walk counts it
+  // as nothing and the search is allowed, while the shell searches the expanded directory
+  // (e.g. the whole home directory). Such a scope has an unknown size, like a glob.
+  test('a scope the shell expands (~, $VAR, $(...)) is not small, so the search is still delegated', async () => {
+    for (const p of ['~', '~/workspace', '$HOME', '"$PWD"', '${HOME}/src', '$(pwd)', '`pwd`']) {
+      const paths = bashSearchPaths(`grep -rn foo ${p}`);
+      expect([p, paths !== null && searchScopeIsSmall(paths, REPO, 200)]).toEqual([p, false]);
+    }
+    expect(isDenied(await runBash('grep -rn foo ~ | grep -v bar'))).toBe(true);
+  });
+
+  test('every search in a chain counts, not only the first (hallucination review)', async () => {
+    expect(bashSearchPaths(`grep -rn foo hooks; grep -rn bar /`)).toEqual(['hooks', '/']);
+    expect(bashSearchPaths('grep -rn foo hooks && find / -name x')).toEqual(['hooks', '/']);
+    expect(isDenied(await runBash(`grep -rn foo ${join(REPO, 'hooks')} | grep -v x; grep -rn bar ${REPO} | grep -v y`))).toBe(true);
+  });
+
+  test('node_modules and other vendored dirs count, since grep -r and find read them', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'goodboy-bscope-'));
+    tmpDirs.push(dir);
+    mkdirSync(join(dir, 'node_modules', 'pkg'), { recursive: true });
+    for (let i = 0; i < 30; i++) writeFileSync(join(dir, 'node_modules', 'pkg', `f${i}.js`), '');
+    writeFileSync(join(dir, 'index.ts'), '');
+    expect(searchScopeIsSmall(['.'], dir, 20)).toBe(false);
+    expect(searchScopeIsSmall(['index.ts'], dir, 20)).toBe(true);
+  });
+
+  test('directories count toward the limit, so a deep empty tree is not small', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'goodboy-bscope-'));
+    tmpDirs.push(dir);
+    mkdirSync(join(dir, ...Array.from({ length: 30 }, (_, i) => `d${i}`)), { recursive: true });
+    expect(searchScopeIsSmall(['.'], dir, 20)).toBe(false);
+    expect(searchScopeIsSmall(['.'], dir, 40)).toBe(true);
   });
 });

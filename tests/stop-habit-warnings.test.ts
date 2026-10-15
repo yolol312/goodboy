@@ -113,27 +113,32 @@ async function runStop(
 
 const CODE_FILE = 'util.ts';
 
-describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
-  test('context >= 50% → force block with compact-force reason + stopReason', async () => {
+// Track G: H1-03 is a notice for the user (only the user can compact), never a block.
+describe('Stop hook — H1-03 compaction notice (>=50%)', () => {
+  test('context >= 50% → /compact notice, with no block or stop signal of its own', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
-    const t = writeTranscript(cwd, 120_000); // 60% → force
+    const t = writeTranscript(cwd, 120_000); // 60% → notice
     const out = await runStop(tmp, cwd, sessionId, t);
-    expect(out.decision).toBe('block');
-    expect(out.reason).toContain('강제');
-    expect(out.reason).toContain('/compact');
-    expect(out.stopReason).toBe('compact_needed');
+    expect(out.systemMessage ?? '').toContain('/compact');
+    expect(out.systemMessage ?? '').toContain('H1-03');
+    expect(out.stopReason).toBeUndefined();
+    expect(out.reason ?? '').not.toContain('/compact'); // a block here is the review gate's
   });
 
-  test('force suppresses H1-01 long-session warning even when tokens are high', async () => {
+  test('the notice suppresses the H1-01 long-session warning on the Stop where it fires', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
-    // 120k tokens = 60% (>= force 50%) AND above token warn 50k → but force wins, H1-01 suppressed.
+    // 120k tokens = 60% (>= 50%) AND above token warn 50k → the notice wins, H1-01 suppressed.
     const t = writeTranscript(cwd, 120_000);
     const out = await runStop(tmp, cwd, sessionId, t);
-    expect(out.decision).toBe('block');
-    expect(out.reason).toContain('강제');
+    expect(out.systemMessage ?? '').toContain('/compact');
     expect(out.systemMessage ?? '').not.toContain('긴 세션'); // H1-01 suppressed
+
+    // The next Stop is latched (no notice), so the H1-01 warning shows there.
+    const next = await runStop(tmp, cwd, sessionId, t);
+    expect(next.systemMessage ?? '').not.toContain('/compact');
+    expect(next.systemMessage ?? '').toContain('긴 세션');
   });
 });
 

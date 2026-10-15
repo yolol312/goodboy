@@ -5,9 +5,10 @@
 // "편집이 하나도 없는데도 발동하는가"이다.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { approvalMarkerRelPath } from '../lib/approval-marker';
 
 const STOP_HOOK = resolve(import.meta.dir, '..', 'hooks', 'stop.ts');
 const tmpDirs: string[] = [];
@@ -68,6 +69,14 @@ function writeTranscript(cwd: string, text: string, userText = '설명해줘'): 
   ];
   writeFileSync(path, lines.join('\n') + '\n', 'utf8');
   return path;
+}
+
+/** The user's one-use Stop override (track G): what `! touch <marker>` creates. */
+function approveStop(cwd: string, sessionId: string): string {
+  const p = join(cwd, approvalMarkerRelPath('stop', sessionId));
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, '', 'utf8');
+  return p;
 }
 
 interface StopOut {
@@ -210,16 +219,50 @@ describe('Stop hook — 층0 인용 검증 게이트', () => {
     expect(out.decision).toBeUndefined();
   });
 
-  test('MAX_RETRIES escape: 3회째는 통과 + 사용자 알림 (영구 차단 방지)', async () => {
+  // Track G: no count-based escape. Every full Stop blocks while the citation is wrong; from
+  //   the 2nd block on, the user is told how to override it.
+  test('no retry cap: the 3rd Stop still blocks; from the 2nd the user sees the marker and GOODBOY_CLAIM_GATE=off', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedTurnOnly(tmp, sessionId, 3);
     const tp = writeTranscript(cwd, 'src/nope.ts:42 에서 처리합니다.');
+    const touch = `! touch ${approvalMarkerRelPath('stop', sessionId)}`;
 
-    expect((await runStop(tmp, cwd, sessionId, tp)).decision).toBe('block');
-    expect((await runStop(tmp, cwd, sessionId, tp)).decision).toBe('block');
+    const first = await runStop(tmp, cwd, sessionId, tp);
+    expect(first.decision).toBe('block');
+    expect(first.reason).toContain('(block 1)');
+    expect(first.reason).toContain('only the user can let this Stop pass');
+    expect(first.reason).not.toContain('재시도');
+    expect(first.systemMessage ?? '').not.toContain(touch);
+
+    const second = await runStop(tmp, cwd, sessionId, tp);
+    expect(second.decision).toBe('block');
+    expect(second.reason).toContain('(block 2)');
+    expect(second.systemMessage ?? '').toContain(touch);
+    expect(second.systemMessage ?? '').toContain('GOODBOY_CLAIM_GATE=off');
+
     const third = await runStop(tmp, cwd, sessionId, tp);
-    expect(third.decision).toBeUndefined();
-    expect(third.systemMessage ?? '').toContain('인용 검증이');
+    expect(third.decision).toBe('block');
+    expect(third.reason).toContain('(block 3)');
+    expect(third.reason).toContain('src/nope.ts:42');
+  });
+
+  test("the user's Stop marker passes the claim gate once; the next Stop blocks again", async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedTurnOnly(tmp, sessionId, 3);
+    const tp = writeTranscript(cwd, 'src/nope.ts:42 에서 처리합니다.');
+    expect((await runStop(tmp, cwd, sessionId, tp)).decision).toBe('block');
+
+    const marker = approveStop(cwd, sessionId);
+    const passed = await runStop(tmp, cwd, sessionId, tp);
+    expect(passed.decision).toBeUndefined();
+    expect(passed.systemMessage ?? '').toContain('사용자 승인 마커로 이번 턴의');
+    expect(passed.systemMessage ?? '').toContain('이번 턴의 claim 게이트');
+    expect(existsSync(marker)).toBe(false); // used once
+
+    // The counter was reset by the pass: the same citation blocks again from 1.
+    const next = await runStop(tmp, cwd, sessionId, tp);
+    expect(next.decision).toBe('block');
+    expect(next.reason).toContain('(block 1)');
   });
 
   test('stop_hook_active 경로에서는 차단하지 않고 경고만 남긴다', async () => {

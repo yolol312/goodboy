@@ -1,6 +1,6 @@
-// Stabilization plan A3: review/test cursors and retry counters are session-bound.
-// Turn numbers are per-session counters, so state written by session A must never
-// exempt (or escape) session B. Before A3, session A accepting a review at turn 22 left a
+// Stabilization plan A3: review/test cursors, block counters and Stop approval markers are
+// session-bound. Turn numbers are per-session counters, so state written by session A must
+// never exempt (or let through) session B. Before A3, session A accepting a review at turn 22 left a
 // repo-level cursor that silently skipped review for session B's first 22 turns. Cursors
 // and counters now live in each session's state dir.
 
@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { approvalMarkerRelPath } from '../lib/approval-marker';
 import { REVIEW_CURSOR_FILE, cursorFileName } from '../lib/review-cursor';
 import { AXIS_DIMENSIONS } from '../lib/review-dimensions';
 
@@ -172,18 +173,23 @@ describe('Stop hook — session-bound state (A3)', () => {
     expect(out.decision).toBe('block');
   });
 
-  test("another session's retry counter does not grant an escape", async () => {
+  // Track G: the count-based escape is gone; the user's Stop marker carries a session tag.
+  test("another session's Stop marker and block count do not let this session pass", async () => {
     const { tmp, cwd } = newSandbox();
     seedSession(tmp, 'sess-b', 1, ['src/a.ts'], cwd);
     writeUncoveringReview(cwd);
-    // Session A already used two of its three attempts (counters live in the session dir).
+    // Session A was blocked twice and its user approved its next Stop.
     mkdirSync(join(tmp, 'goodboy-session-sess-a'), { recursive: true });
     writeFileSync(join(tmp, 'goodboy-session-sess-a', '.goodboy-review-validate-retry-count.txt'), '2', 'utf8');
+    const markerA = join(cwd, approvalMarkerRelPath('stop', 'sess-a'));
+    writeFileSync(markerA, '', 'utf8');
     const out = await runStop(tmp, cwd, 'sess-b');
     expect(out.decision).toBe('block');
-    expect(out.reason).toContain('1/3');
-    // ...and session B's block leaves session A's budget untouched.
+    expect(out.reason).toContain('(block 1)');
+    expect(out.systemMessage ?? '').not.toContain('! touch'); // B's first block: no notice yet
+    // ...and session B's Stop leaves session A's count and approval untouched.
     expect(readFileSync(join(tmp, 'goodboy-session-sess-a', '.goodboy-review-validate-retry-count.txt'), 'utf8')).toBe('2');
+    expect(existsSync(markerA)).toBe(true);
   });
 
   test('a legacy repo-level retry counter is ignored', async () => {
@@ -193,6 +199,6 @@ describe('Stop hook — session-bound state (A3)', () => {
     writeFileSync(join(cwd, '.claude', '.goodboy-review-validate-retry-count.txt'), '2', 'utf8');
     const out = await runStop(tmp, cwd, 'sess-b');
     expect(out.decision).toBe('block');
-    expect(out.reason).toContain('1/3');
+    expect(out.reason).toContain('(block 1)');
   });
 });

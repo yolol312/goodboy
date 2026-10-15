@@ -251,15 +251,25 @@ export function buildAskQuestionsInstruction(missing: RequiredInput[]): string {
  *  기록해야 하고(근거 게이트 A1 — 기본 warn은 안내, deny면 차단), 기록된 가정은 리뷰가 검증해야 통과된다(추측-리뷰 연동 A2)
  *  — 즉 "묻지 않고 넘어가기"에도 비용이 있다. env GOODBOY_ASK_UNCLEAR=on|off (기본 on). */
 export const ASK_WHEN_UNCLEAR_INSTRUCTION = [
-  '이 요청이 작업(코드 수정·생성·디버깅·설정 변경 등)이라면, 착수 전에 핵심 정보가 충분한지',
-  '스스로 점검하세요(self-assessment): 무엇을/어디를 바꾸는지, 기대 동작, (버그라면) 재현',
-  '방법과 현재 동작, 영향 범위.',
-  '1. 실제로 부족한 항목만 AskUserQuestion으로 한 번에 묶어 질문하고, 각 질문에 "확인 필요"',
-  '   옵션을 포함하세요.',
-  '2. 사용자가 "확인 필요"를 선택했거나 답하지 못한 항목은 절대 답을 지어내지 말고',
-  '   `## 근거 > 가정` 섹션에 명시적 가정으로 기록하세요.',
-  '3. 정보가 이미 충분하거나, 단순 질문/대화이거나, 사소한 결정이면 묻지 말고 바로 진행하세요.',
-  '(부족 입력 질문 유도, B2)',
+  'If this request is a task (changing or writing code, debugging, changing configuration),',
+  'check before you start that you have the key facts (self-assessment): what to change and',
+  'where, the expected behavior, for a bug how to reproduce it and what happens now, and the scope.',
+  '1. Ask only for what is really missing, in one AskUserQuestion call, and give each question',
+  '   a "확인 필요" option.',
+  '2. Never make up an answer the user marked "확인 필요" or could not give. Record it as an',
+  '   explicit assumption in the rationale section (`## 근거` > `가정`, or `## Rationale` > `Assumptions`).',
+  '3. If the facts are already there, or this is a question, a conversation or a small decision,',
+  '   do not ask; go ahead.',
+  '(ask when unclear, B2)',
+].join('\n');
+
+/** (track G, R2) Stop rule for outward effects, injected with the B2 guidance. The hook
+ *  backstop for subagents is the outward-command gate; env GOODBOY_OUTWARD_GATE=off drops both. */
+export const OUTWARD_EFFECT_INSTRUCTION = [
+  'Never run anything that changes a live external or production system (deploys, remote',
+  'databases, third-party APIs that change state, pushes, messages). Use a sandbox or',
+  'temporary target instead; if none fits the task, ask the user first. Reading is fine.',
+  '(stop rule R2)',
 ].join('\n');
 
 /** additionalContext로 주입할 self-attestation 체크리스트 instruction 빌드.
@@ -273,18 +283,18 @@ export const ASK_WHEN_UNCLEAR_INSTRUCTION = [
 export function buildRequiredInputsChecklist(required: RequiredInput[]): string {
   if (!Array.isArray(required) || required.length === 0) return '';
   const lines: string[] = [];
-  lines.push('이 스킬은 다음 필수 입력 항목들을 요구합니다. 각 항목에 대해 사용자의 프롬프트가 이미 그 내용을 충분히 명시하고 있는지 스스로 판단하세요(self-assessment).');
+  lines.push('This skill needs the inputs below. For each one, judge whether the user\'s prompt already specifies it (self-assessment).');
   lines.push('');
-  lines.push('필수 입력 체크리스트:');
+  lines.push('Required inputs:');
   for (const input of required) {
-    const q = (input.question ?? '').trim() || `${input.name}에 대한 값`;
-    const unknownNote = input.allow_unknown === false ? ' (사용자 확인 필수)' : '';
+    const q = (input.question ?? '').trim() || `a value for ${input.name}`;
+    const unknownNote = input.allow_unknown === false ? ' (the user must confirm)' : '';
     lines.push(`- ${input.name}: ${q}${unknownNote}`);
   }
   lines.push('');
-  lines.push('처리 규칙:');
-  lines.push('1. 프롬프트가 이미 충족하는 항목은 다시 묻지 마세요. (단어가 그냥 들어있는지가 아니라 실제로 내용이 명세되었는지로 판단하세요.)');
-  lines.push('2. 실제로 충족되지 않은 항목만 AskUserQuestion 도구로 한 번에 묶어 물어보고, 각 질문에 "확인 필요" 옵션을 자동으로 추가하세요.');
-  lines.push('3. 사용자가 "확인 필요"를 선택했거나 답할 수 없는 항목은 절대로 답을 지어내지 마세요(no fabrication). 대신 `## 근거 > 가정` 섹션에 어떤 가정을 두고 진행하는지 명시적으로 기록하세요.');
+  lines.push('Rules:');
+  lines.push('1. Do not ask again for an input the prompt already covers. Judge by what is actually specified, not by whether a word appears.');
+  lines.push('2. Ask only for inputs that are really missing, in one AskUserQuestion call, with a "확인 필요" option on each question.');
+  lines.push('3. Never make up an answer for an input the user marked "확인 필요" or cannot answer (no fabrication). Record the assumption you proceed on in the rationale section (`## 근거` > `가정`, or `## Rationale` > `Assumptions`).');
   return lines.join('\n');
 }

@@ -5,7 +5,12 @@ import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, resolve as resolvePath } from 'node:path';
 import {
+  agentCallRecord,
+  appendDispatchLog,
+  bareSkillName,
   bashOutputFloodMessage,
+  isWorkflowSkill,
+  recordSkillEvidence,
   bashOutputWarnThresholds,
   classifyBashFlood,
   classifyBashReadDetailed,
@@ -26,6 +31,7 @@ import {
   webRepeatSearchMessage,
   writeHabitState,
   writeValidationFailure,
+  afterBash,
 } from '../lib';
 
 interface PostToolInput {
@@ -37,6 +43,7 @@ interface PostToolInput {
   agent_id?: string;
   agent_type?: string;
   tool_name?: string;
+  tool_use_id?: string;
   tool_input?: Record<string, unknown>;
   tool_response?: unknown;
 }
@@ -314,6 +321,20 @@ function main(): void {
       const toolInput = input.tool_input ?? {};
       const toolResponse = input.tool_response;
 
+      // (A0) Delegation log (track G §10.7): an Agent call's background launch or its
+      //   foreground completion, so the delegation guard can count running agents.
+      if (toolName === 'Agent' || toolName === 'Task') {
+        const rec = agentCallRecord(input.tool_use_id ?? null, toolResponse, Date.now());
+        if (rec) appendDispatchLog(sessionId, rec);
+      }
+      // (A0.5) Skill rule evidence (track G §10.4): the main session invoked a workflow skill.
+      if (toolName === 'Skill' && !input.agent_type) {
+        const skill = typeof toolInput.skill === 'string' ? toolInput.skill : '';
+        if (skill !== '' && isWorkflowSkill(skill)) {
+          recordSkillEvidence(sessionId, { k: 'skill', t: Date.now(), name: bareSkillName(skill) });
+        }
+      }
+
       // (A) Read/Edit 추적
       //   D2: agent_id가 있으면(서브에이전트) 기록에 태깅해, 재-Read 게이트가
       //   에이전트별 스코프로 판정할 수 있게 한다. 메인은 태깅 없음(='main' 스코프, 하위호환).
@@ -346,18 +367,29 @@ function main(): void {
             recordRead(sessionId, abs, turn, safeMtime(abs), agentId, partial);
           }
         } else if (toolName === 'Edit' || toolName === 'Write') {
+          // The mtime right after the edit lets read-before-edit see a later change by
+          //   someone else (another agent, the user, a formatter).
           const fp = (toolInput.file_path as string | undefined) ?? '';
-          if (fp) recordEdit(sessionId, resolvePath(cwd, fp), turn, agentId);
+          if (fp) {
+            const abs = resolvePath(cwd, fp);
+            recordEdit(sessionId, abs, turn, agentId, safeMtime(abs));
+          }
         } else if (toolName === 'MultiEdit') {
           // MultiEdit는 file_path가 단일 (edits 배열)이거나, 일부 클라이언트에서 다중일 수 있음.
           const fp = (toolInput.file_path as string | undefined) ?? '';
-          if (fp) recordEdit(sessionId, resolvePath(cwd, fp), turn, agentId);
+          if (fp) {
+            const abs = resolvePath(cwd, fp);
+            recordEdit(sessionId, abs, turn, agentId, safeMtime(abs));
+          }
           const edits = (toolInput.edits as unknown[] | undefined) ?? [];
           if (Array.isArray(edits)) {
             for (const e of edits) {
               if (e && typeof e === 'object') {
                 const fp2 = (e as Record<string, unknown>).file_path as string | undefined;
-                if (fp2) recordEdit(sessionId, resolvePath(cwd, fp2), turn, agentId);
+                if (fp2) {
+                  const abs2 = resolvePath(cwd, fp2);
+                  recordEdit(sessionId, abs2, turn, agentId, safeMtime(abs2));
+                }
               }
             }
           }
@@ -472,6 +504,16 @@ function main(): void {
         }
       }
 
+      // (E) Track G: after a Bash call, markers it made are removed and project files it wrote
+      //   indirectly are recorded (lib/write-sweep.ts afterBash; also run by
+      //   PostToolUseFailure, since a failing command skips PostToolUse, G0 M18).
+      let markerNotice: string | undefined;
+      if (toolName === 'Bash') {
+        const after = afterBash(sessionId, input.tool_use_id, cwd, toolInput.command, agentId);
+        if (after.context) additionalContext = additionalContext ? `${additionalContext}\n${after.context}` : after.context;
+        markerNotice = after.notice;
+      }
+
       const out: HookOutput = {};
       if (additionalContext !== undefined) {
         out.hookSpecificOutput = {
@@ -479,6 +521,7 @@ function main(): void {
           additionalContext,
         };
       }
+      if (markerNotice !== undefined) out.systemMessage = markerNotice;
       emit(out);
     })
     .catch((err) => {

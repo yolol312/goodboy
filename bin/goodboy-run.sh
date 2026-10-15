@@ -2,7 +2,9 @@
 # goodboy hook 런처 — Bun 부재 가드 + 첫 실행 자동 설치 (POSIX sh, Bun 불필요)
 #
 # 사용: sh goodboy-run.sh <hook-name>
-#   hook-name: pre-tool-use | post-tool-use | user-prompt-submit | stop
+#   hook-name: pre-tool-use | post-tool-use | user-prompt-submit | stop | session-start |
+#              subagent-stop | post-tool-use-failure
+#   (without Bun, the last three pass silently like post-tool-use and stop)
 #
 # 동작:
 #   - Bun이 있으면 → 해당 hook 스크립트를 그대로 실행 (기존과 동일)

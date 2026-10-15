@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { AXIS_DIMENSIONS } from '../lib/review-dimensions';
 
 // H1-03 강제 자동 compact(force >= GOODBOY_COMPACT_FORCE_PCT, 기본 50%)의 Stop hook 통합 테스트.
+// Track G: H1-03 no longer blocks (only the user can run /compact). At or above the threshold
+// the user gets a Korean notice once per crossing; the latch resets below the threshold or
+// when usage cannot be measured.
 const STOP_HOOK = resolve(import.meta.dir, '..', 'hooks', 'stop.ts');
 const tmpDirs: string[] = [];
 
@@ -138,6 +141,18 @@ async function runStop(
 const CODE_FILE = 'util.ts';
 const COMPACT_MARKER = '/compact';
 
+/** The H1-03 notice latch, in the session state dir. */
+function latchPath(tmp: string, sessionId: string): string {
+  return join(tmp, `goodboy-session-${sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_')}`, '.goodboy-compact-force-count.txt');
+}
+
+/** The H1-03 notice never blocks: no decision of its own, no stop signal. */
+function expectNoCompactBlock(out: StopOut): void {
+  expect(out.stopReason).toBeUndefined();
+  expect(out.additionalContext).toBeUndefined();
+  expect(out.reason ?? '').not.toContain(COMPACT_MARKER);
+}
+
 /** A passing review for util.ts: future-dated and checks every dimension. A code file needs
  *  performance + refactoring-quality + security-secrets, but requiredDimensionsFor() also
  *  matches tokens in the absolute path, so a random mkdtemp suffix (e.g. "url") can add
@@ -154,36 +169,32 @@ function passingReview(cwd: string): Record<string, unknown> {
   };
 }
 
-describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
-  test('context >= 50% → force BLOCK with auto-compact signal (stopReason + additionalContext)', async () => {
+describe('Stop hook — H1-03 compaction notice (>=50%, track G)', () => {
+  test('context >= 50% → a /compact notice for the user, never a block', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
-    // Even with a passing review on disk, force takes precedence.
     writeReview(cwd, passingReview(cwd));
     const transcript = writeTranscript(cwd, 120_000); // 60% of 200K
     const out = await runStop(tmp, cwd, sessionId, transcript);
 
-    expect(out.decision).toBe('block');
-    expect(out.reason).toContain('강제');
-    expect(out.reason).toContain('60%');
-    expect(out.reason).toContain(COMPACT_MARKER);
-    // context-watchdog.sh와 동일한 자동 compact 유도 신호.
-    expect(out.stopReason).toBe('compact_needed');
-    expect(out.additionalContext).toBeDefined();
-    expect(out.additionalContext).toContain('60%');
+    expect(out.decision).toBeUndefined();
+    expectNoCompactBlock(out);
+    expect(out.systemMessage ?? '').toContain(COMPACT_MARKER);
+    expect(out.systemMessage ?? '').toContain('60%');
+    expect(out.systemMessage ?? '').toContain('H1-03');
   });
 
-  test('force takes precedence over review-required block', async () => {
+  test('the notice does not replace the other gates: a review-required block comes in the same Stop', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
-    // No review file → normally review-required block. But context >= 50% forces compact first.
+    // No review file → review-required block, evaluated as usual next to the notice.
     const transcript = writeTranscript(cwd, 130_000); // 65%
     const out = await runStop(tmp, cwd, sessionId, transcript);
 
     expect(out.decision).toBe('block');
-    expect(out.reason).toContain('강제'); // compact-force reason, NOT the review reason
-    expect(out.reason ?? '').not.toContain('Review is required');
-    expect(out.stopReason).toBe('compact_needed');
+    expect(out.reason).toContain('Review is required');
+    expectNoCompactBlock(out);
+    expect(out.systemMessage ?? '').toContain(COMPACT_MARKER);
   });
 
   test('context < 50% → NO force; review enforcement intact (review-required block)', async () => {
@@ -196,6 +207,7 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
     expect(out.reason).toContain('Review is required');
     expect(out.stopReason).toBeUndefined();
     expect(out.additionalContext).toBeUndefined();
+    expect(out.systemMessage ?? '').not.toContain(COMPACT_MARKER);
   });
 
   test('context < 50% + passing review → clean pass (no force fields)', async () => {
@@ -208,52 +220,56 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
     expect(out.decision).toBeUndefined();
     expect(out.stopReason).toBeUndefined();
     expect(out.reason).toBeUndefined();
+    expect(out.systemMessage ?? '').not.toContain(COMPACT_MARKER);
   });
 
-  test('MAX_RETRIES escape: repeated force eventually passes with a warning (no infinite block)', async () => {
+  test('the notice shows once per crossing; later Stops above the threshold are silent', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
-    writeReview(cwd, passingReview(cwd)); // so the escaped turn can actually pass review
+    writeReview(cwd, passingReview(cwd));
     const transcript = writeTranscript(cwd, 120_000); // 60% — always over threshold
 
     const out1 = await runStop(tmp, cwd, sessionId, transcript);
     const out2 = await runStop(tmp, cwd, sessionId, transcript);
     const out3 = await runStop(tmp, cwd, sessionId, transcript);
 
-    // First two genuine stops: forced block.
-    expect(out1.decision).toBe('block');
-    expect(out1.stopReason).toBe('compact_needed');
-    expect(out2.decision).toBe('block');
-    // Third: MAX_RETRIES(3) escape → not force-blocked; passes with an escape warning.
-    expect(out3.decision).toBeUndefined();
-    expect(out3.stopReason).toBeUndefined();
-    expect(out3.systemMessage ?? '').toContain('H1-03 강제');
-    // Counts the blocks that happened, like every other escape message (A9).
-    expect(out3.systemMessage ?? '').toContain('2회 차단 후에도');
+    for (const out of [out1, out2, out3]) {
+      expect(out.decision).toBeUndefined();
+      expectNoCompactBlock(out);
+    }
+    expect(out1.systemMessage ?? '').toContain(COMPACT_MARKER);
+    expect(out2.systemMessage ?? '').not.toContain(COMPACT_MARKER);
+    expect(out3.systemMessage ?? '').not.toContain(COMPACT_MARKER);
+    // The latch is a counter file that stays at 1 (no count toward an escape).
+    expect(readFileSync(latchPath(tmp, sessionId), 'utf8').trim()).toBe('1');
   });
 
-  // A7: resetting on escape made an endless block/block/pass cycle; the escape now latches.
-  test('escape latches for the session until usage drops below the threshold', async () => {
+  // A7: the latch must not cycle; it clears only when usage drops below the threshold.
+  test('the latch resets when usage drops below the threshold, so the next crossing notifies again', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
     writeReview(cwd, passingReview(cwd));
     const transcript = writeTranscript(cwd, 120_000); // 60%
-    for (let i = 0; i < 3; i++) await runStop(tmp, cwd, sessionId, transcript); // block, block, escape
+    const first = await runStop(tmp, cwd, sessionId, transcript); // notice
 
-    const out4 = await runStop(tmp, cwd, sessionId, transcript);
-    const out5 = await runStop(tmp, cwd, sessionId, transcript);
-    expect(out4.decision).toBeUndefined();
-    expect(out4.stopReason).toBeUndefined();
-    expect(out5.decision).toBeUndefined();
-    // The latch must not silence the context warning (it only suppresses re-forcing).
-    expect(out4.systemMessage ?? '').toContain('H1-01');
+    const out2 = await runStop(tmp, cwd, sessionId, transcript);
+    const out3 = await runStop(tmp, cwd, sessionId, transcript);
+    expect(first.systemMessage ?? '').toContain(COMPACT_MARKER);
+    expect(out2.decision).toBeUndefined();
+    expect(out2.systemMessage ?? '').not.toContain(COMPACT_MARKER);
+    expect(out3.decision).toBeUndefined();
+    expect(out3.systemMessage ?? '').not.toContain(COMPACT_MARKER);
+    // The latch must not silence the context warning (it only suppresses repeating the notice).
+    expect(out2.systemMessage ?? '').toContain('H1-01');
 
-    // Usage drops (compaction happened) → latch clears → a new excess starts at 1/3.
+    // Usage drops (compaction happened) → latch clears → a new crossing notifies again.
     const low = writeTranscript(cwd, 12_000);
-    expect((await runStop(tmp, cwd, sessionId, low)).decision).toBeUndefined();
+    const lowOut = await runStop(tmp, cwd, sessionId, low);
+    expect(lowOut.decision).toBeUndefined();
+    expect(existsSync(latchPath(tmp, sessionId))).toBe(false);
     const again = await runStop(tmp, cwd, sessionId, writeTranscript(cwd, 120_000));
-    expect(again.decision).toBe('block');
-    expect(again.reason).toContain('1/3');
+    expect(again.decision).toBeUndefined();
+    expect(again.systemMessage ?? '').toContain(COMPACT_MARKER);
   });
 
   test('no transcript / unmeasurable → no force; review enforcement intact', async () => {
@@ -263,21 +279,22 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
     expect(out.decision).toBe('block');
     expect(out.reason).toContain('Review is required');
     expect(out.stopReason).toBeUndefined();
+    expect(out.systemMessage ?? '').not.toContain(COMPACT_MARKER);
   });
 
   // (v0.27.6) 압축 경계 직후 — 실측 오탐: /compact 후에도 압축 전 usage가 플러시 지연으로
   //   최신으로 읽혀 재차단됐다(pct=53 deny, 실제 6%). 경계 이후 usage가 없으면 강제 금지.
-  test('compact 경계 직후(압축 후 usage 미플러시) → NO force + 카운터 리셋', async () => {
+  test('right after a compact boundary (usage not flushed yet) → no notice, and the latch resets', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
     writeReview(cwd, passingReview(cwd));
-    // 1) 압축 전 60% → 강제 block(카운터 1).
+    // 1) Before compaction, 60% → notice (latch set).
     const transcript = writeTranscript(cwd, 120_000);
     const out1 = await runStop(tmp, cwd, sessionId, transcript);
-    expect(out1.decision).toBe('block');
-    expect(out1.stopReason).toBe('compact_needed');
+    expect(out1.decision).toBeUndefined();
+    expect(out1.systemMessage ?? '').toContain(COMPACT_MARKER);
 
-    // 2) 사용자가 /compact — 경계 마커가 기록되지만 압축 후 usage는 아직 플러시 전.
+    // 2) The user runs /compact — the boundary is written, the post-compaction usage is not yet.
     const boundary =
       JSON.stringify({ type: 'user', isCompactSummary: true, message: { role: 'user', content: '요약' } }) +
       '\n' +
@@ -292,14 +309,14 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
         boundary,
       'utf8',
     );
-    // 수정 전에는 압축 전 120K(60%)가 그대로 읽혀 2/3 재차단됐다(실측 재현).
+    // The pre-compaction 120K (60%) must not count as current.
     const out2 = await runStop(tmp, cwd, sessionId, transcript);
-    expect(out2.stopReason).toBeUndefined();
-    expect(out2.reason ?? '').not.toContain('강제');
+    expectNoCompactBlock(out2);
     expect(out2.decision).toBeUndefined(); // passing review → clean pass
+    expect(out2.systemMessage ?? '').not.toContain(COMPACT_MARKER);
+    expect(existsSync(latchPath(tmp, sessionId))).toBe(false); // unmeasurable resets the latch
 
-    // 3) 압축 후 usage가 플러시되면 압축 후 수치 기준으로 판정(6% → 강제 없음),
-    //    카운터도 리셋됐으므로 이후 진짜 초과는 1/3부터 시작한다.
+    // 3) Once the post-compaction usage is flushed, it decides (6% → no notice).
     writeFileSync(
       transcript,
       JSON.stringify({
@@ -315,9 +332,9 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
     );
     const out3 = await runStop(tmp, cwd, sessionId, transcript);
     expect(out3.decision).toBeUndefined();
-    expect(out3.stopReason).toBeUndefined();
+    expect(out3.systemMessage ?? '').not.toContain(COMPACT_MARKER);
 
-    // 4) 카운터 리셋 검증: 다시 초과하면 3회째(escape)가 아니라 1/3부터 차단.
+    // 4) A new crossing notifies again.
     writeFileSync(
       transcript,
       JSON.stringify({
@@ -326,25 +343,25 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
       'utf8',
     );
     const out4 = await runStop(tmp, cwd, sessionId, transcript);
-    expect(out4.decision).toBe('block');
-    expect(out4.reason).toContain('1/3');
+    expect(out4.decision).toBeUndefined();
+    expect(out4.systemMessage ?? '').toContain(COMPACT_MARKER);
   });
 
   // (v0.27.6 변이 사살, 리뷰 medium) usage-null 카운터 리셋이 어느 테스트로도 고정되지
   //   않았다 — 기존 통합 시나리오는 null 다음에 임계 미만(6%) 단계가 있어 그 경로의
   //   기존 리셋이 변이를 가렸다. 여기서는 null 직후 곧바로 재초과시켜 구속한다.
-  test('측정 불가(경계 직후)가 강제 카운터를 리셋한다 — 직후 재초과는 1/3부터', async () => {
+  test('an unmeasurable Stop resets the latch: an immediate re-crossing notifies again', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
     writeReview(cwd, passingReview(cwd));
 
-    // 1) 60% → 강제 block(카운터 1).
+    // 1) 60% → notice (latch set).
     const transcript = writeTranscript(cwd, 120_000);
     const out1 = await runStop(tmp, cwd, sessionId, transcript);
-    expect(out1.decision).toBe('block');
-    expect(out1.reason).toContain('1/3');
+    expect(out1.decision).toBeUndefined();
+    expect(out1.systemMessage ?? '').toContain(COMPACT_MARKER);
 
-    // 2) 경계 직후(압축 후 usage 미플러시) → 측정 불가, 강제 없음 + 카운터 리셋.
+    // 2) Right after a boundary (post-compaction usage not flushed) → unmeasurable, no notice.
     writeFileSync(
       transcript,
       JSON.stringify({
@@ -356,9 +373,10 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
       'utf8',
     );
     const out2 = await runStop(tmp, cwd, sessionId, transcript);
-    expect(out2.stopReason).toBeUndefined();
+    expectNoCompactBlock(out2);
+    expect(out2.systemMessage ?? '').not.toContain(COMPACT_MARKER);
 
-    // 3) 곧바로 다시 초과 — 리셋이 없었다면(변이) 2/3로 이어졌을 것.
+    // 3) Over again right away — without the reset (mutant) the latch would keep it silent.
     writeFileSync(
       transcript,
       JSON.stringify({
@@ -367,8 +385,8 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
       'utf8',
     );
     const out3 = await runStop(tmp, cwd, sessionId, transcript);
-    expect(out3.decision).toBe('block');
-    expect(out3.reason).toContain('1/3');
+    expect(out3.decision).toBeUndefined();
+    expect(out3.systemMessage ?? '').toContain(COMPACT_MARKER);
   });
 
   // (3-A) 1M 지원 세대(opus-4-8)인데 [1m] 표식이 없으면 200K/1M 구분 불가 → 강제 보류.
@@ -382,18 +400,20 @@ describe('Stop hook — H1-03 forced auto-compact (>=50%)', () => {
     expect(out.stopReason).toBeUndefined();
     expect(out.decision).toBeUndefined(); // 강제도, 리뷰 block도 아님(passing review)
     expect(out.reason ?? '').not.toContain('강제');
+    expect(out.systemMessage ?? '').not.toContain(COMPACT_MARKER); // no notice on an unconfident limit
   });
 
   // (3-A) 같은 모호 모델이라도 GOODBOY_CONTEXT_LIMIT으로 한도를 명시하면 강제가 복구된다.
-  test('ambiguous model but GOODBOY_CONTEXT_LIMIT set → force applies', async () => {
+  test('ambiguous model but GOODBOY_CONTEXT_LIMIT set → the notice applies', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, [CODE_FILE], cwd);
     writeReview(cwd, passingReview(cwd));
     const transcript = writeTranscriptWithModel(cwd, 150_000, 'claude-opus-4-8');
     const out = await runStop(tmp, cwd, sessionId, transcript, { GOODBOY_CONTEXT_LIMIT: '200000' });
-    // 200K로 확정 → 75% → 강제 block.
-    expect(out.decision).toBe('block');
-    expect(out.reason).toContain('강제');
-    expect(out.stopReason).toBe('compact_needed');
+    // A confident 200K limit → 75% → the notice (still no block).
+    expect(out.decision).toBeUndefined();
+    expectNoCompactBlock(out);
+    expect(out.systemMessage ?? '').toContain(COMPACT_MARKER);
+    expect(out.systemMessage ?? '').toContain('75%');
   });
 });

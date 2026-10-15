@@ -1,9 +1,9 @@
-// Escape budgets belong to one session (stabilization plan A3), and escape messages count
-// the blocks that actually happened (A9). Driven only through real Stop calls, so the tests
-// do not depend on where or how the counters are stored.
+// Block counts belong to one session (stabilization plan A3), and so does the user's Stop
+// approval (track G: it replaced the count-based escapes). Driven only through real Stop
+// calls, so the tests do not depend on where or how the counters are stored.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
@@ -98,30 +98,43 @@ async function runStop(tmp: string, cwd: string, sessionId: string): Promise<Sto
   }
 }
 
-describe('Stop hook — per-session escape budgets (A3) and escape wording (A9)', () => {
-  test("another session's Stop does not reset this session's escape budget", async () => {
+// The command the notice prints for each session (the session tag is the id up to 8 chars).
+const TOUCH_A = '! touch .claude/.goodboy-stop-approved-sess-a.txt';
+const TOUCH_B = '! touch .claude/.goodboy-stop-approved-sess-b.txt';
+
+/** The user's one-use Stop override for `sessionId`: what its notice tells the user to run. */
+function approveStop(cwd: string, sessionId: string): string {
+  const p = join(cwd, '.claude', `.goodboy-stop-approved-${sessionId}.txt`);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, '', 'utf8');
+  return p;
+}
+
+describe('Stop hook — per-session block counts (A3) and the user override (track G)', () => {
+  test("another session's Stop does not reset this session's block count", async () => {
     const { tmp, cwd } = newSandbox();
     seedValidationMarker(tmp, 'sess-a');
 
     const a1 = await runStop(tmp, cwd, 'sess-a');
     expect(a1.decision).toBe('block');
-    expect(a1.reason).toContain('1/3');
+    expect(a1.reason).toContain('(block 1)');
     const a2 = await runStop(tmp, cwd, 'sess-a');
     expect(a2.decision).toBe('block');
-    expect(a2.reason).toContain('2/3');
+    expect(a2.reason).toContain('(block 2)');
+    expect(a2.systemMessage ?? '').toContain(TOUCH_A);
 
-    // Session B has no marker of its own; its Stop resets only its own budget.
+    // Session B has no marker of its own; its Stop resets only its own count.
     const b = await runStop(tmp, cwd, 'sess-b');
     expect(b.decision).toBeUndefined();
 
+    // No escape on the 3rd: still blocked, the count goes on.
     const a3 = await runStop(tmp, cwd, 'sess-a');
-    expect(a3.decision).toBeUndefined();
-    // Two blocks happened, then the escape: the message must say 2, not 3.
-    expect(a3.systemMessage).toContain('2회 차단 후');
-    expect(a3.systemMessage).not.toContain('3회 차단 후');
+    expect(a3.decision).toBe('block');
+    expect(a3.reason).toContain('(block 3)');
+    expect(a3.systemMessage ?? '').toContain(TOUCH_A);
   });
 
-  test('two sessions blocking in turn each reach their own escape (no endless 1/3 loop)', async () => {
+  test("two sessions blocking in turn count their own blocks; one session's approval does not pass the other", async () => {
     const { tmp, cwd } = newSandbox();
     seedSession(tmp, 'sess-a', 1, ['src/a.ts'], cwd);
     seedSession(tmp, 'sess-b', 1, ['src/b.ts'], cwd);
@@ -132,16 +145,24 @@ describe('Stop hook — per-session escape budgets (A3) and escape wording (A9)'
     const a2 = await runStop(tmp, cwd, 'sess-a');
     const b2 = await runStop(tmp, cwd, 'sess-b');
     expect([a1.decision, b1.decision, a2.decision, b2.decision]).toEqual(['block', 'block', 'block', 'block']);
-    expect(a1.reason).toContain('retry 1/3');
-    expect(b1.reason).toContain('retry 1/3');
-    expect(a2.reason).toContain('retry 2/3');
-    expect(b2.reason).toContain('retry 2/3');
+    expect(a1.reason).toContain('(block 1)');
+    expect(b1.reason).toContain('(block 1)');
+    expect(a2.reason).toContain('(block 2)');
+    expect(b2.reason).toContain('(block 2)');
+    // Each notice names that session's own marker.
+    expect(a2.systemMessage ?? '').toContain(TOUCH_A);
+    expect(a2.systemMessage ?? '').not.toContain(TOUCH_B);
+    expect(b2.systemMessage ?? '').toContain(TOUCH_B);
 
+    // B's user approves: B passes once, A is still blocked.
+    const markerB = approveStop(cwd, 'sess-b');
     const a3 = await runStop(tmp, cwd, 'sess-a');
+    expect(a3.decision).toBe('block');
+    expect(a3.reason).toContain('(block 3)');
+    expect(existsSync(markerB)).toBe(true); // A's Stop does not use B's approval
     const b3 = await runStop(tmp, cwd, 'sess-b');
-    expect(a3.decision).toBeUndefined();
     expect(b3.decision).toBeUndefined();
-    expect(a3.systemMessage).toContain('2회 차단 후');
-    expect(b3.systemMessage).toContain('2회 차단 후');
+    expect(b3.systemMessage ?? '').toContain('사용자 승인 마커로 이번 턴의');
+    expect(existsSync(markerB)).toBe(false);
   });
 });

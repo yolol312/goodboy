@@ -117,6 +117,14 @@ describe('classifyBashWrite — 허용해야 하는 것 (오탐 방지)', () => 
     expect(denied('make 2>/dev/null')).toEqual([]);
     expect(denied('make > /dev/null 2>&1')).toEqual([]);
     expect(denied('echo err >&2')).toEqual([]);
+    // Results come only from the CLI: a shell write into .claude/tests or .claude/reviews is a
+    //   forged result (G1 security review); the rest of .claude/ stays allowed.
+    expect(denied("echo '{\"verdict\":\"pass\"}' > .claude/tests/x.json")).toEqual(['/proj/.claude/tests/x.json']);
+    expect(denied('cp fake.json .claude/reviews/r.json')).toEqual([]); // cp is not classified (the after-Bash sweeps do not catch it either)
+    expect(denied('echo x > .claude/notes.txt')).toEqual([]);
+    // `)` ends the target: in `$(cmd 2>&1)` it is the fd 1, not a file `1)` (G1 test round).
+    expect(denied('out=$(git push 2>&1); echo "$out"')).toEqual([]);
+    expect(denied('echo $(date > src/a.ts)')).toEqual(['/proj/src/a.ts']);
   });
 
   test('프로젝트 밖 경로 (mktemp -d 프로브)', () => {
@@ -139,7 +147,9 @@ describe('classifyBashWrite — 허용해야 하는 것 (오탐 방지)', () => 
     expect(denied('echo x > dist/bundle.js')).toEqual([]);
     expect(denied('echo x > node_modules/.cache/y')).toEqual([]);
     expect(denied('git log > .git/notes')).toEqual([]);
-    expect(denied('echo x > .claude/reviews/r.json')).toEqual([]);
+    expect(denied('echo x > .claude/status-notes.txt')).toEqual([]);
+    // Track G: results come only from the CLI, so .claude/reviews and .claude/tests are guarded.
+    expect(denied('echo x > .claude/reviews/r.json')).toEqual(['/proj/.claude/reviews/r.json']);
   });
 
   test('로그 파일', () => {

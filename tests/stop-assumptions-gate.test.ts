@@ -3,9 +3,10 @@
 //   비어 있을 때 Stop이 차단해야 한다.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { approvalMarkerRelPath } from '../lib/approval-marker';
 
 const STOP_HOOK = resolve(import.meta.dir, '..', 'hooks', 'stop.ts');
 const tmpDirs: string[] = [];
@@ -104,6 +105,14 @@ const REASONING_WITH_SPECULATION = [
 
 const REASONING_FACTS_ONLY = ['## 추론', '### 사실', '- README를 Read로 확인함'].join('\n');
 
+/** The user's one-use Stop override (track G): what `! touch <marker>` creates. */
+function approveStop(cwd: string, sessionId: string): string {
+  const p = join(cwd, approvalMarkerRelPath('stop', sessionId));
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, '', 'utf8');
+  return p;
+}
+
 interface StopOut {
   decision?: string;
   reason?: string;
@@ -181,16 +190,40 @@ describe('Stop hook — 추측-리뷰 연동 (A2)', () => {
     expect(out.decision).toBeUndefined();
   });
 
-  test('MAX_RETRIES escape: 3회째는 통과 + 사용자 알림', async () => {
+  // Track G: no count-based escape. The 3rd Stop in a row blocks like the 1st; from the 2nd
+  //   block on, the user is told how to let it pass.
+  test('no retry cap: the 3rd Stop in a row still blocks and tells the user about the marker', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, [DOC_FILE], cwd);
     writeReview(cwd, []);
-    mkdirSync(join(cwd, '.claude'), { recursive: true });
     // Retry counters are per session (A3): they live in the session state dir.
     writeFileSync(join(tmp, `goodboy-session-${sessionId}`, '.goodboy-retry-count.txt'), '2', 'utf8');
     const tp = writeTranscript(cwd, REASONING_WITH_SPECULATION);
     const out = await runStop(tmp, cwd, sessionId, tp);
+    expect(out.decision).toBe('block');
+    expect(out.reason).toContain('추측-리뷰 연동');
+    expect(out.reason).toContain('(block 3)');
+    expect(out.reason).toContain('only the user can let this Stop pass');
+    expect(out.reason).not.toContain('재시도');
+    expect(out.systemMessage ?? '').toContain(`! touch ${approvalMarkerRelPath('stop', sessionId)}`);
+    expect(out.systemMessage ?? '').not.toContain('GOODBOY_'); // review gates have no env switch
+  });
+
+  test("the user's Stop marker passes the gate once; the next Stop blocks again", async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 1, [DOC_FILE], cwd);
+    writeReview(cwd, []);
+    const marker = approveStop(cwd, sessionId);
+    const tp = writeTranscript(cwd, REASONING_WITH_SPECULATION);
+    const out = await runStop(tmp, cwd, sessionId, tp);
     expect(out.decision).toBeUndefined();
-    expect(out.systemMessage).toContain('검증되지 않음');
+    expect(out.systemMessage ?? '').toContain('검증되지 않았어요');
+    expect(out.systemMessage ?? '').toContain('사용자 승인 마커로 이번 턴의');
+    expect(existsSync(marker)).toBe(false); // used once
+
+    // The edit is still in scope and still unverified: blocked again, counting from 1.
+    const next = await runStop(tmp, cwd, sessionId, tp);
+    expect(next.decision).toBe('block');
+    expect(next.reason).toContain('(block 1)');
   });
 });

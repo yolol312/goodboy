@@ -1,7 +1,7 @@
-// A7: once the forced-compact escape has fired, it stays latched for the session.
-// Later Stops above the threshold neither block nor repeat the escape warning; the latch
-// clears when usage drops below the threshold. (Before A7 the escape reset the counter,
-// giving an endless block/block/pass cycle.)
+// A7, track G: H1-03 is a notice, not a block. Once it has fired, it stays latched for the
+// session: later Stops above the threshold do not repeat it; the latch clears when usage
+// drops below the threshold. (Before A7 the forced-compact escape reset its counter, giving
+// an endless block/block/pass cycle; track G removed the block itself.)
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -101,8 +101,8 @@ async function runStop(box: { tmp: string; cwd: string; sessionId: string }, tra
   }
 }
 
-describe('Stop hook — forced-compact escape latch (A7)', () => {
-  test('after the escape, later Stops pass silently instead of repeating the warning', async () => {
+describe('Stop hook — compaction notice latch (A7, track G)', () => {
+  test('the notice fires once; later Stops over the threshold pass silently', async () => {
     const box = newSandbox();
     const high = transcript(box.cwd, 120_000); // 60%
     const outs: StopOut[] = [];
@@ -111,27 +111,26 @@ describe('Stop hook — forced-compact escape latch (A7)', () => {
     // On failure, show which gate produced each outcome (a one-off failure was seen once in a
     // full-suite run and could not be explained from the decisions alone).
     const trace = JSON.stringify(outs.map((o) => [o.decision ?? 'pass', (o.reason ?? o.systemMessage ?? '').slice(-100)]));
-    expect(outs.map((o) => o.decision), trace).toEqual(['block', 'block', undefined, undefined, undefined]);
-    expect(outs[2]!.systemMessage ?? '').toContain('H1-03');
-    // The escape counts the blocks that happened (2), like every other escape message.
-    expect(outs[2]!.systemMessage ?? '').toContain('2회 차단 후에도');
-    for (const o of outs.slice(3)) {
-      expect(o.stopReason).toBeUndefined();
-      expect(o.systemMessage ?? '').not.toContain('H1-03');
-    }
+    expect(outs.map((o) => o.decision), trace).toEqual([undefined, undefined, undefined, undefined, undefined]);
+    expect(outs[0]!.systemMessage ?? '').toContain('H1-03');
+    expect(outs[0]!.systemMessage ?? '').toContain('/compact');
+    for (const o of outs) expect(o.stopReason).toBeUndefined();
+    for (const o of outs.slice(1)) expect(o.systemMessage ?? '').not.toContain('H1-03');
   });
 
-  test('the latch is per session: another session over the threshold starts at 1/3', async () => {
+  test('the latch is per session: another session over the threshold gets its own notice', async () => {
     const box = newSandbox();
     const high = transcript(box.cwd, 120_000);
-    for (let i = 0; i < 3; i++) await runStop(box, high); // block, block, escape (latched)
+    expect((await runStop(box, high)).systemMessage ?? '').toContain('H1-03'); // notice, then latched
 
     const other = { ...box, sessionId: `${box.sessionId}-other` };
     const first = await runStop(other, high);
-    expect(first.decision).toBe('block');
-    expect(first.reason).toContain('1/3');
+    expect(first.decision).toBeUndefined();
+    expect(first.systemMessage ?? '').toContain('H1-03');
 
     // The first session is still latched.
-    expect((await runStop(box, high)).decision).toBeUndefined();
+    const again = await runStop(box, high);
+    expect(again.decision).toBeUndefined();
+    expect(again.systemMessage ?? '').not.toContain('H1-03');
   });
 });

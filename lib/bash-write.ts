@@ -13,7 +13,8 @@
 // 완전 차단이 아니라 "무심코 우회"를 막는 것이 목적이다.
 
 import { homedir } from 'node:os';
-import { resolve as resolvePath, sep } from 'node:path';
+import { normalize as normalizePath, resolve as resolvePath, sep } from 'node:path';
+import { namesOwnResultDir, RESULT_DIR } from './result-dir';
 
 /** 세그먼트 토큰 중 리다이렉션 연산자(> <) 자리를 표시하는 마커.
  *  공백을 포함해 정상 토큰과 절대 충돌하지 않는다. The token after it is the operator's
@@ -121,8 +122,12 @@ export function tokenizeSegments(command: string): string[][] {
  *    word-character prefix (`EOF`) waited for a line that never came.
  *  - Comments are dropped from the scanned text: their `>` writes nothing. A `#` starts one
  *    only at the start of a word, so not after an escaped blank (`a\ #b`) or right after a
- *    command substitution (`$(echo a)#b`). */
-export function stripHeredocs(command: string): string {
+ *    command substitution (`$(echo a)#b`).
+ *  - `expansions` (the shared reader, closing G1 round): an unquoted body (`<<EOF`) runs its
+ *    `$(…)` and backticks, so such a body is kept as the double-quoted word of a no-op `:`
+ *    command after the line. A quoted delimiter (`<<'EOF'`) keeps the body data.
+ *  - `bodies` collects every body; `owners`, beside it, the command each one belongs to. */
+export function stripHeredocs(command: string, opts: { expansions?: boolean; bodies?: string[]; owners?: Array<HeredocOwner | undefined> } = {}): string {
   const n = command.length;
   let out = '';
   // Where the scan is: shell syntax (the top level or a command substitution `$( … )`) or a
@@ -134,7 +139,7 @@ export function stripHeredocs(command: string): string {
   let inSingle = false;
   let wordStart = true; // a `#` here starts a comment
   // Heredocs opened on the current line; their bodies start after its newline.
-  const pending: Array<{ delim: string; stripTabs: boolean }> = [];
+  const pending: Array<{ delim: string; stripTabs: boolean; quoted: boolean; owner?: HeredocOwner }> = [];
   const emit = (s: string, startsWord: boolean): void => {
     out += s;
     wordStart = startsWord;
@@ -234,10 +239,10 @@ export function stripHeredocs(command: string): string {
       const stripTabs = command[j] === '-';
       if (stripTabs) j++;
       while (command[j] === ' ' || command[j] === '\t') j++;
-      const { word, end } = heredocDelimiter(command, j);
+      const { word, end, quoted } = heredocDelimiter(command, j);
       if (word !== '') {
         // 연산자+종결자 표기를 명령 텍스트에서 제거(공백으로 치환) — 줄의 나머지는 유지.
-        pending.push({ delim: word, stripTabs });
+        pending.push({ delim: word, stripTabs, quoted, owner: opts.owners ? heredocOwner(out) : undefined });
         emit(' ', true);
         i = end;
         continue;
@@ -247,13 +252,21 @@ export function stripHeredocs(command: string): string {
       emit('\n', true);
       i++;
       // 본문 스킵: 각 heredoc 순서대로, 줄 전체가 종결자와 일치하는 줄까지 소비.
-      for (const { delim, stripTabs } of pending.splice(0)) {
+      for (const { delim, stripTabs, quoted, owner } of pending.splice(0)) {
+        const lines: string[] = [];
         while (i < n) {
           const nl = command.indexOf('\n', i);
           const line = command.slice(i, nl === -1 ? n : nl);
           i = nl === -1 ? n : nl + 1;
           if ((stripTabs ? line.replace(/^\t+/, '') : line) === delim) break;
+          lines.push(line);
         }
+        // `expansions`: an unquoted body's substitutions run when the command reads it
+        //   (closing G1 round), so they stay as a no-op command's word, in its place.
+        const body = lines.join('\n');
+        opts.bodies?.push(body);
+        opts.owners?.push(owner);
+        if (opts.expansions && !quoted && /\$\(|`/.test(body)) emit(`: ${bodyAsQuoted(body)}\n`, true);
       }
       continue;
     }
@@ -261,6 +274,22 @@ export function stripHeredocs(command: string): string {
     i++;
   }
   return out;
+}
+
+/** The command a heredoc belongs to: its words before the operator, and whether it starts a
+ *  command substitution (`$(cat <<'EOF'`). */
+export interface HeredocOwner {
+  words: string;
+  substitution: boolean;
+}
+
+/** Read back from the text before the operator, at most 256 characters (a long line of
+ *  operators must not cost its square). */
+function heredocOwner(out: string): HeredocOwner {
+  const stop = Math.max(0, out.length - 256);
+  let k = out.length;
+  while (k > stop && !/[\n;&|()]/.test(out[k - 1]!)) k--;
+  return { words: out.slice(k).trim(), substitution: out[k - 1] === '(' && out[k - 2] === '$' };
 }
 
 /** The index after an arithmetic expression starting at `i` (`$((`, `((` or `$[`). */
@@ -282,18 +311,22 @@ function arithmeticEnd(command: string, i: number): number {
 }
 
 /** A heredoc delimiter at `j`: one shell word, quotes removed. Returns '' when there is none. */
-function heredocDelimiter(command: string, j: number): { word: string; end: number } {
+function heredocDelimiter(command: string, j: number): { word: string; end: number; quoted: boolean } {
   let word = '';
+  // A quoted delimiter (`'EOF'`, `"EOF"`, `\EOF`) makes the body data; else it expands.
+  let quoted = false;
   while (j < command.length) {
     const c = command[j] ?? '';
     if (c === "'" || c === '"') {
+      quoted = true;
       const close = command.indexOf(c, j + 1);
-      if (close === -1) return { word: word + command.slice(j + 1), end: command.length };
+      if (close === -1) return { word: word + command.slice(j + 1), end: command.length, quoted };
       word += command.slice(j + 1, close);
       j = close + 1;
       continue;
     }
     if (c === '\\' && j + 1 < command.length) {
+      quoted = true;
       word += command[j + 1];
       j += 2;
       continue;
@@ -302,7 +335,33 @@ function heredocDelimiter(command: string, j: number): { word: string; end: numb
     word += c;
     j++;
   }
-  return { word, end: j };
+  return { word, end: j, quoted };
+}
+
+/** An unquoted heredoc body as a double-quoted shell word: both expand `$(…)`, backticks and
+ *  `$x` the same way, but a `"` is plain text in the body (outside its substitutions). */
+function bodyAsQuoted(body: string): string {
+  let out = '"';
+  let depth = 0;
+  let tick = false;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i]!;
+    if (c === '\\' && i + 1 < body.length) {
+      out += c + body[++i];
+      continue;
+    }
+    if (c === '$' && body[i + 1] === '(') {
+      depth++;
+      out += '$(';
+      i++;
+      continue;
+    }
+    if (depth > 0 && c === '(') depth++;
+    else if (depth > 0 && c === ')') depth--;
+    else if (c === '`') tick = !tick;
+    out += c === '"' && depth === 0 && !tick ? '\\"' : c;
+  }
+  return `${out}"`;
 }
 
 /** 리다이렉션(> >> &> 2>) 타깃 — 따옴표 상태를 추적하는 문자 단위 스캐너 (v0.26.1).
@@ -360,7 +419,8 @@ function redirectTargets(command: string): { target: string; index: number }[] {
       }
       j++; // 닫는 따옴표
     } else {
-      while (j < command.length && !/[\s;|&<>]/.test(command[j] ?? '')) {
+      // `)` ends the word too: in `$(cmd 2>&1)` the target is `1`, not `1)`.
+      while (j < command.length && !/[\s;|&<>)]/.test(command[j] ?? '')) {
         target += command[j];
         j++;
       }
@@ -568,7 +628,12 @@ const ALWAYS_ALLOWED = new Set(['/dev/null', '/dev/stdout', '/dev/stderr', '/dev
 
 /** cwd 기준 상대 경로 조각이 산출물/메타 디렉터리인가 */
 function isAllowedInsideProject(rel: string): boolean {
-  const first = rel.split(sep)[0] ?? '';
+  const parts = rel.split(sep);
+  const first = parts[0] ?? '';
+  // Track G: the gates' evidence is written only by the result CLI (its own process, not a
+  //   shell redirect), so a shell write into .claude/tests or .claude/reviews is a forged
+  //   result and counts as a project write.
+  if (first === '.claude' && ['tests', 'reviews', 'pending'].includes(parts[1] ?? '')) return false;
   if (['.claude', '.git', 'node_modules', 'dist', 'build', 'coverage', 'target'].includes(first)) {
     return true;
   }
@@ -589,7 +654,7 @@ function extraAllowed(): string[] {
 
 /** 이 Bash 명령이 프로젝트 안의 파일을 쓰려 하면 그 경로들을 반환. 없으면 빈 배열.
  *  절대 throw 하지 않는다(파싱 실패 = 빈 배열 = fail-open). */
-export function classifyBashWrite(command: string, cwd: string): string[] {
+export function classifyBashWrite(command: string, cwd: string, opts: { strict?: boolean } = {}): string[] {
   if (typeof command !== 'string' || command.trim() === '') return [];
   let targets: { target: string; index: number }[];
   let cds: DirEvent[];
@@ -625,6 +690,19 @@ export function classifyBashWrite(command: string, cwd: string): string[] {
   const denied = new Set<string>();
   for (const { target: t, index } of targets) {
     if (ALWAYS_ALLOWED.has(t)) continue;
+    // A target naming this session's result dirs is a project write even when it has `$` or a
+    //   glob after the dir (`> ".claude/tests/f$(date +%s).json"`, security review): results
+    //   come only from the CLI. Quotes, backslashes, `./` and `//` are read through; a glob in
+    //   the dir part (`.claude/te*s/`) may name one too. Another project's result dir (a mktemp
+    //   sandbox) is an ordinary outside write (lib/result-dir.ts, final G1 review).
+    const flat = normalizePath(t.replace(/["'\\]/g, ''));
+    if (RESULT_DIR.test(flat)) {
+      const at = t.startsWith('/') ? cwdAbs : baseDirAt(cwdAbs, cds, index);
+      if (namesOwnResultDir(t, at, cwdAbs)) {
+        denied.add(resolvePath(at, flat.replace(/[$`*?].*$/, '')));
+        continue;
+      }
+    }
     // 변수/치환이 섞인 타깃은 판정 불가 → fail-open(허용)
     if (/[$`*?]/.test(t)) continue;
     const base = t.startsWith('/') ? cwdAbs : baseDirAt(cwdAbs, cds, index);
@@ -640,8 +718,10 @@ export function classifyBashWrite(command: string, cwd: string): string[] {
     if (abs !== cwdAbs && !abs.startsWith(cwdAbs + sep)) continue;
     const rel = abs.slice(cwdAbs.length + 1);
     if (rel === '') continue;
-    if (isAllowedInsideProject(rel)) continue;
-    if (allowExtra.some((p) => rel === p || rel.startsWith(p.endsWith(sep) ? p : p + sep))) continue;
+    // `strict` (role limits for read-only agents): no artifact or meta-dir exemptions, so
+    //   `.git/hooks/pre-push` or `.claude/settings.local.json` count as project writes.
+    if (!opts.strict && isAllowedInsideProject(rel)) continue;
+    if (!opts.strict && allowExtra.some((p) => rel === p || rel.startsWith(p.endsWith(sep) ? p : p + sep))) continue;
     denied.add(abs);
   }
   return Array.from(denied);
@@ -658,8 +738,8 @@ export function bashWriteMessage(files: string[], markerRelPath: string): string
     '임시 프로브 파일이 필요하면 `mktemp -d`가 만든 디렉터리(프로젝트 밖)에 만드세요. ' +
     '대량 범위 편집(수백 줄 삭제 등)이라 Edit의 old_string 재현이 비현실적이면: ' +
     '(1) Read로 범위를 확인한 뒤 Write 도구로 파일 전체를 재작성하거나, ' +
-    `(2) 사용자 승인을 받아 \`touch ${markerRelPath}\` 후 같은 명령을 ` +
-    '다시 실행하세요(1회용 승인 — 편집은 리뷰 추적에 기록됩니다). ' +
+    `(2) 사용자에게 승인을 요청해, 사용자가 직접 \`! touch ${markerRelPath}\`를 실행한 뒤 같은 명령을 ` +
+    '다시 실행하세요(1회용 승인 — 편집은 리뷰 추적에 기록됩니다. 마커는 사용자만 만들 수 있습니다). ' +
     '(Bash 쓰기 게이트 — 세션 전체 해제: GOODBOY_BASH_WRITE_GATE=off)'
   );
 }

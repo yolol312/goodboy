@@ -1,17 +1,19 @@
-// Foreign high findings on the review gate's escapes (stabilization plan A3, round 3), end to
-// end with the real PostToolUse and Stop hooks.
+// Foreign high findings on the review gate's user overrides (stabilization plan A3, round 3;
+// track G), end to end with the real PostToolUse and Stop hooks.
 //
 // High findings about files outside this session's edit history do not block; the Stop
 // shows them once, when the review cursor moves. Only the passes showed them. The four
-// escapes also move the cursor, and the next Stop starts after it, so a foreign high
+// escapes also moved the cursor, and the next Stop starts after it, so a foreign high
 // finding written while the session was blocked was never shown (refactoring and
 // security reviews). The high-severity and dimension escapes also left the status
-// snapshot at "review pending" after moving the cursor.
+// snapshot at "review pending" after moving the cursor. Track G replaced the count-based
+// escapes with the user's one-use Stop marker, which passes these gates the same way.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { approvalMarkerRelPath } from '../lib/approval-marker';
 import { AXIS_DIMENSIONS } from '../lib/review-dimensions';
 
 const ROOT = resolve(import.meta.dir, '..');
@@ -116,17 +118,21 @@ function transcript(repo: Repo, text: string): string {
   return path;
 }
 
-/** Two blocks, then the escape. */
-async function stopUntilEscape(repo: Repo, transcriptPath?: string): Promise<HookOut> {
+/** Three blocks (no count-based escape), then the user's marker lets the Stop pass once. */
+async function stopUntilUserPass(repo: Repo, transcriptPath?: string): Promise<HookOut> {
   const payload = { session_id: SID, hook_event_name: 'Stop', ...(transcriptPath ? { transcript_path: transcriptPath } : {}) };
-  for (let i = 1; i <= 2; i++) {
+  for (let i = 1; i <= 3; i++) {
     const blocked = await run(repo, STOP, payload);
     expect(blocked.decision).toBe('block');
+    expect(blocked.reason ?? '').toContain(`(block ${i})`);
     expect(blocked.reason ?? '').not.toContain(FOREIGN_ISSUE); // a note for the user, not a block reason
   }
-  const escaped = await run(repo, STOP, payload);
-  expect(escaped.decision).toBeUndefined();
-  return escaped;
+  const marker = join(repo.cwd, approvalMarkerRelPath('stop', SID));
+  writeFileSync(marker, '', 'utf8'); // the user's `! touch`
+  const passed = await run(repo, STOP, payload);
+  expect(passed.decision).toBeUndefined();
+  expect(existsSync(marker)).toBe(false); // used once
+  return passed;
 }
 
 function reviewPending(repo: Repo): unknown {
@@ -137,13 +143,13 @@ function reviewPending(repo: Repo): unknown {
 }
 
 function expectForeignNote(out: HookOut): void {
-  expect(out.systemMessage ?? '').toContain('사용자 확인이 필요합니다');
+  expect(out.systemMessage ?? '').toContain('사용자 승인 마커로 이번 턴의');
   expect(out.systemMessage ?? '').toContain(`이 세션의 편집 기록에 없는 파일에 대한 high 지적(차단하지 않음): [high]`);
   expect(out.systemMessage ?? '').toContain(FOREIGN_ISSUE);
 }
 
-describe('foreign high findings on the escapes (A3, round 3)', () => {
-  test('the high-severity escape', async () => {
+describe('foreign high findings on the user overrides (A3, round 3; track G)', () => {
+  test('the high-severity override', async () => {
     const repo = newRepo();
     await editA(repo);
     const a = resolve(repo.cwd, 'src/a.ts');
@@ -153,34 +159,34 @@ describe('foreign high findings on the escapes (A3, round 3)', () => {
       verdict: 'needs-changes',
     });
     writeForeignReview(repo);
-    const out = await stopUntilEscape(repo);
+    const out = await stopUntilUserPass(repo);
     expectForeignNote(out);
     expect(out.systemMessage ?? '').toContain('token logged');
     expect(reviewPending(repo)).toBe(false);
   }, 60_000);
 
-  test('the review-validation escape', async () => {
+  test('the review-validation override', async () => {
     const repo = newRepo();
     await editA(repo);
     writeForeignReview(repo); // the only review: src/a.ts stays unreviewed
-    expectForeignNote(await stopUntilEscape(repo));
+    expectForeignNote(await stopUntilUserPass(repo));
   }, 60_000);
 
-  test('the assumption-review escape', async () => {
+  test('the assumption-review override', async () => {
     const repo = newRepo();
     await editA(repo);
     writeReview(repo, 'a.json', { reviewed_files: [resolve(repo.cwd, 'src/a.ts')] });
     writeForeignReview(repo);
     const tp = transcript(repo, ['Done.', '', '## 근거', '### 사실', '- a is exported', '### 가정', '- callers pass a string'].join('\n'));
-    expectForeignNote(await stopUntilEscape(repo, tp));
+    expectForeignNote(await stopUntilUserPass(repo, tp));
   }, 60_000);
 
-  test('the dimension escape', async () => {
+  test('the dimension override', async () => {
     const repo = newRepo();
     await editA(repo);
     writeReview(repo, 'a.json', { reviewed_files: [resolve(repo.cwd, 'src/a.ts')], dimensions_checked: ['performance'] });
     writeForeignReview(repo);
-    const out = await stopUntilEscape(repo);
+    const out = await stopUntilUserPass(repo);
     expectForeignNote(out);
     expect(reviewPending(repo)).toBe(false);
   }, 60_000);

@@ -48,7 +48,7 @@ describe('user-prompt-submit H5-04 concise-first', () => {
   test('injects concise-first instruction on a normal prompt (default on)', async () => {
     const out = await runHook('fix the login bug');
     expect(ctx(out)).toContain('H5-04');
-    expect(ctx(out)).toContain('요약');
+    expect(ctx(out)).toContain('summary');
   });
 
   test('does NOT inject when the prompt requests detail', async () => {
@@ -95,13 +95,13 @@ describe('user-prompt-submit B2 — 일반 프롬프트 부족-입력 질문 유
 
   test('카테고리 커맨드에는 주입하지 않는다 (전용 체크리스트가 대신함)', async () => {
     const out = await runHook('/fix-bug 로그인 후 401');
-    expect(ctx(out)).toContain('필수 입력 체크리스트'); // 전용 체크리스트
-    expect(ctx(out)).not.toContain('(부족 입력 질문 유도, B2)'); // 일반 지시는 중복 주입 안 함
+    expect(ctx(out)).toContain('Required inputs:'); // 전용 체크리스트
+    expect(ctx(out)).not.toContain('(ask when unclear, B2)'); // 일반 지시는 중복 주입 안 함
   });
 
   test('가정 기록 안전망(A1/A2 연계) 문구를 포함한다', async () => {
     const out = await runHook('설정 바꿔줘');
-    expect(ctx(out)).toContain('가정');
-    expect(ctx(out)).toContain('지어내지');
+    expect(ctx(out)).toContain('assumption');
+    expect(ctx(out)).toContain('make up');
   });
 });

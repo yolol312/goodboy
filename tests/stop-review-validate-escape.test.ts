@@ -1,13 +1,16 @@
 // (결함 D) validateReview 실패 게이트의 영구 데드락 방지.
 //   커버리지 실패(리뷰가 변경 파일을 커버하지 않음)로 리뷰 검증이 실패하면 Stop이
 //   차단한다. v0.25.0까지 이 게이트만 escape가 없어, 삭제된 유령 파일이 남으면
-//   영원히 통과할 수 없었다. 이제 MAX_RETRIES(3) 후에는 통과 + 사용자 알림 + 커서
-//   전진(전진 없이는 다음 턴에 같은 집합으로 재차단)으로 데드락을 끊는다.
+//   영원히 통과할 수 없었다.
+// Track G: no count-based escape. The gate blocks on every Stop; only the user's one-use
+//   marker passes it, and that pass moves the review cursor (without it the next turn blocks
+//   on the same ghost files again).
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { approvalMarkerRelPath } from '../lib/approval-marker';
 import { REVIEW_CURSOR_FILE, cursorFileName } from '../lib/review-cursor';
 
 const STOP_HOOK = resolve(import.meta.dir, '..', 'hooks', 'stop.ts');
@@ -76,6 +79,14 @@ function writeUncoveringReview(cwd: string): void {
   );
 }
 
+/** The user's one-use Stop override (track G): what `! touch <marker>` creates. */
+function approveStop(cwd: string, sessionId: string): string {
+  const p = join(cwd, approvalMarkerRelPath('stop', sessionId));
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, '', 'utf8');
+  return p;
+}
+
 interface StopOut {
   decision?: string;
   reason?: string;
@@ -110,29 +121,54 @@ const cursorPath = (tmp: string, sessionId: string, cwd: string): string =>
     cursorFileName(REVIEW_CURSOR_FILE, cwd),
   );
 
-describe('Stop hook — validateReview 실패 게이트 escape (결함 D)', () => {
-  test('커버리지 실패는 1·2회 차단(재시도 카운터), 3회째 통과 + 커서 전진', async () => {
+describe('Stop hook — validateReview failure gate: user override (defect D, track G)', () => {
+  test("coverage failure blocks on every Stop; only the user's marker passes it and moves the cursor", async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 1, ['src/a.ts'], cwd);
     writeUncoveringReview(cwd);
+    const touch = `! touch ${approvalMarkerRelPath('stop', sessionId)}`;
 
-    // 1회: block, 재시도 1/3
+    // 1st: block, no notice for the user yet.
     const out1 = await runStop(tmp, cwd, sessionId);
     expect(out1.decision).toBe('block');
     expect(out1.reason).toContain('Review validation failed');
-    expect(out1.reason).toContain('retry 1/3');
+    expect(out1.reason).toContain('(block 1)');
+    expect(out1.reason).toContain('only the user can let this Stop pass');
     expect(out1.reason).not.toContain('/review-changes'); // A9: no such command
+    expect(out1.reason).not.toContain('retry');
+    expect(out1.systemMessage ?? '').not.toContain(touch);
 
-    // 2회: block, 재시도 2/3
+    // 2nd: block, and the user is told how to override (no env switch for review gates).
     const out2 = await runStop(tmp, cwd, sessionId);
     expect(out2.decision).toBe('block');
-    expect(out2.reason).toContain('retry 2/3');
+    expect(out2.reason).toContain('(block 2)');
+    expect(out2.systemMessage ?? '').toContain(touch);
+    expect(out2.systemMessage ?? '').not.toContain('GOODBOY_');
 
-    // 3회째: escape → 통과 + 사용자 확인 알림 + 커서 전진(데드락 해소).
+    // 3rd: still a block (the old escape passed here).
     const out3 = await runStop(tmp, cwd, sessionId);
-    expect(out3.decision).toBeUndefined();
-    expect(out3.systemMessage).toContain('사용자 확인');
-    // 커서 파일이 생겨 다음 턴에 같은 유령 집합으로 재차단되지 않는다.
+    expect(out3.decision).toBe('block');
+    expect(out3.reason).toContain('(block 3)');
+    expect(existsSync(cursorPath(tmp, sessionId, cwd))).toBe(false);
+
+    // The user's marker: pass + notice + cursor moves (the deadlock ends), marker used once.
+    const marker = approveStop(cwd, sessionId);
+    const out4 = await runStop(tmp, cwd, sessionId);
+    expect(out4.decision).toBeUndefined();
+    expect(out4.systemMessage ?? '').toContain('리뷰 검증 실패');
+    expect(out4.systemMessage ?? '').toContain('사용자 승인 마커로 이번 턴의');
     expect(existsSync(cursorPath(tmp, sessionId, cwd))).toBe(true);
+    expect(existsSync(marker)).toBe(false);
+
+    // A new edit after the cursor, still not covered: blocked again, counting from 1.
+    const safe = sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_');
+    appendFileSync(
+      join(tmp, `goodboy-session-${safe}`, 'edits.jsonl'),
+      JSON.stringify({ file: resolve(cwd, 'src/a.ts'), turn: 4, timestamp: new Date().toISOString() }) + '\n',
+      'utf8',
+    );
+    const out5 = await runStop(tmp, cwd, sessionId);
+    expect(out5.decision).toBe('block');
+    expect(out5.reason).toContain('(block 1)');
   });
 });

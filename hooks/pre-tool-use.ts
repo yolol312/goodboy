@@ -4,19 +4,24 @@
 import { existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve as resolvePath, sep } from 'node:path';
 import {
+  appendDispatchLog,
   approvalMarkerPath,
   approvalMarkerRelPath,
   assistantEntriesAfterLastText,
   bareCatDumpMessage,
   agentTranscriptPath,
   BASH_SEARCH_MESSAGE,
+  bashSearchPaths,
   bashWriteMessage,
   catDumpThresholdBytes,
   checkRecursionGuard,
   classifyBareCatDump,
   classifyBashSearch,
   classifyBashWrite,
+  classifyOutward,
   CLI_PATH,
+  decideOutward,
+  decideSpawn,
   ensureApprovalDir,
   ensureSessionDir,
   envInt,
@@ -24,19 +29,63 @@ import {
   extractRecentAssistantTextEntries,
   gateMessage,
   getCurrentTurn,
+  getLatestEditTimestampSince,
   getRecentReadMtime,
+  hashPrompt,
   hasAssistantMessages,
   hasReasoningSection,
+  hasSkillEvidenceSince,
+  isDocPath,
+  isGoodboyArtifact,
   isPartialRead,
   isReadOnlyBash,
+  lastKnownVersion,
+  projectRelative,
+  readReviewCursor,
+  searchScopeIsSmall,
+  skillRuleMessage,
   logGate,
+  namedFiles,
   noteRiskApprovalPath,
   parseReasoningSection,
+  readDispatchLog,
+  readHostRules,
   readSessionState,
   recordEdit,
+  roleOf,
   type SessionState,
+  skillDenial,
+  writeDenial,
+  spawnCaps,
+  type SpawnCode,
+  spawnsClaudeCli,
   wasFileEditedRecently,
   wasFileReadRecently,
+  bashMarkerWrite,
+  checkHandoff,
+  isHostsFile,
+  removedProduction,
+  rememberProduction,
+  resultCliWrite,
+  resultDirWrite,
+  resultWriterDenial,
+  ownsResultDir,
+  classifyHost,
+  readCommand,
+  MAX_SEGMENTS,
+  bashChangedPaths,
+  snapshotGateState,
+  writesGateState,
+  userMarkerPresent,
+  useUserMarker,
+  findRecentTestFiles,
+  handoffsOf,
+  isApprovalMarkerPath,
+  isHandoffSkill,
+  noteBashStart,
+  pushTestMessage,
+  revisionTree,
+  commitIssueDenial,
 } from '../lib';
 
 interface PreToolInput {
@@ -48,6 +97,7 @@ interface PreToolInput {
   agent_id?: string;
   agent_type?: string;
   tool_name?: string;
+  tool_use_id?: string;
   tool_input?: Record<string, unknown>;
 }
 
@@ -59,7 +109,35 @@ interface HookOutput {
     permissionDecision?: 'allow' | 'deny' | 'ask';
     permissionDecisionReason?: string;
     additionalContext?: string;
+    /** Rewritten tool input (G0 M3/M15: applies to Agent calls with permissionDecision 'allow'). */
+    updatedInput?: Record<string, unknown>;
   };
+}
+
+/** Korean user notice for a spawn cap, since a spent budget leaves the work incomplete (§10.2). */
+const SPAWN_CAP_NOTICE: Partial<Record<SpawnCode, string>> = {
+  'task-cap': '작업당 에이전트 호출 상한',
+  'session-cap': '세션당 에이전트 호출 상한',
+  'lead-cap': '리드 한 번당 멤버 호출 상한',
+};
+
+/** R2's host rules: every `.goodboy/hosts` up the tree, plus every production host seen earlier
+ *  in this session (rememberProduction), so `rm .goodboy/hosts; exit 1` (no post hook to
+ *  restore it, G0 M18), `chmod 000` or a symlink cannot lift a production entry. Every Bash
+ *  call passes here before it runs (the push test check reads these rules), so the hosts a
+ *  call could remove are already remembered. */
+function hostRulesNow(cwd: string, sessionId: string): ReturnType<typeof readHostRules> {
+  const rules = readHostRules(cwd);
+  try {
+    rules.production = rememberProduction(sessionId, rules.production);
+  } catch {
+    // best-effort
+  }
+  return rules;
+}
+
+function strOrNull(v: unknown): string | null {
+  return typeof v === 'string' && v.trim() !== '' ? v : null;
 }
 
 // 추론 게이트가 살펴볼 최근 assistant 메시지 개수.
@@ -320,6 +398,11 @@ function main(): void {
         writes: string[];
       } | null = null;
 
+      // (A0.9) A production approval marker this command may use, consumed at the end.
+      let pendingOutwardApproval: { markerPath: string; what: string } | null = null;
+      // (A0.87) The user's push-test approval this hand-off may use, consumed at the end.
+      let pendingPushTestApproval: { markerPath: string; what: string } | null = null;
+
       // (A0) 재귀 폭주 방어 — Agent/Task 호출에 한해, 60초 슬라이딩 윈도우로
       //   총 호출 상한/동일 프롬프트 반복을 검사한다. agent_type 존재 여부와
       //   무관하게 적용한다(서브에이전트가 또 서브에이전트를 부르는 폭주를 막기 위함).
@@ -376,6 +459,452 @@ function main(): void {
         }
       }
 
+      // (A0.7) Delegation guard (track G §10.7, lib/spawn-guard.ts): only leads start agents,
+      //   and only their members, in the foreground; caps per task, lead run, at once and
+      //   session; the same agent and prompt again only with evidence. Allowed calls are
+      //   logged for the caps and rewritten to the policy model/effort (G0 M3).
+      //   env GOODBOY_SPAWN_GATE=on|warn|off (default on); GOODBOY_ROUTING_GATE=off keeps the
+      //   call's own model/effort. Fails closed inside a subagent, open in the main session.
+      if ((toolName === 'Agent' || toolName === 'Task') && envStr('GOODBOY_SPAWN_GATE', 'on') !== 'off') {
+        const warnOnly = envStr('GOODBOY_SPAWN_GATE', 'on') === 'warn';
+        try {
+          const prompt = typeof toolInput.prompt === 'string' ? toolInput.prompt : '';
+          const callee = strOrNull(toolInput.subagent_type) ?? 'general-purpose';
+          const req = {
+            caller: input.agent_type ?? null,
+            callerId: input.agent_id ?? null,
+            callee,
+            prompt,
+            model: strOrNull(toolInput.model),
+            effort: strOrNull(toolInput.effort),
+            files: namedFiles(prompt, cwd),
+          };
+          const now = Date.now();
+          const decision = decideSpawn(req, readDispatchLog(sessionId), spawnCaps(), now, {
+            fileChangedSince: (p, t) => {
+              try {
+                return statSync(p).mtimeMs > t;
+              } catch {
+                return true; // moved or deleted since: the scope changed
+              }
+            },
+            editsSince: (t) => {
+              const latest = getLatestEditTimestampSince(sessionId, 0);
+              return latest !== null && Date.parse(latest) > t;
+            },
+          });
+          if (!decision.allow) {
+            logGate(sessionId, 'spawn-guard', warnOnly ? 'warn' : 'deny', `${decision.code} ${callee}`);
+            if (!warnOnly) {
+              const label = decision.code ? SPAWN_CAP_NOTICE[decision.code] : undefined;
+              emit({
+                ...deny(decision.reason ?? 'Delegation denied.'),
+                ...(label ? { systemMessage: `[goodboy] ${label}에 도달해 에이전트 호출을 막았어요.` } : {}),
+              });
+              return;
+            }
+            preWarnings.push(`${decision.reason} (delegation guard, warn mode)`);
+          }
+          const rewrite: Record<string, unknown> = { ...(decision.rewrite ?? {}) };
+          if (envStr('GOODBOY_ROUTING_GATE', 'on') === 'off') {
+            delete rewrite.model;
+            delete rewrite.effort;
+          }
+          // The applied model/effort (after the policy rewrite) are what the log keeps (§10.5).
+          appendDispatchLog(sessionId, {
+            k: 'dispatch',
+            t: now,
+            tuid: input.tool_use_id ?? `pre-${now}`,
+            caller: req.caller,
+            callerId: req.callerId,
+            callee,
+            hash: hashPrompt(prompt),
+            model: typeof rewrite.model === 'string' ? rewrite.model : req.model,
+            effort: typeof rewrite.effort === 'string' ? rewrite.effort : req.effort,
+            files: req.files,
+            why: decision.why ?? 'new',
+          });
+          if (Object.keys(rewrite).length > 0) {
+            const joined = preWarnings.join('\n');
+            emit({
+              ...(joined ? { systemMessage: joined } : {}),
+              hookSpecificOutput: {
+                hookEventName: 'PreToolUse',
+                permissionDecision: 'allow',
+                updatedInput: { ...toolInput, ...rewrite },
+                ...(joined ? { additionalContext: joined } : {}),
+              },
+            });
+            return;
+          }
+        } catch (err) {
+          logGate(sessionId, 'spawn-guard', 'fail-open', String(err));
+          if (input.agent_type) {
+            emit(deny('The delegation guard could not check this call, so it is denied inside a subagent. Do the work yourself.'));
+            return;
+          }
+        }
+      }
+
+      // (A0.79) A command too large or nested for the shared reader (MAX_SEGMENTS) cannot be
+      //   checked by the rules below, so it does not run: split it (security-injection review:
+      //   a `find -exec find …` fan-out ran this hook past its timeout, which lets a call through).
+      //   A reader that throws denies too: the catch below lets every call through (final G1
+      //   review: 20,000 nested `(` overflowed the stack).
+      if (toolName === 'Bash' && typeof toolInput.command === 'string') {
+        let unreadable: string | null = null;
+        try {
+          if (readCommand(toolInput.command, cwd).truncated) unreadable = `truncated ${toolInput.command.length}`;
+        } catch (err) {
+          unreadable = `threw ${String(err).slice(0, 120)}`;
+        }
+        if (unreadable !== null) {
+          logGate(sessionId, 'reader', 'deny', unreadable);
+          emit(deny(`This command is too large or nested for goodboy to read (over ${MAX_SEGMENTS} command segments or deeply nested), so its rules cannot be checked. Split it into smaller commands.`));
+          return;
+        }
+      }
+
+      // (A0.795) Commit issue rule (lib/commit-issue.ts, the user's request 2026-10-15): every
+      //   `git commit`, in the main session and in agents, names an issue in its message.
+      //   Per project `.goodboy/commit-issue` (a pattern, or `off`); env GOODBOY_COMMIT_ISSUE=off.
+      if (toolName === 'Bash' && typeof toolInput.command === 'string' && envStr('GOODBOY_COMMIT_ISSUE', 'on') !== 'off') {
+        const why = commitIssueDenial(toolInput.command, cwd, sessionId);
+        if (why !== null) {
+          logGate(sessionId, 'commit-issue', 'deny', why.slice(0, 80));
+          emit({ ...deny(why), systemMessage: '[goodboy] 이슈 번호가 없는 커밋을 막았어요. 메시지에 이슈 번호(예: ABC-123, #123)를 넣어야 커밋돼요.' });
+          return;
+        }
+      }
+
+      // (A0.8) A subagent may not start a headless Claude Code run: `claude -p` from Bash is
+      //   the route around (A0.7). The main session may (it is the user's own action).
+      if (
+        toolName === 'Bash' &&
+        input.agent_type &&
+        envStr('GOODBOY_SPAWN_GATE', 'on') !== 'off' &&
+        typeof toolInput.command === 'string' &&
+        spawnsClaudeCli(toolInput.command)
+      ) {
+        const msg = 'A subagent may not start Claude Code runs (claude -p / --print). Do the work yourself with your own tools.';
+        if (envStr('GOODBOY_SPAWN_GATE', 'on') === 'warn') {
+          logGate(sessionId, 'spawn-guard', 'warn', `cli-spawn ${input.agent_type}`);
+          preWarnings.push(`${msg} (delegation guard, warn mode)`);
+        } else {
+          logGate(sessionId, 'spawn-guard', 'deny', `cli-spawn ${input.agent_type}`);
+          emit(deny(msg));
+          return;
+        }
+      }
+
+      // (A0.85) Approval markers are the user's alone (track G: no model-side escape). The user
+      //   creates one with `! touch`, which runs outside the tool hooks; a model's write to a
+      //   marker is denied here, and PostToolUse removes any marker a Bash call created anyway
+      //   (an obfuscated name). Removing a marker (withdrawing an approval) stays allowed.
+      if (envStr('GOODBOY_MARKER_GUARD', 'on') !== 'off') {
+        const markerTarget =
+          (toolName === 'Write' || toolName === 'Edit' || toolName === 'MultiEdit' || toolName === 'NotebookEdit') &&
+          typeof (toolInput.file_path ?? toolInput.notebook_path) === 'string' &&
+          isApprovalMarkerPath(String(toolInput.file_path ?? toolInput.notebook_path))
+            ? String(toolInput.file_path ?? toolInput.notebook_path)
+            : toolName === 'Bash' && typeof toolInput.command === 'string'
+              ? bashMarkerWrite(toolInput.command)
+              : null;
+        if (markerTarget !== null) {
+          logGate(sessionId, 'marker-guard', 'deny', markerTarget);
+          emit(
+            deny(
+              'goodboy approval markers can only be created by the user (they run `! touch` themselves). ' +
+                'Ask the user if they approve; do not create or change the marker yourself.',
+            ),
+          );
+          return;
+        }
+      }
+      // (A0.86) `.goodboy/hosts` production entries are the user's (R2, security review): the
+      //   model may add hosts, but an edit that removes or downgrades a production entry is
+      //   denied, and so is any Bash write to the file (a Bash removal is restored afterwards).
+      if (envStr('GOODBOY_OUTWARD_GATE', 'on') !== 'off') {
+        // Remember the production hosts before any Bash call runs (whatever the other gates'
+        //   switches), so a call that removes them lifts nothing (hostRulesNow).
+        if (toolName === 'Bash') hostRulesNow(cwd, sessionId);
+        const hostsDenial = (() => {
+          const fp = typeof toolInput.file_path === 'string' ? resolvePath(cwd, toolInput.file_path) : '';
+          if ((toolName === 'Write' || toolName === 'Edit' || toolName === 'MultiEdit') && fp && isHostsFile(fp)) {
+            let before = '';
+            try {
+              before = readFileSync(fp, 'utf8');
+            } catch {
+              return null; // a new file removes nothing
+            }
+            let after = before;
+            if (toolName === 'Write') after = String(toolInput.content ?? '');
+            const edits =
+              toolName === 'Edit' ? [toolInput] : Array.isArray(toolInput.edits) ? (toolInput.edits as Record<string, unknown>[]) : [];
+            for (const e of edits) {
+              const o = String(e.old_string ?? '');
+              const n = String(e.new_string ?? '');
+              after = e.replace_all === true ? after.split(o).join(n) : after.replace(o, n);
+            }
+            const removed = removedProduction(before, after);
+            return removed.length > 0 ? removed : null;
+          }
+          if (toolName === 'Bash' && typeof toolInput.command === 'string') {
+            const hit = classifyBashWrite(toolInput.command, cwd).filter(isHostsFile);
+            return hit.length > 0 ? ['(a Bash write)'] : null;
+          }
+          return null;
+        })();
+        if (hostsDenial !== null) {
+          logGate(sessionId, 'outward', 'deny', `hosts ${hostsDenial.join(', ')}`);
+          const bashWrite = hostsDenial[0] === '(a Bash write)';
+          emit(
+            deny(
+              (bashWrite
+                ? 'Bash may not write .goodboy/hosts: a shell write can drop production entries, which only the user removes (stop rule R2). '
+                : `This would remove production entries from .goodboy/hosts (${hostsDenial.join(', ')}). Only the user removes or downgrades a production host (stop rule R2). `) +
+                'Use Edit/Write to add hosts, and ask the user for the rest.',
+            ),
+          );
+          return;
+        }
+      }
+
+      // (A0.885) Results come from their agents (lib/role-limits.ts resultWriterDenial).
+      //   env GOODBOY_RESULT_GUARD=on|off (default on).
+      if (toolName === 'Bash' && typeof toolInput.command === 'string' && envStr('GOODBOY_RESULT_GUARD', 'on') !== 'off') {
+        const kind = resultCliWrite(toolInput.command);
+        // Copies, moves, redirects and interpreter scripts that name this session's result dirs
+        //   (nested shells included); reads and `mkdir -p .claude/tests` pass.
+        const intoResults = resultDirWrite(toolInput.command, cwd);
+        const denial = kind
+          ? resultWriterDenial(kind, input.agent_type, roleOf(input.agent_type))
+          : intoResults
+            ? `Results come only from the goodboy CLI (test-write / review-write); this command would write ${intoResults} directly.`
+            : null;
+        if (denial) {
+          logGate(sessionId, 'result-guard', 'deny', `${kind} ${input.agent_type ?? 'main'}`);
+          emit(deny(denial));
+          return;
+        }
+      }
+
+      // (A0.88) goodboy's gate state is not the model's to change (lib/state-guard.ts).
+      if (toolName === 'Bash' && typeof toolInput.command === 'string' && writesGateState(toolInput.command)) {
+        logGate(sessionId, 'state-guard', 'deny', toolInput.command.slice(0, 120));
+        emit(deny("This command changes goodboy's own session state (goodboy-session-*). The gates decide from it; leave it alone and satisfy the gate instead."));
+        return;
+      }
+
+
+      // (A0.87) Push test check (track G, lib/push-test.ts): a hand-off — git push (branches,
+      //   tags), MR/PR creation, a deploy to a host that is neither local nor `allow`, or the
+      //   /ship and /land-and-deploy skills — needs a passing layer-1 result whose tested tree is
+      //   the tree handed off. Before R2, so a denial here never uses a production approval.
+      //   A BLOCKED result never passes. The main session's override is the user's one-use
+      //   marker (consumed at the end, after every other gate); a subagent has none.
+      //   env GOODBOY_PUSH_TEST_GATE=on|warn|off (default on). Fails closed in a subagent.
+      if (envStr('GOODBOY_PUSH_TEST_GATE', 'on') !== 'off' && (toolName === 'Bash' || toolName === 'Skill')) {
+        const warnOnly = envStr('GOODBOY_PUSH_TEST_GATE', 'on') === 'warn';
+        const inSubagent = !!input.agent_type;
+        try {
+          const handoffs =
+            toolName === 'Bash'
+              ? typeof toolInput.command === 'string'
+                ? handoffsOf(toolInput.command, cwd, hostRulesNow(cwd, sessionId))
+                : []
+              : typeof toolInput.skill === 'string' && isHandoffSkill(toolInput.skill) && revisionTree(cwd, 'HEAD') !== null
+                ? [{ kind: 'push' as const, what: `/${toolInput.skill}`, cwd, revs: ['HEAD'] }]
+                : [];
+          if (handoffs.length > 0) {
+            const results = findRecentTestFiles(resolvePath(cwd, '.claude', 'tests'), envInt('GOODBOY_TEST_WINDOW_MIN', 1440));
+            for (const h of handoffs) {
+              const o = checkHandoff(h, results);
+              if (o.ok) continue;
+              const marker = approvalMarkerPath(cwd, 'push-test', sessionId);
+              if (!inSubagent && userMarkerPresent(sessionId, marker, input.tool_use_id)) {
+                pendingPushTestApproval = { markerPath: marker, what: h.what };
+                break;
+              }
+              const msg = pushTestMessage(h.what, o);
+              if (warnOnly) {
+                logGate(sessionId, 'push-test', 'warn', `${o.why} ${h.what}`);
+                preWarnings.push(`${msg} (push test check, warn mode)`);
+                break;
+              }
+              logGate(sessionId, 'push-test', 'deny', `${o.why} ${h.what}`);
+              ensureApprovalDir(cwd);
+              emit({
+                ...deny(inSubagent ? `${msg} Agents never hand off untested work: return BLOCKED.` : msg),
+                ...(inSubagent
+                  ? {}
+                  : {
+                      systemMessage:
+                        `[goodboy] 통과한 테스트 결과 없이 ${h.what}을(를) 하려는 걸 막았어요` +
+                        (o.why === 'blocked' ? `(테스트를 실행하지 못함: ${o.blocked?.blocked?.reason ?? ''})` : '') +
+                        `. 테스트 없이 보내려면 \`! touch ${approvalMarkerRelPath('push-test', sessionId)}\`(이번 한 번)을 실행하거나 GOODBOY_PUSH_TEST_GATE=off로 끄세요.`,
+                    }),
+              });
+              return;
+            }
+          }
+        } catch (err) {
+          logGate(sessionId, 'push-test', 'fail-open', String(err));
+          if (inSubagent && !warnOnly) {
+            emit(deny('The push test check could not check this command, so it is denied inside a subagent. Return BLOCKED.'));
+            return;
+          }
+        }
+      }
+
+      // (A0.9) Outward-command rule (track G stop rule R2, lib/outward-command.ts): a command
+      //   that changes a host listed as production in .goodboy/hosts is denied, in the main
+      //   session until the user approves that one use; a subagent's command that changes an
+      //   unlisted external host is denied with a retarget hint; the main session gets advice,
+      //   once per target. Reads always pass. env GOODBOY_OUTWARD_GATE=on|warn|off (default on).
+      //   Fails closed inside a subagent, open in the main session.
+      if (toolName === 'Bash' && typeof toolInput.command === 'string' && envStr('GOODBOY_OUTWARD_GATE', 'on') !== 'off') {
+        const warnOnly = envStr('GOODBOY_OUTWARD_GATE', 'on') === 'warn';
+        const inSubagent = !!input.agent_type;
+        try {
+          const targets = classifyOutward(toolInput.command, cwd);
+          if (targets.length > 0) {
+            const rules = hostRulesNow(cwd, sessionId);
+            const { action, target } = decideOutward(targets, rules, inSubagent);
+            // A broken hosts file makes every external host production (classifyHost): say so,
+            //   and do not call an unlisted host "listed".
+            const listed = !!target && classifyHost(target.host, { ...rules, broken: [] }) === 'production';
+            const brokenNote =
+              target && !listed && (rules.broken ?? []).length > 0
+                ? `goodboy cannot read ${rules.broken!.join(', ')}, so every external host counts as production until the user fixes it`
+                : '';
+            const what = target ? `${target.kind} → ${target.host}${brokenNote ? ` (${brokenNote})` : ''}` : '';
+            const listedAs = brokenNote ? 'treated as production' : 'listed as production in .goodboy/hosts';
+            if (action === 'deny-production') {
+              const marker = approvalMarkerPath(cwd, 'outward', sessionId);
+              if (!inSubagent && userMarkerPresent(sessionId, marker, input.tool_use_id)) {
+                // Used only once every later gate has passed (see the end of this hook), so a
+                //   later denial keeps the approval for the retry.
+                pendingOutwardApproval = { markerPath: marker, what };
+              } else if (warnOnly) {
+                preWarnings.push(`[R2] ${what} is ${listedAs}. (outward gate, warn mode)`);
+              } else {
+                logGate(sessionId, 'outward', 'deny', `production ${what}`);
+                ensureApprovalDir(cwd);
+                emit({
+                  ...deny(
+                    inSubagent
+                      ? `This command changes ${what}, ${listedAs} (stop rule R2). Agents never act on production: return BLOCKED with the exact command for the user to run.`
+                      : `This command changes ${what}, ${listedAs} (stop rule R2). Ask the user first. If they approve this exact command, have them run \`! touch ${approvalMarkerRelPath('outward', sessionId)}\`, then run it again; the approval covers one command.`,
+                  ),
+                  systemMessage: `[goodboy] 운영(production) 대상 명령을 막았어요: ${what}`,
+                });
+                return;
+              }
+            } else if (action === 'deny-unlisted' && !warnOnly) {
+              logGate(sessionId, 'outward', 'deny', `unlisted ${what}`);
+              emit(
+                deny(
+                  `This command changes an external system (${what}) that .goodboy/hosts does not list, which agents may not do (stop rule R2). ` +
+                    'Point it at a local or sandbox target (one listed as `allow` in .goodboy/hosts), or return BLOCKED with the exact command for the user to run.',
+                ),
+              );
+              return;
+            } else if (action === 'advise' || action === 'deny-unlisted') {
+              const key = what;
+              const seenFile = join(ensureSessionDir(sessionId), 'outward-advised.json');
+              let seen: string[] = [];
+              try {
+                seen = JSON.parse(readFileSync(seenFile, 'utf8')) as string[];
+              } catch {
+                seen = [];
+              }
+              if (!seen.includes(key)) {
+                logGate(sessionId, 'outward', 'warn', `unlisted ${what}`);
+                preWarnings.push(
+                  `[R2] ${what} changes an external system that .goodboy/hosts does not list. Run it only if the user asked for exactly this; otherwise use a sandbox target or ask first.`,
+                );
+                try {
+                  writeFileSync(seenFile, JSON.stringify([...seen, key]), 'utf8');
+                } catch {
+                  // best-effort: the advice may repeat
+                }
+              }
+            }
+          }
+        } catch (err) {
+          logGate(sessionId, 'outward', 'fail-open', String(err));
+          if (inSubagent && !warnOnly) {
+            emit(deny('The outward-command rule could not check this command, so it is denied inside a subagent. Return BLOCKED with the command for the user to run.'));
+            return;
+          }
+        }
+      }
+
+      // (A0.10) Role limits (track G, lib/role-limits.ts): a goodboy agent writes only what its
+      //   role allows (Write/Edit and Bash writes inside the project) and invokes only its own
+      //   tool skills. Plugin agents ignore permissionMode and Skill(...) (G0 M5, M9). Built-in
+      //   agents are not limited here. env GOODBOY_ROUTING_GATE=off turns it off.
+      if (input.agent_type && envStr('GOODBOY_ROUTING_GATE', 'on') !== 'off') {
+        const role = roleOf(input.agent_type);
+        if (role) {
+          let denial: string | null = null;
+          const projectRoot = resolvePath(cwd);
+          if (['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(toolName)) {
+            const p = strOrNull(toolInput.file_path) ?? strOrNull(toolInput.notebook_path);
+            if (p) denial = writeDenial(role, resolvePath(cwd, p), projectRoot);
+          } else if (toolName === 'Bash' && typeof toolInput.command === 'string') {
+            // Redirects (no meta-dir exemptions unless the role writes code) plus file
+            //   programs and mutating git commands (security review: cp/mv/rm, git checkout).
+            const strict = role.writes !== 'code';
+            const changed = [...classifyBashWrite(toolInput.command, cwd, { strict }), ...bashChangedPaths(toolInput.command, cwd)];
+            for (const f of changed) {
+              denial = writeDenial(role, resolvePath(cwd, f), projectRoot);
+              if (denial) break;
+            }
+          } else if (toolName === 'Skill') {
+            const s = strOrNull(toolInput.skill);
+            if (s) denial = skillDenial(role, s);
+          }
+          if (denial) {
+            logGate(sessionId, 'role-limit', 'deny', `${role.name} ${toolName}`);
+            emit(deny(denial));
+            return;
+          }
+        }
+      }
+
+      // (A0.11) Skill rule (track G §10.4, lib/skill-rule.ts): a main-session code edit needs a
+      //   workflow skill for the current change (since the last accepted review), or a
+      //   skill-gap note recorded through the CLI. Docs, files outside the project and goodboy
+      //   artifacts are exempt. env GOODBOY_SKILL_GATE=on|warn|off (default on).
+      if (
+        !input.agent_type &&
+        ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(toolName) &&
+        envStr('GOODBOY_SKILL_GATE', 'on') !== 'off'
+      ) {
+        const p = strOrNull(toolInput.file_path) ?? strOrNull(toolInput.notebook_path);
+        if (p) {
+          const abs = resolvePath(cwd, p);
+          const rel = projectRelative(abs, resolvePath(cwd));
+          if (rel !== null && !isDocPath(rel) && !isGoodboyArtifact(abs)) {
+            const cursor = readReviewCursor(cwd, sessionId);
+            const since = cursor ? Date.parse(cursor.timestamp) : 0;
+            if (!hasSkillEvidenceSince(sessionId, Number.isFinite(since) ? since : 0)) {
+              const msg = skillRuleMessage(CLI_PATH, sessionId);
+              if (envStr('GOODBOY_SKILL_GATE', 'on') === 'warn') {
+                logGate(sessionId, 'skill-rule', 'warn', rel);
+                preWarnings.push(msg);
+              } else {
+                logGate(sessionId, 'skill-rule', 'deny', rel);
+                emit(deny(msg));
+                return;
+              }
+            }
+          }
+        }
+      }
+
       // (A) 도구 강제 위임. 서브에이전트(agent_type 존재)면 면제.
       //   GOODBOY_DISABLE_DELEGATION=1 이면 위임 자체를 끈다.
       if (!input.agent_type && process.env.GOODBOY_DISABLE_DELEGATION !== '1') {
@@ -401,7 +930,14 @@ function main(): void {
           const command =
             typeof toolInput.command === 'string' ? (toolInput.command as string) : '';
           const hit = classifyBashSearch(command);
-          if (hit) {
+          // (G1) A search over a small, explicit scope runs here: delegating a lookup in a
+          //   few known files cost more than the search. GOODBOY_BASH_SEARCH_SMALL (default
+          //   200 files) sets the size; 0 delegates every recursive search, as before.
+          const smallLimit = envInt('GOODBOY_BASH_SEARCH_SMALL', 200);
+          const searchPaths = hit && smallLimit > 0 ? bashSearchPaths(command) : null;
+          if (hit && searchPaths && searchScopeIsSmall(searchPaths, cwd, smallLimit)) {
+            logGate(sessionId, 'bash-search', 'warn', `small-scope ${hit}`);
+          } else if (hit) {
             const msg = `${BASH_SEARCH_MESSAGE} (감지: ${hit})`;
             if (gate === 'warn') {
               logGate(sessionId, 'bash-search', 'warn', hit);
@@ -467,6 +1003,8 @@ function main(): void {
             //   consumedPath에서 복원해 승인을 보존한다.
             const consumedPath = `${approvalPath}.consumed-${process.pid}`;
             const approved = (() => {
+              // Track G: a marker made during an open model Bash call is not the user's.
+              if (!userMarkerPresent(sessionId, approvalPath, input.tool_use_id)) return false;
               try {
                 renameSync(approvalPath, consumedPath); // 경합 패배 시 throw → 승인 없음
                 return true;
@@ -575,14 +1113,22 @@ function main(): void {
       if (isEditTool && envStr('GOODBOY_ARTIFACT_WRITE_GATE', 'on') !== 'off') {
         const filePath = (toolInput.file_path as string | undefined) ?? '';
         if (filePath) {
-          const cwdAbs = resolvePath(cwd);
+          // The result dirs of the cwd's project, of a project above it, or of a package below
+          //   it (security review rounds 2–3: a Write from a subdirectory to the root, or from
+          //   the root into a package before a `cd`, was allowed). Another project's
+          //   same-named path elsewhere is not this session's evidence and passes.
           const abs = resolvePath(cwd, filePath);
-          const rel = abs.startsWith(cwdAbs + sep) ? abs.slice(cwdAbs.length + 1) : '';
-          const inTests = rel.startsWith(`.claude${sep}tests${sep}`);
-          const inReviews = rel.startsWith(`.claude${sep}reviews${sep}`);
+          const cwdAbs = resolvePath(cwd);
+          const resultDir = (kind: string): boolean => {
+            const at = abs.indexOf(`${sep}.claude${sep}${kind}${sep}`);
+            return at >= 0 && ownsResultDir(abs.slice(0, at) || sep, cwdAbs);
+          };
+          const inTests = resultDir('tests');
+          const inReviews = resultDir('reviews');
           if (inTests || inReviews) {
             const cmd = inTests ? 'test-write' : 'review-write';
             const schema = inTests ? 'TestResult' : 'ReviewResult';
+            const rel = abs.startsWith(cwdAbs + sep) ? abs.slice(cwdAbs.length + 1) : abs;
             logGate(sessionId, 'artifact-write', 'deny', rel);
             emit(
               deny(
@@ -620,38 +1166,37 @@ function main(): void {
             //   강제한다(tokenhabit H2-01 실측 — goodboy 자신이 유발하는 재독).
             //   두 게이트의 컨텍스트 수명 근사치를 같은 값으로 정렬한다.
             const rbeWindow = envInt('GOODBOY_READ_BEFORE_EDIT_WINDOW', 30);
-            const editedOk = wasFileEditedRecently(sessionId, absPath, turn, rbeWindow);
-            const readOk = wasFileReadRecently(sessionId, absPath, turn, rbeWindow);
-            if (!editedOk && !readOk) {
+            // Track G: the editor itself must know the file — its own read or edit (agent_id
+            //   scope; the main session is 'main'). A subagent without agent_id cannot be told
+            //   apart, so any record counts for it, as before. What it knew from before the
+            //   last compaction does not count (lastKnownVersion).
+            const rbeScope = input.agent_id ? input.agent_id : input.agent_type ? undefined : 'main';
+            const known = lastKnownVersion(sessionId, absPath, turn, rbeWindow, rbeScope);
+            if (known === null) {
               logGate(sessionId, 'read-before-edit', 'deny', absPath);
               emit(
                 deny(
-                  `이 파일을 먼저 Read 도구로 읽은 후 편집하세요: ${absPath}. ` +
-                    '큰 파일이면 편집할 범위만 offset/limit로 부분 읽기 해도 충분합니다. (Read-before-edit 정책)',
+                  `Read this file with the Read tool before editing it: ${absPath}. ` +
+                    'For a large file, a partial read (offset/limit) of the part you edit is enough. (read-before-edit)',
                 ),
               );
               return;
             }
-            // (v0.27.9, 리뷰 지적) 창 확대(20→30)의 안전 보강 — 창 안에 read가 있어도
-            //   그 사이 파일이 외부에서 바뀌었으면(mtime 불일치) 그 지식은 낡았다 → 재독 요구.
-            //   직접 편집한 파일은 편집 시점 지식이 유효(editedOk 우선). mtime을 모르면
-            //   fail-open(구버전 기록 하위호환). 재-Read 게이트(A2)와 같은 mtime 기준이라,
-            //   여기서 요구된 재독이 A2에 다시 차단되는 순환은 없다(mtime 변경 = A2 허용 조건).
-            if (!editedOk && readOk) {
+            // (v0.27.9) A read or own edit inside the window is stale when the file changed
+            //   since (mtime differs): another agent, the user or a formatter wrote it. Unknown
+            //   mtime (old records) fails open. The re-Read gate (A2) allows a read once the
+            //   mtime changed, so this demand cannot loop.
+            if (known.mtime !== null) {
               try {
-                const prevMtime = getRecentReadMtime(sessionId, absPath, turn, rbeWindow);
-                if (prevMtime !== null) {
-                  const curMtime = statSync(absPath).mtimeMs;
-                  if (curMtime !== prevMtime) {
-                    logGate(sessionId, 'read-before-edit', 'deny', `stale-read ${absPath}`);
-                    emit(
-                      deny(
-                        `마지막 Read 이후 파일이 변경되었습니다: ${absPath}. ` +
-                          '변경된 내용을 다시 Read(부분 읽기 가능)한 후 편집하세요. (Read-before-edit 정책, 변경 감지)',
-                      ),
-                    );
-                    return;
-                  }
+                if (statSync(absPath).mtimeMs !== known.mtime) {
+                  logGate(sessionId, 'read-before-edit', 'deny', `stale-${known.via} ${absPath}`);
+                  emit(
+                    deny(
+                      `The file changed after you last ${known.via === 'read' ? 'read' : 'edited'} it: ${absPath}. ` +
+                        'Read it again (a partial read is fine) and then edit. (read-before-edit, change check)',
+                    ),
+                  );
+                  return;
                 }
               } catch {
                 // fail-open — mtime 판정 실패가 편집을 막지 않는다.
@@ -928,7 +1473,7 @@ function main(): void {
           const approvedPath = approvalMarkerPath(cwd, 'risk', sessionId); // this session's (A3)
           // Remembered so the next category command withdraws it, wherever the cwd is then.
           noteRiskApprovalPath(sessionId, approvedPath);
-          if (!existsSync(approvedPath)) {
+          if (!userMarkerPresent(sessionId, approvedPath, input.tool_use_id)) {
             ensureApprovalDir(cwd); // so the user's `! touch` works in a repo without .claude/
             // 위험 게이트가 deny하면, A1.7에서 원자 소비한 Bash 쓰기 승인 마커를 복원한다
             //   (v0.27.1/2: deny로 승인만 소진되는 문제와 병렬 이중 승인 TOCTOU를 함께 해소).
@@ -943,6 +1488,49 @@ function main(): void {
             emit(deny(riskDenyMessage(state, sessionId)));
             return;
           }
+        }
+      }
+
+      // (A0.87, A0.9) Every deny gate passed: use the user's approvals now, all or none. Each
+      //   is taken by an atomic rename to a consumed path; if one is gone (a parallel call used
+      //   it), the ones already taken and a pending Bash-write approval are put back and the
+      //   call is denied (refactoring review: an outward race used to spend the push approval).
+      const approvals = [
+        ['push-test', pendingPushTestApproval, (w: string) => `This hands off ${w} without a passing test result, and its one-use approval was already used. Ask the user to approve it again.`],
+        ['outward', pendingOutwardApproval, (w: string) => `This command changes ${w}, listed as production in .goodboy/hosts (stop rule R2), and its one-use approval was already used. Ask the user to approve it again.`],
+      ] as const;
+      const taken: Array<{ markerPath: string; consumed: string }> = [];
+      for (const [gate, pending, lost] of approvals) {
+        if (pending === null) continue;
+        const consumed = `${pending.markerPath}.consumed-${process.pid}`;
+        let ok = userMarkerPresent(sessionId, pending.markerPath, input.tool_use_id);
+        if (ok) {
+          try {
+            renameSync(pending.markerPath, consumed);
+            taken.push({ markerPath: pending.markerPath, consumed });
+          } catch {
+            ok = false;
+          }
+        }
+        if (!ok) {
+          for (const t of [...taken, ...(pendingBashWriteApproval ? [{ markerPath: pendingBashWriteApproval.markerPath, consumed: pendingBashWriteApproval.consumedPath }] : [])]) {
+            try {
+              renameSync(t.consumed, t.markerPath);
+            } catch {
+              // best-effort, as in the risk gate
+            }
+          }
+          logGate(sessionId, gate, 'deny', `${pending.what} (approval already used)`);
+          emit(deny(lost(pending.what)));
+          return;
+        }
+        logGate(sessionId, gate, 'warn', `approved ${pending.what}`);
+      }
+      for (const t of taken) {
+        try {
+          unlinkSync(t.consumed);
+        } catch {
+          // a leftover consumed file unlocks nothing
         }
       }
 
@@ -967,6 +1555,15 @@ function main(): void {
           `승인 마커로 Bash 쓰기를 1회 허용했습니다(${writes.length}개 파일). ` +
             '해당 파일들은 편집 기록에 포함되어 리뷰 대상입니다.',
         );
+      }
+
+      // Every gate passed: note when and where this Bash call starts, so the post hooks remove
+      //   markers it created, record files it wrote indirectly and put back gate state it
+      //   changed. Only for calls that run: a denied call fires no post hook, and its open note
+      //   would make the user's `! touch` after the denial look model-made.
+      if (toolName === 'Bash' && input.tool_use_id) {
+        noteBashStart(sessionId, input.tool_use_id, cwd, toolInput.command as string | undefined, input.agent_id);
+        snapshotGateState(sessionId, input.tool_use_id);
       }
 
       emitPass(preWarnings);

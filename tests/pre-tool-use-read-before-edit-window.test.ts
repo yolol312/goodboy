@@ -99,7 +99,7 @@ describe('pre-tool-use read-before-edit — 창 30턴 정렬 (v0.27.9)', () => {
     seedReadAtTurn(tmp, sessionId, file, 5, 40); // 35턴 경과 > 30
     const out = await runEdit(tmp, cwd, sessionId, file);
     expect(isDenied(out)).toBe(true);
-    expect(out.hookSpecificOutput?.permissionDecisionReason ?? '').toContain('부분 읽기');
+    expect(out.hookSpecificOutput?.permissionDecisionReason ?? '').toContain('partial read');
   });
 
   test('창 안의 read라도 그 사이 파일이 바뀌었으면(mtime 불일치) 차단 — 낡은 지식 편집 방지 (리뷰 medium)', async () => {
@@ -112,7 +112,7 @@ describe('pre-tool-use read-before-edit — 창 30턴 정렬 (v0.27.9)', () => {
     seedReadAtTurn(tmp, sessionId, file, 25, 30, curMtime - 5000);
     const out = await runEdit(tmp, cwd, sessionId, file);
     expect(isDenied(out)).toBe(true);
-    expect(out.hookSpecificOutput?.permissionDecisionReason ?? '').toContain('변경');
+    expect(out.hookSpecificOutput?.permissionDecisionReason ?? '').toContain('changed after you last read');
   });
 
   test('mtime이 일치하면 창 안의 read로 통과, mtime 기록이 없으면 fail-open 통과', async () => {

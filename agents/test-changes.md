@@ -240,13 +240,20 @@ JSON
 - `environment.mode`: `container` | `local` | `none`
 - `acceptance[].red.exit_code`: **0이 아니어야 한다** / `green.exit_code`: **0이어야 한다**
 - `acceptance[].id`: 0단계 `acceptance-list` 의 id와 정확히 일치
-- `verdict`: `pass` | `needs-changes` | `fail`
+- `verdict`: `pass` | `needs-changes` | `fail` | `blocked`
 - `timestamp`: 적지 않는다 (서버 시각으로 채워짐)
+- `commit`, `tree`: never set them. `test-write` records the tested working tree itself; a
+  push or MR later passes only when it hands off exactly that tree.
 
 `verdict` 규율:
 - **pass**: 모든 스위트 통과 + 모든 수용 기준 커버 + `prototype_diff.mismatches` 에 high 없음
 - **needs-changes**: 실패한 기준/스위트가 있거나 프로토타입과 어긋남 → 메인이 고쳐야 한다
 - **fail**: 환경을 못 띄우는 등 자동 수정으로 해결 불가
+- **blocked**: the tests cannot run here at all (no runner, no container runtime, no
+  environment). Add `blocked: {reason, evidence: [{command, output}]}`: a reason of at least
+  15 characters and the commands you ran with their output that show it. `test_files` may
+  then be empty. The Stop gate accepts it as unverified and tells the user; a push never
+  passes on it. Never use `blocked` for tests that run and fail — that is `needs-changes`.
 
 ---
 

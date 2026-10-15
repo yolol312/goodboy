@@ -20,7 +20,8 @@ interface TrackRecord {
   file: string;
   turn: number;
   timestamp: string;
-  /** H2-01: Read 시점의 파일 수정시각(mtimeMs). 없을 수 있음(하위호환). */
+  /** H2-01: Read 시점의 파일 수정시각(mtimeMs). 없을 수 있음(하위호환).
+   *  On an edit record: the file's mtime right after the edit (read-before-edit, track G). */
   mtime?: number;
   /** D2: 이 기록을 남긴 에이전트의 agent_id. 없으면 메인 에이전트('main' 스코프)로 취급.
    *  재-Read 게이트가 에이전트별로 공정하게 판정하기 위한 스코프 키(구버전 라인 하위호환). */
@@ -269,6 +270,50 @@ export function clearReadRecords(sessionId: string): void {
       // best-effort
     }
   }
+  // Edits stay for review, but what the model knew from its own edits left the context too:
+  //   read-before-edit counts only edits after this point (lastKnownVersion).
+  try {
+    writeFileSync(join(ensureSessionDir(sessionId), KNOWLEDGE_EPOCH_FILE), new Date().toISOString(), 'utf8');
+  } catch {
+    // best-effort
+  }
+}
+
+const KNOWLEDGE_EPOCH_FILE = 'knowledge-epoch.txt';
+
+function knowledgeEpoch(dir: string): string {
+  try {
+    return readFileSync(join(dir, KNOWLEDGE_EPOCH_FILE), 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
+/** What read-before-edit knows of a file: the newest read or own edit within the window, in
+ *  the given scope (agent_id, 'main', or undefined for any), after the last compaction.
+ *  `mtime` is the file's mtime at that read or right after that edit (null when unknown, for
+ *  old records). null = not read or edited recently. */
+export function lastKnownVersion(
+  sessionId: string,
+  filePath: string,
+  currentTurn: number,
+  withinTurns: number,
+  agent?: string,
+): { via: 'read' | 'edit'; mtime: number | null } | null {
+  const dir = ensureSessionDir(sessionId);
+  const target = normalize(filePath);
+  const cutoff = currentTurn - withinTurns;
+  const epoch = knowledgeEpoch(dir);
+  let best: { via: 'read' | 'edit'; mtime: number | null; at: string } | null = null;
+  for (const via of ['read', 'edit'] as const) {
+    for (const r of readRecords(dir, via === 'read' ? 'reads.jsonl' : 'edits.jsonl')) {
+      if (r.file !== target || r.turn < cutoff || r.turn > currentTurn) continue;
+      if (agent !== undefined && recordScope(r) !== agent) continue;
+      if (epoch !== '' && r.timestamp <= epoch) continue;
+      if (best === null || r.timestamp >= best.at) best = { via, mtime: r.mtime ?? null, at: r.timestamp };
+    }
+  }
+  return best === null ? null : { via: best.via, mtime: best.mtime };
 }
 
 /** 이 세션에 읽기 기록이 하나라도 있는가.
@@ -284,8 +329,9 @@ export function hasAnyReadRecords(sessionId: string): boolean {
   }
 }
 
-/** 이번 턴 안에 Edit/Write로 변경된 파일 기록. agent는 D2 스코프용(선택). */
-export function recordEdit(sessionId: string, filePath: string, turn: number, agent?: string): void {
+/** 이번 턴 안에 Edit/Write로 변경된 파일 기록. agent는 D2 스코프용(선택).
+ *  mtime: the file's mtime right after the edit, so a later change by someone else is seen. */
+export function recordEdit(sessionId: string, filePath: string, turn: number, agent?: string, mtime?: number): void {
   // (B) goodboy 자체 산출물은 기록 자체를 남기지 않는다 — 리뷰 JSON을 Write 툴로
   //   쓰면 산출물이 스스로 리뷰 대상이 되는 순환이 생긴다(라이브 데드락 재현).
   //   프로브 패턴(C)/존재 필터(A)는 기록 시점에 적용하지 않는다 — 프로브 파일도
@@ -298,6 +344,7 @@ export function recordEdit(sessionId: string, filePath: string, turn: number, ag
     timestamp: new Date().toISOString(),
   };
   if (typeof agent === 'string' && agent !== '') record.agent = agent;
+  if (typeof mtime === 'number' && Number.isFinite(mtime)) record.mtime = mtime;
   appendRecord(dir, 'edits.jsonl', record);
 }
 

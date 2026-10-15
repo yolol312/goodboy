@@ -10,6 +10,7 @@ import type {
   ReviewFinding,
   ReviewResult,
   StatusSnapshot,
+  TestResult,
 } from '../lib';
 import {
   citationBlockMessage,
@@ -38,6 +39,7 @@ import {
   detectTestInfrastructure,
   axesOfDimensions,
   failingSuites,
+  isEvidencedBlocked,
   fileModifiedAt,
   findRecentReviewFiles,
   findRecentTestFiles,
@@ -75,6 +77,19 @@ import {
   writeRetryCount,
   writeReviewCursor,
   writeStatusSnapshot,
+  effortNotice,
+  hasRepeatedBlock,
+  isDocPath,
+  projectRelative,
+  readLastAdvice,
+  recommendEffort,
+  writeLastAdvice,
+  approvalMarkerPath,
+  approvalMarkerRelPath,
+  useUserMarker,
+  ensureApprovalDir,
+  restoreOrphanGateState,
+  finishOpenBashCalls,
 } from '../lib';
 
 interface StopInput {
@@ -86,6 +101,10 @@ interface StopInput {
   // 일부/향후 Claude Code 버전이 세션 모델을 넘길 수 있음(예: `claude-opus-4-8[1m]`).
   // 있으면 컨텍스트 창 동적 감지의 최우선 신호로 쓴다(없으면 무시).
   model?: string;
+  /** Current effort of the main session (G0: on Stop and tool events). */
+  effort?: { level?: string };
+  /** Running background work (G0 M10): `{id, type, status, description, agent_type}`. */
+  background_tasks?: Array<{ type?: string; status?: string; agent_type?: string }>;
 }
 
 interface HookOutput {
@@ -93,20 +112,60 @@ interface HookOutput {
   decision?: 'block';
   reason?: string;
   systemMessage?: string;
-  // context-watchdog.sh와 동일한 자동 compact 유도 신호(H1-03 강제):
-  //   top-level stopReason: 'compact_needed' + top-level additionalContext.
-  stopReason?: string;
-  additionalContext?: string;
   hookSpecificOutput?: {
     hookEventName: 'Stop';
     additionalContext?: string;
   };
 }
 
-const MAX_RETRIES = 3;
-// Escapes fire on attempt MAX_RETRIES, i.e. after MAX_RETRIES - 1 blocks (A9: messages
-// and README said "after 3 blocks" while the gates block twice).
-const ESCAPE_AFTER_BLOCKS = MAX_RETRIES - 1;
+// Track G: no count-based escape. A gate blocks until its evidence is there; only the user
+// lets a Stop past it, with a one-use marker (`! touch`, which the model cannot create:
+// PreToolUse denies its writes to markers) or the gate's env switch. After this many blocks
+// in a row the user is told how, in Korean.
+const NOTICE_AFTER_BLOCKS = 2;
+
+/** True once the user's one-use Stop marker was used in this Stop run; every later gate in
+ *  the same run passes too, so one approval ends one Stop. */
+let userPassUsed = false;
+
+/** The user's override for a blocking gate: uses `.claude/.goodboy-stop-approved-<tag>.txt`
+ *  once. The caller passes the gate as its old escape did (cursor moves, counter resets). */
+function userPass(sessionId: string, cwd: string, gate: string): boolean {
+  if (userPassUsed) return true;
+  if (!useUserMarker(sessionId, approvalMarkerPath(cwd, 'stop', sessionId))) return false;
+  userPassUsed = true;
+  logGate(sessionId, gate, 'warn', 'user-override');
+  habitWarnings.push(`[goodboy] 사용자 승인 마커로 이번 턴의 ${gate} 게이트를 통과시켰어요. 검증되지 않은 상태예요.`);
+  return true;
+}
+
+/** A review accepted (on evidence or by the user's marker): the cursor moves and every review
+ *  block count restarts, so the next change's first block says `(block 1)` (refactoring review:
+ *  an override used to leave the other counter at 2). */
+function acceptReview(sessionId: string, cwd: string): void {
+  resetRetryCount(sessionId);
+  resetRetryCount(sessionId, REVIEW_VALIDATE_COUNT_FILE);
+  writeReviewCursor(cwd, getCurrentTurn(sessionId), sessionId);
+}
+
+/** A blocking gate's output: the model is told that only the user can let it pass; after
+ *  NOTICE_AFTER_BLOCKS blocks in a row the user sees how (marker or env switch). */
+function blockOutput(sessionId: string, cwd: string, reason: string, gate: string, envSwitch: string, count: number): HookOutput {
+  const out: HookOutput = {
+    decision: 'block',
+    reason:
+      `${reason} (block ${count}) This gate passes only on its evidence. If you cannot provide it, ` +
+      'tell the user what is missing and why; only the user can let this Stop pass.',
+  };
+  if (count >= NOTICE_AFTER_BLOCKS) {
+    ensureApprovalDir(cwd);
+    out.systemMessage =
+      `[goodboy] ${gate} 게이트가 ${count}번 연속 막았어요. 근거 없이 넘어가려면 ` +
+      `\`! touch ${approvalMarkerRelPath('stop', sessionId)}\`(이번 한 번)을 실행하세요` +
+      (envSwitch !== '' ? `. 계속 끄려면 ${envSwitch}로 설정하세요.` : '.');
+  }
+  return out;
+}
 
 
 /** $HOME/.claude/settings.json 경로. HOME 미설정/오류 시 null(설정 폴백을 건너뜀).
@@ -121,28 +180,26 @@ function settingsJsonPath(): string | null {
   }
 }
 
-// H1-03 강제 자동 compact 재시도 카운터 파일. review 재시도(.goodboy-retry-count.txt)와
-// 간섭하지 않도록 별도 파일에 동일 escape 패턴(MAX_RETRIES)으로 관리한다.
+// H1-03 compaction notice latch (track G: a notice, not a block), kept apart from the review
+// counter (.goodboy-retry-count.txt).
 const COMPACT_FORCE_COUNT_FILE = '.goodboy-compact-force-count.txt';
 
-// (C1) 자동 검증 실패 게이트 재시도 카운터 파일. 게이트마다 카운터를 분리해
-// 서로의 재시도 기회를 깎지 않게 한다(리뷰/compact 카운터와 독립).
+// Block counters, one per gate (track G: they count blocks in a row for the user notice; no
+// gate passes on a count). File names keep the old "retry" wording for compatibility.
+// (C1) the auto-validation failure gate.
 const VALIDATION_COUNT_FILE = '.goodboy-validation-retry-count.txt';
 
-// (D) validateReview 실패 게이트 재시도 카운터. 다른 게이트와 분리 관리.
-//   v0.25.0까지 이 게이트만 escape가 없어 영구 데드락을 만들었다(라이브 재현:
-//   삭제된 프로브/리뷰 산출물이 유령 파일로 남아 커버리지가 영원히 실패).
+// (D) review validation and "no review at all". Until v0.25.0 this gate had no way out and
+//   deadlocked on ghost files (deleted probes and review artifacts); the user's marker is it now.
 const REVIEW_VALIDATE_COUNT_FILE = '.goodboy-review-validate-retry-count.txt';
 
-// (층1) 테스트 게이트 재시도 카운터. 리뷰 카운터와 분리 — 테스트 재시도가 리뷰의
-// 재시도 기회를 깎으면, 테스트를 고치는 동안 리뷰 게이트가 escape로 새어나간다.
+// (layer 1) the test gate, apart from the review counter.
 const TEST_COUNT_FILE = '.goodboy-test-retry-count.txt';
 
-// (층0) 인용 검증 게이트 재시도 카운터. 다른 게이트와 분리 — 층0은 편집 없는 턴에도
-// 발동하므로, 카운터를 공유하면 답변 턴의 재시도가 리뷰의 기회를 깎는다.
+// (layer 0) the citation gate: it also fires on turns without edits.
 const CLAIM_COUNT_FILE = '.goodboy-claim-retry-count.txt';
 
-// 이번 Stop 실행에서 사용자에게 보일 토큰-습관 경고들(H1-01 긴 세션 경고, H1-03 강제 escape 통지).
+// 이번 Stop 실행에서 사용자에게 보일 토큰-습관 경고들(H1-01 긴 세션 경고, H1-03 compact 안내).
 // emit()이 모든 출력 경로(block/pass)의 systemMessage에 이 경고들을 덧붙인다 —
 // 이 권고들은 리뷰 통과/차단과 독립적이어야 하기 때문.
 const habitWarnings: string[] = [];
@@ -163,7 +220,7 @@ async function readStdin(): Promise<string> {
 
 /** (H1-01) 긴 세션(경과시간/절대토큰) 경고를 계산해 habitWarnings에 채운다.
  *  - fail-open: 예외/측정불가면 조용히 통과(경고 없음). 절대 throw 하지 않는다.
- *  - 세션당 1회. H1-03 강제가 이번 Stop에 발동했으면(forceActive) 스팸 방지로 생략한다.
+ *  - 세션당 1회. H1-03 compact 안내가 이번 Stop에 나갔으면(forceActive) 스팸 방지로 생략한다.
  *  - 세션 시작 시각(sessionStartTs)은 최초 1회 기록한다(시간 기반 판단용). */
 function maybeSetLongSessionWarning(
   usage: ReturnType<typeof getContextUsage>,
@@ -181,7 +238,7 @@ function maybeSetLongSessionWarning(
       dirty = true;
     }
 
-    // H1-03 강제가 이번 Stop에 발동했으면 스팸 방지를 위해 H1-01 생략. 세션당 1회.
+    // H1-03 안내가 이번 Stop에 나갔으면 스팸 방지를 위해 H1-01 생략. 세션당 1회.
     if (!forceActive) {
       const timeWarnMin = envInt('GOODBOY_SESSION_TIME_WARN_MIN', 35);
       // (v0.27.8) 토큰 임계 기본값을 한도 비례(25%)로 — 실사용 버그: 절대값 50K는
@@ -244,19 +301,12 @@ function maybeSetLongSessionWarning(
   }
 }
 
-/** (H1-03) 컨텍스트 자동 compact 강제 판정.
- *  컨텍스트 점유율이 GOODBOY_COMPACT_FORCE_PCT(기본 50) 이상이면:
- *   1) context-watchdog.sh와 동일한 자동 compact 유도 신호
- *      (top-level stopReason: 'compact_needed' + additionalContext)를 실어 하네스 compact를 유도하고,
- *   2) decision:'block' + reason으로 턴 종료를 막아 확실히 compact를 강제한다.
- *  무한 block 방지: stop_hook_active(main B단계에서 조기 return)와 MAX_RETRIES escape를 재사용한다.
- *   - 별도 카운터 파일(.goodboy-compact-force-count.txt)을 사용해 review 재시도와 간섭하지 않는다.
- *   - 강제가 MAX_RETRIES회 이상 지속되면 통과시키고 경고만 남긴다(영구 정지 방지).
- *   - 임계 미만이면 카운터를 리셋하고 아무 동작도 하지 않는다.
- *  fail-open: 측정 불가/예외 시 강제하지 않는다(null 반환).
+/** (H1-03) Context compaction notice. At GOODBOY_COMPACT_FORCE_PCT (default 50) or more, the
+ *  user is told once per crossing to run /compact (track G: it no longer blocks; only the user
+ *  can compact). Below the threshold, or unmeasurable, the latch resets. Fails open.
  *
- *  @returns output: emit할 HookOutput(block) 또는 null(강제 안 함/escape 통과).
- *           forced: 이번 Stop에서 강제가 발동했는지(escape 통과 포함) — H1-01 스팸 억제 판단용. */
+ *  @returns output: always null now (kept for the call site).
+ *           forced: whether the notice fired on this Stop — H1-01 spam suppression. */
 function maybeForceCompact(
   usage: ReturnType<typeof getContextUsage>,
   sessionId: string,
@@ -282,8 +332,8 @@ function maybeForceCompact(
     }
 
     // (3-A) 한도가 확정적이지 않으면(1M 지원 모델인데 [1m] 표식 없음 / 미지 모델 → 200K/1M 구분 불가)
-    //   강제 block을 보류한다. 표식 없는 1M 세션이 200K로 오판되어 저토큰인데도 오탐 강제되던 문제 방지.
-    //   H1-01(절대 토큰 경고)이 안전망 역할을 하며, 하드 강제는 GOODBOY_CONTEXT_LIMIT 명시로 복구할 수 있다.
+    //   안내를 보류한다. 표식 없는 1M 세션이 200K로 오판되어 저토큰인데도 오탐되던 문제 방지.
+    //   H1-01(절대 토큰 경고)이 안전망 역할을 하며, GOODBOY_CONTEXT_LIMIT 명시로 안내를 복구할 수 있다.
     if (!usage.confident) {
       // E1: "강제했을 상황인데 한도 미확정으로 보류" — 무력화 상태의 핵심 신호라 기록한다.
       logGate(sessionId, 'compact-force', 'fail-open', `limit-unconfident pct=${pct}`);
@@ -291,41 +341,17 @@ function maybeForceCompact(
       return { output: null, forced: false };
     }
 
-    const prev = readRetryCount(sessionId, COMPACT_FORCE_COUNT_FILE);
-    // A7: the escape latches for this session (the counter is session-bound) until usage
-    //   drops below the threshold or becomes unmeasurable — both paths above reset it.
-    //   Resetting on escape produced an endless block/block/pass cycle (observed: 7 Stops).
-    //   forced=false: nothing fires on a latched Stop, so H1-01/D4 context warnings stay on.
-    if (prev >= MAX_RETRIES) return { output: null, forced: false };
-    const count = prev + 1;
-
-    // MAX_RETRIES escape — 강제를 반복했는데도 해소되지 않음 → 통과 + 경고(무한 block 방지).
-    if (count >= MAX_RETRIES) {
-      writeRetryCount(sessionId, MAX_RETRIES, COMPACT_FORCE_COUNT_FILE);
-      logGate(sessionId, 'compact-force', 'warn', `escape pct=${pct}`);
-      habitWarnings.push(
-        `컨텍스트 사용률 ${pct}%가 지속됩니다. 자동 압축 강제가 ${ESCAPE_AFTER_BLOCKS}회 차단 후에도 ` +
-          '해소되지 않아 이번 턴은 통과시킵니다. 수동으로 /compact 또는 새 세션을 권장합니다. (H1-03 강제)',
-      );
-      return { output: null, forced: true };
-    }
-
-    writeRetryCount(sessionId, count, COMPACT_FORCE_COUNT_FILE);
-    logGate(sessionId, 'compact-force', 'deny', `pct=${pct} retry=${count}`);
-    return {
-      output: {
-        decision: 'block',
-        reason:
-          `컨텍스트 사용률 ${pct}%로 임계 초과. 자동 압축이 필요합니다. ` +
-          `/compact 후 계속하세요. (H1-03 강제, ${count}/${MAX_RETRIES})`,
-        // context-watchdog.sh와 동일한 자동 compact 유도 신호(하네스가 인식하면 자동 compact 수행).
-        stopReason: 'compact_needed',
-        additionalContext:
-          `🔴 컨텍스트 사용량 ${pct}% (강제 임계 ${forcePct}% 초과). 자동 /compact를 실행합니다. ` +
-          '현재 작업의 핵심 결정사항과 남은 작업에 집중하여 compact하세요.',
-      },
-      forced: true,
-    };
+    // Track G: a notice to the user, never a block — only the user can run /compact, so a
+    //   block asked the model for something it cannot do. Once per crossing: the counter
+    //   latches until usage drops below the threshold or becomes unmeasurable (both reset it
+    //   above). forced=false on a latched Stop keeps the H1-01/D4 context warnings on.
+    if (readRetryCount(sessionId, COMPACT_FORCE_COUNT_FILE) >= 1) return { output: null, forced: false };
+    writeRetryCount(sessionId, 1, COMPACT_FORCE_COUNT_FILE);
+    logGate(sessionId, 'compact-force', 'warn', `notice pct=${pct}`);
+    habitWarnings.push(
+      `[goodboy] 컨텍스트 사용률이 ${pct}%예요(기준 ${forcePct}%). 지금 /compact를 실행하거나 새 세션을 시작하는 걸 권해요. (H1-03)`,
+    );
+    return { output: null, forced: true };
   } catch {
     // fail-open — 판정 실패 시 강제하지 않는다.
     return { output: null, forced: false };
@@ -460,7 +486,7 @@ function checkCitations(
   }
 }
 
-function claimGate(sessionId: string, citationCheck: () => CitationProblem[]): HookOutput | null {
+function claimGate(sessionId: string, cwd: string, citationCheck: () => CitationProblem[]): HookOutput | null {
   try {
     const problems = citationCheck();
     if (problems.length === 0) {
@@ -471,31 +497,19 @@ function claimGate(sessionId: string, citationCheck: () => CitationProblem[]): H
     const hallucinated = hallucinatedCitations(problems);
     const unread = unreadCitations(problems);
 
-    const count = readRetryCount(sessionId, CLAIM_COUNT_FILE) + 1;
-    if (count >= MAX_RETRIES) {
-      // 영구 차단 방지 — 통과시키되 사용자에게 알린다.
+    if (userPass(sessionId, cwd, 'claim')) {
       resetRetryCount(sessionId, CLAIM_COUNT_FILE);
-      logGate(sessionId, 'claim', 'warn', 'escape');
-      habitWarnings.push(
-        `인용 검증이 ${ESCAPE_AFTER_BLOCKS}회 차단 후에도 해소되지 않아 이번 턴은 통과시킵니다. ` +
-          `사용자 확인이 필요합니다. (${(hallucinated[0] ?? unread[0])?.detail ?? ''})`,
-      );
       return null;
     }
+    const count = readRetryCount(sessionId, CLAIM_COUNT_FILE) + 1;
     writeRetryCount(sessionId, count, CLAIM_COUNT_FILE);
 
     if (hallucinated.length > 0) {
       logGate(sessionId, 'claim', 'deny', `hallucinated(${hallucinated.length})`);
-      return {
-        decision: 'block',
-        reason: `${citationBlockMessage(hallucinated)} (재시도 ${count}/${MAX_RETRIES})`,
-      };
+      return blockOutput(sessionId, cwd, citationBlockMessage(hallucinated), 'claim', 'GOODBOY_CLAIM_GATE=off', count);
     }
     logGate(sessionId, 'claim', 'deny', `unread(${unread.length})`);
-    return {
-      decision: 'block',
-      reason: `${unreadBlockMessage(unread, count >= 2)} (재시도 ${count}/${MAX_RETRIES})`,
-    };
+    return blockOutput(sessionId, cwd, unreadBlockMessage(unread, count >= 2), 'claim', 'GOODBOY_CLAIM_GATE=off', count);
   } catch (err) {
     // fail-open — 게이트 자체의 오류가 턴을 막지 않는다.
     process.stderr.write(`[goodboy stop] claim gate error: ${String(err)}\n`);
@@ -556,7 +570,9 @@ function acceptanceFor(cwd: string): AcceptanceReading {
 function needsTestCoverage(file: string, cwd: string): boolean {
   const rel = relative(resolvePath(cwd), file);
   const scoped = rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel) ? rel : file;
-  return !isTestFile(scoped) && !isDocFile(scoped);
+  // isDocPath (extension, or anything under docs/) is the rule the skill rule and role limits
+  //   use; with no count-based escape, a docs/diagram.svg edit must not demand a test forever.
+  return !isTestFile(scoped) && !isDocFile(scoped) && !isDocPath(scoped.split(sep).join('/'));
 }
 
 /** (F2) When code was edited: dev-cycle documents exist but yield no acceptance criteria.
@@ -587,6 +603,92 @@ function warnAcceptanceProblem(sessionId: string, cwd: string, problem: Acceptan
   }
 }
 
+type TestEvaluation =
+  | { kind: 'accept' }
+  | { kind: 'accept-unverified'; blocked: TestResult }
+  | { kind: 'block'; reason: string };
+
+/**
+ * The one layer-1 decision, shared by the gate and the stop_hook_active accept so the two
+ * cannot drift (refactoring review): coverage and staleness, then every check on the results
+ * that ran. An evidence-backed BLOCKED result ends the turn as unverified only when the results
+ * that did run pass: a failing unit run next to an e2e run that could not start is a failure.
+ */
+function evaluateTestResults(
+  results: TestResult[],
+  changedEdits: ReturnType<typeof getEditsWithLastTimestampSince>,
+  acceptance: AcceptanceReading,
+): TestEvaluation {
+  const block = (reason: string): TestEvaluation => ({ kind: 'block', reason });
+  const cov = validateTestCoverage(results, changedEdits);
+  if (!cov.ok) return block(`테스트 검증 실패: ${cov.reason ?? '알 수 없는 이유'}.`);
+  const effective = cov.effective.length > 0 ? cov.effective : results.slice(0, 1);
+  const blocked = effective.filter((r) => r.verdict === 'blocked');
+  if (!blocked.every(isEvidencedBlocked)) {
+    return block(
+      'A `blocked` test result needs blocked.reason (at least 15 characters) and blocked.evidence: ' +
+        'the commands you ran and their output that show why the tests cannot run.',
+    );
+  }
+  const ran = effective.filter((r) => r.verdict !== 'blocked');
+
+  const suiteFail = failingSuites(ran);
+  if (suiteFail) return block(`${suiteFail}. 원인을 수정하고 다시 테스트하세요.`);
+  const missingFiles = missingTestFiles(ran);
+  if (missingFiles) return block(missingFiles);
+  const evidenceIssue = validateEvidence(ran);
+  if (evidenceIssue) {
+    return block(
+      `테스트 증거가 불충분합니다: ${evidenceIssue} ` +
+        `되돌린 상태에서 실패(red)하고 지금은 통과(green)함을 실행으로 보여야 합니다.`,
+    );
+  }
+  const forbidden = scanForbiddenPatterns(ran.flatMap((r) => r.test_files ?? []));
+  if (forbidden.length > 0) {
+    const list = forbidden
+      .slice(0, 3)
+      .map((h) => `${h.file}: ${h.message}`)
+      .join(' / ');
+    return block(
+      `통과하지만 아무것도 검증하지 않는 테스트 패턴이 있습니다: ${list}` +
+        `${forbidden.length > 3 ? ` 외 ${forbidden.length - 3}건` : ''}`,
+    );
+  }
+  // Criteria the blocked runs were for stay uncovered: that is what "unverified" means.
+  if (blocked.length > 0) return { kind: 'accept-unverified', blocked: blocked[0]! };
+  const uncovered = uncoveredCriteria(ran, acceptance.criteria);
+  if (uncovered.length > 0) {
+    const list = uncovered
+      .slice(0, 3)
+      .map((c) => `${c.id}(${c.description})`)
+      .join('; ');
+    return block(
+      `확정된 요구사항/프로토타입이 요구하는 수용 기준이 테스트로 커버되지 않았습니다: ` +
+        `${list}${uncovered.length > 3 ? ` 외 ${uncovered.length - 3}건` : ''}. ` +
+        `\`bun "${CLI_PATH}" acceptance-list\` 로 전체 목록을 확인하세요.`,
+    );
+  }
+  return { kind: 'accept' };
+}
+
+/** Accepts an evidence-backed BLOCKED test result (track G): the cursor moves and the user
+ *  is told, on both paths (the gate itself and the stop_hook_active accept). */
+/** Layer 1 accepted (on evidence, BLOCKED evidence or the user's marker): cursor and count. */
+function acceptTests(sessionId: string, cwd: string): void {
+  resetRetryCount(sessionId, TEST_COUNT_FILE);
+  writeTestCursor(cwd, getCurrentTurn(sessionId), sessionId);
+  statusSnapshot.testPending = false;
+}
+
+function acceptBlockedTests(sessionId: string, cwd: string, r: TestResult, logReason: string): void {
+  acceptTests(sessionId, cwd);
+  logGate(sessionId, 'test', 'warn', `${logReason}: ${r.blocked?.reason ?? ''}`);
+  habitWarnings.push(
+    `[goodboy] 테스트를 실행하지 못해 검증되지 않은 상태로 턴을 마쳐요. 사유: ${r.blocked?.reason ?? ''}` +
+      ' push나 MR 전에는 통과한 테스트 결과가 필요해요.',
+  );
+}
+
 /**
  * (층1) stop_hook_active 조기 return 경로의 **비차단** 테스트 수락 시도.
  *
@@ -615,18 +717,14 @@ function tryAcceptPendingTest(sessionId: string, cwd: string): boolean {
     const changedEdits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd).filter((e) =>
       needsTestCoverage(e.file, cwd),
     );
-    const cov = validateTestCoverage(results, changedEdits);
-    if (!cov.ok) return false;
-    const effective = cov.effective.length > 0 ? cov.effective : results.slice(0, 1);
-    if (failingSuites(effective)) return false;
-    if (missingTestFiles(effective)) return false;
-    if (validateEvidence(effective)) return false;
-    if (scanForbiddenPatterns(effective.flatMap((r) => r.test_files ?? [])).length > 0) return false;
-    if (uncoveredCriteria(effective, acceptance.criteria).length > 0) return false;
+    const ev = evaluateTestResults(results, changedEdits, acceptance);
+    if (ev.kind === 'block') return false;
+    if (ev.kind === 'accept-unverified') {
+      acceptBlockedTests(sessionId, cwd, ev.blocked, 'blocked-on-stop-active');
+      return true;
+    }
     // 수락.
-    resetRetryCount(sessionId, TEST_COUNT_FILE);
-    writeTestCursor(cwd, getCurrentTurn(sessionId), sessionId);
-    statusSnapshot.testPending = false;
+    acceptTests(sessionId, cwd);
     logGate(sessionId, 'test', 'warn', 'accept-on-stop-active');
     return true;
   } catch {
@@ -692,28 +790,25 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
     const results = findRecentTestFiles(testsDir, testWindowMinutes());
 
     const block = (reason: string): HookOutput | null => {
-      const count = readRetryCount(sessionId, TEST_COUNT_FILE) + 1;
-      if (count < MAX_RETRIES) {
-        writeRetryCount(sessionId, count, TEST_COUNT_FILE);
-        // 자르지 않는다 — gate-log가 자체 상한(300자)으로 다듬는다. 80자로 잘랐더니
-        //   라이브 로그에서 어떤 파일이 문제인지 보이지 않았다(경로가 `/pr` 에서 끊김).
-        logGate(sessionId, 'test', 'deny', reason);
-        return {
-          decision: 'block',
-          reason: `${reason} (테스트 게이트, 재시도 ${count}/${MAX_RETRIES})`,
-        };
+      // The user's override (track G) passes as the old escape did: cursor moves, counter resets.
+      if (userPass(sessionId, cwd, 'test')) {
+        acceptTests(sessionId, cwd);
+        return null;
       }
-      // 한계 초과 → 통과 + 알림 + 커서 전진(영구 차단 방지 — 리뷰 게이트와 동일 패턴).
-      resetRetryCount(sessionId, TEST_COUNT_FILE);
-      writeTestCursor(cwd, getCurrentTurn(sessionId), sessionId);
-      // 사유를 함께 남긴다 — 라이브 검증에서 'escape'만 기록돼 3번째 차단 이유를
-      //   사후에 알 수 없었다(계측 원칙: 게이트가 왜 새어나갔는지 추적 가능해야 한다).
-      logGate(sessionId, 'test', 'warn', `escape: ${reason}`);
-      habitWarnings.push(
-        `테스트 게이트가 ${ESCAPE_AFTER_BLOCKS}회 차단 후에도 해소되지 않아 이번 턴은 통과시킵니다. ` +
-          `사용자 확인이 필요합니다. (사유: ${reason})`,
+      const count = readRetryCount(sessionId, TEST_COUNT_FILE) + 1;
+      writeRetryCount(sessionId, count, TEST_COUNT_FILE);
+      // 자르지 않는다 — gate-log가 자체 상한(300자)으로 다듬는다. 80자로 잘랐더니
+      //   라이브 로그에서 어떤 파일이 문제인지 보이지 않았다(경로가 `/pr` 에서 끊김).
+      logGate(sessionId, 'test', 'deny', reason);
+      return blockOutput(
+        sessionId,
+        cwd,
+        `${reason} (테스트 게이트) If the tests cannot run here (no runner, no environment), record a ` +
+          '`blocked` result with the commands and output that show it; that ends the turn as unverified.',
+        'test',
+        'GOODBOY_TEST_GATE=off',
+        count,
       );
-      return null;
     };
 
     if (results.length === 0) {
@@ -731,55 +826,14 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
     const changedEdits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd).filter((e) =>
       needsTestCoverage(e.file, cwd),
     );
-    const cov = validateTestCoverage(results, changedEdits);
-    if (!cov.ok) {
-      return block(`테스트 검증 실패: ${cov.reason ?? '알 수 없는 이유'}.`);
+    const ev = evaluateTestResults(results, changedEdits, acceptance);
+    if (ev.kind === 'block') return block(ev.reason);
+    if (ev.kind === 'accept-unverified') {
+      acceptBlockedTests(sessionId, cwd, ev.blocked, 'blocked');
+      return null;
     }
-    const effective = cov.effective.length > 0 ? cov.effective : results.slice(0, 1);
-
-    const suiteFail = failingSuites(effective);
-    if (suiteFail) return block(`${suiteFail}. 원인을 수정하고 다시 테스트하세요.`);
-
-    const missingFiles = missingTestFiles(effective);
-    if (missingFiles) return block(missingFiles);
-
-    const evidenceIssue = validateEvidence(effective);
-    if (evidenceIssue) {
-      return block(
-        `테스트 증거가 불충분합니다: ${evidenceIssue} ` +
-          `되돌린 상태에서 실패(red)하고 지금은 통과(green)함을 실행으로 보여야 합니다.`,
-      );
-    }
-
-    const forbidden = scanForbiddenPatterns(effective.flatMap((r) => r.test_files ?? []));
-    if (forbidden.length > 0) {
-      const list = forbidden
-        .slice(0, 3)
-        .map((h) => `${h.file}: ${h.message}`)
-        .join(' / ');
-      return block(
-        `통과하지만 아무것도 검증하지 않는 테스트 패턴이 있습니다: ${list}` +
-          `${forbidden.length > 3 ? ` 외 ${forbidden.length - 3}건` : ''}`,
-      );
-    }
-
-    const uncovered = uncoveredCriteria(effective, acceptance.criteria);
-    if (uncovered.length > 0) {
-      const list = uncovered
-        .slice(0, 3)
-        .map((c) => `${c.id}(${c.description})`)
-        .join('; ');
-      return block(
-        `확정된 요구사항/프로토타입이 요구하는 수용 기준이 테스트로 커버되지 않았습니다: ` +
-          `${list}${uncovered.length > 3 ? ` 외 ${uncovered.length - 3}건` : ''}. ` +
-          `\`bun "${CLI_PATH}" acceptance-list\` 로 전체 목록을 확인하세요.`,
-      );
-    }
-
     // 통과 → 커서 전진 + 카운터 리셋.
-    resetRetryCount(sessionId, TEST_COUNT_FILE);
-    writeTestCursor(cwd, getCurrentTurn(sessionId), sessionId);
-    statusSnapshot.testPending = false;
+    acceptTests(sessionId, cwd);
     return null;
   } catch (err) {
     // fail-open — 게이트 자체의 오류가 턴을 막지 않는다.
@@ -960,9 +1014,7 @@ function tryAcceptPendingReview(
     );
     if (requiredDims.some((d) => !checkedDims.has(d))) return null;
     // 수락.
-    writeReviewCursor(cwd, getCurrentTurn(sessionId), sessionId);
-    resetRetryCount(sessionId, REVIEW_VALIDATE_COUNT_FILE);
-    resetRetryCount(sessionId);
+    acceptReview(sessionId, cwd);
     statusSnapshot.reviewPending = false;
     // 수락은 평소 기록하지 않지만, 이 경로는 신설이라 관측 가능성을 위해 남긴다.
     logGate(sessionId, 'review', 'warn', 'accept-on-stop-active');
@@ -1005,6 +1057,22 @@ function main(): void {
         process.stderr.write(`[goodboy stop] incrementTurn error: ${String(err)}\n`);
       }
 
+      // (A0.2) Track G: gate state that a model Bash call changed and never reported back on
+      //   (`exit N` fires no post hook, G0 M18) is put back before the gates read it.
+      //   The whole post-hook work runs for those calls (markers, hosts, indirect writes),
+      //   then any snapshot left without a note is restored.
+      try {
+        const finished = finishOpenBashCalls(sessionId);
+        if (finished.notice) habitWarnings.push(finished.notice);
+        const restored = restoreOrphanGateState(sessionId);
+        if (restored.length > 0) {
+          logGate(sessionId, 'state-guard', 'deny', `restored ${restored.join(', ')}`);
+          habitWarnings.push(`[goodboy] 명령이 바꾼 goodboy 게이트 상태를 되돌렸어요: ${restored.join(', ')}`);
+        }
+      } catch {
+        // best-effort
+      }
+
       // (A0.5, v0.27.5) 리뷰 파일 위생 — 실사용 보고: .claude/reviews/*.json이 무한정
       //   쌓인다. 유효창을 지난 리뷰는 게이트가 다시는 읽지 않으므로 보존 기간
       //   (GOODBOY_REVIEW_RETENTION_MIN, 기본 3일; 0 이하로 비활성) 경과분을 삭제한다.
@@ -1041,6 +1109,38 @@ function main(): void {
       if (st) {
         statusSnapshot.category = st.category ?? null;
         statusSnapshot.risk = st.risk ?? null;
+      }
+
+      // (A0.7) Effort advice (track G §10.5, lib/effort-advice.ts) — never blocks; the user
+      //   changes effort with /effort. Shown only when the recommendation changes.
+      //   env GOODBOY_EFFORT_ADVICE=on|off (default on).
+      if (envStr('GOODBOY_EFFORT_ADVICE', 'on') !== 'off') {
+        try {
+          const current = input.effort?.level ?? null;
+          const last = readLastAdvice(sessionId);
+          const reviewCursor = readReviewCursor(cwd, sessionId);
+          const changed = getEditsSince(sessionId, reviewCursor ? reviewCursor.turn : 0, cwd);
+          const root = resolvePath(cwd);
+          const docOnly =
+            changed.length > 0 &&
+            changed.every((f) => {
+              const rel = projectRelative(f, root);
+              return rel !== null && isDocPath(rel);
+            });
+          const category = st?.category ?? null;
+          const advice = recommendEffort({
+            current,
+            category,
+            repeatedBlock: hasRepeatedBlock(readGateLog(sessionId), last?.ts ?? null),
+            docOnly,
+          });
+          if (advice && current && advice.level !== last?.level) {
+            habitWarnings.push(effortNotice(current, advice, category));
+            writeLastAdvice(sessionId, advice.level);
+          }
+        } catch {
+          // fail-open: advice only
+        }
       }
 
       // (B) 무한루프 방지 — 단, 리뷰 수락은 여기서도 시도한다(v0.26.7).
@@ -1105,7 +1205,7 @@ function main(): void {
               st.ctxParseWarned = true;
               habitWarnings.push(
                 '컨텍스트 사용량 측정이 계속 실패하고 있습니다(transcript 포맷 변경 가능성). ' +
-                  '컨텍스트 자동 관리(경고/강제 compact)가 비활성 상태일 수 있습니다. (계측 canary, E1)',
+                  '컨텍스트 자동 관리(경고/compact 안내)가 비활성 상태일 수 있습니다. (계측 canary, E1)',
               );
             }
             writeHabitState(sessionId, st);
@@ -1153,9 +1253,8 @@ function main(): void {
         // fail-open
       }
 
-      // (B3) H1-03 강제 자동 compact — 컨텍스트 점유율이 강제 임계(기본 50%) 이상이면
-      //   자동 compact 신호 + decision:block으로 턴 종료를 막아 확실히 compact를 강제한다.
-      //   무한 block은 stop_hook_active(위 B)와 MAX_RETRIES escape로 방지한다.
+      // (B3) H1-03 — at the threshold (default 50%) the user is told to /compact, once per
+      //   crossing. Track G: no block, since only the user can compact.
       const force = maybeForceCompact(usage, sessionId);
 
       // (B4) H1-01 긴 세션 경고 준비 — 강제가 발동했으면(force.forced) 스팸 방지로 생략.
@@ -1181,53 +1280,62 @@ function main(): void {
         }
       }
 
-      // 강제 block이 결정되면 리뷰 검사보다 우선해 즉시 emit하고 종료한다.
-      //   (B)의 무한루프 early-return은 위에서 끝나므로 강제/경고가 붙지 않는다.
-      if (force.output) {
-        emit(force.output);
-        return;
-      }
-
       // (B5) C1 — 자동 검증 실패 게이트. PostToolUse가 남긴 실패 마커가 살아 있으면
       //   턴 종료를 차단한다(편집→재검증 통과 시 PostToolUse가 마커를 지워 해제됨).
       //   - Session binding: the marker lives in this session's state dir and must name
       //     this session; a later project-wide pass of its commands makes it stale (A3).
-      //   - 무한 block 방지: 전용 카운터 + MAX_RETRIES escape(초과 시 통과 + 사용자 알림).
-      const vf = readValidationFailure(sessionId); // this session's marker only
+      //   - No count-based escape (track G): only the user's marker passes it (userPass).
+      // GOODBOY_AUTOVALIDATE=off lifts this gate too: with no validation runs, nothing could
+      //   ever clear the marker (the switch the block notice names).
+      const autoValidateOff = envStr('GOODBOY_AUTOVALIDATE', 'typecheck') === 'off';
+      if (autoValidateOff) clearValidationFailure(sessionId);
+      const vf = autoValidateOff ? null : readValidationFailure(sessionId); // this session's marker only
       statusSnapshot.validationFailed = vf !== null;
       if (vf) {
         const cmds = vf.commands.length > 0 ? vf.commands.join(', ') : '자동 검증';
-        const count = readRetryCount(sessionId, VALIDATION_COUNT_FILE) + 1;
-        if (count < MAX_RETRIES) {
+        if (userPass(sessionId, cwd, 'validation')) {
+          resetRetryCount(sessionId, VALIDATION_COUNT_FILE);
+          clearValidationFailure(sessionId);
+        } else {
+          const count = readRetryCount(sessionId, VALIDATION_COUNT_FILE) + 1;
           writeRetryCount(sessionId, count, VALIDATION_COUNT_FILE);
           logGate(sessionId, 'validation', 'deny', cmds);
-          emit({
-            decision: 'block',
-            reason:
+          emit(
+            blockOutput(
+              sessionId,
+              cwd,
               `자동 검증이 실패한 상태입니다: ${cmds}. 원인을 수정하세요 — ` +
-              `파일을 편집하면 검증이 자동 재실행되고, 통과하면 이 차단이 해제됩니다. ` +
-              `(검증 게이트, 재시도 ${count}/${MAX_RETRIES})`,
-          });
+                `파일을 편집하면 검증이 자동 재실행되고, 통과하면 이 차단이 해제됩니다. (검증 게이트)`,
+              'validation',
+              'GOODBOY_AUTOVALIDATE=off',
+              count,
+            ),
+          );
           return;
         }
-        // 한계 초과 → 통과 + 사용자 알림 + 마커/카운터 정리(영구 차단 방지).
-        resetRetryCount(sessionId, VALIDATION_COUNT_FILE);
-        clearValidationFailure(sessionId);
-        logGate(sessionId, 'validation', 'warn', 'escape');
-        habitWarnings.push(
-          `자동 검증 실패가 ${ESCAPE_AFTER_BLOCKS}회 차단 후에도 해소되지 않아 이번 턴은 통과시킵니다. ` +
-            `사용자 확인이 필요합니다. (실패: ${cmds})`,
-        );
       } else {
-        // No marker, another session's, or a stale one (a later pass) → 카운터 리셋(다음 실패는 새로 3회 기회).
+        // No marker, another session's, or a stale one (a later pass) → the block count restarts.
         resetRetryCount(sessionId, VALIDATION_COUNT_FILE);
       }
 
       // (B5.5) 층0 — 인용 검증. **편집 유무와 무관하게** 매 턴 동작하는 유일한 게이트다.
       //   답변만 하는 턴(코드베이스 설명 등)은 이 게이트가 없으면 통째로 무검증이다.
-      const claimBlock = claimGate(sessionId, citationCheck);
+      const claimBlock = claimGate(sessionId, cwd, citationCheck);
       if (claimBlock) {
         emit(claimBlock);
+        return;
+      }
+
+      // (B5.8) Running agents (track G, G0 M10): the review and test gates wait while a
+      //   background agent runs, since its result (often the review or test the gate asks
+      //   for) has not arrived; blocking now made the model start a duplicate. Only agents
+      //   count: a long-running background shell (a dev server) would defer the gates forever.
+      const runningAgents = (input.background_tasks ?? []).filter(
+        (t) => t && t.type === 'subagent' && t.status === 'running',
+      );
+      if (runningAgents.length > 0) {
+        logGate(sessionId, 'stop', 'warn', `deferred-for-agents(${runningAgents.length})`);
+        emit({});
         return;
       }
 
@@ -1274,17 +1382,31 @@ function main(): void {
         }
       })();
       if (reviews.length === 0) {
+        // The user's override, as on the other review gates: the cursor moves.
+        if (userPass(sessionId, cwd, 'review')) {
+          acceptReview(sessionId, cwd);
+          statusSnapshot.reviewPending = false;
+          emit({});
+          return;
+        }
         const preview = recentEdits.slice(0, 5).join(', ');
         const more = recentEdits.length > 5 ? ` 외 ${recentEdits.length - 5}개` : '';
+        const count = readRetryCount(sessionId, REVIEW_VALIDATE_COUNT_FILE) + 1;
+        writeRetryCount(sessionId, count, REVIEW_VALIDATE_COUNT_FILE);
         logGate(sessionId, 'review', 'deny', 'no-review-file');
-        emit({
-          decision: 'block',
-          // A9: there is no /review-changes command; point to steps that exist.
-          reason:
+        emit(
+          blockOutput(
+            sessionId,
+            cwd,
+            // A9: there is no /review-changes command; point to steps that exist.
             `Review is required for the changed files: ${preview}${more}. ` +
-            `Get the required axes with \`bun "${CLI_PATH}" review-axes <files>\`, then run one ` +
-            'goodboy:review-changes subagent per axis (or use /request-review).',
-        });
+              `Get the required axes with \`bun "${CLI_PATH}" review-axes <files>\`, then run one ` +
+              'goodboy:review-changes subagent per axis (or use /request-review).',
+            'review',
+            '',
+            count,
+          ),
+        );
         return;
       }
 
@@ -1307,41 +1429,38 @@ function main(): void {
         }
       })();
       if (!v.ok) {
-        const count = readRetryCount(sessionId, REVIEW_VALIDATE_COUNT_FILE) + 1;
-        if (count < MAX_RETRIES) {
+        if (!userPass(sessionId, cwd, 'review')) {
+          const count = readRetryCount(sessionId, REVIEW_VALIDATE_COUNT_FILE) + 1;
           writeRetryCount(sessionId, count, REVIEW_VALIDATE_COUNT_FILE);
           logGate(sessionId, 'review', 'deny', v.reason ?? 'invalid');
-          emit({
-            decision: 'block',
-            reason:
+          emit(
+            blockOutput(
+              sessionId,
+              cwd,
               `Review validation failed: ${v.reason ?? 'unknown reason'}. Run the review again ` +
-              `(goodboy:review-changes per axis, or /request-review). (retry ${count}/${MAX_RETRIES})`,
-          });
+                `(goodboy:review-changes per axis, or /request-review).`,
+              'review',
+              '',
+              count,
+            ),
+          );
           return;
         }
-        // 한계 초과 → 통과 + 사용자 알림. 커서 전진이 핵심 — 전진 없이는 다음 턴에
-        // 같은 유령 파일 집합으로 재차단된다(v0.25.0 영구 데드락의 구조적 원인).
-        const escapedForeign = (() => {
+        // The user's override: the cursor must move — without it the next turn blocks on the
+        //   same ghost files again (the structural cause of the v0.25.0 permanent deadlock).
+        const passedForeign = (() => {
           try {
             return splitFindings(reviews, sessionId, cwd, cursor ? cursor.timestamp : null).foreign;
           } catch {
             return [] as ReviewFinding[];
           }
         })();
-        resetRetryCount(sessionId, REVIEW_VALIDATE_COUNT_FILE);
-        writeReviewCursor(cwd, getCurrentTurn(sessionId), sessionId);
+        acceptReview(sessionId, cwd);
         statusSnapshot.reviewPending = false;
-        logGate(sessionId, 'review', 'warn', 'validate-escape');
-        emit({
-          systemMessage: withForeignNote(
-            `리뷰 검증이 ${ESCAPE_AFTER_BLOCKS}회 차단 후에도 실패해 이번 턴은 통과시킵니다. ` +
-              `사용자 확인이 필요합니다. (사유: ${v.reason ?? '알 수 없음'})`,
-            escapedForeign,
-          ),
-        });
+        emit({ systemMessage: withForeignNote(`리뷰 검증 실패: ${v.reason ?? '알 수 없음'}`, passedForeign) });
         return;
       }
-      // 검증 통과 → 이 게이트의 카운터 리셋(다음 실패는 새로 3회 기회).
+      // Validation passed → this gate's block count restarts.
       resetRetryCount(sessionId, REVIEW_VALIDATE_COUNT_FILE);
 
       // 가정 검증(F1.5)/차원(F2)은 커버리지를 실제 구성한 리뷰들(effective) 기준으로
@@ -1367,31 +1486,29 @@ function main(): void {
       // (F) 재시도 카운터 (high severity).
       const highSev = activeFindings.filter((f) => f && f.severity === 'high');
       if (highSev.length > 0) {
-        const count = readRetryCount(sessionId) + 1;
-        writeRetryCount(sessionId, count);
         const issues = findingsSummary(highSev, false);
-        if (count < MAX_RETRIES) {
+        if (!userPass(sessionId, cwd, 'review')) {
+          const count = readRetryCount(sessionId) + 1;
+          writeRetryCount(sessionId, count);
           logGate(sessionId, 'review', 'deny', 'high-severity');
           const axes = axesToReReview(highSev, findingSource);
-          emit({
-            decision: 'block',
-            reason:
+          emit(
+            blockOutput(
+              sessionId,
+              cwd,
               `high severity 발견사항을 수정하세요: ${issues}. A finding clears when, after the fix, ` +
-              `the review axes that raised it (${axes || 'unknown'}) review the flagged file again. ` +
-              `(재시도 ${count}/${MAX_RETRIES})`,
-          });
+                `the review axes that raised it (${axes || 'unknown'}) review the flagged file again.`,
+              'review',
+              '',
+              count,
+            ),
+          );
           return;
         }
-        // 한계 초과 → 통과 + 사용자에게 알림. 리뷰 수락 → 커서 전진.
-        resetRetryCount(sessionId);
-        writeReviewCursor(cwd, getCurrentTurn(sessionId), sessionId);
-        statusSnapshot.reviewPending = false; // the cursor moved, as on the other escapes
-        emit({
-          systemMessage: withForeignNote(
-            `${ESCAPE_AFTER_BLOCKS}회 차단 후에도 해소되지 않았습니다(재시도 ${MAX_RETRIES}회째). 사용자 확인이 필요합니다. (high severity: ${issues})`,
-            foreignFindings,
-          ),
-        });
+        // The user's override: review accepted → cursor moves.
+        acceptReview(sessionId, cwd);
+        statusSnapshot.reviewPending = false;
+        emit({ systemMessage: withForeignNote(`해소되지 않은 high severity: ${issues}`, foreignFindings) });
         return;
       }
 
@@ -1409,37 +1526,36 @@ function main(): void {
         0,
       );
       if (declaredUnknowns > 0 && checkedAssumptions === 0) {
-        const count = readRetryCount(sessionId) + 1;
-        if (count < MAX_RETRIES) {
+        if (!userPass(sessionId, cwd, 'review')) {
+          const count = readRetryCount(sessionId) + 1;
           writeRetryCount(sessionId, count);
           logGate(sessionId, 'review', 'deny', 'assumptions-unchecked');
-          emit({
-            decision: 'block',
-            reason:
+          emit(
+            blockOutput(
+              sessionId,
+              cwd,
               `메인 에이전트가 ## 근거 섹션에서 추측/가정 ${declaredUnknowns}건을 선언했지만, ` +
-              `리뷰가 가정 검증을 수행하지 않았습니다(unknown_assumptions_checked 비어 있음). ` +
-              `review-changes 서브에이전트로 각 추측/가정을 검증해 결과에 기록한 뒤 다시 리뷰하세요. ` +
-              `(추측-리뷰 연동, 재시도 ${count}/${MAX_RETRIES})`,
-          });
+                `리뷰가 가정 검증을 수행하지 않았습니다(unknown_assumptions_checked 비어 있음). ` +
+                `review-changes 서브에이전트로 각 추측/가정을 검증해 결과에 기록한 뒤 다시 리뷰하세요. (추측-리뷰 연동)`,
+              'review',
+              '',
+              count,
+            ),
+          );
           return;
         }
-        // 한계 초과 → 통과 + 사용자에게 알림. 리뷰 수락 → 커서 전진.
-        resetRetryCount(sessionId);
-        writeReviewCursor(cwd, getCurrentTurn(sessionId), sessionId);
+        // The user's override: review accepted → cursor moves.
+        acceptReview(sessionId, cwd);
         statusSnapshot.reviewPending = false;
         emit({
-          systemMessage: withForeignNote(
-            `${ESCAPE_AFTER_BLOCKS}회 차단 후에도 해소되지 않았습니다(재시도 ${MAX_RETRIES}회째). 사용자 확인이 필요합니다. ` +
-              `(추측/가정 ${declaredUnknowns}건이 리뷰에서 검증되지 않음)`,
-            foreignFindings,
-          ),
+          systemMessage: withForeignNote(`추측/가정 ${declaredUnknowns}건이 리뷰에서 검증되지 않았어요.`, foreignFindings),
         });
         return;
       }
 
       // (F2) 차원 커버리지 검사 — 변경 파일이 요구하는 품질 차원을 리뷰가 실제로 평가했는지.
       //   리뷰의 dimensions_checked에 누락된 필수 차원이 있으면 BLOCK.
-      //   high-severity와 동일한 MAX_RETRIES escape를 재사용해 영구 차단을 막는다.
+      //   Like high severity, only the user's marker passes it (track G).
       const requiredDims = (() => {
         try {
           return requiredDimensionsFor(recentEdits);
@@ -1452,31 +1568,31 @@ function main(): void {
       );
       const missingDims = requiredDims.filter((d) => !checkedDims.has(d));
       if (missingDims.length > 0) {
-        const count = readRetryCount(sessionId) + 1;
         const dimList = missingDims.join(', ');
-        if (count < MAX_RETRIES) {
+        if (!userPass(sessionId, cwd, 'review')) {
+          const count = readRetryCount(sessionId) + 1;
           writeRetryCount(sessionId, count);
           logGate(sessionId, 'review', 'deny', `missing-dimensions: ${dimList}`);
-          emit({
-            decision: 'block',
-            reason:
+          emit(
+            blockOutput(
+              sessionId,
+              cwd,
               `리뷰가 변경 내용이 요구하는 품질 차원을 평가하지 않았습니다. ` +
-              `누락된 차원: ${dimList}. ` +
-              `review-changes 서브에이전트로 해당 차원(런타임/관찰 프로브 포함)을 평가하고 ` +
-              `결과의 dimensions_checked에 추가한 뒤 다시 리뷰하세요. (재시도 ${count}/${MAX_RETRIES})`,
-          });
+                `누락된 차원: ${dimList}. ` +
+                `review-changes 서브에이전트로 해당 차원(런타임/관찰 프로브 포함)을 평가하고 ` +
+                `결과의 dimensions_checked에 추가한 뒤 다시 리뷰하세요.`,
+              'review',
+              '',
+              count,
+            ),
+          );
           return;
         }
-        // 한계 초과 → 통과 + 사용자에게 알림. 리뷰 수락 → 커서 전진.
-        resetRetryCount(sessionId);
-        writeReviewCursor(cwd, getCurrentTurn(sessionId), sessionId);
+        // The user's override: review accepted → cursor moves.
+        acceptReview(sessionId, cwd);
         statusSnapshot.reviewPending = false;
         emit({
-          systemMessage: withForeignNote(
-            `${ESCAPE_AFTER_BLOCKS}회 차단 후에도 해소되지 않았습니다(재시도 ${MAX_RETRIES}회째). 사용자 확인이 필요합니다. ` +
-              `(리뷰가 다음 품질 차원을 평가하지 않음: ${dimList})`,
-            foreignFindings,
-          ),
+          systemMessage: withForeignNote(`리뷰가 다음 품질 차원을 평가하지 않았어요: ${dimList}`, foreignFindings),
         });
         return;
       }
@@ -1485,8 +1601,7 @@ function main(): void {
       const systemMessage = passNote('리뷰 통과.', activeFindings, foreignFindings) || undefined;
       // 리뷰 수락(blocking high-severity 없음) → 커서 전진.
       //   이후 Stop에서는 이 턴 이후 편집만 리뷰 필요 대상이 된다.
-      resetRetryCount(sessionId);
-      writeReviewCursor(cwd, getCurrentTurn(sessionId), sessionId);
+      acceptReview(sessionId, cwd);
       statusSnapshot.reviewPending = false;
 
       const out: HookOutput = {};

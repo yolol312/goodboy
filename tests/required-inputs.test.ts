@@ -72,18 +72,19 @@ describe('buildRequiredInputsChecklist', () => {
     expect(out).toContain('self-assessment');
   });
 
-  test('includes the no-fabrication instruction and 가정 routing', () => {
+  test('includes the no-fabrication instruction and the assumption routing (both languages)', () => {
     const out = buildRequiredInputsChecklist(addFeatureInputs);
-    expect(out).toContain('지어내지 마세요');
-    expect(out).toContain('## 근거 > 가정');
+    expect(out).toContain('Never make up');
+    expect(out).toContain('`## 근거` > `가정`');
+    expect(out).toContain('`## Rationale` > `Assumptions`');
   });
 
-  test('marks allow_unknown=false items as 확인 필수', () => {
+  test('marks allow_unknown=false items as needing the user', () => {
     const out = buildRequiredInputsChecklist(addFeatureInputs);
     // test_strategy has allow_unknown:false
     const line = out.split('\n').find((l) => l.startsWith('- test_strategy'));
     expect(line).toBeDefined();
-    expect(line).toContain('사용자 확인 필수');
+    expect(line).toContain('the user must confirm');
   });
 
   test('instructs to use AskUserQuestion only for uncovered items', () => {

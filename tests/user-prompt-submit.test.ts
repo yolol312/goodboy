@@ -44,6 +44,7 @@ async function runHook(prompt: string): Promise<{ stdout: string; cwd: string }>
       CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT,
       GOODBOY_CONCISE_DEFAULT: 'off',
       GOODBOY_ASK_UNCLEAR: 'off',
+      GOODBOY_OUTWARD_GATE: 'off',
     },
   });
   const stdout = await new Response(proc.stdout).text();
@@ -58,35 +59,37 @@ function parseAdditionalContext(stdout: string): string {
   return out.hookSpecificOutput?.additionalContext ?? '';
 }
 
-describe('user-prompt-submit 빈 카테고리 커맨드 차단 (B1)', () => {
+describe('user-prompt-submit argument-free category commands (G1; B1 used to block them)', () => {
   function parseBlock(stdout: string): { decision?: string; reason?: string } {
     return JSON.parse(stdout) as { decision?: string; reason?: string };
   }
 
-  test('인자 없는 /fix-bug → block + 필수 질문 안내', async () => {
+  test('인자 없는 /fix-bug → 차단하지 않고, 대상을 대화·diff에서 찾으라고 안내', async () => {
     const { stdout } = await runHook('/fix-bug');
     const out = parseBlock(stdout);
-    expect(out.decision).toBe('block');
-    expect(out.reason ?? '').toContain('/fix-bug');
-    expect(out.reason ?? '').toContain('다시 입력');
-  });
-
-  test('옵션만 있는 /fix-bug --risk risky → block (내용 없음)', async () => {
-    const { stdout } = await runHook('/fix-bug --risk risky');
-    const out = parseBlock(stdout);
-    expect(out.decision).toBe('block');
-  });
-
-  test('내용이 있으면 차단하지 않는다 (의미 판정은 모델 몫)', async () => {
-    const { stdout } = await runHook('/fix-bug 로그인 후 401');
-    const out = parseBlock(stdout);
     expect(out.decision).toBeUndefined();
+    expect(parseAdditionalContext(stdout)).toContain('without a task description');
   });
 
-  test('빈 커맨드로는 session-state를 기록하지 않는다', async () => {
+  test('옵션만 있는 /fix-bug --risk risky → 차단 없음, 위험도 override는 그대로 기록', async () => {
+    const { stdout, cwd } = await runHook('/fix-bug --risk risky');
+    expect(parseBlock(stdout).decision).toBeUndefined();
+    const state = JSON.parse(
+      readFileSync(join(cwd, '.claude', '.goodboy-session-state.json'), 'utf8'),
+    ) as { risk: string };
+    expect(state.risk).toBe('risky');
+  });
+
+  test('내용이 있으면 안내 문구가 붙지 않는다', async () => {
+    const { stdout } = await runHook('/fix-bug 로그인 후 401');
+    expect(parseBlock(stdout).decision).toBeUndefined();
+    expect(parseAdditionalContext(stdout)).not.toContain('without a task description');
+  });
+
+  test('빈 커맨드도 작업으로 등록한다 (위험 게이트가 적용되도록)', async () => {
     const { cwd } = await runHook('/migrate');
     const { existsSync } = await import('node:fs');
-    expect(existsSync(join(cwd, '.claude', '.goodboy-session-state.json'))).toBe(false);
+    expect(existsSync(join(cwd, '.claude', '.goodboy-session-state.json'))).toBe(true);
   });
 
   test('알려지지 않은 커맨드(/unknown)는 차단 대상 아님', async () => {
@@ -122,7 +125,7 @@ describe('user-prompt-submit self-attestation checklist (#3)', () => {
     const ctx = parseAdditionalContext(stdout);
     expect(ctx).toContain('user_scenario');
     expect(ctx).toContain('test_strategy');
-    expect(ctx).toContain('지어내지 마세요');
+    expect(ctx).toContain('Never make up');
   });
 
   test('keyword-stuffing does not change the checklist (not gameable)', async () => {

@@ -9,3 +9,12 @@
 for (const key of Object.keys(process.env)) {
   if (key.startsWith('GOODBOY_')) delete process.env[key];
 }
+
+// The skill rule (track G) denies a main-session code edit without a workflow skill, which
+// every older hook test that edits a source file would hit first. It is off for the suite;
+// tests/skill-rule*.test.ts turn it on explicitly.
+process.env.GOODBOY_SKILL_GATE = 'off';
+
+// The commit issue rule denies a `git commit` without an issue number, which older hook tests
+// that commit would hit first. Off for the suite; tests/commit-issue.test.ts turns it on.
+process.env.GOODBOY_COMMIT_ISSUE = 'off';

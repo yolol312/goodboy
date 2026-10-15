@@ -264,7 +264,8 @@ describe('F6 — the Bash write deny message in a repo without .claude/', () => 
       tool_name: 'Bash',
       tool_input: { command: 'echo hi > src/a.ts' },
     })) as { hookSpecificOutput?: { permissionDecisionReason?: string } };
-    const marker = /`touch ([^`]+)`/.exec(out.hookSpecificOutput?.permissionDecisionReason ?? '')?.[1] ?? '';
+    // Track G: the message tells the user to run `! touch <marker>` (the model cannot).
+    const marker = /`! touch ([^`]+)`/.exec(out.hookSpecificOutput?.permissionDecisionReason ?? '')?.[1] ?? '';
     expect(marker).not.toBe('');
     expect(Bun.spawnSync(['touch', marker], { cwd: repo.cwd }).exitCode).toBe(0);
   }, 30_000);

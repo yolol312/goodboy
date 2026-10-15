@@ -224,7 +224,7 @@ F7 (English agent definitions and injection) and the per-session recursion-guard
   approvals and retries.
 - The `migrate` skill contradicts itself ("execute the migration" vs "stop at the dry run").
 - Nested subagents are on by default (3 levels). Only concurrency is capped (20 at once,
-  M6); nothing caps the total number of agents a session spawns by default. A runaway
+  M6); no default per-session cap was found (M6). A runaway
   re-delegation loop (about 6,000 delegations of one "run pytest" task, 2026-06-14) is the
   failure to prevent.
 - Escapes that pass a rule after a written reason or a number of retries were used to skip
@@ -338,7 +338,8 @@ Tool skills (hidden from the menu; main session and agents):
   The migrate contradiction is fixed in prepare-migration.
 - `/verify` stays repo-only under that name and gains scenarios for the new rules.
 - Skill rule: a main-session code edit needs a workflow skill invoked in the current task
-  (read from the transcript). When none fits, the main session records a skill-gap note
+  (recorded in `skill-evidence.jsonl` by PostToolUse for a Skill call and by UserPromptSubmit
+  for a typed command). When none fits, the main session records a skill-gap note
   (skills considered, why each did not fit, what skill would) and goes on. Reviews check
   that the note is honest; the monthly review uses the notes to improve or add skills.
   There is no catch-all skill.
@@ -411,6 +412,24 @@ Tool skills (hidden from the menu; main session and agents):
   - The existing coverage checks (acceptance criteria, changed files, review axes) stay.
   - A warning when a code file in `tested_files` has no executed changed line. Whether it
     becomes a block is decided after a month of data.
+- Push test check (G1, added by the user 2026-10-14): before every hand-off — `git push`
+  (feature branches and tags; not `--dry-run` or deletions), MR/PR creation (`gh pr create`,
+  `glab mr create`), a deploy that `lib/outward-command.ts` classifies as mutating toward a
+  host that is neither local nor `allow`, and the `/ship` and `/land-and-deploy` skills — a
+  passing layer-1 result must exist for exactly the content handed off. Evidence:
+  `test-write` records the tested working tree as a git tree hash (`tree`, plus `commit`),
+  untracked files included, ignored files and goodboy artifacts not (on both sides); the
+  hand-off passes when the commit it sends has that tree, or for a deploy, when the working
+  tree does (a deploy ships the files as they are). A commit after the tests still matches;
+  an edit after them does not. The result must also show a suite that ran and test files that
+  exist. A push of every branch or tag (`--all`, `--tags`, `--mirror`) is denied as unclear:
+  name the refs. Pushes inside `sh -c`, `eval` and git aliases count. No re-run. Checked
+  before R2, so a denial never uses a production approval. A `blocked` result never passes;
+  only the user overrides (one-use marker or `GOODBOY_PUSH_TEST_GATE`). A typed `/ship` is
+  not checked at prompt time; its pushes are.
+- Test measurement (G2, with `record-tests`): every layer-1 result records, per test type
+  (unit, integration, ui, e2e), the count and the duration. Measured, not gated; no extra
+  runs; no test tiers (the tier advice is track H).
 
 ### 10.9 Monthly review
 
@@ -427,24 +446,142 @@ Tool skills (hidden from the menu; main session and agents):
 
 | Event | Change |
 |---|---|
-| SessionStart (new) | configuration warnings; record the model |
+| SessionStart (new) | configuration warnings; after a compaction (`source: compact`, M17) reset what read-before-edit counts as known. Recording the model moves to track H (model-change checkup) |
 | PreToolUse, Agent | delegation guards; model and effort check; dispatch log |
-| PreToolUse, Bash | block `claude -p`; R2; deny writes from read-only roles |
-| PreToolUse, Write/Edit | role limits and result-path limits; skill rule |
-| PreToolUse, search | relax H2-03 so small searches run in the main session |
-| UserPromptSubmit | task prompts only: R1/R2/delegation lines and a skill or agent suggestion; fixed slash regex; a task is registered once; argument-free commands allowed; the risk gate only from commands the user typed |
-| Stop | effort advice; review and test messages from the policy table; accept evidence-backed `BLOCKED`; defer the review and test gates while `background_tasks` lists running agents (M10) |
+| PreToolUse, Bash | block `claude -p`; push test check before R2; R2; deny writes from read-only roles; commit issue rule (added by the user 2026-10-15, `lib/commit-issue.ts`): every `git commit`, in the main session and in agents (also through aliases, `-c alias.*`, `!` aliases and shells reading a heredoc script), names an issue in its message (a Jira key or `#123` by default, a project pattern or `off` in `.goodboy/commit-issue`, pinned at SessionStart (startup, resume, clear) under the repo's real path, and the pins made before the first Bash call runs; a file first read later counts only when it and its `.goodboy` dir are unchanged since and not behind a symlink, and one that does not count leaves the default rule, never a farther file; `GOODBOY_COMMIT_ISSUE=off`). Message files are read only when regular and at most 1 MB (4 MB per call, each file once), reused commits through `git log --end-of-options`, git spawns are capped at 8 per call and 5 s each, a call at 10 s, and a git that stalls or prints over 1 MB denies; aliases keep the call's `-c` settings (also `include.path`) and `--git-dir`/`--work-tree`, chains and heredoc shells are followed two deep and denied deeper, `eval`/`sh -c` of a heredoc substitution is read, and an alias or a reuse under env config (`GIT_CONFIG*`, `GIT_DIR`, `HOME`, `--config-env`) is denied; `--cleanup=strip` and `-e` drop `#` lines first (final G1 reviews: an option-shaped `-C` value made the hook write a file; unbounded alias lookups, re-read files, a 3 GB MERGE_MSG and heredoc scripts read with the cube of their number ran it past its timeout or killed it). The git it runs, and the push check's and write sweep's, has fsmonitor off and no signature check. Commits made by `git merge`, `revert`, `cherry-pick` and `commit-tree` are outside the rule |
+| PreToolUse, Skill | `/ship` and `/land-and-deploy` need the push test evidence for HEAD |
+| PreToolUse, Write/Edit | role limits and result-path limits; skill rule; read-before-edit asks what the editor itself knows (its own reads and edits by `agent_id`, the file unchanged since by mtime, nothing from before the last compaction) |
+| PreToolUse, any write | approval markers are the user's: a model write to `.claude/.goodboy-*-approved-*` (any letter case) is denied; after a Bash call the post hooks remove the markers it created (by name against a snapshot taken at the start, not by mtime), and a marker made during a call that never reported back (`exit N`, M18) is not used |
+| PreToolUse/post hooks, Bash | gate state guard (`lib/state-guard.ts`): a command that changes a goodboy session dir is denied; the guarded files are snapshotted before each Bash call and restored after it (or at the next Stop); `.goodboy/hosts` production entries cannot be removed by the model (Edit/Write denied, a Bash removal restored), and the files are merged up the tree; files an interpreter or nested shell wrote are recorded as edits (`lib/write-sweep.ts`); a shell write into `.claude/tests` or `.claude/reviews` is a project write (results come only from the CLI) |
+| PreToolUse, Bash in a read-only role | besides redirects: `cp`/`mv`/`rm`/`touch`/`chmod`…, `perl -i`, mutating git commands, and no `.git/`/`.claude/` exemptions |
+| PreToolUse, search | relax H2-03 so small searches run in the main session; a path the shell expands (`~`, `$VAR`, `$(…)`) is never small |
+| UserPromptSubmit | every prompt that is not a task notification gets the R1 (ask when unclear) and R2 lines; a workflow command gets R2 plus its checklist; fixed slash regex; argument-free commands allowed; the risk gate only from commands the user typed. Moved to G3: delegation lines and a skill or agent suggestion, registering a task once, and the effort check before a task's first action |
+| Stop | effort advice; accept evidence-backed `BLOCKED`; defer the review and test gates while `background_tasks` lists running agents (M10); no count-based escape: a gate blocks until its evidence is there, and only the user's one-use marker (`.goodboy-stop-approved-<tag>`) passes it, with a Korean notice from the 2nd block; H1-03 compaction is a notice, never a block. Review and test messages from the policy table move to G2 (they name G2 agents) |
 | PostToolUse, Agent | completion status into the log |
+| PostToolUseFailure, Agent and Bash (new) | a failed Agent call counts as done/blocked, so it stops counting as running and gets one retry (M16); a failing Bash call gets the same after-Bash sweeps as PostToolUse (M18) |
+
+- Kept on purpose: the reasoning gate's lag escape (it covers the harness's transcript flush
+  lag, not the model), and the `stop_hook_active` pass. On a Stop that follows a block,
+  goodboy accepts what it can and does not block again, except that after accepting a test
+  result it goes on to the full gates (validation, claim, review), which can block. So a turn
+  can end once after a block without its evidence; the review and test cursors do not move,
+  so the next turn's Stop blocks again (the claim gate checks each turn's own answer).
+  The user decided (2026-10-14) that this needs no work unless the Ralph plugin is used.
+- Round 2 of the G1 security review added: results only from their agents (`test-write` from
+  test roles, `review-write` from review roles, `GOODBOY_RESULT_GUARD`), no copies or `$`-named
+  redirects into the result dirs, and a Write to any `.claude/tests|reviews/` on the path;
+  marker origin also by ctime against recorded model Bash windows (`bash-windows.jsonl`), so a
+  marker made in another directory during a call is refused; production hosts never shrink
+  within a session (`production-hosts.json`), so `chmod 000`, a directory or a symlink in place
+  of the hosts file lifts nothing; one shared shell reader (`commandSegments`, with `-lc`-style
+  clusters) for every classifier; an alias-lookup budget; `$(…)`, env-config and config-decided
+  pushes are unclear; read-only roles also cannot `tar -x`, `unzip`, `curl -o`, `wget`, `rsync`,
+  `ditto` or `git read-tree` into the project; the Stop finishes Bash calls that never reported
+  back before any gate reads state.
+- Round 3 added: a symlink is no approval marker; a `.goodboy/hosts` that exists but cannot be
+  read as a plain file (or a `.goodboy` dir that cannot be listed) makes every external host
+  production, in later sessions too; a result CLI call whose subcommand is built at run time
+  counts as a result write; the Stop's finishing of open Bash calls skips the git sweep after
+  5 s (Stop has 15 s); the shared reader also reads `xargs` and `find -exec` commands and
+  csh/tcsh/fish `-c`; pushes fed to a shell on stdin, with `xargs` arguments, or of more than
+  10 refs are unclear; a literal `cd` before a push moves where it is checked; alias names
+  ignore case; result-dir targets are normalized; a Write into a package's result dir below
+  the cwd is denied too.
+- The final review added: a result-dir path is found anywhere in a word, so interpreter code
+  that names one (`python3 -c "open('.claude/tests/x','w')"`) is denied; a result CLI path held
+  in a variable or a glob counts as a result write of unknown kind; the push check stops at the
+  first unclear hand-off or past 10 refs; the PostToolUse write sweep has 12 s again (3 s at
+  Stop). Its second pass undid four false denials of normal work that came from reading the
+  whole command text: every rule now reads segments (lib/outward-command.ts). The result CLI
+  counts only when a JS runtime runs a `lib/cli.ts` (`cat lib/cli.ts`, `bun src/cli.ts --help`
+  pass); a result dir counts as written only by a redirect, a file program's target, `sed -i`,
+  an interpreter, a work-tree git command or `find -delete|-exec`, and only when it is this
+  session's (lib/result-dir.ts: a mktemp sandbox's `.claude/tests` is not); env or
+  `--git-dir`/`--work-tree` make only a push or a possible alias unclear (`git rev-parse
+  --git-dir` and `GIT_DIR=… git log` pass); the stdin-shell, xargs and substitution rules need a
+  shell reading stdin, an xargs running git, or a substitution among the push's own words.
+  The re-review and the last layer-1 round then narrowed them further: xargs running a git
+  built-in other than push passes; a copy out of a result dir is a read, while a write to a
+  loop or `read` variable over the dir, or an xargs writer's input, is not; option writers
+  (`curl -o`, `tar -x -C`, `unzip -d`, `cp -t`) and a CLI behind runtime flags (`bun --cwd .`,
+  `bunx tsx`) are seen; `command -v` runs nothing. The last round made the shared reader skip
+  compound-command words (`if … then`, `do`, `{`, `!`), which had hidden the program from every
+  classifier, and gave each segment a subshell scope, so `cd` is followed per scope and `eval`
+  stays in its parent's; xargs running `sed -i`/`perl -pi` on its input counts as a write.
+  Its injection pass found a fan-out (`find -exec find …` with no terminator) that ran
+  PreToolUse past its timeout, which lets a call through: the reader now has a budget
+  (`MAX_SEGMENTS`, 5000) and a command over it is denied ("split it"). One reader function,
+  `readCommand`, gives every segment the dir it runs in (subshell scopes, `pushd`/`popd` stack,
+  `builtin cd`, `env -C`), shared by the push check, deploys, role limits and the result guard.
+  The closing rounds (compared with real bash and zsh) made it read a command substitution
+  inside double quotes and in an unquoted heredoc body as commands, before the command around
+  it, which keeps the substitution's text in its word; join backslash-newlines; read `$'…'`;
+  take prefix options per prefix word (`sudo -n`, `time -p`, `env -S`, `sudo -D`); treat a
+  job as a scope (a piped or backgrounded command or group runs in a subshell; where bash and
+  zsh differ, the shell's dir after a `cd` there is unclear); stop at 64 nested subshells and
+  4 nested readings (`eval eval …`) with `truncated`; and deny when the reader throws.
+- Known limits: hooks and the model's Bash run as the same OS user, so a determined model can
+  still forge goodboy's own state; the guards make it hard and visible, not impossible. Seen
+  and not closed: a detached background process that creates a marker after its call ended;
+  removing the session dir's snapshots with a glob the text check misses (the state is then
+  not restored); a result forged by a script that builds the result path at run time or
+  imports the CLI module; interpreter writes by a read-only role are recorded as edits, not
+  denied; `push.followTags=true` in config is not read; a directory change goodboy cannot
+  follow (`cd -`, a computed dir, a `popd` past what it saw, `env -C` with a computed dir, a
+  `cd` that moves the shell in zsh but not in bash: the last pipeline element, a pipeline
+  before the last of a list ending in `&`) makes a later push or deploy unclear rather than
+  checked, so such commands need a literal `cd`; a script file a
+  shell runs
+  (`bash release.sh`) is not read; a result written into a dir named by a variable other than
+  `$PWD` is not seen; nor is a write into a parent of the result dirs (`tar -x -C .claude`,
+  `cp -r x/tests .claude/`, `rsync … .claude/`), since a plain copy into `.claude/` is normal
+  work. A push, or a git word that may be an alias, run with config or repository
+  from the environment (`GIT_CONFIG*`, `HOME`, `XDG_CONFIG_HOME`, `GIT_DIR`, `GIT_WORK_TREE`,
+  `--config-env`, `--git-dir`, `-c include.*`) is unclear and denied; built-in commands pass,
+  since git never lets an alias hide one. An indirect write is not recorded when `git status`
+  takes longer than 12 s (3 s at Stop, skipped after 5 s there). The state guard can also undo a
+  write goodboy's own hooks made during a long Bash call (a background agent's validation
+  pass), which only makes a gate stricter. The shared reader also leaves these open (closing
+  G1 round, all fail closed or rare): a function body is read as if it ran where it is
+  defined; an unquoted heredoc body's substitutions are read after the line, so a `cd` later
+  on that line moves them; `git -C "$(git rev-parse --show-toplevel)" push` is denied as
+  unresolved; a substitution's output used as an argument of an interpreter or a writer counts
+  as a write when its text names a result dir; `$(echo git) push` shows no push (the program
+  is known only at run time); `>` inside `(( … ))` reads as a redirect (v0.30 behavior).
+  goodboy's own git calls start no program from the repo's config (lib/hook-git.ts: no
+  fsmonitor, signature check or transport, so no lazy fetch in a partial clone; the write
+  sweep empties every filter driver), except a clean filter in the push check's work-tree hash
+  (turning filters off would break the hash of an LFS repo) and config inside submodules; the
+  post hook's auto-verify runs the project's own typecheck command, which the model can edit.
+  These are the same class as the detached background process above. The shared reader reads a
+  program name in lower case (case-insensitive APFS runs `GIT` as git; `cd`, `pushd` and `popd`
+  keep their case) and git's dashed programs (`git-push`) as git. The commit issue
+  rule also leaves these open (final G1 rounds; most fail closed): pins changed by a Bash call
+  that fires no post hook (`exit N`) count until the next Stop puts them back; its setting comes from the
+  shell's dir, not the repo `--git-dir`/`GIT_DIR` names; `commit.cleanup` and
+  `core.commentChar` in config are not read; env exported earlier in the command
+  (`export GIT_CONFIG_COUNT=…`) and external `git-<name>` programs are not seen; a script
+  file a shell runs is not read; a heredoc that `cat` reads inside a substitution is taken as
+  a message, so `echo "$(cat <<EOF … EOF)" | bash` is not read; more than 8 unknown git words in one
+  command are denied (`git lfs` repeats are looked up once).
+- Proposed for later (v0.32 or after, the user's call): a git `pre-push` hook that runs the
+  same push check inside git, where shell spelling, aliases and env config cannot hide a
+  push. The PreToolUse check stays as the early, explained denial.
+- Spawn concurrency (3) counts the main session's calls; a lead's members count against its
+  per-run cap (6).
 
 - Libraries: `lib/routing-policy.ts` (one table of roles, models, efforts, tools, caps and
   review/test dispatch), `lib/outward-command.ts`, `lib/diff-coverage.ts`, the gate log
   extended with dispatch and completion records, and `lib/recursion-guard.ts` as a session
   budget.
 - Contract tests use independent fixtures, not the policy table itself.
-- New env: `GOODBOY_SPAWN_GATE`, `GOODBOY_SPAWN_LIMIT`, `GOODBOY_SPAWN_LIMIT_LEAD`,
-  `GOODBOY_OUTWARD_GATE`, `GOODBOY_ROUTING_GATE`, `GOODBOY_SKILL_GATE`,
-  `GOODBOY_SKILL_EFFORT`, `GOODBOY_CODEX`. Repo config lives under `.goodboy/`. Renames of
-  existing names wait for D1.
+- New env (G1): `GOODBOY_SPAWN_GATE`, `GOODBOY_SPAWN_LIMIT`, `GOODBOY_SPAWN_LIMIT_LEAD`,
+  `GOODBOY_SPAWN_LIMIT_SESSION`, `GOODBOY_SPAWN_CONCURRENCY`, `GOODBOY_ROUTING_GATE`,
+  `GOODBOY_OUTWARD_GATE`, `GOODBOY_SKILL_GATE`, `GOODBOY_LOG_DIR`, `GOODBOY_EFFORT_ADVICE`,
+  `GOODBOY_BASH_SEARCH_SMALL`, `GOODBOY_PUSH_TEST_GATE`, `GOODBOY_MARKER_GUARD`,
+  `GOODBOY_RESULT_GUARD`, `GOODBOY_COMMIT_ISSUE`; G2:
+  `GOODBOY_SKILL_EFFORT`, `GOODBOY_CODEX`, `GOODBOY_CODEX_MODEL`. Repo config lives under
+  `.goodboy/`. Renames of existing names wait for D1.
 
 ### 10.11 Steps
 
@@ -454,7 +591,7 @@ Branch `feat/g-routing`. After each step: tests, typecheck, one all-axes review,
 | Step | Contents |
 |---|---|
 | G0 | This plan; the measurements in §10.12 |
-| G1 | Rules (§10.5–10.7, §10.10), tests first. The audit of existing reason- and count-based escapes comes last |
+| G1 | Rules (§10.5–10.7, §10.10), tests first. The audit of existing reason- and count-based escapes comes last. Done 2026-10-14; the user added the push test check and the read-before-edit knowledge rules during the step. B3 note: skipping per-prompt text for short prompts was rejected, since a short prompt can be a new, vague task |
 | G2 | Tool skills and the 24 agents together, since agents depend on the skills; the two renames; capability checks; leads enabled last |
 | G3 | Workflow skills: slimmed, renamed, effort set |
 
@@ -481,7 +618,10 @@ without model/effort.
 | M12 | What does the hook payload hold for a typed `/plugin:skill …` command? | The raw text, e.g. `/probe:probe-b hello there` | the slash regex accepts `:` |
 | M13 | Codex CLI | `codex login status` exits 0 ("Logged in using ChatGPT"). `codex review --uncommitted` (also `--base`, `--commit`) runs without prompts; a 5-line diff took 91 s and found the planted off-by-one as `[P1] … file:line`. Failures exit 1: the configured default model was rejected for a ChatGPT login (logged in `m13-default-model.err`), and once the model was "at capacity" (seen in the session; that log was overwritten by the successful run). No token count is printed | run-codex-review passes the model explicitly (`GOODBOY_CODEX_MODEL`), parses `[P0]`–`[P3]`, and records `skipped` with stderr on a non-zero exit; tokens are not tracked for Codex |
 | M14 | Can a lead merge its members' results? | Only with foreground calls. With background calls (the default), the lead's turn ended after launching both members, their completions went to the main session, and no merge arrived. With `run_in_background: false` (m5) the lead got each result in its own turn and merged them | see M15 |
-| M15 | Can a hook force a lead's member calls into the foreground, and do they still run in parallel? | Yes. A PreToolUse rewrite to `run_in_background: false` on Agent calls made by an agent: two calls in one message started 0.25 s apart, ran at the same time (about 3 s each), and the lead returned both results merged | the delegation guard rewrites every agent-made Agent call to the foreground |
+| M15 | Can a hook force a lead's member calls into the foreground, and do they still run in parallel? | Yes. A PreToolUse rewrite to `run_in_background: false` on Agent calls made by an agent: two calls in one message started 0.25 s apart, ran at the same time (about 3 s each), and the lead returned both results merged. A lead that pasted member hand-backs verbatim tripped the harness's frame-forgery flag | the delegation guard rewrites every agent-made Agent call to the foreground; lead definitions summarize member output, never paste it (G2) |
+| M16 | Does a failed Agent call fire a hook? (measured during G1) | Yes: `PostToolUseFailure` with `tool_name`, `tool_input`, `tool_use_id`, `error` (e.g. "Agent type '…' not found"), `is_interrupt`, `duration_ms`; PostToolUse does not fire | a PostToolUseFailure hook records the call as done/blocked. Open: a call allowed by goodboy and denied by another hook leaves no record and counts as running for 30 min |
+| M17 | How is a compaction seen? (measured during G1) | `/compact` on a resumed session fired `SessionStart` with `source: "compact"` and the same `session_id` (plus a SubagentStop for the summarizer) | SessionStart resets what read-before-edit counts as known; the Stop context-drop heuristic stays as a second signal |
+| M18 | Which hook fires after a Bash command that fails? (measured during G1) | `echo hi; false` fired `PostToolUseFailure` (`error: "Exit code 1\nhi"`) and no PostToolUse; `exit 3` fired no post hook at all | the after-Bash sweeps also run from PostToolUseFailure; a Bash call with no post hook is caught by the open start note (markers) and the next Stop (gate state) |
 
 So the lead design in §10.3 and §10.7 stands: leads dispatch their own members, in parallel
 and in the foreground, enforced by the PreToolUse rewrite. The fallbacks considered were

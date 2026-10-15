@@ -15,14 +15,17 @@ import type {
   Severity,
   TestEnvMode,
   TestResult,
+  TestVerdict,
   Verdict,
 } from './types';
+import { workTreeState } from './push-test';
 import {
   findDevCycleArtifacts,
   prototypeContractWarnings,
   requiredAcceptanceCriteria,
 } from './acceptance';
 import { AXIS_DIMENSIONS, axesFor, requiredDimensionsFor } from './review-dimensions';
+import { appendSkillGapLog, recordSkillEvidence, validateSkillGapNote } from './skill-rule';
 
 // ---- 유틸 ----
 
@@ -43,6 +46,7 @@ function writeJson(path: string, data: unknown): void {
 
 const VALID_SEVERITIES: Severity[] = ['high', 'medium', 'low'];
 const VALID_VERDICTS: Verdict[] = ['pass', 'needs-changes', 'fail'];
+const VALID_TEST_VERDICTS: TestVerdict[] = [...VALID_VERDICTS, 'blocked'];
 
 /** stdin을 끝까지 읽는다. */
 async function readAllStdin(): Promise<string> {
@@ -285,9 +289,34 @@ export function validateTestResultInput(parsed: unknown): {
     errors.push('category는 문자열이어야 합니다.');
   }
 
+  // A `blocked` result (track G): the tests could not run. It needs the commands and output
+  //   that show why; it may name no test files, since none could run.
+  const isBlocked = p.verdict === 'blocked';
+  if (isBlocked) {
+    const b = p.blocked as Record<string, unknown> | undefined;
+    if (typeof b !== 'object' || b === null) {
+      errors.push('verdict `blocked` needs blocked: {reason, evidence: [{command, output}]}.');
+    } else {
+      if (typeof b.reason !== 'string' || b.reason.trim().length < 15) {
+        errors.push('blocked.reason must say why the tests cannot run (at least 15 characters).');
+      }
+      if (!Array.isArray(b.evidence) || b.evidence.length === 0) {
+        errors.push('blocked.evidence must list the commands you ran and their output that show it.');
+      } else {
+        b.evidence.forEach((e, i) => validateEvidenceInput(e, `blocked.evidence[${i}]`, errors, { requireExitCode: false }));
+        b.evidence.forEach((e, i) => {
+          const o = (e as Record<string, unknown> | null)?.output;
+          if (typeof o === 'string' && o.trim() === '') errors.push(`blocked.evidence[${i}].output is empty.`);
+        });
+      }
+    }
+  }
+
   // test_files: repo에 남는 테스트 자산. 존재까지 여기서 확인한다 —
   //   임시 디렉터리에 만들고 지운 프로브를 테스트로 위장하는 것을 쓰기 시점에 막는다.
-  if (!Array.isArray(p.test_files) || p.test_files.length === 0) {
+  if (isBlocked && Array.isArray(p.test_files) && p.test_files.length === 0) {
+    // none could run
+  } else if (!Array.isArray(p.test_files) || p.test_files.length === 0) {
     errors.push(
       'test_files는 비어 있지 않은 배열이어야 합니다 — 층1 테스트는 repo에 남는 자산입니다(임시 프로브가 아님).',
     );
@@ -387,8 +416,8 @@ export function validateTestResultInput(parsed: unknown): {
     });
   }
 
-  if (!VALID_VERDICTS.includes(p.verdict as Verdict)) {
-    errors.push(`verdict는 ${VALID_VERDICTS.join('|')} 중 하나여야 합니다 (입력: ${String(p.verdict)}).`);
+  if (!VALID_TEST_VERDICTS.includes(p.verdict as TestVerdict)) {
+    errors.push(`verdict는 ${VALID_TEST_VERDICTS.join('|')} 중 하나여야 합니다 (입력: ${String(p.verdict)}).`);
   }
 
   if (p.prototype_diff !== undefined) {
@@ -417,11 +446,12 @@ export function validateTestResultInput(parsed: unknown): {
     environment: p.environment as TestResult['environment'],
     suites: (p.suites as TestResult['suites']) ?? [],
     acceptance: (p.acceptance as TestResult['acceptance']) ?? [],
-    verdict: p.verdict as Verdict,
+    verdict: p.verdict as TestVerdict,
   };
   if (p.prototype_diff !== undefined) {
     value.prototype_diff = p.prototype_diff as TestResult['prototype_diff'];
   }
+  if (isBlocked) value.blocked = p.blocked as TestResult['blocked'];
   return { ok: true, errors: [], value };
 }
 
@@ -440,6 +470,11 @@ async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
   }
 
   const result = validated.value;
+  // The tested content, taken here and never from the agent (lib/push-test.ts): the push
+  //   test check matches a hand-off against `tree`.
+  const state = workTreeState(cwd);
+  result.commit = state.commit;
+  result.tree = state.tree;
   const testsDir = join(cwd, '.claude', 'tests');
   ensureDir(testsDir);
   const outPath = uniqueJsonPath(testsDir, timestampToFilename(result.timestamp));
@@ -517,11 +552,34 @@ function cmdReviewAxes(args: string[]): void {
   );
 }
 
+// ---- command: skill-gap (track G skill rule) ----
+
+/** Records why no workflow skill fits the current change, so the skill rule lets main-session
+ *  code edits go on; the note also goes to the persistent log for the monthly review. */
+async function cmdSkillGap(cwd: string, args: string[]): Promise<void> {
+  const i = args.indexOf('--session');
+  const sessionId = i >= 0 ? (args[i + 1] ?? '').trim() : '';
+  if (sessionId === '') fail('skill-gap: pass --session <session id> (the deny message prints it)');
+  const raw = await readAllStdin();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    fail('skill-gap: stdin is not JSON. Shape: {"considered":[{"skill":"fix-bug","why_not":"..."}],"would_fit":"...","task":"..."}');
+  }
+  const res = validateSkillGapNote(parsed);
+  if (!res.ok || !res.value) fail(`skill-gap: the note is incomplete:\n- ${res.errors.join('\n- ')}`);
+  const ts = new Date().toISOString();
+  recordSkillEvidence(sessionId, { k: 'skill-gap', t: Date.parse(ts), note: res.value });
+  appendSkillGapLog({ ts, session: sessionId, cwd, note: res.value });
+  process.stdout.write(JSON.stringify({ ok: true, recorded: ts }) + '\n');
+}
+
 // ---- main ----
 
 const USAGE =
   '사용법: bun lib/cli.ts <command> [args...]\n' +
-  '명령: review-write | test-write | acceptance-list | review-axes <파일...>';
+  '명령: review-write | test-write | acceptance-list | review-axes <파일...> | skill-gap --session <id>';
 
 async function main(): Promise<void> {
   const cwd = process.cwd();
@@ -545,6 +603,9 @@ async function main(): Promise<void> {
         break;
       case 'review-axes':
         cmdReviewAxes(args);
+        break;
+      case 'skill-gap':
+        await cmdSkillGap(cwd, args);
         break;
       default:
         fail(`알 수 없는 명령: ${command}\n${USAGE}`);

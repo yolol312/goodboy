@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -180,5 +180,44 @@ describe('bun guard — bun 없음', () => {
       expect(r.stdout).toBe('');
       expect(r.stderr).toBe('');
     }
+  });
+});
+
+describe('bun guard — track G hooks (session-start, subagent-stop, post-tool-use-failure)', () => {
+  test('without Bun, the track G hooks pass silently (exit 0)', async () => {
+    const home = makeHome();
+    for (const hook of ['session-start', 'subagent-stop', 'post-tool-use-failure']) {
+      const r = await runGuard(hook, home);
+      expect([hook, r.code, r.stdout, r.stderr]).toEqual([hook, 0, '', '']);
+    }
+    // Neither hook may start the install-consent flow that only user-prompt-submit owns.
+    expect(existsSync(markerPath(home))).toBe(false);
+  });
+
+  test('every hook registered in hooks.json runs through the launcher and has a script', () => {
+    const root = resolve(import.meta.dir, '..');
+    const cfg = JSON.parse(readFileSync(join(root, 'hooks', 'hooks.json'), 'utf8')) as {
+      hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+    };
+    const names: string[] = [];
+    for (const groups of Object.values(cfg.hooks)) {
+      for (const g of groups) {
+        for (const h of g.hooks) {
+          const m = h.command.match(/^sh "\$\{CLAUDE_PLUGIN_ROOT\}\/bin\/goodboy-run\.sh" ([\w-]+)$/);
+          expect([h.command, m !== null]).toEqual([h.command, true]);
+          names.push(m![1]!);
+        }
+      }
+    }
+    expect(names.sort()).toEqual([
+      'post-tool-use',
+      'post-tool-use-failure',
+      'pre-tool-use',
+      'session-start',
+      'stop',
+      'subagent-stop',
+      'user-prompt-submit',
+    ]);
+    for (const n of names) expect([n, existsSync(join(root, 'hooks', `${n}.ts`))]).toEqual([n, true]);
   });
 });

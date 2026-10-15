@@ -110,8 +110,19 @@ export interface TestResult {
     prototype_path: string;
     mismatches: PrototypeMismatch[];
   };
-  verdict: Verdict;
+  verdict: TestVerdict;
+  /** With verdict `blocked`: why the tests could not run, shown by commands and their output
+   *  (no runner, no environment). Track G: the Stop test gate accepts it with a notice; a
+   *  push never passes on it. */
+  blocked?: { reason: string; evidence: TestEvidence[] };
+  /** Set by `cli.ts test-write`, never by the agent: HEAD and the working tree it tested as a
+   *  git tree hash (lib/push-test.ts workTreeState). The push test check matches `tree`. */
+  commit?: string | null;
+  tree?: string | null;
 }
+
+/** A layer-1 test verdict: a review verdict, or `blocked` when the tests could not run. */
+export type TestVerdict = Verdict | 'blocked';
 
 export interface HookEvent {
   type: string;

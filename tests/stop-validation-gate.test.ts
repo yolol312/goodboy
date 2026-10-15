@@ -1,11 +1,14 @@
 // (C1) 자동 검증 실패 → Stop 차단 게이트 테스트.
 //   PostToolUse가 남긴 실패 마커가 살아 있는 동안 Stop이 턴 종료를 차단하는지,
 //   세션 바인딩/escape/해제 흐름이 맞는지 검증한다.
+// Track G: no count-based escape; only the user's one-use Stop marker (or
+//   GOODBOY_AUTOVALIDATE=off) lets a Stop past a live failure marker.
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { approvalMarkerRelPath } from '../lib/approval-marker';
 
 const STOP_HOOK = resolve(import.meta.dir, '..', 'hooks', 'stop.ts');
 const POST_HOOK = resolve(import.meta.dir, '..', 'hooks', 'post-tool-use.ts');
@@ -45,6 +48,14 @@ function seedMarker(tmp: string, sessionId: string, commands: string[], owner = 
   );
 }
 
+/** The user's one-use Stop override (track G): what `! touch <marker>` creates. */
+function approveStop(cwd: string, sessionId: string): string {
+  const p = join(cwd, approvalMarkerRelPath('stop', sessionId));
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, '', 'utf8');
+  return p;
+}
+
 interface HookOut {
   decision?: string;
   reason?: string;
@@ -78,13 +89,15 @@ async function runStop(tmp: string, cwd: string, sessionId: string): Promise<Hoo
 }
 
 describe('Stop hook — 자동 검증 실패 게이트 (C1)', () => {
-  test('현재 세션의 실패 마커 → BLOCK (실패 명령 + 재시도 카운터 인용)', async () => {
+  test("this session's failure marker → BLOCK (failed command and block count)", async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedMarker(tmp, sessionId,['bun run typecheck']);
     const out = await runStop(tmp, cwd, sessionId);
     expect(out.decision).toBe('block');
     expect(out.reason).toContain('bun run typecheck');
-    expect(out.reason).toContain('재시도 1/3');
+    expect(out.reason).toContain('(block 1)');
+    expect(out.reason).toContain('only the user can let this Stop pass');
+    expect(out.reason).not.toContain('재시도');
     // 마커는 유지된다(해제는 재검증 통과가 담당).
     expect(existsSync(markerPath(tmp, sessionId))).toBe(true);
   });
@@ -119,19 +132,40 @@ describe('Stop hook — 자동 검증 실패 게이트 (C1)', () => {
     expect(out.decision).toBeUndefined();
   });
 
-  test('MAX_RETRIES escape: 3회째는 통과 + 사용자 알림 + 마커 정리', async () => {
+  test('no retry cap: the 3rd Stop in a row still blocks and names the marker and GOODBOY_AUTOVALIDATE=off', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedMarker(tmp, sessionId,['bun run typecheck']);
-    // Retry counters are per session (A3): they live in the session state dir.
+    // Two blocks already happened. Retry counters are per session (A3): session state dir.
     const sessionDir = join(tmp, `goodboy-session-${sessionId}`);
     mkdirSync(sessionDir, { recursive: true });
     writeFileSync(join(sessionDir, '.goodboy-validation-retry-count.txt'), '2', 'utf8');
     const out = await runStop(tmp, cwd, sessionId);
+    expect(out.decision).toBe('block');
+    expect(out.reason).toContain('(block 3)');
+    expect(out.systemMessage ?? '').toContain(`! touch ${approvalMarkerRelPath('stop', sessionId)}`);
+    expect(out.systemMessage ?? '').toContain('GOODBOY_AUTOVALIDATE=off');
+    expect(existsSync(markerPath(tmp, sessionId))).toBe(true); // the failure stays
+  });
+
+  test("the user's Stop marker passes once and clears the failure marker; the next failure blocks again", async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedMarker(tmp, sessionId,['bun run typecheck']);
+    const sessionDir = join(tmp, `goodboy-session-${sessionId}`);
+    writeFileSync(join(sessionDir, '.goodboy-validation-retry-count.txt'), '2', 'utf8');
+    const approval = approveStop(cwd, sessionId);
+    const out = await runStop(tmp, cwd, sessionId);
     expect(out.decision).toBeUndefined();
-    expect(out.systemMessage).toContain('사용자 확인');
-    expect(out.systemMessage).toContain('bun run typecheck');
-    // escape 시 마커를 지워 영구 차단을 방지한다.
+    expect(out.systemMessage ?? '').toContain('사용자 승인 마커로 이번 턴의');
+    expect(out.systemMessage ?? '').toContain('이번 턴의 validation 게이트');
+    // The pass clears the failure marker (as the old escape did) and uses the approval once.
     expect(existsSync(markerPath(tmp, sessionId))).toBe(false);
+    expect(existsSync(approval)).toBe(false);
+    expect(existsSync(join(sessionDir, '.goodboy-validation-retry-count.txt'))).toBe(false);
+
+    seedMarker(tmp, sessionId,['bun run typecheck']);
+    const next = await runStop(tmp, cwd, sessionId);
+    expect(next.decision).toBe('block');
+    expect(next.reason).toContain('(block 1)');
   });
 
   test('검증 게이트는 리뷰 재시도 카운터(.goodboy-retry-count.txt)를 건드리지 않는다', async () => {

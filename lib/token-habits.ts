@@ -9,7 +9,7 @@
 //   - 스팸 금지: 경고는 세션당/단계당 1회. "이미 경고함"을 habit-state.json에 기록한다.
 //   - env 토글: 각 기능은 GOODBOY_ 접두사 env로 끄거나 임계값을 조정할 수 있다.
 
-import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
 
@@ -45,13 +45,12 @@ export const TOKEN_HABITS: Record<string, TokenHabit> = {
   },
   'H1-03': {
     id: 'H1-03',
-    title: '컨텍스트 자동 compact 강제',
+    title: '컨텍스트 compact 권고',
     envVars: ['GOODBOY_COMPACT_FORCE_PCT', 'GOODBOY_CONTEXT_LIMIT'],
     defaults: { GOODBOY_COMPACT_FORCE_PCT: 50 },
     description:
-      '컨텍스트 점유율이 강제 임계(기본 50%) 이상이면 자동 compact 신호(stopReason: compact_needed)와 ' +
-      'decision:block으로 턴 종료를 막아 compact를 강제(공격적). ' +
-      'MAX_RETRIES 초과 시 통과+경고(무한 block 방지). 임계 미만이면 아무 동작 없음. ' +
+      'Track G: at the threshold (default 50%) the user is told once per crossing to run /compact; the ' +
+      'turn is never blocked, since only the user can compact. 임계 미만이면 아무 동작 없음. ' +
       '점유율은 (현재 입력 토큰 / 컨텍스트 한도)로 계산하는데, 한도는 모델 ID의 1M 표식으로 판별한다. ' +
       '⚠️ 1M 확장 컨텍스트는 세션 토글이라 실제 모델 ID(예: claude-opus-4-8)에는 표식이 없어 200K로 오판될 수 있다 ' +
       '(percent가 수 배로 부풀어 오탐 강제 발생). 1M 창을 쓰면 GOODBOY_CONTEXT_LIMIT=1000000처럼 한도를 명시하면 정확하다 ' +
@@ -188,7 +187,7 @@ export function writeHabitState(sessionId: string, state: HabitState): void {
   }
 }
 
-// --- H1-03: 컨텍스트 자동 compact 강제 --------------------------------------
+// --- H1-03: 컨텍스트 compact 안내 ------------------------------------------
 
 /** 강제 자동 compact 임계(%). 컨텍스트 점유율이 이 값 이상이면 Stop 훅이 compact를 강제한다.
  *  GOODBOY_COMPACT_FORCE_PCT로 조정, 기본 50. (하위 경고 단계 없이 전부 "강제"로 통일) */
@@ -620,6 +619,102 @@ function tokenizeShellWords(seg: string): Array<{ value: string; quoted: boolean
   return out;
 }
 
+// --- H2-03 relaxation (track G): a small, explicit search scope runs in the main session ---
+
+const SEARCH_VALUE_FLAGS = new Set([
+  '-e', '-f', '--regexp', '--file', '-m', '--max-count', '-A', '-B', '-C', '--context',
+  '--include', '--exclude', '--exclude-dir', '-g', '--glob', '-t', '--type', '-T', '--type-not',
+]);
+/** A path whose size is unknown as written: a glob, or one the shell expands (~, $VAR, $(...),
+ *  backticks, braces), which stat would miss and count as nothing. */
+const UNKNOWN_SCOPE = /[*?[{~$`]/;
+
+/** The paths the recursive searches of a command read, from every segment that is one (a
+ *  pipe filter such as `| grep -v x` is not), or null when no segment is a search this module
+ *  recognizes. A chained `grep -r x small/; grep -r y /` must not run as small (hallucination
+ *  review: only the first segment used to count). No path means the current directory. */
+export function bashSearchPaths(command: string): string[] | null {
+  const all: string[] = [];
+  let found = false;
+  for (const seg of splitShellSegments(command.trim())) {
+    if (classifyBashSearch(seg.text) === null) continue;
+    const paths = segmentSearchPaths(seg.text);
+    if (paths === null) return null; // a search whose scope cannot be read: not small
+    found = true;
+    all.push(...paths);
+  }
+  return found ? all : null;
+}
+
+function segmentSearchPaths(text: string): string[] | null {
+  const tokens = tokenizeShellWords(text).map((t) => t.value);
+  while (tokens.length > 0 && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0]!) || /^(?:sudo|time|nice|nohup|command)$/.test(tokens[0]!))) tokens.shift();
+  let bin = tokens.shift() ?? '';
+  if (bin === 'git' && tokens[0] === 'grep') {
+    tokens.shift();
+    bin = 'git grep';
+  }
+  if (bin === 'find') {
+    const paths: string[] = [];
+    for (const t of tokens) {
+      if (t.startsWith('-') || t === '(' || t === '!') break;
+      paths.push(t);
+    }
+    return paths.length > 0 ? paths : ['.'];
+  }
+  if (!['grep', 'egrep', 'fgrep', 'rgrep', 'rg', 'ripgrep', 'ag', 'ack', 'git grep'].includes(bin)) return null;
+  const positional: string[] = [];
+  let patternGiven = false;
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (t === '--') {
+      positional.push(...tokens.slice(i + 1));
+      break;
+    }
+    if (t.startsWith('-') && t !== '-') {
+      const name = t.includes('=') ? t.slice(0, t.indexOf('=')) : t;
+      if (name === '-e' || name === '--regexp' || name === '-f' || name === '--file') patternGiven = true;
+      if (SEARCH_VALUE_FLAGS.has(name) && !t.includes('=')) i++;
+      continue;
+    }
+    positional.push(t);
+  }
+  const paths = patternGiven ? positional : positional.slice(1);
+  return paths.length > 0 ? paths : ['.'];
+}
+
+/** True when the paths hold at most `limit` entries (files and dirs, a walk that stops once past
+ *  the limit). Nothing is skipped: grep -r and find read node_modules, .git and build dirs too.
+ *  A missing path counts as nothing. */
+export function searchScopeIsSmall(paths: string[], cwd: string, limit: number): boolean {
+  let count = 0;
+  const walk = (p: string): boolean => {
+    let st: ReturnType<typeof statSync>;
+    try {
+      st = statSync(p);
+    } catch {
+      return true;
+    }
+    if (++count > limit) return false;
+    if (!st.isDirectory()) return true;
+    let entries: string[];
+    try {
+      entries = readdirSync(p);
+    } catch {
+      return true;
+    }
+    for (const e of entries) {
+      if (!walk(join(p, e))) return false;
+    }
+    return true;
+  };
+  for (const p of paths) {
+    if (UNKNOWN_SCOPE.test(p)) return false;
+    if (!walk(resolve(cwd, p))) return false;
+  }
+  return true;
+}
+
 export const BASH_SEARCH_MESSAGE =
   'Bash로 코드베이스를 직접 재귀 탐색하지 마세요(도구 위임 게이트 우회). ' +
   "이런 검색은 서브에이전트에 위임하세요: Agent 도구로 'general-purpose'/'Explore' 서브에이전트를 " +
@@ -641,5 +736,5 @@ export function wantsDetail(prompt: string): boolean {
 }
 
 export const CONCISE_INSTRUCTION =
-  '답변은 먼저 핵심을 요약해 제시하고, 사용자가 명시적으로 더 상세한 설명을 요청할 때만 ' +
-  '장황하게 출력하세요. (간결 우선, H5-04)';
+  'Lead with a short summary of the answer; give a long explanation only when the user asks ' +
+  'for more detail. (concise first, H5-04)';

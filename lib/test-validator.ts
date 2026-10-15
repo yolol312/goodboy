@@ -13,13 +13,27 @@
 import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { canonicalTimestamp, isTrustedTimestamp } from './trusted-time';
-import type { AcceptanceCoverage, TestResult, Verdict } from './types';
+import type { AcceptanceCoverage, TestResult, TestVerdict } from './types';
 import type { AcceptanceCriterion } from './acceptance';
 // 변경 파일 + 마지막 편집 시각. 리뷰 게이트와 같은 타입을 쓴다(같은 커버리지 의미론).
 import type { ChangedFileEdit } from './review-validator';
 
-function isVerdict(v: unknown): v is Verdict {
-  return v === 'pass' || v === 'needs-changes' || v === 'fail';
+function isVerdict(v: unknown): v is TestVerdict {
+  return v === 'pass' || v === 'needs-changes' || v === 'fail' || v === 'blocked';
+}
+
+/** An evidence-backed BLOCKED result (track G): verdict `blocked` with a reason and at least
+ *  one command and its output that show why the tests could not run. */
+export function isEvidencedBlocked(r: TestResult): boolean {
+  if (r.verdict !== 'blocked' || !r.blocked) return false;
+  const { reason, evidence } = r.blocked;
+  return (
+    typeof reason === 'string' &&
+    reason.trim().length >= 15 &&
+    Array.isArray(evidence) &&
+    evidence.length > 0 &&
+    evidence.every((e) => typeof e?.command === 'string' && e.command.trim() !== '' && typeof e.output === 'string' && e.output.trim() !== '')
+  );
 }
 
 function normalizePath(p: string): string {

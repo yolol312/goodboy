@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { approvalMarkerRelPath } from '../lib/approval-marker';
 import { TEST_CURSOR_FILE, cursorFileName } from '../lib/review-cursor';
 
 const STOP_HOOK = resolve(import.meta.dir, '..', 'hooks', 'stop.ts');
@@ -73,6 +74,8 @@ interface TestResultOpts {
   suites?: Array<{ name: string; command: string; passed: number; failed: number; output: string }>;
   acceptance?: Array<Record<string, unknown>>;
   verdict?: string;
+  /** With verdict `blocked` (track G): why the tests could not run, and the evidence. */
+  blocked?: Record<string, unknown>;
 }
 
 function writeTestResult(cwd: string, opts: TestResultOpts): void {
@@ -90,9 +93,18 @@ function writeTestResult(cwd: string, opts: TestResultOpts): void {
       suites: opts.suites ?? [{ name: 'unit', command: 'bun test', passed: 3, failed: 0, output: '3 pass' }],
       acceptance: opts.acceptance ?? [],
       verdict: opts.verdict ?? 'pass',
+      ...(opts.blocked ? { blocked: opts.blocked } : {}),
     }),
     'utf8',
   );
+}
+
+/** The user's one-use Stop override (track G): what `! touch <marker>` creates. */
+function approveStop(cwd: string, sessionId: string): string {
+  const p = join(cwd, approvalMarkerRelPath('stop', sessionId));
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, '', 'utf8');
+  return p;
 }
 
 /** 통과 케이스는 리뷰 게이트까지 흘러가므로 통과 리뷰가 함께 필요하다. */
@@ -481,22 +493,130 @@ describe('Stop hook — 층1 테스트 게이트', () => {
     expect(await accepted([goodAcceptance(), screen])).toBe(true);
   }, 30_000);
 
-  test('MAX_RETRIES escape: 3회째는 통과 + 커서 전진(영구 차단 방지)', async () => {
+  // Track G: no count-based escape. The gate blocks on every full Stop until its evidence is
+  //   there; from the 2nd block on, the user is told how to override it.
+  test('no retry cap: the 3rd Stop still blocks; from the 2nd the user sees the marker and GOODBOY_TEST_GATE=off', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 3, [CODE_FILE], cwd);
+    const touch = `! touch ${approvalMarkerRelPath('stop', sessionId)}`;
 
     const first = await runStop(tmp, cwd, sessionId);
     expect(first.decision).toBe('block');
     expect(first.reason).toContain('테스트가 없습니다');
+    expect(first.reason).toContain('(block 1)');
+    expect(first.reason).toContain('only the user can let this Stop pass');
+    expect(first.reason).not.toContain('재시도');
+    expect(first.systemMessage ?? '').not.toContain(touch);
+
     const second = await runStop(tmp, cwd, sessionId);
     expect(second.decision).toBe('block');
-    expect(second.reason).toContain('테스트가 없습니다');
+    expect(second.reason).toContain('(block 2)');
+    expect(second.systemMessage ?? '').toContain(touch);
+    expect(second.systemMessage ?? '').toContain('GOODBOY_TEST_GATE=off');
 
-    // 3회째: 테스트 게이트는 통과시키고 커서를 전진시킨다. 그 뒤 리뷰 게이트가
-    // 자기 사유로 막는 것은 정상이므로 decision이 아니라 **사유**로 판정한다.
     const third = await runStop(tmp, cwd, sessionId);
-    expect(third.reason ?? '').not.toContain('테스트가 없습니다');
+    expect(third.decision).toBe('block');
+    expect(third.reason).toContain('테스트가 없습니다');
+    expect(third.reason).toContain('(block 3)');
+    expect(existsSync(testCursorPath(tmp, sessionId, cwd))).toBe(false);
+  });
+
+  test("the user's Stop marker passes the test gate once and moves the test cursor", async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 3, [CODE_FILE], cwd);
+    const marker = approveStop(cwd, sessionId);
+
+    // The test gate passes and its cursor moves. The review gate may still block with its
+    // own reason, so this is judged by the reason, not the decision.
+    const passed = await runStop(tmp, cwd, sessionId);
+    expect(passed.reason ?? '').not.toContain('테스트가 없습니다');
+    expect(passed.systemMessage ?? '').toContain('사용자 승인 마커로 이번 턴의');
+    expect(passed.systemMessage ?? '').toContain('이번 턴의 test 게이트');
     expect(existsSync(testCursorPath(tmp, sessionId, cwd))).toBe(true);
+    expect(existsSync(marker)).toBe(false); // used once
+
+    // The edit is still untested: the next Stop blocks again, counting from 1.
+    const next = await runStop(tmp, cwd, sessionId);
+    expect(next.decision).toBe('block');
+    expect(next.reason).toContain('테스트가 없습니다');
+    expect(next.reason).toContain('(block 1)');
+  });
+
+  // Track G: tests that cannot run here end the turn as unverified, on evidence only.
+  test('an evidence-backed blocked result covering the changed files passes: cursor moves, the user is told', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 3, [CODE_FILE], cwd);
+    writeTestResult(cwd, {
+      testedFiles: [resolve(cwd, CODE_FILE)],
+      testFiles: [],
+      suites: [],
+      verdict: 'blocked',
+      blocked: {
+        reason: 'no test runner is installed in this repo',
+        evidence: [{ command: 'bun test', output: 'bun: command not found', exit_code: 127 }],
+      },
+    });
+    writePassingReview(cwd, [resolve(cwd, CODE_FILE)]);
+
+    const out = await runStop(tmp, cwd, sessionId);
+    expect(out.reason ?? '').not.toContain('(테스트 게이트)'); // layer 1 did not block
+    expect(out.systemMessage ?? '').toContain('테스트를 실행하지 못해');
+    expect(out.systemMessage ?? '').toContain('no test runner is installed in this repo');
+    expect(existsSync(testCursorPath(tmp, sessionId, cwd))).toBe(true);
+  });
+
+  test('a blocked result next to a run that failed blocks: unverified only when what ran passed (refactoring review)', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    const OTHER = 'src/other.ts';
+    seedSession(tmp, sessionId, 3, [CODE_FILE, OTHER], cwd);
+    writeTestResult(cwd, {
+      testedFiles: [resolve(cwd, CODE_FILE)],
+      testFiles: [],
+      suites: [],
+      verdict: 'blocked',
+      blocked: { reason: 'the e2e browser cannot start here', evidence: [{ command: 'npx playwright test', output: 'browserType.launch: Executable does not exist' }] },
+    });
+    const testFile = join(cwd, 'tests', 'other.test.ts');
+    mkdirSync(dirname(testFile), { recursive: true });
+    writeFileSync(testFile, 'test("o", () => {});\n');
+    writeFileSync(
+      join(cwd, '.claude', 'tests', 'unit.json'),
+      JSON.stringify({
+        timestamp: new Date(Date.now() + 60_000).toISOString(),
+        tested_files: [resolve(cwd, OTHER)],
+        category: 'add-feature',
+        test_files: [testFile],
+        environment: { mode: 'local' },
+        suites: [{ name: 'unit', command: 'bun test', passed: 2, failed: 1, output: '2 pass 1 fail' }],
+        acceptance: [],
+        verdict: 'needs-changes',
+      }),
+    );
+    writePassingReview(cwd, [resolve(cwd, CODE_FILE), resolve(cwd, OTHER)]);
+    const out = await runStop(tmp, cwd, sessionId);
+    expect(out.decision).toBe('block');
+    expect(out.reason ?? '').toContain('실패한 테스트 스위트');
+    expect(out.systemMessage ?? '').not.toContain('테스트를 실행하지 못해');
+  });
+
+  test('a blocked result without evidence still blocks', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 3, [CODE_FILE], cwd);
+    writeTestResult(cwd, {
+      testedFiles: [resolve(cwd, CODE_FILE)],
+      testFiles: [],
+      suites: [],
+      verdict: 'blocked',
+      blocked: { reason: 'no test runner is installed in this repo', evidence: [] },
+    });
+
+    const out = await runStop(tmp, cwd, sessionId);
+    expect(out.decision).toBe('block');
+    expect(out.reason).toContain('blocked.evidence');
+    expect(out.reason).toContain('(테스트 게이트)');
+    expect(out.reason).toContain('(block 1)');
+    expect(out.systemMessage ?? '').not.toContain('테스트를 실행하지 못해');
+    expect(existsSync(testCursorPath(tmp, sessionId, cwd))).toBe(false);
   });
 });
 
