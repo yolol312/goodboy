@@ -22,8 +22,8 @@ core gates can switch off silently, false positives can deadlock a session, and
 
 ## 2. Principles
 
-1. **Feature freeze** — no new gates until v1.0. Exception: track G (§10), approved by
-   the user on 2026-10-14.
+1. **Feature freeze** — no new gates until v1.0. Exceptions: track G (§10) and track H
+   (§14, project knowledge, v0.32.0), both approved by the user on 2026-10-14.
 2. **Test first** — every fix lands with a regression test that fails before the fix.
 3. **Measure before trading cost against detection.**
 4. **Proportional cost** — guardrail overhead scales with change size and risk.
@@ -646,6 +646,9 @@ without model/effort.
 | M17 | How is a compaction seen? (measured during G1) | `/compact` on a resumed session fired `SessionStart` with `source: "compact"` and the same `session_id` (plus a SubagentStop for the summarizer) | SessionStart resets what read-before-edit counts as known; the Stop context-drop heuristic stays as a second signal |
 | M18 | Which hook fires after a Bash command that fails? (measured during G1) | `echo hi; false` fired `PostToolUseFailure` (`error: "Exit code 1\nhi"`) and no PostToolUse; `exit 3` fired no post hook at all | the after-Bash sweeps also run from PostToolUseFailure; a Bash call with no post hook is caught by the open start note (markers) and the next Stop (gate state) |
 | M19 | Capability check (G2, 2026-10-15): do the routed agents produce their artifact? | In a temp repo with `--plugin-dir` and a haiku main session, foreground calls: `review-all` wrote two valid review JSONs (all axes, `hallucination` marker). `test-unit` first wrote none: its red step edited `src/` in place, which its role limits deny (tests only). With write-regression-test running red in a `git archive <base>` copy and the mutation in a copy of the tree, it wrote a passing result with `by_type` (`unit`: 1 suite, 9 tests) and `coverage` measured, red failing on HEAD and the mutation caught | `review-all` and `test-unit` are routed (`CHECKED_ROLES`); red and mutation never touch the project |
+| M20 | H0, 2026-10-15: what does SessionStart carry per source? | `startup` and `clear`: `cwd`, `session_id`, `source`, `transcript_path`. `resume` adds `context_tokens`, `estimated_cache_write_usd`, `prompt_cache_likely_expired`, `seconds_since_last_response`. `compact` adds `model` and `prompt_id` | SessionStart handles all four sources; the policy notice needs only `cwd` and `source` |
+| M21 | Does a resumed or cleared session keep its session id? | `--resume` keeps it (the read log carries over, and so does the context); `/clear` starts a new id | resume needs no re-read; clear starts a fresh read log, so the gate asks for the reads again |
+| M22 | How is a compaction seen? | `PreCompact` (`trigger: manual`, `custom_instructions`) then `SessionStart` `compact` with the same id | the read records reset on `compact` (G1), so the read gate requires the files again |
 
 So the lead design in §10.3 and §10.7 stands: leads dispatch their own members, in parallel
 and in the foreground, enforced by the PreToolUse rewrite. The fallbacks considered were
@@ -671,6 +674,118 @@ result files, and (c) no leads.
 - Supported OS: macOS and Linux (the launcher is a sh script).
 - 0.x allows state-file format changes; legacy files are ignored rather than migrated.
 - Sizes are relative (S/M/L); there are no calendar estimates.
+
+## 14. H — Project knowledge (v0.32.0)
+
+Approved by the user on 2026-10-14 as a feature-freeze exception, like G. Reasons and the
+user's decisions are in the framework-improvement backlog (items 1, 2, 3, 6, 8, 9). Branch
+`feat/h-knowledge`, stacked on `feat/g-routing`: the precondition "G merged" became "G
+committed" while the user is away (their instruction, 2026-10-14); G merges first.
+
+### 14.1 Why
+
+A session starts without the project's background (policies, past decisions), so the same
+questions come back and the docs drift from the code. H makes the project's knowledge a
+file every session reads first, splits every check into `ai` (evidence decides) and `human`
+(the user decides), and keeps the key docs in step with the code they describe.
+
+### 14.2 Project mode (H1)
+
+- A directory is non-project only when its own `CLAUDE.md` has the line
+  `goodboy: non-project` (trimmed, exact). Everything else is a project. Only the session's
+  cwd counts: no inheritance, and `~/.claude/CLAUDE.md` is never read for this.
+- The marker is written only with user evidence: the user typed `goodboy: non-project` in a
+  prompt, or an AskUserQuestion answer in this session chose an option containing
+  `non-project`. Otherwise PreToolUse denies the Edit, Write or Bash that adds it.
+- Non-project mode turns off the policy read gate, the docs rule and the test gate. The
+  review gate stays (evidence and hallucination checks included), and so do R2, the spawn
+  and recursion guards and write-bypass detection.
+- `/Users/seongmo/ccworkspace/CLAUDE.md` gets the marker only with the user's OK.
+
+### 14.3 Policy file, read gate and the knowledge skill (H2)
+
+- `.goodboy/policy.md`, git-managed and committed in every repo: one `## <id> <title>`
+  section per entry with `decide: ai|human`, `source:`, `date:` and `checked:` lines (and
+  `evidence:` for an `ai` entry). Size budget: 200 lines; SessionStart warns above it.
+- `.goodboy/docs.json`, the doc map: `{"docs": [{"path", "session_start", "covers": [globs]}]}`.
+- SessionStart (all four sources, project mode): names the required files (policy.md and the
+  `session_start` docs) and tells the model to Read them first; a missing policy.md asks for
+  the skill's create mode, with a Korean notice to the user.
+- Read gate (PreToolUse, main session only; subagents get the policy in their prompt): until
+  each required file has a full Read in this session, every other tool is denied with the
+  unread files named. Evidence is the read log; partial reads count when their ranges cover
+  the file. A Read is required again after a compaction and when the file changed since the
+  read (not by this session's own edits). Always allowed: Read, the knowledge skill,
+  AskUserQuestion, ToolSearch. The required files are exempt from the re-read gate. An
+  unreadable file fails open with a warning. No model-side escape; `GOODBOY_POLICY_GATE=off`
+  for the user.
+- The skill `keep-project-knowledge` (§10.4 format, user-invocable too): create mode asks
+  once whether the directory is a project (not one: write the marker; one: scan README,
+  CLAUDE.md, docs, configs and git history, draft entries with sources and tags, ask once
+  about the `human` and unknown items, write both files); update mode at task end applies the
+  change, records the human decisions of the task and refreshes `checked`. Done when the files
+  exist, every entry has source, date and tag, and docs.json marks policy.md session-start.
+
+### 14.4 Decision authority (H3)
+
+- Every check is `ai` (verified with evidence, passed without asking; each names its
+  evidence) or `human` (the work stops: the main session asks once per gate, batched, in
+  Korean; a subagent returns BLOCKED; a hook blocks until the user's marker). An unlisted
+  check that evidence can decide is `ai`; otherwise, or when unsure, `human`. Neither has a
+  written-reason escape.
+- goodboy ships the generic defaults (`lib/decision-authority.ts`); policy.md adds project
+  items. The hook-enforced `human` checks are the existing ones (R2 and `.goodboy/hosts`, the
+  risk gate, dev-cycle stage gates); policy `human` entries reach the model through the
+  SessionStart context and reviews (review-evidence, review-spec). Recorded human decisions
+  become `ai` entries next time (update mode).
+
+### 14.5 Doc map and docs rule (H4)
+
+- docs.json lists CLAUDE.md, key docs, the policy file and the test catalog, each with the
+  paths it covers and whether it is session-start.
+- Stop rule (project mode): a changed file a doc covers, with that doc not changed in the
+  task, blocks and names the doc. The skill's update mode either edits the doc or records in
+  docs.json that it checked the doc against the change (`checked` with the time); a check
+  recorded after the change passes. Changes the map cannot see go to review.
+- `cli.ts test-catalog` generates `.goodboy/test-catalog.md` (feature → test type) from the
+  test files. A missing CLAUDE.md gets one `/init` suggestion; CLAUDE.md has a size budget
+  (300 lines, warned at SessionStart).
+- `/done` (outside this repo, not under git) is changed only with the user's OK, after a
+  backup: it would read docs.json and never attach-and-delete a mapped doc.
+
+### 14.6 Global rules without a global CLAUDE.md (H5)
+
+- No shipped CLAUDE.md and no import line. Rules a hook enforces need no text; guidance no
+  hook can check travels in goodboy's own injection (UserPromptSubmit already carries R1 and
+  R2 for task prompts; SessionStart adds the project-knowledge lines).
+- A proposal to the user lists the lines of `~/.claude/CLAUDE.md` that hooks now enforce; none
+  is removed without their OK.
+
+### 14.7 Test tier advice (H6)
+
+- `test-write` keeps a per-project test profile (per type: tests, duration, last measured) in
+  `.claude/goodboy-test-profile.json` (local: machine-written on every run, so it is not
+  committed next to the doc map).
+- Advice only, at SessionStart and at most once a session, when the measured total crosses a
+  threshold (tuned with data): ≤ ~10 min, run everything at task end; ≤ 1 h, unit and
+  integration at commit, everything before push; > 1 h, affected tests before push, full E2E
+  on release or request. Applying a tier setup is a `human` decision.
+
+### 14.8 Steps
+
+| Step | Contents |
+|---|---|
+| H0 | This section; measurements M20–M22 (§10.12) |
+| H1 | Project mode and the marker guard |
+| H2 | policy.md, docs.json, the SessionStart notice, the read gate, the knowledge skill |
+| H3 | Decision-authority defaults and their delivery |
+| H4 | The docs rule, the test catalog, the CLAUDE.md checks |
+| H5 | Hook-delivered guidance; the proposal for `~/.claude/CLAUDE.md` |
+| H6 | The test profile and the tier advice |
+
+Each step: tests first, typecheck, one narrow review and one test record (at most two rounds;
+§10.11's cost lesson), a /verify probe per new rule, README (Korean). Merge and push wait for
+the user.
 
 ## Appendix — mutation set (2026-10-12 review)
 
