@@ -32,7 +32,7 @@ const REVIEWERS = [
 ];
 
 export const ROLES: readonly RoleSpec[] = [
-  { name: 'research-lead', team: 'research', model: 'opus', effort: 'medium', writes: 'none', members: ['research-web', 'research-code', 'research-cause'], toolSkills: ['cite-sources', 'summarize-diff'] },
+  { name: 'research-lead', team: 'research', model: 'opus', effort: 'medium', writes: 'none', members: ['research-web', 'research-code', 'research-cause'], toolSkills: ['cite-sources'] },
   { name: 'research-web', team: 'research', model: 'sonnet', effort: 'medium', writes: 'none', toolSkills: ['cite-sources'] },
   { name: 'research-code', team: 'research', model: 'sonnet', effort: 'medium', writes: 'none', toolSkills: ['summarize-diff'] },
   { name: 'research-cause', team: 'research', model: 'opus', effort: 'high', writes: 'none', toolSkills: ['isolate-cause', 'probe-runtime'] },
@@ -43,20 +43,43 @@ export const ROLES: readonly RoleSpec[] = [
   { name: 'build-docs', team: 'build', model: 'sonnet', effort: 'medium', writes: 'docs', toolSkills: [] },
   { name: 'build-run', team: 'build', model: 'haiku', effort: 'low', writes: 'none', toolSkills: ['run-long-command'] },
   { name: 'review-lead', team: 'review', model: 'sonnet', effort: 'high', writes: 'result', members: REVIEWERS, toolSkills: ['summarize-diff', 'record-review', 'run-codex-review'] },
-  { name: 'review-all', team: 'review', model: 'sonnet', effort: 'high', writes: 'result', toolSkills: ['summarize-diff', 'record-review', 'check-security', 'check-evidence', 'check-code-quality', 'run-codex-review'] },
+  { name: 'review-all', team: 'review', model: 'sonnet', effort: 'high', writes: 'result', toolSkills: ['summarize-diff', 'record-review', 'check-security', 'check-evidence', 'check-code-quality', 'check-ui-states', 'follow-design-tokens', 'run-codex-review'] },
   { name: 'review-spec', team: 'review', model: 'sonnet', effort: 'high', writes: 'result', toolSkills: ['summarize-diff', 'record-review', 'check-spec-coverage'] },
   { name: 'review-quality', team: 'review', model: 'sonnet', effort: 'medium', writes: 'result', toolSkills: ['summarize-diff', 'record-review', 'check-code-quality'] },
   { name: 'review-security', team: 'review', model: 'opus', effort: 'high', writes: 'result', toolSkills: ['summarize-diff', 'record-review', 'check-security'] },
   { name: 'review-ui', team: 'review', model: 'sonnet', effort: 'medium', writes: 'result', toolSkills: ['summarize-diff', 'record-review', 'follow-design-tokens', 'check-ui-states'] },
   { name: 'review-infra', team: 'review', model: 'sonnet', effort: 'high', writes: 'result', toolSkills: ['summarize-diff', 'record-review', 'check-infra-config'] },
   { name: 'review-evidence', team: 'review', model: 'opus', effort: 'high', writes: 'result', toolSkills: ['summarize-diff', 'record-review', 'check-evidence'] },
-  { name: 'test-lead', team: 'test', model: 'sonnet', effort: 'high', writes: 'result', members: ['test-unit', 'test-spec', 'test-ui', 'test-security'], toolSkills: ['record-tests'] },
-  { name: 'test-unit', team: 'test', model: 'sonnet', effort: 'high', writes: 'tests', toolSkills: ['record-tests', 'write-regression-test', 'measure-coverage'] },
+  { name: 'test-lead', team: 'test', model: 'sonnet', effort: 'high', writes: 'none', members: ['test-unit', 'test-spec', 'test-ui', 'test-security'], toolSkills: [] },
+  { name: 'test-unit', team: 'test', model: 'sonnet', effort: 'high', writes: 'tests', toolSkills: ['record-tests', 'check-spec-coverage', 'write-regression-test', 'measure-coverage'] },
   { name: 'test-spec', team: 'test', model: 'sonnet', effort: 'high', writes: 'tests', toolSkills: ['record-tests', 'check-spec-coverage', 'run-e2e', 'measure-coverage'] },
-  { name: 'test-ui', team: 'test', model: 'sonnet', effort: 'high', writes: 'result', toolSkills: ['record-tests', 'check-ui-states', 'run-e2e'] },
-  { name: 'test-security', team: 'test', model: 'opus', effort: 'high', writes: 'result', toolSkills: ['record-tests', 'attack-sandbox'] },
+  { name: 'test-ui', team: 'test', model: 'sonnet', effort: 'high', writes: 'tests', toolSkills: ['record-tests', 'check-ui-states', 'run-e2e'] },
+  { name: 'test-security', team: 'test', model: 'opus', effort: 'high', writes: 'tests', toolSkills: ['record-tests', 'attack-sandbox', 'write-regression-test'] },
   { name: 'test-probe', team: 'test', model: 'sonnet', effort: 'high', writes: 'none', toolSkills: ['probe-runtime'] },
 ];
+
+/** The agents goodboy's gates send work to, by job. Every hook message takes its agent names
+ *  from here, so a rename is one change (§10.3). */
+export const ROUTE = {
+  /** A review of the changed files (one all-axes run, or one run per axis). */
+  review: 'review-all',
+  /** Layer-1 tests of the changed code. */
+  test: 'test-unit',
+} as const;
+
+/** Names of the agents before G2, still recognized as their roles (a session started before
+ *  an upgrade keeps the old agents). */
+export const LEGACY_AGENTS: Readonly<Record<string, string>> = { 'review-changes': 'review-all', 'test-changes': 'test-unit' };
+
+/** The plugin's name for a role: `goodboy:review-all`. */
+export function agentName(role: string): string {
+  return `goodboy:${role}`;
+}
+
+/** Roles whose capability check passed (§10.3: a live run produced its artifact; plan §10.12
+ *  M19). Only these are routed to: a gate names no other agent. The others can still be
+ *  called, and join when their check passes. */
+export const CHECKED_ROLES: ReadonlySet<string> = new Set([ROUTE.review, ROUTE.test]);
 
 /** Delegation caps (§10.7), each tunable by env. */
 export interface SpawnCaps {

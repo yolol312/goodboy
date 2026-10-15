@@ -127,9 +127,12 @@ export function spawnsClaudeCli(command: string): boolean {
   return false;
 }
 
-/** Outcome of a finished agent from its final text: BLOCKED (whole word) or ok. */
+/** Outcome of a finished agent from its final text: BLOCKED (whole word), or the
+ *  follow-agent-rules hand-back line `status: blocked` (G2 review: written in lower case, it
+ *  read as ok and the one retry after a blocked run was denied), or ok. */
 export function outcomeOf(text: string | undefined | null): 'ok' | 'blocked' {
-  return /\bBLOCKED\b/.test(text ?? '') ? 'blocked' : 'ok';
+  const t = text ?? '';
+  return /\bBLOCKED\b/.test(t) || /^\s*status:\s*blocked\b/im.test(t) ? 'blocked' : 'ok';
 }
 
 /** Log record for an Agent call's PostToolUse response (G0): a background call returns

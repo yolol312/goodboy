@@ -47,15 +47,15 @@ required_inputs:
 
 4. **자동 검증**: Edit/Write 후 PostToolUse hook이 타입체크/린트/테스트 자동 실행. 실패 결과는 컨텍스트로 주입되니 확인 후 수정.
 
-5. **테스트** ⚠️ 필수: 코드를 고쳤으면 `test-changes` 서브에이전트를 호출하세요. Stop hook의 층1 테스트 게이트가 테스트 결과 파일이 없으면 종료를 차단합니다.
+5. **테스트** ⚠️ 필수: 코드를 고쳤으면 `test-unit` 서브에이전트를 호출하세요. Stop hook의 층1 테스트 게이트가 테스트 결과 파일이 없으면 종료를 차단합니다.
 
    ```
-   Agent(test-changes, "다음 변경을 테스트: <변경 파일> / 카테고리: <이 워크플로우>")
+   Agent(test-unit, "다음 변경을 테스트: <변경 파일> / 카테고리: <이 워크플로우>")
    ```
 
    컨테이너로 의존 프로세스를 띄우고 단위·통합·E2E를 작성·실행하며, red-green과 뮤테이션 프로브로 "통과하지만 아무것도 검증하지 않는 테스트"를 배제합니다. 테스트 파일은 repo에 남습니다.
 
-6. **리뷰** ⚠️ 필수: 테스트가 통과한 뒤 `review-changes` 를 **축별로 병렬 호출**하세요. Stop hook이 리뷰 결과 파일이 없으면 종료를 차단합니다.
+6. **리뷰** ⚠️ 필수: 테스트가 통과한 뒤 `review-all` 를 **축별로 병렬 호출**하세요. Stop hook이 리뷰 결과 파일이 없으면 종료를 차단합니다.
 
    먼저 띄울 축을 결정적으로 확인합니다:
 
@@ -66,10 +66,10 @@ required_inputs:
    그 다음 **한 메시지에서 여러 Agent 호출을 동시에** 보냅니다 — 그래야 실제로 병렬입니다.
 
    ```
-   Agent(review-changes, "축: hallucination / 파일: <변경 파일> / 카테고리: <이 워크플로우>")
-   Agent(review-changes, "축: refactoring  / 파일: <변경 파일> / ...")
-   Agent(review-changes, "축: security     / 파일: <변경 파일> / ...")
-   Agent(review-changes, "축: performance  / 파일: <변경 파일> / ...")
+   Agent(review-all, "축: hallucination / 파일: <변경 파일> / 카테고리: <이 워크플로우>")
+   Agent(review-all, "축: refactoring  / 파일: <변경 파일> / ...")
+   Agent(review-all, "축: security     / 파일: <변경 파일> / ...")
+   Agent(review-all, "축: performance  / 파일: <변경 파일> / ...")
    ```
 
    `hallucination` 축은 변경 내용과 무관하게 **항상** 포함합니다. 나머지는 `review-axes` 출력이 알려줍니다. 각 축은 자기 차원만 `dimensions_checked` 에 채우고, Stop hook이 합집합으로 커버리지를 판정합니다.
@@ -85,7 +85,7 @@ required_inputs:
 
 ## 설계 시 반영할 품질 차원 (해당 시)
 
-⚠️ **shift-left**: 아래는 작업 종료 시 `review-changes`의 **필수 프로브(7.5단계)가 그대로 검사**하는 항목입니다. 리뷰가 잡아낼 때까지 기다리지 말고, 변경이 아래 트리거에 해당하면 **구현하면서 처음부터 만들어 넣으세요**. 해당하는 트리거만 골라 consult하는 체크리스트입니다(전부 다 적용하라는 뜻 아님).
+⚠️ **shift-left**: 아래는 작업 종료 시 `review-all`의 **필수 프로브(check-security · check-ui-states 스킬)가 그대로 검사**하는 항목입니다. 리뷰가 잡아낼 때까지 기다리지 말고, 변경이 아래 트리거에 해당하면 **구현하면서 처음부터 만들어 넣으세요**. 해당하는 트리거만 골라 consult하는 체크리스트입니다(전부 다 적용하라는 뜻 아님).
 
 - **프론트엔드 변경** (HTML/CSS/클라이언트 JS/JSX/TSX 또는 HTML 문자열) → 트리거: `ui-ux-accessibility` + `plan-completeness`
   - 모든 상호작용 컨트롤에 접근 가능한 이름(`<label for>` 또는 `aria-label`).

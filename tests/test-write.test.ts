@@ -58,7 +58,7 @@ function validResult(cwd: string, over: Record<string, unknown> = {}): Record<st
     category: 'add-feature',
     test_files: [realTestFile(cwd)],
     environment: { mode: 'local', command: 'npm run dev', evidence: '200 OK' },
-    suites: [{ name: 'unit', command: 'bun test', passed: 2, failed: 0, output: '2 pass' }],
+    suites: [{ name: 'unit', command: 'bun test', passed: 2, failed: 0, output: '2 pass', type: 'unit', duration_ms: 120 }],
     acceptance: [
       {
         id: 'AC-1',

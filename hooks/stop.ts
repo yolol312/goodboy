@@ -12,6 +12,7 @@ import type {
   StatusSnapshot,
   TestResult,
 } from '../lib';
+import { agentName, ROUTE } from '../lib/routing-policy';
 import {
   citationBlockMessage,
   CLI_PATH,
@@ -813,10 +814,10 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
 
     if (results.length === 0) {
       const preview = recentEdits.slice(0, 5).join(', ');
-      const more = recentEdits.length > 5 ? ` 외 ${recentEdits.length - 5}개` : '';
+      const more = recentEdits.length > 5 ? ` and ${recentEdits.length - 5} more` : '';
       return block(
-        `변경된 코드에 대한 테스트가 없습니다. test-changes 서브에이전트를 호출해 ` +
-          `단위/통합 테스트를 작성·실행하고 결과를 기록하세요: ${preview}${more}`,
+        `No test result covers the changed code. Run ${agentName(ROUTE.test)} to write and run ` +
+          `unit and integration tests and record the result: ${preview}${more}`,
       );
     }
 
@@ -1398,10 +1399,10 @@ function main(): void {
           blockOutput(
             sessionId,
             cwd,
-            // A9: there is no /review-changes command; point to steps that exist.
+            // A9: point to steps that exist; the agent name comes from the policy table.
             `Review is required for the changed files: ${preview}${more}. ` +
               `Get the required axes with \`bun "${CLI_PATH}" review-axes <files>\`, then run one ` +
-              'goodboy:review-changes subagent per axis (or use /request-review).',
+              `${agentName(ROUTE.review)} subagent per axis (or use /request-review).`,
             'review',
             '',
             count,
@@ -1438,7 +1439,7 @@ function main(): void {
               sessionId,
               cwd,
               `Review validation failed: ${v.reason ?? 'unknown reason'}. Run the review again ` +
-                `(goodboy:review-changes per axis, or /request-review).`,
+                `(${agentName(ROUTE.review)} per axis, or /request-review).`,
               'review',
               '',
               count,
@@ -1534,9 +1535,9 @@ function main(): void {
             blockOutput(
               sessionId,
               cwd,
-              `메인 에이전트가 ## 근거 섹션에서 추측/가정 ${declaredUnknowns}건을 선언했지만, ` +
-                `리뷰가 가정 검증을 수행하지 않았습니다(unknown_assumptions_checked 비어 있음). ` +
-                `review-changes 서브에이전트로 각 추측/가정을 검증해 결과에 기록한 뒤 다시 리뷰하세요. (추측-리뷰 연동)`,
+              `The main session declared ${declaredUnknowns} guesses or assumptions in its rationale ` +
+                `(## 근거 / ## Rationale), but the review did not check them (unknown_assumptions_checked is empty). ` +
+                `Run ${agentName(ROUTE.review)} to check each one, record it, and review again. (guess-review link)`,
               'review',
               '',
               count,
@@ -1577,10 +1578,10 @@ function main(): void {
             blockOutput(
               sessionId,
               cwd,
-              `리뷰가 변경 내용이 요구하는 품질 차원을 평가하지 않았습니다. ` +
-                `누락된 차원: ${dimList}. ` +
-                `review-changes 서브에이전트로 해당 차원(런타임/관찰 프로브 포함)을 평가하고 ` +
-                `결과의 dimensions_checked에 추가한 뒤 다시 리뷰하세요.`,
+              `The review did not assess the quality dimensions this change needs. ` +
+                `Missing: ${dimList}. ` +
+                `Run ${agentName(ROUTE.review)} for them (with runtime or observation probes), ` +
+                `add them to dimensions_checked, and review again.`,
               'review',
               '',
               count,

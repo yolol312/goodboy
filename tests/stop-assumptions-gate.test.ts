@@ -157,8 +157,8 @@ describe('Stop hook — 추측-리뷰 연동 (A2)', () => {
     const tp = writeTranscript(cwd, REASONING_WITH_SPECULATION);
     const out = await runStop(tmp, cwd, sessionId, tp);
     expect(out.decision).toBe('block');
-    expect(out.reason).toContain('추측-리뷰 연동');
-    expect(out.reason).toContain('1건');
+    expect(out.reason).toContain('guess-review link');
+    expect(out.reason).toContain('declared 1 guesses or assumptions');
   });
 
   test('추측 선언 + 리뷰가 가정을 검증함 → PASS', async () => {
@@ -201,7 +201,7 @@ describe('Stop hook — 추측-리뷰 연동 (A2)', () => {
     const tp = writeTranscript(cwd, REASONING_WITH_SPECULATION);
     const out = await runStop(tmp, cwd, sessionId, tp);
     expect(out.decision).toBe('block');
-    expect(out.reason).toContain('추측-리뷰 연동');
+    expect(out.reason).toContain('guess-review link');
     expect(out.reason).toContain('(block 3)');
     expect(out.reason).toContain('only the user can let this Stop pass');
     expect(out.reason).not.toContain('재시도');

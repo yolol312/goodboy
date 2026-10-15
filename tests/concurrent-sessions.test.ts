@@ -224,7 +224,7 @@ describe('two sessions in one repo — review and test cursors (A3)', () => {
     await edit(repo, 'sess-c', 'src/c.ts');
     const c = await stop(repo, 'sess-c', 'on');
     expect(c.decision).toBe('block');
-    expect(c.reason).toContain('테스트가 없습니다');
+    expect(c.reason).toContain('No test result covers the changed code');
   }, 30_000);
 });
 

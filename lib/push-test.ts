@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { basename, join, resolve as resolvePath } from 'node:path';
 import { stripHeredocs } from './bash-write';
 import { HOOK_GIT_ARGS, HOOK_GIT_ENV, splitAliasValue } from './hook-git';
+import { agentName, ROUTE } from './routing-policy';
 import {
   classifyHost,
   classifyOutward,
@@ -519,7 +520,7 @@ export function pushTestMessage(what: string, o: Exclude<PushTestOutcome, { ok: 
   const rev = o.rev === WORKTREE ? 'the working tree as it is' : o.rev;
   return (
     `${what} hands off ${rev} without a passing test result for exactly that content ` +
-    `(tree ${o.tree?.slice(0, 10) ?? '?'}).${differs} Run the layer-1 tests (goodboy:test-changes; \`test-write\` records the tested tree) ` +
+    `(tree ${o.tree?.slice(0, 10) ?? '?'}).${differs} Run the layer-1 tests (${agentName(ROUTE.test)}; \`test-write\` records the tested tree) ` +
     'on what you hand off, then try again. A commit made after the tests still matches; any edit after them does not. (push test check)'
   );
 }

@@ -9,7 +9,7 @@
 import { basename, relative, resolve as resolvePath, sep } from 'node:path';
 import { commandSegments, dropRedirects, gitSubcommandAt, plainWord, readCommand, xargsCommandAt } from './outward-command';
 import { namesOwnResultDir } from './result-dir';
-import type { RoleSpec } from './routing-policy';
+import { agentName, LEGACY_AGENTS, roleOf, ROUTE, type RoleSpec } from './routing-policy';
 import { isDocFile, isTestFile } from './test-validator';
 
 // Beyond layer 1's isTestFile: more test dirs, JVM/.NET/Ruby names, test-runner configs.
@@ -322,20 +322,20 @@ export function resultDirWrite(command: string, cwd: string): string | null {
 /** Why this agent may not record that result, or null when it may (security review: with the
  *  count-based escapes gone, a main session writing its own "passing" results was the
  *  cheapest way past the gates). Test results come from test agents and review results from
- *  review agents, the pre-G2 `test-changes` and `review-changes` included. */
+ *  review agents, the pre-G2 names (LEGACY_AGENTS) included. */
 export function resultWriterDenial(kind: 'test' | 'review' | 'unknown', agentType: string | undefined, role: RoleSpec | null): string | null {
+  const legacyTeam = agentType?.startsWith('goodboy:') ? roleOf(agentName(LEGACY_AGENTS[agentType.slice('goodboy:'.length)] ?? ''))?.team : undefined;
+  const team = role?.team ?? legacyTeam;
   if (kind === 'unknown') {
-    const isResultRole =
-      agentType === 'goodboy:test-changes' || agentType === 'goodboy:review-changes' || role?.team === 'test' || role?.team === 'review';
-    return isResultRole
+    return team === 'test' || team === 'review'
       ? null
       : `This runs the goodboy result CLI with a subcommand built at run time; only test and review agents record results, and ${agentType ?? 'the main session'} is neither.`;
   }
-  const legacy = kind === 'test' ? 'goodboy:test-changes' : 'goodboy:review-changes';
-  if (agentType === legacy || role?.team === kind) return null;
+  if (team === kind) return null;
+  const agent = agentName(kind === 'test' ? ROUTE.test : ROUTE.review);
   return (
-    `Only goodboy ${kind} agents record ${kind} results (${legacy}${kind === 'test' ? ', test-*' : ', review-*'}); ` +
-    `${agentType ? agentType : 'the main session'} may not. Run the ${kind} agent instead.`
+    `Only goodboy ${kind} agents record ${kind} results (${agent}${kind === 'test' ? ', test-*' : ', review-*'}); ` +
+    `${agentType ? agentType : 'the main session'} may not. Run ${agent} instead.`
   );
 }
 

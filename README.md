@@ -114,9 +114,9 @@ PostToolUse hook이 자동 검증 실행 — 기본은 타입체크만 (GOODBOY_
 턴 종료를 차단한다(재검증 통과 시 자동 해제).
    ↓
 모델이 작업 완료 시도 → Stop hook 층1 **테스트 게이트** (리뷰보다 먼저)
-   - 없음 → 차단, "test-changes 서브에이전트 호출하세요"
+   - 없음 → 차단, "goodboy:test-unit 서브에이전트를 부르세요"
    ↓
-test-changes 서브에이전트가 동작을 검증
+test-unit 서브에이전트가 동작을 검증
    - 컨테이너(docker compose)로 서버/DB 기동 → 단위·통합·E2E(Playwright) 작성·실행
    - dev-cycle 프로토타입이 있으면 **정답지로 대조** (구조·능력·상태, 픽셀 아님)
    - red-green + 뮤테이션 프로브로 "통과하지만 아무것도 검증하지 않는 테스트" 배제
@@ -129,9 +129,9 @@ Stop hook 재검사(층1): 스위트 실패 0 / test_files 실재 / red가 실�
    - 리뷰 대상 = 마지막 리뷰 이후 **메인이 편집한** 파일 (서브에이전트가 만든 프로브/임시
      파일은 대상 아님 — 리뷰 에이전트가 자기 프로브 파일 때문에 다시 차단되는 자기참조
      루프를 막는다)
-   - 없음 → 차단, "review-changes 서브에이전트 호출하세요"
+   - 없음 → 차단, "goodboy:review-all 서브에이전트를 부르세요"
    ↓
-review-changes 서브에이전트를 **축별로 병렬 호출** (한 메시지에서 동시에)
+review-all 서브에이전트를 **축별로 병렬 호출** (한 메시지에서 동시에)
    hallucination(항상) · refactoring · security · performance · ui
    → 각 축이 자기 .claude/reviews/<ts>.json 작성. Stop이 합집합으로 커버리지 판정
    ↓
@@ -251,6 +251,31 @@ PreToolUse hook이 메인에서 탐색 도구 4종 호출을 차단하고 서브
 | 스킬 규칙 | 메인의 코드 편집에는 이번 작업에서 부른 워크플로 스킬이 필요하다. 맞는 스킬이 없으면 skill-gap 기록 후 진행 | `GOODBOY_SKILL_GATE=on\|warn\|off`, 기록 위치 `GOODBOY_LOG_DIR` |
 | effort 조언 | 같은 게이트에 두 번 막히면 한 단계 위를, 문서만 고치면 아래를 턴 끝에 한 번 권고 | `GOODBOY_EFFORT_ADVICE=off` |
 | 설정 경고 | 새/재개 세션에서 `CLAUDE_CODE_EFFORT_LEVEL`(모든 effort 덮어씀), 깊이 2 미만 설정을 경고 | — |
+| 스킬 effort | goodboy 스킬은 자기 effort(frontmatter)로 그 턴만 실행되고, 세션 effort와 다르면 한 줄로 알린다 | `GOODBOY_SKILL_EFFORT=auto\|off` |
+| 테스트 기록 측정 | 테스트 결과의 스위트마다 유형(`unit`·`integration`·`ui`·`e2e`)과 걸린 시간을 기록하고, 유형별 개수·시간 합계(`by_type`)를 남긴다. 커버리지는 프로젝트에 있는 도구로 재고(설치하지 않음), 바뀐 줄 중 실행된 줄(`cli.ts diff-coverage`)을 함께 기록한다. 측정만 하고 막지 않는다(바뀐 줄이 하나도 실행되지 않은 파일은 경고) | — |
+| Codex 2차 의견 | 켜면 리뷰마다 로컬 Codex CLI가 변경분을 읽기 전용으로 리뷰하고, 그 결과를 `source: "codex"`로 같은 리뷰 결과에 넣는다. 변경분이 사용자 본인의 Codex 로그인으로 OpenAI에 전송되므로 기본은 꺼짐. Codex가 없거나 실패하면 `skipped`로 기록하고 진행 | `GOODBOY_CODEX=on\|off`, `GOODBOY_CODEX_MODEL` |
+
+#### 에이전트 24개와 도구 스킬 23개
+
+에이전트 이름은 `<팀>-<역할>`이고 리드는 `-lead`로 끝난다(전체 표: 계획서 §10.3). 리뷰 게이트는
+`goodboy:review-all`(구 review-changes), 테스트 게이트와 push 확인은 `goodboy:test-unit`(구 test-changes)을
+안내한다. 실제 실행에서 결과 파일을 남기는 것이 확인된 에이전트만 게이트가 안내하고, 나머지는 직접
+불러 쓸 수 있다.
+
+| 팀 | 에이전트 |
+|---|---|
+| research | research-lead, research-web, research-code, research-cause |
+| build | build-backend, build-frontend, build-data, build-infra, build-docs, build-run |
+| review | review-lead, review-all, review-spec, review-quality, review-security, review-ui, review-infra, review-evidence |
+| test | test-lead, test-unit, test-spec, test-ui, test-security, test-probe |
+
+에이전트 정의는 역할·한계·쓸 도구 스킬만 담고, 절차는 도구 스킬(`skills/<이름>/SKILL.md`, `/` 메뉴에는
+안 보임)에 있다. 모든 에이전트는 `follow-agent-rules`(leaf 실행, R1/R2, 결과는 CLI로만, 반환 형식)를 미리
+읽는다. 도구 스킬: write-migration, isolate-cause, write-api-contract, edit-infra-safely,
+check-spec-coverage, check-security, check-infra-config, check-evidence, write-regression-test,
+probe-runtime, attack-sandbox, cite-sources, summarize-diff, follow-design-tokens, check-code-quality,
+check-ui-states, run-e2e, record-review, record-tests, run-long-command, run-codex-review,
+measure-coverage, follow-agent-rules.
 
 ## 결정 근거 기록 (4분류)
 
@@ -459,10 +484,11 @@ goodboy/                                # 플러그인 루트
 │   ├── debug/SKILL.md
 │   ├── write-doc/SKILL.md
 │   ├── request-review/SKILL.md
-│   └── setup-statusline/SKILL.md       # 상태바 설치/연동
-├── agents/
-│   ├── test-changes.md                 # 층1 — 컨테이너 기동·테스트 작성/실행·프로토타입 대조
-│   └── review-changes.md               # 층2 — 축(환각/리팩토링/보안/성능/UI)별 병렬 실행
+│   ├── setup-statusline/SKILL.md       # 상태바 설치/연동
+│   └── <도구 스킬 23개>/SKILL.md        # 에이전트가 쓰는 절차 (check-*, record-*, run-*, write-* …)
+├── agents/                             # 에이전트 24개 (research-*, build-*, review-*, test-*)
+│   ├── test-unit.md                    # 층1 — 테스트 작성/실행·red-green·커버리지 (구 test-changes)
+│   └── review-all.md                   # 층2 — 전 축 또는 축 하나 리뷰 (구 review-changes)
 ├── statusline/
 │   └── statusline.ts                   # 동봉 상태바 (선택 설치)
 ├── lib/
@@ -485,6 +511,9 @@ goodboy/                                # 플러그인 루트
 │   ├── gate-log.ts                     # 게이트 발동 로그 + 상태 스냅샷
 │   ├── token-habits.ts                 # 토큰 낭비 습관 카탈로그 + 게이트 헬퍼
 │   ├── recursion-guard.ts
+│   ├── routing-policy.ts               # 역할·model·effort·도구 스킬·위임 상한 표
+│   ├── diff-coverage.ts                # 바뀐 줄 커버리지 (lcov·Cobertura·JaCoCo·Go)
+│   ├── hook-git.ts                     # 훅이 돌리는 git의 안전 설정
 │   └── cli.ts
 ├── package.json
 └── README.md
@@ -494,8 +523,8 @@ goodboy/                                # 플러그인 루트
 
 ```
 <project>/.claude/
-├── reviews/                            # review-changes 결과 JSON (축별로 여러 개)
-├── tests/                              # test-changes 결과 JSON
+├── reviews/                            # 리뷰 결과 JSON (축별로 여러 개)
+├── tests/                              # 층1 테스트 결과 JSON
 └── (승인 마커 — .goodboy-risk-approved-<세션 태그>.txt, .goodboy-bash-write-approved-<세션 태그>.txt,
     작업 분류 기록 — .goodboy-session-state.json)
 
@@ -710,8 +739,8 @@ v0.31.0부터는 "편집하는 쪽이 지금 그 파일을 알고 있는가"를 
 ### "Stop이 차단됩니다 — 리뷰 필요"
 
 차단 메시지에 나온 `review-axes` 명령으로 필요한 리뷰 축을 확인한 뒤, 축마다
-`goodboy:review-changes` 서브에이전트를 실행하세요. `/request-review` 를 쓰면 이 과정을 대신 진행합니다.
-(`/review-changes` 라는 슬래시 커맨드는 없습니다. 축 하나짜리 general-purpose 리뷰는 필수 차원 누락으로 다시 차단됩니다.)
+`goodboy:review-all` 서브에이전트를 실행하세요(프롬프트에 `axis: <축>`). `/request-review` 를 쓰면 이 과정을 대신 진행합니다.
+(리뷰용 슬래시 커맨드는 없습니다. 축 하나짜리 general-purpose 리뷰는 필수 차원 누락으로 다시 차단됩니다.)
 
 ### `.claude/reviews/*.json`이 쌓입니다
 
@@ -819,7 +848,7 @@ JSON
 
 | 사유 | 대응 |
 |---|---|
-| "테스트가 없습니다" | `test-changes` 서브에이전트를 호출하세요 |
+| "No test result covers the changed code" | `goodboy:test-unit` 서브에이전트를 호출하세요 |
 | "테스트되지 않은 변경 파일" | 그 파일까지 커버하도록 다시 테스트 |
 | "test_files … 존재하지 않습니다" | 테스트를 `mktemp` 가 아니라 **repo 안에** 만드세요 |
 | "red 증거가 성공(exit 0)" | 되돌린 상태에서 실패하는 것을 먼저 보여야 합니다 |

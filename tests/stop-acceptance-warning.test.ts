@@ -80,7 +80,7 @@ describe('layer 1 with English and unreadable dev-cycle documents (F1/F2)', () =
     );
     await edit(repo, 'sess-en', 'src/settings.ts');
     const text = await stopText(repo, 'sess-en');
-    expect(text).toContain('테스트가 없습니다'); // layer 1 is on (dev-cycle artifacts found)
+    expect(text).toContain('No test result covers the changed code'); // layer 1 is on (dev-cycle artifacts found)
     expect(text).not.toContain(WARNING);
   }, 30_000);
 

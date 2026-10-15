@@ -16,7 +16,7 @@ import { join, resolve } from 'node:path';
 const ROOT = resolve(import.meta.dir, '..');
 const STOP = join(ROOT, 'hooks', 'stop.ts');
 const POST = join(ROOT, 'hooks', 'post-tool-use.ts');
-const LINK = '추측-리뷰 연동';
+const LINK = 'guess-review link';
 const DOC = 'README.md'; // no required review dimensions: the assumption link is the gate under test
 const tmpDirs: string[] = [];
 
@@ -148,7 +148,7 @@ describe('the assumption-review link with English and described labels (F3)', ()
     const out = await stop(repo, 'sess-en', transcript(repo, RATIONALE));
     expect(out.decision).toBe('block');
     expect(out.reason ?? '').toContain(LINK);
-    expect(out.reason ?? '').toContain('1건');
+    expect(out.reason ?? '').toContain('declared 1 guesses or assumptions');
   }, 30_000);
 
   test('the same section passes once the review checked the assumption', async () => {
@@ -165,7 +165,7 @@ describe('the assumption-review link with English and described labels (F3)', ()
     const out = await stop(repo, 'sess-ko', transcript(repo, TEMPLATE_KO));
     expect(out.decision).toBe('block');
     expect(out.reason ?? '').toContain(LINK);
-    expect(out.reason ?? '').toContain('1건');
+    expect(out.reason ?? '').toContain('declared 1 guesses or assumptions');
   }, 30_000);
 
   // Round 3 (security review): the rationale gate asks for `- 없음` in an empty category.
@@ -202,7 +202,7 @@ describe('the assumption-review link with English and described labels (F3)', ()
     await editAndReview(repo, 'sess-mixed', false);
     const out = await stop(repo, 'sess-mixed', transcript(repo, `${TEMPLATE_KO}\n### 추측 ⚠️ (근거 약함)\n- 없음`));
     expect(out.decision).toBe('block');
-    expect(out.reason ?? '').toContain('1건');
+    expect(out.reason ?? '').toContain('declared 1 guesses or assumptions');
   }, 30_000);
 
   test('the stop_hook_active accept is held for it, and the next full Stop blocks', async () => {

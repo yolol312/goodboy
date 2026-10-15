@@ -179,8 +179,8 @@ describe('Stop hook — 층1 테스트 게이트', () => {
 
     const out = await runStop(tmp, cwd, sessionId);
     expect(out.decision).toBe('block');
-    expect(out.reason).toContain('테스트가 없습니다');
-    expect(out.reason).toContain('test-changes');
+    expect(out.reason).toContain('No test result covers the changed code');
+    expect(out.reason).toContain('goodboy:test-unit');
   });
 
   // Layer-1 test run: isTestFile() saw the absolute path, so for a repo that lives under a
@@ -193,7 +193,7 @@ describe('Stop hook — 층1 테스트 게이트', () => {
 
     const out = await runStop(tmp, cwd, sessionId);
     expect(out.decision).toBe('block');
-    expect(out.reason).toContain('테스트가 없습니다');
+    expect(out.reason).toContain('No test result covers the changed code');
     expect(out.reason).toContain('a.ts');
     expect(out.reason).not.toContain('a.test.ts'); // the repo's own test file is still exempt
   });
@@ -205,7 +205,7 @@ describe('Stop hook — 층1 테스트 게이트', () => {
     seedSession(tmp, sessionId, 3, ['README.md', 'docs/GUIDE.md'], cwd);
 
     const out = await runStop(tmp, cwd, sessionId);
-    expect(out.reason ?? '').not.toContain('테스트가 없습니다');
+    expect(out.reason ?? '').not.toContain('No test result covers the changed code');
     expect(out.reason ?? '').not.toContain('테스트되지 않은 변경 파일');
   });
 
@@ -215,7 +215,7 @@ describe('Stop hook — 층1 테스트 게이트', () => {
 
     const out = await runStop(tmp, cwd, sessionId);
     expect(out.decision).toBe('block');
-    expect(out.reason).toContain('테스트가 없습니다');
+    expect(out.reason).toContain('No test result covers the changed code');
     expect(out.reason).toContain(CODE_FILE);
     expect(out.reason).not.toContain('README.md');
   });
@@ -234,7 +234,7 @@ describe('Stop hook — 층1 테스트 게이트', () => {
 
     const out = await runStop(tmp, cwd, sessionId, { GOODBOY_TEST_GATE: 'off' });
     // 테스트 게이트는 건너뛰고 리뷰 게이트가 대신 막는다 — 사유가 테스트 사유면 안 된다.
-    expect(out.reason ?? '').not.toContain('테스트가 없습니다');
+    expect(out.reason ?? '').not.toContain('No test result covers the changed code');
   });
 
   test('모든 조건을 만족하면 통과하고 테스트 커서가 전진한다', async () => {
@@ -421,7 +421,7 @@ describe('Stop hook — 층1 테스트 게이트', () => {
     await proc.exited;
     expect(existsSync(testCursorPath(tmp, sessionId, cwd))).toBe(true); // 커서 전진
     // 층1은 통과했고(테스트 사유가 아니고), 층2가 리뷰를 요구한다.
-    expect(out.reason ?? '').not.toContain('테스트가 없습니다');
+    expect(out.reason ?? '').not.toContain('No test result covers the changed code');
     expect(out.decision).toBe('block');
     expect(out.reason ?? '').toContain('Review is required');
   });
@@ -502,7 +502,7 @@ describe('Stop hook — 층1 테스트 게이트', () => {
 
     const first = await runStop(tmp, cwd, sessionId);
     expect(first.decision).toBe('block');
-    expect(first.reason).toContain('테스트가 없습니다');
+    expect(first.reason).toContain('No test result covers the changed code');
     expect(first.reason).toContain('(block 1)');
     expect(first.reason).toContain('only the user can let this Stop pass');
     expect(first.reason).not.toContain('재시도');
@@ -516,7 +516,7 @@ describe('Stop hook — 층1 테스트 게이트', () => {
 
     const third = await runStop(tmp, cwd, sessionId);
     expect(third.decision).toBe('block');
-    expect(third.reason).toContain('테스트가 없습니다');
+    expect(third.reason).toContain('No test result covers the changed code');
     expect(third.reason).toContain('(block 3)');
     expect(existsSync(testCursorPath(tmp, sessionId, cwd))).toBe(false);
   });
@@ -529,7 +529,7 @@ describe('Stop hook — 층1 테스트 게이트', () => {
     // The test gate passes and its cursor moves. The review gate may still block with its
     // own reason, so this is judged by the reason, not the decision.
     const passed = await runStop(tmp, cwd, sessionId);
-    expect(passed.reason ?? '').not.toContain('테스트가 없습니다');
+    expect(passed.reason ?? '').not.toContain('No test result covers the changed code');
     expect(passed.systemMessage ?? '').toContain('사용자 승인 마커로 이번 턴의');
     expect(passed.systemMessage ?? '').toContain('이번 턴의 test 게이트');
     expect(existsSync(testCursorPath(tmp, sessionId, cwd))).toBe(true);
@@ -538,7 +538,7 @@ describe('Stop hook — 층1 테스트 게이트', () => {
     // The edit is still untested: the next Stop blocks again, counting from 1.
     const next = await runStop(tmp, cwd, sessionId);
     expect(next.decision).toBe('block');
-    expect(next.reason).toContain('테스트가 없습니다');
+    expect(next.reason).toContain('No test result covers the changed code');
     expect(next.reason).toContain('(block 1)');
   });
 
@@ -650,7 +650,7 @@ describe('Stop hook — 층1 테스트 게이트 활성 판정 (auto)', () => {
 
     // 층1을 지나 층2(리뷰)에서 막히는 것은 정상 — 층1이 막지 않았음만 본다.
     const out = await runAuto(tmp, cwd, sessionId);
-    expect(out.reason ?? '').not.toContain('테스트가 없습니다');
+    expect(out.reason ?? '').not.toContain('No test result covers the changed code');
     expect(out.systemMessage ?? '').toContain('테스트 게이트가 이 저장소에서 비활성');
   });
 
@@ -670,7 +670,7 @@ describe('Stop hook — 층1 테스트 게이트 활성 판정 (auto)', () => {
 
     const out = await runAuto(tmp, cwd, sessionId);
     expect(out.decision).toBe('block');
-    expect(out.reason ?? '').toContain('테스트가 없습니다');
+    expect(out.reason ?? '').toContain('No test result covers the changed code');
   });
 
   test('package.json scripts.test 가 있으면 켜진다 (npm 자리표시자는 제외)', async () => {
@@ -681,7 +681,7 @@ describe('Stop hook — 층1 테스트 게이트 활성 판정 (auto)', () => {
       JSON.stringify({ scripts: { test: 'echo "Error: no test specified" && exit 1' } }),
       'utf8',
     );
-    expect((await runAuto(tmp, cwd, sessionId)).reason ?? '').not.toContain('테스트가 없습니다');
+    expect((await runAuto(tmp, cwd, sessionId)).reason ?? '').not.toContain('No test result covers the changed code');
 
     writeFileSync(
       join(cwd, 'package.json'),
@@ -710,7 +710,7 @@ describe('Stop hook — 층1 테스트 게이트 활성 판정 (auto)', () => {
     seedSession(tmp, sessionId, 1, ['src/a.ts'], cwd);
 
     const out = await runStop(tmp, cwd, sessionId, { GOODBOY_TEST_GATE: 'off' });
-    expect(out.reason ?? '').not.toContain('테스트가 없습니다');
+    expect(out.reason ?? '').not.toContain('No test result covers the changed code');
     expect(out.systemMessage ?? '').not.toContain('테스트 게이트가 이 저장소에서 비활성');
   });
 });

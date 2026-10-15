@@ -208,7 +208,7 @@ describe('Stop hook — stop_hook_active 경로의 비차단 리뷰 수락 (v0.2
     // 다음 full Stop이 차원 누락으로 정식 차단.
     const next = await runStop(tmp, cwd, sessionId, false);
     expect(next.decision).toBe('block');
-    expect(next.reason).toContain('차원');
+    expect(next.reason).toContain('quality dimensions');
   });
 
   test('가정 선언 + 가정 검증 없는 리뷰는 수락 보류 — F1.5 우회 차단 (v0.26.8)', async () => {

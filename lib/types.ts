@@ -26,6 +26,9 @@ export interface ReviewFinding {
   /** 프로브 증거(실행한 명령 + 관찰된 출력). high/medium finding은 review-write에서 필수.
    *  구버전 리뷰(필드 없음) 읽기는 계속 허용 — 새 write에서만 강제. */
   probe?: string;
+  /** Who found it: `codex` for a finding from the Codex second opinion (`run-codex-review`,
+   *  track G §10.8); absent for the reviewer's own. */
+  source?: 'codex';
 }
 
 export interface ReviewResult {
@@ -38,6 +41,9 @@ export interface ReviewResult {
   /** 이번 리뷰가 평가한 품질 차원 목록 (예: "ui-ux-accessibility", "web-hardening").
    *  생략 시 []로 취급 — 구버전 리뷰 읽기는 계속 허용, Stop hook이 커버리지 검사에 사용. */
   dimensions_checked?: string[];
+  /** The Codex second opinion of this round (GOODBOY_CODEX=on): ran, or skipped with why and
+   *  the error output (missing, not logged in, over 10 minutes, failing). */
+  codex?: { status: 'ran' | 'skipped'; reason?: string; output?: string };
 }
 
 // ---- 층1 테스트 게이트 ----
@@ -73,12 +79,32 @@ export interface AcceptanceCoverage {
   mutation?: { command: string; output: string; detected: boolean };
 }
 
+/** A test type (track G §10.8): each layer-1 result counts and times its suites per type. */
+export type TestType = 'unit' | 'integration' | 'ui' | 'e2e';
+
 export interface TestSuiteRun {
   name: string;
   command: string;
   passed: number;
   failed: number;
   output: string;
+  /** The suite's test type and wall time; test-write requires both (absent in old results). */
+  type?: TestType;
+  duration_ms?: number;
+}
+
+/** Coverage from the project's own tool (`measure-coverage`): recorded, never a gate. */
+export interface CoverageRecord {
+  status: 'measured' | 'unavailable';
+  /** The tool and command that measured it (`bun test --coverage`). */
+  tool?: string;
+  /** Line and branch coverage of the run, in percent. */
+  line_pct?: number;
+  branch_pct?: number;
+  /** Changed lines the run executed (`cli.ts diff-coverage`). */
+  changed?: { covered: number; total: number; files_without_executed_changes: string[] };
+  /** Why coverage is unavailable (no tool, no report). */
+  reason?: string;
 }
 
 export interface PrototypeMismatch {
@@ -115,6 +141,10 @@ export interface TestResult {
    *  (no runner, no environment). Track G: the Stop test gate accepts it with a notice; a
    *  push never passes on it. */
   blocked?: { reason: string; evidence: TestEvidence[] };
+  /** Coverage of the run, when measured (`measure-coverage`). */
+  coverage?: CoverageRecord;
+  /** Set by `cli.ts test-write` from `suites`: per test type, the suites, tests and wall time. */
+  by_type?: Partial<Record<TestType, { suites: number; tests: number; duration_ms: number }>>;
   /** Set by `cli.ts test-write`, never by the agent: HEAD and the working tree it tested as a
    *  git tree hash (lib/push-test.ts workTreeState). The push test check matches `tree`. */
   commit?: string | null;

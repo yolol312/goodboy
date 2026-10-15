@@ -1,7 +1,8 @@
 # Review-Corpus — "test the reviewer" regression corpus
 
 This corpus guards against the **review silently regressing** — going back to
-rubber-stamping after `agents/review-changes.md` is edited. Each dimension has a
+rubber-stamping after the review agents (`agents/review-*.md`) or their check skills
+(`skills/check-*/SKILL.md`; before G2, `agents/review-changes.md`) are edited. Each dimension has a
 minimal `bad/` sample containing ONE clearly-seeded defect and a `good/` sample
 with that defect fixed. An `EXPECTED.json` in each variant states the
 machine-checkable contract: `{dimension, minSeverity, changedFiles, oneLineDefect}`.
@@ -34,14 +35,14 @@ fixtures/review-corpus/
    `lib/review-dimensions.ts`, this test fails. Runs in plain `bun test`.
 
 2. **Live LLM-review baseline** (`BASELINE.md`) — the documented, repeatable proof that
-   the *actual review* (following `agents/review-changes.md` mandatory probes) catches
+   the *actual review* (following the check skills' mandatory probes) catches
    each seeded defect at the expected dimension + severity on `bad/`, and stays clean on
    `good/`. This is not run by `bun test` — it is a human/agent-driven baseline you
-   re-run when `review-changes.md` (or the probe set) changes.
+   re-run when the check skills (or the probe set) change.
 
 ## How to re-run the live baseline
 
-Act as the reviewer following `agents/review-changes.md` §7.5 and run the **real**
+Act as the reviewer following `skills/check-security` and `skills/check-ui-states` and run the **real**
 probes (no static reading). For convenience the exact probes used last time:
 
 ### web-hardening (error-path / source leak)

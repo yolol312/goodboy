@@ -1,6 +1,6 @@
 // 변경 파일 → 필수 리뷰 차원 매핑.
 //
-// review-changes.md가 정의한 조건부 품질 차원을 "어떤 변경이 어떤 차원을 강제하는지"
+// 리뷰 도구 스킬(check-*)이 정의한 조건부 품질 차원을 "어떤 변경이 어떤 차원을 강제하는지"
 // 기계가 판정할 수 있게 만든다. Stop hook이 이 매핑으로 리뷰의 dimensions_checked가
 // 충분한지(누락된 필수 차원이 없는지) 검사한다.
 //
@@ -67,7 +67,7 @@ export function axesFor(changedFiles: string[]): ReviewAxis[] {
  * from before dimensions_checked look like). A dimension of no known axis stands for
  * itself, so it is matched only by a review that lists it too. The marker `hallucination`
  * names the axis inside a review that also has dimensions: the single run that does every
- * axis lists it (agents/review-changes.md). Without the marker that run's hallucination
+ * axis lists it (agents/review-all.md, skills/record-review). Without the marker that run's hallucination
  * findings read as findings of the other axes (round-3 closing reviews).
  *
  * Supersession matches axes, not dimensions: each axis lists only the dimensions that its
@@ -195,7 +195,7 @@ function isConfigLikeFile(lower: string): boolean {
 /**
  * 변경된 파일 목록으로부터 리뷰가 반드시 평가해야 하는 차원 집합을 계산한다.
  *
- * 규칙(review-changes.md의 트리거와 1:1):
+ * 규칙(check-security · check-code-quality · check-ui-states 스킬의 트리거와 1:1):
  *  - 프론트엔드(HTML/CSS/JSX/client-JS) → ui-ux-accessibility, plan-completeness
  *  - HTTP 서버/라우트/API 코드 → web-hardening, error-path, proto-pollution
  *    (서버는 외부 입력 파싱 + JSON 바디 키잉을 거의 항상 한다)

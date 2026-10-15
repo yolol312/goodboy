@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-// goodboy 보조 CLI — review-changes 슬래시 커맨드/서브에이전트가 Bash로 호출
+// goodboy helper CLI, run through Bash by the review and test agents and their tool skills
+// (record-review, record-tests, measure-coverage).
 //
 // 사용법:
 //   bun ${CLAUDE_PLUGIN_ROOT}/lib/cli.ts <command> [args...]
@@ -15,10 +16,13 @@ import type {
   Severity,
   TestEnvMode,
   TestResult,
+  TestSuiteRun,
+  TestType,
   TestVerdict,
   Verdict,
 } from './types';
 import { workTreeState } from './push-test';
+import { diffCoverageOf } from './diff-coverage';
 import {
   findDevCycleArtifacts,
   prototypeContractWarnings,
@@ -110,6 +114,9 @@ export function validateReviewResultInput(parsed: unknown): {
       if (finding.probe !== undefined && typeof finding.probe !== 'string') {
         errors.push(`findings[${i}].probe는 문자열이어야 합니다(실행 명령 + 관찰 출력).`);
       }
+      if (finding.source !== undefined && finding.source !== 'codex') {
+        errors.push(`findings[${i}].source can only be "codex" (a Codex second-opinion finding); leave it out for your own.`);
+      }
       if (finding.severity === 'high' || finding.severity === 'medium') {
         if (typeof finding.probe !== 'string' || finding.probe.trim() === '') {
           errors.push(
@@ -140,6 +147,16 @@ export function validateReviewResultInput(parsed: unknown): {
     }
   }
 
+  // codex: optional {status: ran|skipped, reason, output}; a skip says why (track G §10.8).
+  if (p.codex !== undefined) {
+    const c = p.codex as Record<string, unknown> | null;
+    if (typeof c !== 'object' || c === null || (c.status !== 'ran' && c.status !== 'skipped')) {
+      errors.push('codex must be {status: "ran" | "skipped", reason?, output?}.');
+    } else if (c.status === 'skipped' && (typeof c.reason !== 'string' || c.reason.trim() === '')) {
+      errors.push('codex.status "skipped" needs a reason (and the error output in codex.output).');
+    }
+  }
+
   if (errors.length > 0) return { ok: false, errors };
 
   // (E 보안) timestamp는 호출자 입력을 받지 않는다 — staleness 검사가 하한만 보므로
@@ -158,6 +175,7 @@ export function validateReviewResultInput(parsed: unknown): {
     verdict: p.verdict as Verdict,
     dimensions_checked: (p.dimensions_checked as string[]) ?? [],
   };
+  if (p.codex !== undefined) value.codex = p.codex as ReviewResult['codex'];
   return { ok: true, errors: [], value };
 }
 
@@ -359,8 +377,18 @@ export function validateTestResultInput(parsed: unknown): {
       if (typeof suite.passed !== 'number') errors.push(`suites[${i}].passed는 숫자여야 합니다.`);
       if (typeof suite.failed !== 'number') errors.push(`suites[${i}].failed는 숫자여야 합니다.`);
       if (typeof suite.output !== 'string') errors.push(`suites[${i}].output은 문자열이어야 합니다.`);
+      // Per test type, the count and the time (track G §10.8): measured, not gated.
+      if (!TEST_TYPES.includes(suite.type as TestType)) {
+        errors.push(`suites[${i}].type must be one of ${TEST_TYPES.join('|')} (got ${String(suite.type)}).`);
+      }
+      if (typeof suite.duration_ms !== 'number' || !Number.isFinite(suite.duration_ms) || suite.duration_ms < 0) {
+        errors.push(`suites[${i}].duration_ms must be the suite's wall time in milliseconds (a number ≥ 0).`);
+      }
     });
   }
+
+  // coverage: optional, from the project's own tool (measure-coverage); never a gate.
+  if (p.coverage !== undefined) validateCoverageInput(p.coverage, errors);
 
   // acceptance — red/green 증거는 여기가 1차 관문이다.
   if (!Array.isArray(p.acceptance)) {
@@ -452,7 +480,47 @@ export function validateTestResultInput(parsed: unknown): {
     value.prototype_diff = p.prototype_diff as TestResult['prototype_diff'];
   }
   if (isBlocked) value.blocked = p.blocked as TestResult['blocked'];
+  if (p.coverage !== undefined) value.coverage = p.coverage as TestResult['coverage'];
+  if (value.suites.length > 0) value.by_type = byTestType(value.suites);
   return { ok: true, errors: [], value };
+}
+
+const TEST_TYPES: TestType[] = ['unit', 'integration', 'ui', 'e2e'];
+
+/** Per test type: how many suites and tests ran and how long they took. */
+export function byTestType(suites: TestSuiteRun[]): NonNullable<TestResult['by_type']> {
+  const out: NonNullable<TestResult['by_type']> = {};
+  for (const s of suites) {
+    if (!s.type) continue;
+    const t = (out[s.type] ??= { suites: 0, tests: 0, duration_ms: 0 });
+    t.suites++;
+    t.tests += s.passed + s.failed;
+    t.duration_ms += s.duration_ms ?? 0;
+  }
+  return out;
+}
+
+function validateCoverageInput(raw: unknown, errors: string[]): void {
+  const c = raw as Record<string, unknown> | null;
+  if (typeof c !== 'object' || c === null || (c.status !== 'measured' && c.status !== 'unavailable')) {
+    errors.push('coverage must be {status: "measured" | "unavailable", …}.');
+    return;
+  }
+  if (c.status === 'unavailable' && (typeof c.reason !== 'string' || c.reason.trim() === '')) {
+    errors.push('coverage.status "unavailable" needs a reason (no tool, no report).');
+  }
+  for (const k of ['line_pct', 'branch_pct'] as const) {
+    if (c[k] !== undefined && (typeof c[k] !== 'number' || (c[k] as number) < 0 || (c[k] as number) > 100)) {
+      errors.push(`coverage.${k} must be a percentage from 0 to 100.`);
+    }
+  }
+  if (c.changed !== undefined) {
+    const ch = c.changed as Record<string, unknown> | null;
+    const okNum = (v: unknown) => typeof v === 'number' && Number.isInteger(v) && v >= 0;
+    if (typeof ch !== 'object' || ch === null || !okNum(ch.covered) || !okNum(ch.total) || (ch.covered as number) > (ch.total as number) || !Array.isArray(ch.files_without_executed_changes)) {
+      errors.push('coverage.changed must be the `cli.ts diff-coverage` output: {covered, total, files_without_executed_changes}.');
+    }
+  }
 }
 
 async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
@@ -488,6 +556,24 @@ async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
   process.stdout.write(
     JSON.stringify({ ok: true, path: outPath, timestamp: result.timestamp }) + '\n',
   );
+  // A warning, not a block (track G §10.8: decided after a month of data).
+  const idle = (result.coverage?.changed?.files_without_executed_changes ?? []).filter((f) => result.tested_files.includes(f));
+  if (idle.length > 0) {
+    process.stderr.write(`warning: no changed line of these tested files ran in the tests: ${idle.join(', ')}\n`);
+  }
+}
+
+// ---- command: diff-coverage ----
+
+/** `diff-coverage <report> [--base <rev>]`: changed lines a coverage report saw executed. */
+function cmdDiffCoverage(cwd: string, args: string[]): void {
+  const report = args.find((a, i) => !a.startsWith('--') && args[i - 1] !== '--base');
+  const b = args.indexOf('--base');
+  const base = b >= 0 ? args[b + 1] : undefined;
+  if (!report) fail('usage: diff-coverage <coverage report> [--base <rev>]');
+  const out = diffCoverageOf(cwd, report, base);
+  if ('error' in out) fail(out.error);
+  process.stdout.write(JSON.stringify(out) + '\n');
 }
 
 // ---- 명령: acceptance-list ----
@@ -579,7 +665,7 @@ async function cmdSkillGap(cwd: string, args: string[]): Promise<void> {
 
 const USAGE =
   '사용법: bun lib/cli.ts <command> [args...]\n' +
-  '명령: review-write | test-write | acceptance-list | review-axes <파일...> | skill-gap --session <id>';
+  '명령: review-write | test-write | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>]';
 
 async function main(): Promise<void> {
   const cwd = process.cwd();
@@ -606,6 +692,9 @@ async function main(): Promise<void> {
         break;
       case 'skill-gap':
         await cmdSkillGap(cwd, args);
+        break;
+      case 'diff-coverage':
+        cmdDiffCoverage(cwd, args);
         break;
       default:
         fail(`알 수 없는 명령: ${command}\n${USAGE}`);

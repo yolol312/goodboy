@@ -56,7 +56,7 @@ function repo() {
       category: 'add-feature',
       test_files: [join(cwd, 'a.test.ts')],
       environment: { mode: 'local' },
-      suites: [{ name: 'unit', command: 'bun test', passed: 1, failed: 0, output: '1 pass' }],
+      suites: [{ name: 'unit', command: 'bun test', passed: 1, failed: 0, output: '1 pass', type: 'unit', duration_ms: 10 }],
       acceptance: RED_GREEN,
       verdict,
       ...extra,

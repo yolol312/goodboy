@@ -77,7 +77,7 @@ async function recordPass(repo: string, base: string) {
     category: 'add-feature',
     test_files: [join(repo, 'a.test.ts')],
     environment: { mode: 'local' },
-    suites: [{ name: 'unit', command: 'bun test', passed: 1, failed: 0, output: '1 pass' }],
+    suites: [{ name: 'unit', command: 'bun test', passed: 1, failed: 0, output: '1 pass', type: 'unit', duration_ms: 10 }],
     acceptance: [
       { id: 'AC-1', description: 'a', test: 'a.test.ts', red: { command: 'bun test a.test.ts', output: '1 fail', exit_code: 1 }, green: { command: 'bun test a.test.ts', output: '1 pass', exit_code: 0 } },
     ],

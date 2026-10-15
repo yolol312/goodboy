@@ -11,6 +11,7 @@ import {
   bashOutputFloodMessage,
   isWorkflowSkill,
   recordSkillEvidence,
+  skillEffortNotice,
   bashOutputWarnThresholds,
   classifyBashFlood,
   classifyBashReadDetailed,
@@ -46,6 +47,8 @@ interface PostToolInput {
   tool_use_id?: string;
   tool_input?: Record<string, unknown>;
   tool_response?: unknown;
+  /** The session's effort on tool events (G0 M4). */
+  effort?: { level?: string };
 }
 
 interface HookOutput {
@@ -328,11 +331,14 @@ function main(): void {
         if (rec) appendDispatchLog(sessionId, rec);
       }
       // (A0.5) Skill rule evidence (track G §10.4): the main session invoked a workflow skill.
+      //   A skill that runs at its own effort says so in one line (§10.5).
+      let skillNotice: string | null = null;
       if (toolName === 'Skill' && !input.agent_type) {
         const skill = typeof toolInput.skill === 'string' ? toolInput.skill : '';
         if (skill !== '' && isWorkflowSkill(skill)) {
           recordSkillEvidence(sessionId, { k: 'skill', t: Date.now(), name: bareSkillName(skill) });
         }
+        skillNotice = skillEffortNotice(skill, input.effort?.level);
       }
 
       // (A) Read/Edit 추적
@@ -521,7 +527,8 @@ function main(): void {
           additionalContext,
         };
       }
-      if (markerNotice !== undefined) out.systemMessage = markerNotice;
+      const notices = [markerNotice, skillNotice].filter((n): n is string => typeof n === 'string' && n !== '');
+      if (notices.length > 0) out.systemMessage = notices.join('\n');
       emit(out);
     })
     .catch((err) => {

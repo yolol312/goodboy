@@ -273,8 +273,8 @@ Br = browser through Bash (Playwright), A(…) = the members a lead may call.
 | test | test-lead | pick the needed tests, start one shared environment | sonnet / high | R, B, J, A(unit, spec, ui, security) |
 | test | test-unit | unit and integration tests, mutation probes (was test-changes) | sonnet / high | R, B, W (test files), J |
 | test | test-spec | acceptance criteria as E2E flows | sonnet / high | R, B, W (test files), J, Br |
-| test | test-ui | browser checks against the prototype, state reproduction | sonnet / high | R, B, J, Br |
-| test | test-security | dynamic attacks against a local sandbox only | opus / high | R, B, J |
+| test | test-ui | browser checks against the prototype, state reproduction | sonnet / high | R, B, W (test files), J, Br |
+| test | test-security | dynamic attacks against a local sandbox only | opus / high | R, B, W (test files), J |
 | test | test-probe | experiments during work (repro, CSP/CORS, limits) | sonnet / high | R, B, Web, Br |
 
 - Members never get the Agent tool. Agents use tool skills, never workflow skills.
@@ -286,6 +286,22 @@ Br = browser through Bash (Playwright), A(…) = the members a lead may call.
   the limits, including who may call whom and which tool skills an agent may use (M5, M9).
 - An agent joins routing only after a capability check shows it produces its artifact.
   Leads are enabled last, after the delegation guards pass their tests.
+- G2 (2026-10-15): all 24 agent files exist, thin as above, each preloading
+  `follow-agent-rules`. The gates and hook messages name agents only through
+  `ROUTE`/`CHECKED_ROLES` in `lib/routing-policy.ts`: today `review-all` and `test-unit`, the
+  two checked live (M19); the others can be called directly and join routing when their check
+  passes. Leads summarize and list their members' result files; they write no merged result,
+  so no finding is counted twice. The pre-G2 names stay recognized as result writers
+  (`LEGACY_AGENTS`) for sessions started before an upgrade. Contract tests
+  (`tests/g2-agents-skills.test.ts`) keep the files, the table and the plan in step; they
+  moved three tool skills: `review-all` also uses check-ui-states and follow-design-tokens
+  (it runs the ui axis), `test-unit` uses check-spec-coverage (it covers acceptance
+  criteria), and `test-lead` uses none (its members record). The G2 review then gave
+  `test-ui` and `test-security` the test-file write scope (a result needs test files that
+  exist; `test-security` also uses write-regression-test) and took summarize-diff from
+  `research-lead` (it has no Bash). Every review lists a dimension or marker
+  (`hallucination`, `infra-config`, `spec-coverage`, `codex`): an empty list reads as a
+  hallucination review and could clear its findings.
 
 ### 10.4 Skills
 
@@ -314,7 +330,7 @@ Tool skills (hidden from the menu; main session and agents):
 | isolate-cause | high | research-cause, diagnose-failure |
 | write-api-contract | high | build-backend, build-frontend, add-feature |
 | edit-infra-safely | high | build-infra |
-| check-spec-coverage | high | review-spec, test-spec |
+| check-spec-coverage | high | review-spec, test-spec, test-unit |
 | check-security | high | review-security, review-all |
 | check-infra-config | high | review-infra |
 | check-evidence | high | review-evidence, review-all |
@@ -323,9 +339,9 @@ Tool skills (hidden from the menu; main session and agents):
 | attack-sandbox | high | test-security |
 | cite-sources | medium | research-web |
 | summarize-diff | medium | research-code, reviewers |
-| follow-design-tokens | medium | build-frontend, review-ui |
+| follow-design-tokens | medium | build-frontend, review-ui, review-all |
 | check-code-quality | medium | review-quality, review-all |
-| check-ui-states | medium | review-ui, test-ui |
+| check-ui-states | medium | review-ui, review-all, test-ui |
 | run-e2e | medium | test-spec, test-ui |
 | record-review | low | reviewers |
 | record-tests | low | testers |
@@ -348,7 +364,9 @@ Tool skills (hidden from the menu; main session and agents):
 
 - A skill or agent that declares an effort runs at it. When it ends, the session is back at
   the user's own setting (skill effort lasts the invoking turn, agent effort the agent's
-  run). Applied without a prompt, with a one-line notice; `GOODBOY_SKILL_EFFORT=auto|ask`.
+  run). Applied without a prompt, with a one-line notice (PostToolUse on a goodboy Skill
+  call whose frontmatter effort differs from the session's); `GOODBOY_SKILL_EFFORT=auto|off`
+  (G2: `ask` was dropped, since the frontmatter effort applies natively, M2).
 - Skills never set a model, to keep the prompt cache.
 - Advice:
   - SessionStart (new and resumed sessions): configuration warnings only, such as
@@ -429,7 +447,12 @@ Tool skills (hidden from the menu; main session and agents):
   not checked at prompt time; its pushes are.
 - Test measurement (G2, with `record-tests`): every layer-1 result records, per test type
   (unit, integration, ui, e2e), the count and the duration. Measured, not gated; no extra
-  runs; no test tiers (the tier advice is track H).
+  runs; no test tiers (the tier advice is track H). Done in G2: `test-write` requires `type`
+  and `duration_ms` on each suite and adds `by_type`; `coverage` (`measured` with line,
+  branch and changed-line numbers from `cli.ts diff-coverage`, or `unavailable` with a reason)
+  is optional, and a tested code file whose changed lines never ran prints a warning. Codex
+  findings go into the round's own review JSON with `source: "codex"`, and the round records
+  `codex: {status: ran | skipped, reason, output}`.
 
 ### 10.9 Monthly review
 
@@ -592,7 +615,7 @@ Branch `feat/g-routing`. After each step: tests, typecheck, one all-axes review,
 |---|---|
 | G0 | This plan; the measurements in §10.12 |
 | G1 | Rules (§10.5–10.7, §10.10), tests first. The audit of existing reason- and count-based escapes comes last. Done 2026-10-14; the user added the push test check and the read-before-edit knowledge rules during the step. B3 note: skipping per-prompt text for short prompts was rejected, since a short prompt can be a new, vague task |
-| G2 | Tool skills and the 24 agents together, since agents depend on the skills; the two renames; capability checks; leads enabled last |
+| G2 | Tool skills and the 24 agents together, since agents depend on the skills; the two renames; capability checks; leads enabled last. Done 2026-10-15: two review and two test rounds (sonnet, narrow), the capability check M19, and a /verify probe (the Stop test gate names goodboy:test-unit). Leads are written but not routed until their own check |
 | G3 | Workflow skills: slimmed, renamed, effort set |
 
 ### 10.12 Step-0 measurements
@@ -622,6 +645,7 @@ without model/effort.
 | M16 | Does a failed Agent call fire a hook? (measured during G1) | Yes: `PostToolUseFailure` with `tool_name`, `tool_input`, `tool_use_id`, `error` (e.g. "Agent type '…' not found"), `is_interrupt`, `duration_ms`; PostToolUse does not fire | a PostToolUseFailure hook records the call as done/blocked. Open: a call allowed by goodboy and denied by another hook leaves no record and counts as running for 30 min |
 | M17 | How is a compaction seen? (measured during G1) | `/compact` on a resumed session fired `SessionStart` with `source: "compact"` and the same `session_id` (plus a SubagentStop for the summarizer) | SessionStart resets what read-before-edit counts as known; the Stop context-drop heuristic stays as a second signal |
 | M18 | Which hook fires after a Bash command that fails? (measured during G1) | `echo hi; false` fired `PostToolUseFailure` (`error: "Exit code 1\nhi"`) and no PostToolUse; `exit 3` fired no post hook at all | the after-Bash sweeps also run from PostToolUseFailure; a Bash call with no post hook is caught by the open start note (markers) and the next Stop (gate state) |
+| M19 | Capability check (G2, 2026-10-15): do the routed agents produce their artifact? | In a temp repo with `--plugin-dir` and a haiku main session, foreground calls: `review-all` wrote two valid review JSONs (all axes, `hallucination` marker). `test-unit` first wrote none: its red step edited `src/` in place, which its role limits deny (tests only). With write-regression-test running red in a `git archive <base>` copy and the mutation in a copy of the tree, it wrote a passing result with `by_type` (`unit`: 1 suite, 9 tests) and `coverage` measured, red failing on HEAD and the mutation caught | `review-all` and `test-unit` are routed (`CHECKED_ROLES`); red and mutation never touch the project |
 
 So the lead design in §10.3 and §10.7 stands: leads dispatch their own members, in parallel
 and in the foreground, enforced by the PreToolUse rewrite. The fallbacks considered were

@@ -1,6 +1,6 @@
 ---
 name: request-review
-description: 리뷰 요청 워크플로우. 변경된 코드를 review-changes 서브에이전트에게 위임. 사용 예 /request-review <기준>
+description: 리뷰 요청 워크플로우. 변경된 코드를 review-all 서브에이전트에게 위임. 사용 예 /request-review <기준>
 risk_default: simple
 required_inputs:
   - name: review_criteria
@@ -13,7 +13,7 @@ required_inputs:
 
 # 리뷰 요청
 
-변경된 코드를 `review-changes` 서브에이전트에게 명시적으로 위임하는 워크플로우입니다. 다른 워크플로우의 마지막 단계와 동일한 리뷰를 독립적으로 호출하고 싶을 때 사용합니다.
+변경된 코드를 `review-all` 서브에이전트에게 명시적으로 위임하는 워크플로우입니다. 다른 워크플로우의 마지막 단계와 동일한 리뷰를 독립적으로 호출하고 싶을 때 사용합니다.
 
 ## 워크플로우
 
@@ -52,10 +52,10 @@ required_inputs:
    그 다음 **한 메시지에서 여러 Agent 호출을 동시에** 보냅니다 — 그래야 실제로 병렬입니다.
 
    ```
-   Agent(review-changes, "축: hallucination / 파일: <변경 파일> / 리뷰 기준: <review_criteria>")
-   Agent(review-changes, "축: refactoring  / 파일: <변경 파일> / ...")
-   Agent(review-changes, "축: security     / 파일: <변경 파일> / ...")
-   Agent(review-changes, "축: performance  / 파일: <변경 파일> / ...")
+   Agent(review-all, "축: hallucination / 파일: <변경 파일> / 리뷰 기준: <review_criteria>")
+   Agent(review-all, "축: refactoring  / 파일: <변경 파일> / ...")
+   Agent(review-all, "축: security     / 파일: <변경 파일> / ...")
+   Agent(review-all, "축: performance  / 파일: <변경 파일> / ...")
    ```
 
    사용자가 `review_criteria` 로 특정 관심사(예: "보안만")를 지정했더라도 **`hallucination` 축은 항상 포함**합니다 — 환각은 기준과 무관하게 확인해야 합니다. 나머지 축은 기준과 `review-axes` 출력의 교집합으로 정합니다.
@@ -67,7 +67,7 @@ required_inputs:
    - PR URL: 사용자에게 변경 파일 목록 요청 또는 로컬 브랜치 매핑
    - 브랜치: `git diff --name-only <base>...<branch>` 같은 명령으로 산출
    - 파일 목록: 그대로 사용
-3. `review-axes` 로 축을 산출하고, 각 축마다 `Agent(review-changes, "축: … / 파일: …")` 를 **한 메시지에서 동시에** 호출 — 리뷰 기준을 각 프롬프트에 명시
+3. `review-axes` 로 축을 산출하고, 각 축마다 `Agent(review-all, "축: … / 파일: …")` 를 **한 메시지에서 동시에** 호출 — 리뷰 기준을 각 프롬프트에 명시
 4. 모든 축의 결과를 모아 사용자에게 보고 (축별 verdict, findings 요약, 다음 액션 권고)
 
 ## 위험도

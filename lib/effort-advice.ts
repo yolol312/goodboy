@@ -107,3 +107,31 @@ const WHY_KO: Record<EffortWhy, (category: string | null) => string> = {
 export function effortNotice(current: string, advice: EffortAdvice, category: string | null): string {
   return `[goodboy] effort 조언: 지금 ${current} → \`/effort ${advice.level}\` 추천 (${WHY_KO[advice.why](category)})`;
 }
+
+const SKILLS_DIR = join(import.meta.dir, '..', 'skills');
+
+/** The `effort:` a goodboy skill's frontmatter declares, or null. */
+export function skillEffort(skill: string): Effort | null {
+  if (!skill.startsWith('goodboy:')) return null;
+  const name = skill.slice('goodboy:'.length);
+  if (!/^[a-z0-9-]+$/.test(name)) return null;
+  try {
+    const text = readFileSync(join(SKILLS_DIR, name, 'SKILL.md'), 'utf8');
+    const front = text.match(/^---\n([^]*?)\n---/)?.[1] ?? '';
+    const effort = front.match(/^effort:\s*(\S+)\s*$/m)?.[1];
+    return effort && effortRank(effort) > 0 ? (effort as Effort) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The one-line notice when a skill runs at its own effort (§10.5: applied without a
+ *  prompt, for the invoking turn), or null when it matches the session's effort or
+ *  GOODBOY_SKILL_EFFORT=off. Korean: the user reads it. */
+export function skillEffortNotice(skill: string, sessionEffort: string | undefined): string | null {
+  if ((process.env.GOODBOY_SKILL_EFFORT ?? 'auto').trim().toLowerCase() === 'off') return null;
+  const effort = skillEffort(skill);
+  if (effort === null || effort === (sessionEffort ?? '').toLowerCase()) return null;
+  const name = skill.slice('goodboy:'.length);
+  return `[goodboy] ${name} 스킬은 effort ${effort}로 실행돼요(이번 턴만, 끝나면 ${sessionEffort ?? '원래'} 설정으로 돌아가요).`;
+}

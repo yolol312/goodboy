@@ -16,6 +16,7 @@
 
 import { existsSync, readdirSync, readFileSync, statSync, type Dirent } from 'node:fs';
 import { isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
+import { agentName, ROUTE } from './routing-policy';
 
 export interface Citation {
   /** 원문에 쓰인 그대로의 경로 */
@@ -352,7 +353,7 @@ export function citationBlockMessage(problems: CitationProblem[]): string {
 
 export function unreadBlockMessage(problems: CitationProblem[], escalate: boolean): string {
   const tail = escalate
-    ? 'This keeps recurring — run the review-changes subagent with `축: hallucination` to verify ' +
+    ? `This keeps recurring — run the ${agentName(ROUTE.review)} subagent with \`축: hallucination\` to verify ` +
       'the cited claims and record the result.'
     : 'Read each cited file (Read, or cat/sed -n) and cite it by its repo-relative path, then answer ' +
       'again. Claims you did not verify go under `## 근거 > 추측`.';

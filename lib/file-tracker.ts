@@ -384,8 +384,8 @@ export function getRecentEdits(sessionId: string, withinTurns: number): string[]
  *
  *  withinDir(리뷰 스코프): 그 디렉터리 안의 파일만 센다.
  *  ⚠️ 라이브 검증에서 발견된 자기참조 루프/영구 데드락 대응은 inReviewScope의 3중
- *  필터로 처리한다(mktemp 강제 하나에만 의존하지 않는다 — 그 불변식은 review-changes
- *  프롬프트에만 있어 다른 서브에이전트에는 적용되지 않았다):
+ *  필터로 처리한다(mktemp 강제 하나에만 의존하지 않는다 — 그 불변식은 리뷰 에이전트
+ *  (review-all, 구 review-changes) 프롬프트에만 있어 다른 서브에이전트에는 적용되지 않았다):
  *    (A) 삭제된 파일(존재하지 않음)은 리뷰 에이전트가 읽을 수 없어 커버리지가 영구
  *        실패하므로 제외(existsSync). (B) goodboy 자체 산출물(.claude/reviews 등)은
  *        제외해 리뷰 JSON이 스스로 리뷰 대상이 되는 순환을 끊는다. (C) __probe* 등
@@ -443,7 +443,7 @@ function isWithin(file: string, withinDir?: string): boolean {
 //       수 없어 커버리지 영구 실패.
 //   (B) 리뷰 산출물(.claude/reviews/*.json)을 Write 툴로 쓰면 그 파일이 다시 리뷰
 //       대상이 된다(자기참조 무한 후퇴).
-//   (C) 프로브 파일의 mktemp 강제는 review-changes 프롬프트에만 있는 불변식이라,
+//   (C) 프로브 파일의 mktemp 강제는 리뷰 에이전트 프롬프트에만 있는 불변식이라,
 //       다른 서브에이전트가 만든 __probe_* 파일이 프로젝트 안에 남는다.
 //  대응: 조회 함수 2개(getEditsSince/getLatestEditTimestampSince)에 동일한 필터를
 //  적용한다. 두 함수의 대상 집합이 어긋나면 "커버리지 통과/staleness 실패" 교착이

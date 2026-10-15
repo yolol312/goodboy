@@ -170,7 +170,7 @@ describe('cursors per project directory — accepts in a subdirectory (A3)', () 
     // From the root: lib/b.ts was never tested.
     const atRoot = await stop(box, box.root, { testGate: 'on' });
     expect(atRoot.decision).toBe('block');
-    expect(atRoot.reason).toContain('테스트가 없습니다');
+    expect(atRoot.reason).toContain('No test result covers the changed code');
     expect(atRoot.reason).toContain(join(box.root, 'lib', 'b.ts'));
   }, 30_000);
 
