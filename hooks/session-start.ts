@@ -3,13 +3,14 @@
 // environment settings that override goodboy's routing policy (user-facing, so Korean). After
 // a compaction (source "compact", G0 M17) it resets what read-before-edit counts as known:
 // file contents read or edited before it left the context. In a project it also sends the
-// knowledge files to read first (H2), the decision authority (H3) and the user's CLAUDE.md
-// notice (H4). Never blocks.
+// knowledge files to read first (H2), the decision authority (H3), the user's CLAUDE.md
+// notice (H4) and the test tier advice (H6). Never blocks.
 
 import { pinCommitIssueSettings } from '../lib/commit-issue';
 import { pinProjectMode, projectMode } from '../lib/project-mode';
 import { knowledgeRoot, knowledgeSessionNotice } from '../lib/project-knowledge';
 import { claudeMdNotice } from '../lib/doc-map';
+import { tierAdvice } from '../lib/test-profile';
 import { decisionAuthorityContext } from '../lib/decision-authority';
 import { clearReadRecords } from '../lib/file-tracker';
 
@@ -96,17 +97,28 @@ if (import.meta.main) {
         }
       }
       // (H4) The user's CLAUDE.md notice: /init once per project, or over its size budget.
+      //   (H6) The test tier advice, once a session, when the measured tests are long.
       let claudeMd: string | null = null;
+      let tier: { context: string; systemMessage: string } | null = null;
       if (sessionId) {
+        const dir = input.cwd ?? process.cwd();
         try {
-          const dir = input.cwd ?? process.cwd();
-          if (projectMode(dir, sessionId) !== 'non-project') claudeMd = claudeMdNotice(knowledgeRoot(dir).root, source, process.env, dir);
+          if (projectMode(dir, sessionId) !== 'non-project') {
+            const root = knowledgeRoot(dir).root;
+            claudeMd = claudeMdNotice(root, source, process.env, dir);
+            tier = tierAdvice(root, sessionId);
+          }
         } catch {
-          claudeMd = null;
+          // best-effort notices
         }
       }
-      const messages = [...warnings, ...(knowledge.systemMessage ? [knowledge.systemMessage] : []), ...(claudeMd ? [claudeMd] : [])];
-      const context = [knowledge.context, decisions].filter((c): c is string => !!c).join('\n\n');
+      const messages = [
+        ...warnings,
+        ...(knowledge.systemMessage ? [knowledge.systemMessage] : []),
+        ...(claudeMd ? [claudeMd] : []),
+        ...(tier ? [tier.systemMessage] : []),
+      ];
+      const context = [knowledge.context, decisions, tier?.context].filter((c): c is string => !!c).join('\n\n');
       const out: Record<string, unknown> = {};
       if (messages.length > 0) out.systemMessage = messages.join('\n');
       if (context !== '') out.hookSpecificOutput = { hookEventName: 'SessionStart', additionalContext: context };

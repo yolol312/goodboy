@@ -38,8 +38,8 @@ Build a feature from its user scenario to tested, reviewed code.
 6. Tests: run `goodboy:test-unit` with the changed files, category `add-feature` and the
    scenario; it covers the dev-cycle acceptance criteria when there are any.
 7. Review: `bun "<plugin root>/lib/cli.ts" review-axes <files>` (the plugin root is two levels
-   above this skill's base directory), then one `goodboy:review-all` per axis, all in one
-   message: `axis: <axis> / files: … / category: add-feature / rationale: …`.
+   above this skill's base directory), then as its `plan` says: one `goodboy:review-all` for
+   every axis, or one per axis in one message: `axis: <axis> / files: … / category: add-feature / rationale: …`.
 8. Fix high findings; repeat tests and review for the fixed files only.
 
 ## Done when

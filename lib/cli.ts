@@ -26,6 +26,9 @@ import { diffCoverageOf } from './diff-coverage';
 import { knowledgeRoot, validateKnowledge } from './project-knowledge';
 import { decisionItems } from './decision-authority';
 import { catalogRows, renderCatalog, TEST_CATALOG_FILE } from './test-catalog';
+import { recordTestProfile } from './test-profile';
+import { changedLineCount, reviewPlan, reviewPlanNote } from './review-scope';
+import { agentName, ROUTE } from './routing-policy';
 import {
   findDevCycleArtifacts,
   prototypeContractWarnings,
@@ -555,6 +558,8 @@ async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
     fail(`출력 경로가 tests 디렉터리를 벗어납니다: ${resolvedOut}`);
   }
   writeJson(outPath, result);
+  // The project's test profile, for the tier advice (track H §14.7).
+  recordTestProfile(knowledgeRoot(cwd).root, result.by_type, result.timestamp);
 
   process.stdout.write(
     JSON.stringify({ ok: true, path: outPath, timestamp: result.timestamp }) + '\n',
@@ -618,15 +623,21 @@ function cmdAcceptanceList(cwd: string): void {
 
 /** 변경 파일 목록으로부터 띄워야 할 리뷰 축과 각 축이 채워야 할 차원을 출력한다.
  *  스킬이 "어떤 축을 병렬로 띄울지"를 눈대중이 아니라 결정적으로 정하게 한다. */
-function cmdReviewAxes(args: string[]): void {
+function cmdReviewAxes(cwd: string, args: string[]): void {
   const files = args.filter((a) => typeof a === 'string' && a.trim() !== '');
   const dims = requiredDimensionsFor(files);
   const axes = axesFor(files);
+  // (H7) How many review runs: one for every axis when the diff is small.
+  const changedLines = changedLineCount(cwd, files);
+  const plan = reviewPlan(changedLines, axes.length);
   process.stdout.write(
     JSON.stringify(
       {
         ok: true,
         files,
+        changed_lines: changedLines,
+        plan,
+        plan_note: reviewPlanNote(plan, agentName(ROUTE.review)),
         required_dimensions: dims,
         // 축별로 "이번 변경에서 실제 요구되는 차원"만 남긴다 — 에이전트가 트리거되지 않은
         // 차원을 dimensions_checked에 적지 않도록.
@@ -691,7 +702,7 @@ async function main(): Promise<void> {
         cmdAcceptanceList(cwd);
         break;
       case 'review-axes':
-        cmdReviewAxes(args);
+        cmdReviewAxes(cwd, args);
         break;
       case 'skill-gap':
         await cmdSkillGap(cwd, args);

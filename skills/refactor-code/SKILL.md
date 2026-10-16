@@ -29,8 +29,8 @@ Improve structure without changing behavior, and prove the behavior did not chan
 5. Tests: run `goodboy:test-unit` with the changed files and category `refactor-code`; the
    pinned tests must pass unchanged.
 6. Review: `bun "<plugin root>/lib/cli.ts" review-axes <files>` (the plugin root is two levels
-   above this skill's base directory), then one `goodboy:review-all` per axis in one message:
-   `axis: <axis> / files: … / category: refactor-code / rationale: …`.
+   above this skill's base directory), then as its `plan` says: one `goodboy:review-all` for
+   every axis, or one per axis in one message: `axis: <axis> / files: … / category: refactor-code / rationale: …`.
 7. Fix high findings; repeat tests and review for the fixed files only.
 
 ## Done when

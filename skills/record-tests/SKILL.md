@@ -39,7 +39,8 @@ Record one layer-1 test result the Stop gate and the push check can read.
 
 ## Output
 - `{"ok":true,"path":".claude/tests/<ts>.json",…}`; the file gains `by_type` (suites, tests
-  and time per type), `commit` and `tree` (the tested content, set by the CLI).
+  and time per type), `commit` and `tree` (the tested content, set by the CLI). The CLI also
+  updates the project's test profile (`.claude/.goodboy-test-profile.json`, for tier advice).
 
 ## Done when
 - [ ] test-write printed `ok: true`, and every suite has `type` and `duration_ms`.

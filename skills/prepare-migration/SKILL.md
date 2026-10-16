@@ -36,7 +36,7 @@ shared or production environment is the user's own, separate step.
    infra changes: edit-infra-safely or `goodboy:build-infra`).
 5. Dry run on a local copy: forward, rollback, forward again, with each command and output.
 6. Tests and review: `goodboy:test-unit` (category `prepare-migration`), then `review-axes` and
-   one `goodboy:review-all` per axis; ask the security axis for rollback and data-loss checks.
+   the `goodboy:review-all` runs its `plan` says; ask for rollback and data-loss checks.
 7. Hand off: the exact apply and rollback commands for the target environment, for the user
    to run.
 

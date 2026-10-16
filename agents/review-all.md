@@ -18,6 +18,13 @@ that is plainly wrong is itself a `high` finding.
 - With `axis: <name>` in the prompt, do only that axis; several runs go in parallel, so do not
   wait for or read the others. Without it, do every axis in order.
 - `reviewed_files` is every changed file, whatever the axis.
+- With `mode: delta` (files changed after their review): read the newest review in
+  `.claude/reviews/` that lists them, then check only what changed since: its findings against
+  the code now and the new hunks of those files. No new exploration. `reviewed_files` is those
+  files; `dimensions_checked` is every dimension `review-axes` lists for them, plus
+  `hallucination` (one pass over all axes: after a per-axis round the newest review holds one
+  axis only, and the gate needs them all). Keep it to a few minutes.
+- A one-pass run on a small diff stays on the changed lines and what they touch.
 
 ## Tool skills
 1. summarize-diff, to know where to look.

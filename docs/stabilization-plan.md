@@ -810,8 +810,9 @@ file every session reads first, splits every check into `ai` (evidence decides) 
 - A proposal to the user lists the lines of `~/.claude/CLAUDE.md` that hooks now enforce; none
   is removed without their OK.
 - Done in H5 (no code): what goodboy delivers without a global CLAUDE.md is already in place
-  and pinned by tests: R1 (ask when unsure) and R2 (no live systems) in UserPromptSubmit's
-  injection for task prompts (tests/user-prompt-submit-g1.test.ts), the leaf rule in every
+  and pinned by tests: R1 (ask when unsure) for general task prompts, whose place goodboy's
+  commands give to their required-inputs checklist, and R2 (no live systems) for both, in
+  UserPromptSubmit's injection (tests/user-prompt-submit-g1.test.ts), the leaf rule in every
   goodboy agent's preloaded follow-agent-rules, and the delegation guard that denies the Agent
   tool to every subagent but a lead and `claude -p` to every subagent
   (tests/spawn-guard.test.ts), plus the H2–H4 SessionStart lines. The proposal (which lines
@@ -828,6 +829,36 @@ file every session reads first, splits every check into `ai` (evidence decides) 
   threshold (tuned with data): ≤ ~10 min, run everything at task end; ≤ 1 h, unit and
   integration at commit, everything before push; > 1 h, affected tests before push, full E2E
   on release or request. Applying a tier setup is a `human` decision.
+- Built in H6 (`lib/test-profile.ts`): the profile is `.claude/.goodboy-test-profile.json` at
+  the knowledge root (a `.goodboy-*` name, so the push check's tree comparison leaves it out
+  like goodboy's other files; the full suite caught the plain name changing the tree). Per type it
+  keeps the run closest to a full one: a run with at least as many tests replaces the entry,
+  a narrower run does not, unless the entry is 30 days old. No advice up to ten minutes (that
+  is the default already); above it, SessionStart (project mode) gives the model the advice
+  with the measured split and tells it the setup is the user's to decide, and gives the user a
+  Korean line. Once a session: a flag in the session dir, so resume and compaction do not
+  repeat it.
+
+### 14.7a Lighter verification (H7)
+
+Added on 2026-10-16 at the user's request ("the verification is too heavy, probably the
+framework's or the skills' fault; improve them too"); they chose three of four proposals. The
+gates are unchanged; what they ask for is sized:
+
+- `cli.ts review-axes` also reports the changed lines (git, against HEAD, untracked files
+  whole) and a `plan`: one review-all for every axis when the diff is at most 200 lines or has
+  one axis, one per axis otherwise or when the size is unknown (`lib/review-scope.ts`). The
+  Stop hook's "review required" message points at that plan instead of "one per axis".
+- A delta review: when the only problem is files changed after their review, the Stop message
+  says so and asks for one review-all with `mode: delta` and those files; review-all then
+  reads the newest review that lists them and checks only its findings against the code now
+  and the new hunks, on every dimension `review-axes` lists for those files (after a per-axis
+  round the newest review holds one axis, and the gate's dimension and supersession checks need
+  them all; H7 review). The high-finding message points at it too.
+- Rounds: request-review runs a new full review only after a high; mediums are fixed and
+  proven by a test, then a delta review; lows are deferred and start no round.
+- Not chosen: limiting mutation probes to guard logic (test-unit keeps them for every
+  behavior change).
 
 ### 14.8 Steps
 
@@ -840,10 +871,11 @@ file every session reads first, splits every check into `ai` (evidence decides) 
 | H4 | The docs rule, the test catalog, the CLAUDE.md checks |
 | H5 | Hook-delivered guidance; the proposal for `~/.claude/CLAUDE.md` |
 | H6 | The test profile and the tier advice |
+| H7 | Lighter verification (§14.7a), added by the user on 2026-10-16 |
 
 Each step: tests first, typecheck, one narrow review and one test record (at most two rounds;
-§10.11's cost lesson), a /verify probe per new rule, README (Korean). Merge and push wait for
-the user.
+§10.11's cost lesson; from 2026-10-16 a new round only after a high, the full suite once before
+the commit), a /verify probe per new rule, README (Korean). Merge and push wait for the user.
 
 ## Appendix — mutation set (2026-10-12 review)
 

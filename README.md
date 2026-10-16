@@ -131,9 +131,10 @@ Stop hook 재검사(층1): 스위트 실패 0 / test_files 실재 / red가 실�
      루프를 막는다)
    - 없음 → 차단, "goodboy:review-all 서브에이전트를 부르세요"
    ↓
-review-all 서브에이전트를 **축별로 병렬 호출** (한 메시지에서 동시에)
+review-all 서브에이전트 호출: 작은 변경(200줄 이하)은 **1개가 모든 축**, 큰 변경은 **축별로 병렬**
    hallucination(항상) · refactoring · security · performance · ui
-   → 각 축이 자기 .claude/reviews/<ts>.json 작성. Stop이 합집합으로 커버리지 판정
+   → 각 리뷰가 .claude/reviews/<ts>.json 작성. Stop이 합집합으로 커버리지 판정
+   → 리뷰 뒤 고친 파일만 남았으면 그 파일만 보는 **delta 리뷰**(`mode: delta`)로 충분
    ↓
 Stop hook 재검사(층2):
    - verdict=pass → 통과
@@ -292,7 +293,16 @@ integration, ui, e2e)를 만든다. 생성 파일이라 문서 규칙은 편집 
 
 goodboy는 CLAUDE.md를 배포하지 않는다. 훅이 강제하는 규칙은 글이 필요 없고(위임 가드: 리드가 아닌 서브에이전트의
 Agent 도구와 모든 서브에이전트의 `claude -p` 차단), 훅이 검사할 수 없는 안내는 goodboy의 주입으로 전달된다
-(작업 프롬프트마다 R1·R2, 세션 시작 시 지식 파일·결정 권한, 모든 goodboy 에이전트가 미리 읽는 follow-agent-rules).
+(일반 작업 프롬프트에 R1, goodboy 명령에는 그 대신 필수 입력 체크리스트, 둘 다 R2, 세션 시작 시 지식
+파일·결정 권한, 모든 goodboy 에이전트가 미리 읽는 follow-agent-rules).
+
+#### 테스트 티어 조언 (v0.32.0, 트랙 H)
+
+`test-write`가 기록할 때마다 프로젝트의 테스트 프로필(`.claude/.goodboy-test-profile.json`, 로컬 파일)에
+종류별 테스트 수·시간·측정 시각을 남긴다. 일부만 돌린 기록은 프로필을 줄이지 않는다(30일 지나면 갱신).
+측정된 전체 시간이 10분을 넘으면 세션 시작 때 한 번 권한다. 1시간 이하면 커밋 때 unit·integration, 푸시 전
+전체를 돌리고, 1시간을 넘으면 푸시 전 영향받는 테스트, 릴리스나 요청 때 전체 E2E를 돌린다. 조언일 뿐 막지
+않으며, 구성 적용은 사용자가 정한다.
 
 #### 결정 권한: ai와 human (v0.32.0, 트랙 H)
 
@@ -695,13 +705,18 @@ dev-cycle 문서가 있는데 수용 기준이 하나도 나오지 않으면(현
 신호가 하나도 없으면 게이트는 조용히 꺼지고, 세션당 1회 안내만 남긴다. 그래도 강제하려면
 `GOODBOY_TEST_GATE=on`, 완전히 끄려면 `off`.
 
-## 층2 리뷰 — 축별 병렬
+## 층2 리뷰 — 크기에 맞춰 (v0.32.0, 트랙 H7)
 
-리뷰는 축으로 나뉘어 **병렬 서브에이전트**로 돈다. 각 축은 자기 `dimensions_checked` 만 채우고,
-Stop hook이 **합집합**으로 커버리지를 판정한다.
+리뷰는 축으로 나뉘고 Stop hook이 `dimensions_checked`의 **합집합**으로 커버리지를 판정한다. 몇 개를
+띄울지는 변경 크기로 정한다. `review-axes`가 변경 줄 수(HEAD 대비, 새 파일은 전체)와 `plan`을 알려 준다.
+200줄 이하이거나 축이 하나면 review-all **1개가 모든 축**을 보고, 그보다 크면 **축별 병렬**로 돈다. 크기를
+알 수 없으면(이미 커밋된 변경, 저장소 밖·무시된·바이너리 파일, git 실패) 축별로 돈다.
+리뷰 뒤에 고친 파일만 남았으면 Stop이 **delta 리뷰**(`mode: delta`, 그 파일만, 직전 리뷰의 지적과 새로
+바뀐 부분만 보되 차원은 `review-axes`가 그 파일에 요구하는 전부)를 안내한다. 새 전체 라운드는 high가 나왔을 때만 돌린다. medium은 고치고 테스트로 확인한 뒤
+delta 리뷰로 마무리하고, low는 보류한다.
 
 ```bash
-bun ${CLAUDE_PLUGIN_ROOT}/lib/cli.ts review-axes <변경 파일...>   # 띄울 축을 결정적으로 산출
+bun ${CLAUDE_PLUGIN_ROOT}/lib/cli.ts review-axes <변경 파일...>   # 축, 변경 줄 수, plan(single|per-axis)
 ```
 
 | 축 | 담당 차원 |
@@ -793,8 +808,9 @@ v0.31.0부터는 "편집하는 쪽이 지금 그 파일을 알고 있는가"를 
 
 ### "Stop이 차단됩니다 — 리뷰 필요"
 
-차단 메시지에 나온 `review-axes` 명령으로 필요한 리뷰 축을 확인한 뒤, 축마다
-`goodboy:review-all` 서브에이전트를 실행하세요(프롬프트에 `axis: <축>`). `/request-review` 를 쓰면 이 과정을 대신 진행합니다.
+차단 메시지에 나온 `review-axes` 명령으로 필요한 축과 `plan`을 확인한 뒤, 작은 변경이면 `goodboy:review-all`
+하나로, 아니면 축마다(프롬프트에 `axis: <축>`) 실행하세요. 리뷰 뒤 고친 파일만 남았으면 `mode: delta` 리뷰
+하나로 충분합니다. `/request-review` 를 쓰면 이 과정을 대신 진행합니다.
 (리뷰용 슬래시 커맨드는 없습니다. 축 하나짜리 general-purpose 리뷰는 필수 차원 누락으로 다시 차단됩니다.)
 
 ### `.claude/reviews/*.json`이 쌓입니다

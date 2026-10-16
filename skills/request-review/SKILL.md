@@ -20,13 +20,17 @@ Run the review goodboy requires for a change, on demand, and report what it foun
 1. Inputs: ask for what the hook reports missing in one AskUserQuestion (each question with a
    "확인 필요" option); without a location, review the working tree against `HEAD`.
 2. List the changed files (`git diff --name-only HEAD`, plus untracked files).
-3. Axes: `bun "<plugin root>/lib/cli.ts" review-axes <files>` (the plugin root is two levels
-   above this skill's base directory).
-4. Run one `goodboy:review-all` per axis, all in one message:
+3. Axes and size: `bun "<plugin root>/lib/cli.ts" review-axes <files>` (the plugin root is two
+   levels above this skill's base directory); its `plan` says how many runs.
+4. `plan: single` (a small diff): one `goodboy:review-all` for every axis. `plan: per-axis`: one
+   per axis, all in one message:
    `axis: <axis> / files: … / category: request-review / criteria: <review_criteria>`.
    A large or risky change can go to `goodboy:review-lead` instead.
 5. Summarize: each axis's verdict and result file, and the high and medium findings in your own
    words.
+6. Rounds: run a new full review only when the last one found a high. Fix mediums and prove each
+   with a test, then one `goodboy:review-all` with `mode: delta` and the fixed files. Record
+   lows as deferred; they start no round.
 
 ## Done when
 - [ ] Every axis review-axes listed has a review result.

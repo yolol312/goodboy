@@ -228,6 +228,11 @@ export interface ChangedFileEdit {
 }
 
 export interface CoverageResult extends ValidationResult {
+  /** Changed files no review lists. */
+  missing?: string[];
+  /** Changed files whose reviews are all older than their last edit: a delta review of just
+   *  these is enough (H7). */
+  stale?: string[];
   /** 커버리지를 구성한 리뷰들 — 각 변경 파일을 커버하면서 그 파일의 마지막 편집보다
    *  나중인(fresh) 리뷰 **전부**의 합집합. 후속 검사(가정 검증/차원 커버리지)가 이 집합을 쓴다.
    *
@@ -323,6 +328,8 @@ export function validateReviewCoverage(
       ok: false,
       reason: `리뷰되지 않은 변경 파일 ${missing.length}개: ${missing.slice(0, 3).join(', ')}${missing.length > 3 ? ' …' : ''}${futureNote}`,
       effective: Array.from(effective),
+      missing,
+      stale,
     };
   }
   if (stale.length > 0) {
@@ -330,6 +337,7 @@ export function validateReviewCoverage(
       ok: false,
       reason: `리뷰가 마지막 편집보다 오래된 파일 ${stale.length}개: ${stale.slice(0, 3).join(', ')}${stale.length > 3 ? ' …' : ''}. 해당 파일을 다시 리뷰하세요.${futureNote}`,
       effective: Array.from(effective),
+      stale,
     };
   }
   if (failed.length > 0) {

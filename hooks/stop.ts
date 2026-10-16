@@ -1491,8 +1491,8 @@ function main(): void {
             cwd,
             // A9: point to steps that exist; the agent name comes from the policy table.
             `Review is required for the changed files: ${preview}${more}. ` +
-              `Get the required axes with \`bun "${CLI_PATH}" review-axes <files>\`, then run one ` +
-              `${agentName(ROUTE.review)} subagent per axis (or use /request-review).`,
+              `Run \`bun "${CLI_PATH}" review-axes <files>\`: its plan says whether one ` +
+              `${agentName(ROUTE.review)} covers every axis (a small diff) or one runs per axis (or use /request-review).`,
             'review',
             '',
             count,
@@ -1528,8 +1528,13 @@ function main(): void {
             blockOutput(
               sessionId,
               cwd,
-              `Review validation failed: ${v.reason ?? 'unknown reason'}. Run the review again ` +
-                `(${agentName(ROUTE.review)} per axis, or /request-review).`,
+              `Review validation failed: ${v.reason ?? 'unknown reason'}. ` +
+                ((v.stale?.length ?? 0) > 0 && (v.missing?.length ?? 0) === 0
+                  ? // (H7) Only files changed after their review: no full round is needed.
+                    `These files changed after their review: ${v.stale!.slice(0, 5).join(', ')}. A delta review is enough: one ` +
+                    `${agentName(ROUTE.review)} with \`mode: delta\` and these files; it reads the newest review that lists them ` +
+                    `and checks only what changed since, on every dimension \`bun "${CLI_PATH}" review-axes <files>\` lists for them.`
+                  : `Run the review again (\`bun "${CLI_PATH}" review-axes <files>\` gives the plan, or /request-review).`),
               'review',
               '',
               count,
@@ -1588,7 +1593,8 @@ function main(): void {
               sessionId,
               cwd,
               `high severity 발견사항을 수정하세요: ${issues}. A finding clears when, after the fix, ` +
-                `the review axes that raised it (${axes || 'unknown'}) review the flagged file again.`,
+                `the review axes that raised it (${axes || 'unknown'}) review the flagged file again: a delta review ` +
+                `(one ${agentName(ROUTE.review)} with \`mode: delta\` and the fixed files) does it.`,
               'review',
               '',
               count,

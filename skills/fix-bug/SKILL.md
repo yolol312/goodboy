@@ -35,8 +35,8 @@ Make broken behavior right again with the smallest change, and leave a test that
 6. Tests: run the agent `goodboy:test-unit` with the changed files, the category `fix-bug`
    and what changed. It writes the regression test and records the result.
 7. Review: `bun "<plugin root>/lib/cli.ts" review-axes <files>` (the plugin root is two levels
-   above this skill's base directory), then one `goodboy:review-all` per axis, all in one
-   message: `axis: <axis> / files: … / category: fix-bug / rationale: …`.
+   above this skill's base directory), then as its `plan` says: one `goodboy:review-all` for
+   every axis, or one per axis in one message: `axis: <axis> / files: … / category: fix-bug / rationale: …`.
 8. Fix high findings and repeat steps 6–7 for the fixed files only.
 
 ## Done when
