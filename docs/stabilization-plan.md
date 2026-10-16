@@ -40,7 +40,8 @@ so work is released in batches:
 |---|---|
 | v0.30.0 | A (fixes) + F1–F4 (language-policy prerequisites), released 2026-10-13 |
 | v0.31.0 | G (routing: rules, roles, tools), which also covers B2, B3 and F7. Prepared 2026-10-15 on `feat/g-routing` (G0 1312639, G1 bf9c5b9, G2 8e46b84, G3 891c2ef, version bump); the merge and the push to `main` (the release) wait for the user |
-| v0.32.0 | the rest of B (cost) + C (measurement) + F5, F8, and track H (knowledge; branch `feat/h-knowledge`, stacked on `feat/g-routing`) |
+| v0.32.0 | the rest of B (cost) + C (measurement) + F5, F8, and track H (knowledge; branch `feat/h-knowledge`, stacked on `feat/g-routing`). G and H were merged into the local `main` on 2026-10-16 (not pushed) |
+| v0.33.0 | track I (test automation, §15; branch `feat/i-test-automation`, issues #1–#6) |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
 
 ## 4. A — Fix silent failures and deadlocks
@@ -876,6 +877,61 @@ gates are unchanged; what they ask for is sized:
 Each step: tests first, typecheck, one narrow review and one test record (at most two rounds;
 §10.11's cost lesson; from 2026-10-16 a new round only after a high, the full suite once before
 the commit), a /verify probe per new rule, README (Korean). Merge and push wait for the user.
+
+## 15. I — Test automation (v0.33.0)
+
+Asked by the user on 2026-10-16 ("I want 100% test automation through this framework") and
+approved as designed the same day. Branch `feat/i-test-automation` from the local `main` (G
+and H merged); one GitHub issue per step, named in its commits (#1 I0 … #6 I5).
+
+### 15.1 What "100%" means
+
+Four guarantees, each enforced by a gate on evidence (the user chose all four):
+
+1. Changed lines: every changed code line runs in a test of the recorded tree.
+2. Acceptance criteria: every criterion (dev-cycle documents, the policy file, the task's
+   stated goals) has a test that would fail if it broke.
+3. Test types: the types a change needs are all there: unit for code; integration for
+   boundaries (server, database, CLI, file or network IO); ui or e2e for UI changes.
+4. Regression: a full suite (or, past the one-hour tier, the affected tests) passed on the
+   pushed tree before a push.
+
+Not testable, so outside "100%": decisions that are the user's (§14.4: wording, UX choices),
+and live external systems (R2: only sandboxes and fakes).
+
+### 15.2 Measurements (I0)
+
+| # | What | Result |
+|---|---|---|
+| M23 | bun coverage into goodboy's diff coverage | `bun test --coverage --coverage-reporter=lcov --coverage-dir=<dir>` writes an lcov file that `cli.ts diff-coverage` reads: per file, the changed lines that ran |
+| M24 | code run in a child process | absent from bun's report: goodboy's hooks run through `Bun.spawn` in their tests, so their changed lines are not measured at all |
+| M25 | changed files missing from a report | `diffCoverage` skips them silently (counted nowhere, listed nowhere); I1 must count a changed code file the report lacks as not covered |
+| M26 | tools on this machine | python3 without pytest or coverage, no go, openjdk 21, node; diff coverage reads lcov, Cobertura, JaCoCo and Go reports |
+
+Consequences for the design:
+- I1 counts a changed code file absent from the report as uncovered, and says why (a child
+  process, a file no test loads). Projects whose tests run code in child processes need
+  either in-process tests or a recorded human exemption for those files (goodboy itself is
+  one: its hook tests spawn the hooks).
+- A project with no coverage tool records a `blocked` result with the evidence; enabling a
+  tool, or an exemption, is the user's decision.
+- E2E is detected by its config (`playwright.config.*`, `cypress.config.*`) or dependency
+  (`@playwright/test`, `cypress`); without a runner or a browser the result is `blocked` with
+  the evidence, for the user.
+
+### 15.3 Steps
+
+| Step | Issue | Contents |
+|---|---|---|
+| I0 | #1 | This section; measurements M23–M26 |
+| I1 | #2 | Changed lines run in tests: diff coverage from a warning to a rule |
+| I2 | #3 | Every acceptance criterion has a test |
+| I3 | #4 | Test types complete per change kind; several types go to test-lead |
+| I4 | #5 | Full regression on the pushed tree before a push |
+| I5 | #6 | Existing tests that cover the change run with it; weakening a test is a finding |
+
+Each step: tests first, the §14.7a review sizing, a /verify probe per new rule, README
+(Korean), and `/done #<issue>` (GitHub mode) to close it. Merge and push wait for the user.
 
 ## Appendix — mutation set (2026-10-12 review)
 
