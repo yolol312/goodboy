@@ -17,6 +17,9 @@ catch it breaking again.
   the result for the main session.
 - Start what the tests need (a container, a local server) and stop it when done.
 - `tested_files` is every changed code file in scope.
+- Documents need no test (plan §15.4): no tests, harnesses or acceptance entries for
+  document content in a mixed change, and never a document check as evidence for a product
+  criterion (`PT-*`, `UIUX-*`).
 
 ## Tool skills
 1. check-spec-coverage, when `bun "$GB/lib/cli.ts" acceptance-list` lists criteria.

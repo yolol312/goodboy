@@ -17,6 +17,7 @@ import { projectMode } from '../lib/project-mode';
 import { knowledgeRoot, readDocMap } from '../lib/project-knowledge';
 import { staleDocs, staleDocsReason, type StaleDoc } from '../lib/doc-map';
 import { changedLineGaps, changedLineReason, diffCoverageMode, repoTop, sessionCoverageStart } from '../lib/changed-coverage';
+import { documentChangeNote, isDocumentChange } from '../lib/doc-verification';
 import {
   citationBlockMessage,
   CLI_PATH,
@@ -85,7 +86,6 @@ import {
   effortNotice,
   hasRepeatedBlock,
   isDocPath,
-  projectRelative,
   readLastAdvice,
   recommendEffort,
   writeLastAdvice,
@@ -583,6 +583,13 @@ function needsTestCoverage(file: string, cwd: string): boolean {
   // isDocPath (extension, or anything under docs/) is the rule the skill rule and role limits
   //   use; with no count-based escape, a docs/diagram.svg edit must not demand a test forever.
   return !isTestFile(scoped) && !isDocFile(scoped) && !isDocPath(scoped.split(sep).join('/'));
+}
+
+/** (I1b) The document note after a review-gate message, with its separating space; empty
+ *  when the change is not a document change (lib/doc-verification.ts). */
+function withDocNote(files: string[], cwd: string): string {
+  const note = documentChangeNote(files, resolvePath(cwd));
+  return note ? ` ${note}` : '';
 }
 
 /** (F2) When code was edited: dev-cycle documents exist but yield no acceptance criteria.
@@ -1188,13 +1195,7 @@ function main(): void {
           const last = readLastAdvice(sessionId);
           const reviewCursor = readReviewCursor(cwd, sessionId);
           const changed = getEditsSince(sessionId, reviewCursor ? reviewCursor.turn : 0, cwd);
-          const root = resolvePath(cwd);
-          const docOnly =
-            changed.length > 0 &&
-            changed.every((f) => {
-              const rel = projectRelative(f, root);
-              return rel !== null && isDocPath(rel);
-            });
+          const docOnly = isDocumentChange(changed, resolvePath(cwd));
           const category = st?.category ?? null;
           const advice = recommendEffort({
             current,
@@ -1512,7 +1513,9 @@ function main(): void {
             // A9: point to steps that exist; the agent name comes from the policy table.
             `Review is required for the changed files: ${preview}${more}. ` +
               `Run \`bun "${CLI_PATH}" review-axes <files>\`: its plan says whether one ` +
-              `${agentName(ROUTE.review)} covers every axis (a small diff) or one runs per axis (or use /request-review).`,
+              `${agentName(ROUTE.review)} covers every axis (a small diff) or one runs per axis (or use /request-review).` +
+              // (I1b) A document change: its class, budget and guidance.
+              withDocNote(recentEdits, cwd),
             'review',
             '',
             count,
@@ -1554,7 +1557,8 @@ function main(): void {
                     `These files changed after their review: ${v.stale!.slice(0, 5).join(', ')}. A delta review is enough: one ` +
                     `${agentName(ROUTE.review)} with \`mode: delta\` and these files; it reads the newest review that lists them ` +
                     `and checks only what changed since, on every dimension \`bun "${CLI_PATH}" review-axes <files>\` lists for them.`
-                  : `Run the review again (\`bun "${CLI_PATH}" review-axes <files>\` gives the plan, or /request-review).`),
+                  : `Run the review again (\`bun "${CLI_PATH}" review-axes <files>\` gives the plan, or /request-review).`) +
+                withDocNote(recentEdits, cwd),
               'review',
               '',
               count,

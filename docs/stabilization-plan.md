@@ -962,7 +962,9 @@ Consequences for the design:
   call started in and the one its shell ended in (`cd <elsewhere> && mv x <start repo>/…`,
   round 7). Only the start repo has a snapshot, so a directory moved into another repo the
   shell cds to is not seen; a file moved there counts by ctime only when the shell ended in
-  that repo. A call that starts outside any repo sweeps no repo it did not end in (known
+  that repo, and the named targets count only inside the start repo, so a file moved into
+  another repo by an absolute path, with no `cd`, is not seen either. A call that starts
+  outside any repo sweeps no repo it did not end in (known
   limits; Claude Code puts the shell back into the project after a call that leaves it,
   seen on 2026-10-16, so a call starts in the project). The targets the command names count too,
   read from the start cwd (security review: a move
@@ -1065,8 +1067,12 @@ Decided by the user (2026-10-16), all three as recommended:
   be manufactured; their evidence is the review (plan-completeness, hallucination).
 
 I1b (#7), guidance only:
-- A document change, until I3's classifier: every changed file is a doc by today's rule
-  (`isDocPath`), as the effort advice already decides it (`hooks/stop.ts`). Its budget: one
+- A document change, until I3's classifier: every changed file is a document
+  (`isDocumentFile`): a doc by `isDocPath` that is prose (`.md`, `.txt`, `.rst`, `.adoc`), or
+  a static asset under a docs dir (`.html`, `.css`, images, `.pdf`), outside any `prototype`
+  dir, whose review needs no dimension beyond plan-completeness and ui-ux-accessibility. Not
+  a document: code under a docs dir, MDX, `requirements.txt` (dependency-risk),
+  `CMakeLists.txt` (the I1b review). The effort advice uses the same rule. Its budget: one
   review of at most 10 minutes, presentation checks included; no test run (documents need
   none). A mixed change gets no document budget.
 - `agents/test-unit.md`, `agents/review-all.md` and the Stop-hook messages, for a document
@@ -1082,14 +1088,23 @@ I1b (#7), guidance only:
   is a limit, never a pass criterion.
 - The pre-edit guidance (B2, `lib/required-inputs.ts`): collect the user's open decisions in
   one question before the first edit; record unanswered ones as assumptions.
+- Built: `lib/doc-verification.ts` (the class, the budget, the note; the effort advice uses
+  the same rule) appended to both "run a review" messages of the review gate;
+  `agents/review-all.md` (a "Document changes" section, triggered by the note in its prompt),
+  `agents/test-unit.md` (documents need no test), `skills/request-review` steps 4 and 6 (the
+  main session puts the note in the review prompt, since a subagent never sees the gate's
+  message; a document change's mediums wait for the next planned edit), the B2 line, README.
+  Tests: `tests/i1b-doc-guidance.test.ts`. Live probe: a docs-only session ended in 41 s with
+  one review and no test run, and the note reached the transcript.
 
 I3 (#4) additions:
 - `lib/verification-scope.ts::classifyVerificationScope()` sorts each file into document,
   static preview or code, from the resolved repo-relative path, the artifact's role and its
   content. It becomes the one doc rule for every call site of the three rules: the test gate
-  (`needsTestCoverage`), the review dimensions (`requiredDimensionsFor`), the skill rule
-  (`hooks/pre-tool-use.ts`), the effort advice (`hooks/stop.ts`), the docs role's write
-  limit (`lib/role-limits.ts`) and the reasoning gate's copy. Today's `DOC_DIR` matches a
+  (`needsTestCoverage`), the skill rule (`hooks/pre-tool-use.ts`), the effort advice and the
+  I1b note (`lib/doc-verification.ts`), the docs role's write limit (`lib/role-limits.ts`)
+  and the reasoning gate's copy. The review dimensions (`requiredDimensionsFor`, which
+  classifies with its own helpers today) start using it too. Today's `DOC_DIR` matches a
   `docs/` or `doc/` directory at any depth; the classifier decides by the artifact, not the
   folder name alone.
 - A static preview is `.html`/`.css` only, with no `prototype` path component. Its HTML is
@@ -1159,9 +1174,10 @@ in another session's temporary scratchpad and was relayed by hand, with no fixed
   - moves a triaged report to `inbox/done/`.
 - J3: it reads goodboy's own records, asks the model nothing and never blocks.
   - Signals: a hook error or a fail-open path; a gate at its retry limit, or one gate
-    blocking again and again (all in the gate log today); verification over the budget of
-    its change class (I1b); a gate the user switched off during the session. The last two
-    need new records: the durations of the test and review runs, and the gate switches
+    blocking again and again; verification over the budget of its change class (I1b); a
+    gate the user switched off during the session. The gate log has the deny, warn and
+    fail-open decisions and the block counts; the rest needs new records: hook errors (they
+    go to stderr today), the durations of the test and review runs, and the gate switches
     each Stop sees.
   - At most one Korean notice per session, with the signal and `/report-goodboy`. Off in
     this repo; it has an env switch.

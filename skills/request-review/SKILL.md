@@ -25,12 +25,16 @@ Run the review goodboy requires for a change, on demand, and report what it foun
 4. `plan: single` (a small diff): one `goodboy:review-all` for every axis. `plan: per-axis`: one
    per axis, all in one message:
    `axis: <axis> / files: … / category: request-review / criteria: <review_criteria>`.
+   When the Stop gate gave a `Document change (class: document; …)` note, put it in the
+   prompt: the reviewer does not see the gate's message.
    A large or risky change can go to `goodboy:review-lead` instead.
 5. Summarize: each axis's verdict and result file, and the high and medium findings in your own
    words.
 6. Rounds: run a new full review only when the last one found a high. Fix mediums and prove each
    with a test, then one `goodboy:review-all` with `mode: delta` and the fixed files. Record
-   lows as deferred; they start no round.
+   lows as deferred; they start no round. A document change (the gate says
+   `Document change (class: document; …)`): one combined review within its budget; its
+   mediums and lows go to the user and wait for the next planned edit.
 
 ## Done when
 - [ ] Every axis review-axes listed has a review result.

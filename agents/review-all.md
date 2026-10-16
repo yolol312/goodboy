@@ -26,6 +26,18 @@ that is plainly wrong is itself a `high` finding.
   axis only, and the gate needs them all). Keep it to a few minutes.
 - A one-pass run on a small diff stays on the changed lines and what they touch.
 
+## Document changes
+When the prompt carries the Stop gate's `Document change (class: document; …)` note:
+- One pass over every dimension `review-axes` lists, plus `hallucination`, within the budget
+  it states (a limit, not a pass criterion).
+- Verify the changed parts and what they affect (counts, IDs, cross-references, shared
+  styles); check changed claims against their sources; run the existing relevant checks.
+- Presentation only where it changed: a representative render; print only when pagination
+  may change.
+- No new harness, mutation sweep or render matrix. At the budget, stop and list what was
+  not verified in the hand-back summary.
+- Nonblocking medium and low findings are reported; the fix waits for the next planned edit.
+
 ## Tool skills
 1. summarize-diff, to know where to look.
 2. By axis (the required dimensions per file: `bun "$GB/lib/cli.ts" review-axes <files>`):
