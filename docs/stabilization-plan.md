@@ -23,7 +23,8 @@ core gates can switch off silently, false positives can deadlock a session, and
 ## 2. Principles
 
 1. **Feature freeze** — no new gates until v1.0. Exceptions: track G (§10) and track H
-   (§14, project knowledge, v0.32.0), both approved by the user on 2026-10-14.
+   (§14, project knowledge, v0.32.0), both approved by the user on 2026-10-14; track I (§15,
+   v0.33.0), track J (§16, v0.34.0) and track K (§17, v0.35.0), approved on 2026-10-16.
 2. **Test first** — every fix lands with a regression test that fails before the fix.
 3. **Measure before trading cost against detection.**
 4. **Proportional cost** — guardrail overhead scales with change size and risk.
@@ -41,7 +42,9 @@ so work is released in batches:
 | v0.30.0 | A (fixes) + F1–F4 (language-policy prerequisites), released 2026-10-13 |
 | v0.31.0 | G (routing: rules, roles, tools), which also covers B2, B3 and F7. Prepared 2026-10-15 on `feat/g-routing` (G0 1312639, G1 bf9c5b9, G2 8e46b84, G3 891c2ef, version bump); the merge and the push to `main` (the release) wait for the user |
 | v0.32.0 | the rest of B (cost) + C (measurement) + F5, F8, and track H (knowledge; branch `feat/h-knowledge`, stacked on `feat/g-routing`). G and H were merged into the local `main` on 2026-10-16 (not pushed) |
-| v0.33.0 | track I (test automation, §15; branch `feat/i-test-automation`, issues #1–#6) |
+| v0.33.0 | track I (test automation, §15; branch `feat/i-test-automation`, issues #1–#7) |
+| v0.34.0 | track J (field reports, §16; issues #8, #9, #11) |
+| v0.35.0 | track K (update checkups, §17; issue #10 for K1, the later steps are proposals) |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
 
 ## 4. A — Fix silent failures and deadlocks
@@ -883,7 +886,7 @@ the commit), a /verify probe per new rule, README (Korean). Merge and push wait 
 
 Asked by the user on 2026-10-16 ("I want 100% test automation through this framework") and
 approved as designed the same day. Branch `feat/i-test-automation` from the local `main` (G
-and H merged); one GitHub issue per step, named in its commits (#1 I0 … #6 I5).
+and H merged); one GitHub issue per step, named in its commits (#1 I0 … #6 I5; #7 I1b, added the same day).
 
 ### 15.1 What "100%" means
 
@@ -957,8 +960,11 @@ Consequences for the design:
   every path new in it (only when both are of the same repo: after `cd <other repo>` its
   uncommitted files are not the call's writes, round 6). The sweep covers both the repo the
   call started in and the one its shell ended in (`cd <elsewhere> && mv x <start repo>/…`,
-  round 7); a call that starts outside any repo and moves a directory into one has no
-  snapshot, so that move is not seen (a known limit). The targets the command names count too,
+  round 7). Only the start repo has a snapshot, so a directory moved into another repo the
+  shell cds to is not seen; a file moved there counts by ctime only when the shell ended in
+  that repo. A call that starts outside any repo sweeps no repo it did not end in (known
+  limits; Claude Code puts the shell back into the project after a call that leaves it,
+  seen on 2026-10-16, so a call starts in the project). The targets the command names count too,
   read from the start cwd (security review: a move
   after a record put unrun code in a file no edit recorded; the review gate missed it too).
 - Paths: the repo top in the cwd's own spelling (`--show-cdup`), so a symlinked cwd is still
@@ -1002,8 +1008,9 @@ Consequences for the design:
     round 6 these forms match nothing either (fail-closed, never another file): a
     `../shared/…` path of a sibling package, Kotlin sources whose package differs from their
     dir, Go without a go.mod, a path with an extra root prefix.
-  - The snapshot's top and the post hook's are compared as strings; a cwd spelled through a
-    symlink in one hook and not the other loses the directory-move signal.
+  - The repo tops are compared as strings: a cwd spelled through a symlink in one hook and
+    not the other records the same file under both spellings (`recordEdit` resolves the
+    path, it does not follow links). A `cd` inside the same repo runs `git status` twice.
   - An unstaged `mv` counts every line of the file; a staged rename counts none.
   - `changedFilesSince` is unused in production; `matchFile` is quadratic for huge reports,
     and its scoring loop and the `copy to` branch of `changedLines` are dead since round 6;
@@ -1015,14 +1022,231 @@ Consequences for the design:
 | Step | Issue | Contents |
 |---|---|---|
 | I0 | #1 | This section; measurements M23–M26 |
-| I1 | #2 | Changed lines run in tests: diff coverage from a warning to a rule |
-| I2 | #3 | Every acceptance criterion has a test |
-| I3 | #4 | Test types complete per change kind; several types go to test-lead |
+| I1 | #2 | Changed lines run in tests: diff coverage from a warning to a rule. Done: bcbabc1 |
+| I1b | #7 | Bounded verification for document changes: guidance (§15.4) |
+| I2 | #3 | Every acceptance criterion has a test; a document check never satisfies a product criterion (§15.4) |
+| I3 | #4 | Test types complete per change kind; several types go to test-lead. Also the change classifier and the review dimensions per change (§15.4) |
 | I4 | #5 | Full regression on the pushed tree before a push |
 | I5 | #6 | Existing tests that cover the change run with it; weakening a test is a finding |
 
 Each step: tests first, the §14.7a review sizing, a /verify probe per new rule, README
 (Korean), and `/done #<issue>` (GitHub mode) to close it. Merge and push wait for the user.
+
+### 15.4 Document changes (field report, 2026-10-16)
+
+A field report (a handoff from another session, discussed with Codex in two rounds against
+v0.30.0): a dev-cycle requirements task changed only documents (the requirements file, its
+static HTML/CSS preview, the cycle and backlog files). Each of about five edit rounds
+re-armed full test and review runs; test subagents took 12 to 105 minutes, reviews 5 to 10.
+The subagents built mutation harnesses for prose and swept print and render matrices; the
+main session fixed nonblocking findings, which started new rounds, and edited before the
+user's answers were in.
+
+Checked against the current source (not v0.30.0):
+- The agents are now `test-unit` and `review-all`.
+- Since G1, `needsTestCoverage` uses `isDocPath`: everything under `docs/` needs no test, so
+  the preview's red/green demand is gone already. The other side is a gap: code and
+  dev-cycle prototypes under `docs/` need no test either.
+- H7 already sizes reviews (one review up to 200 changed lines), asks for delta reviews and
+  defers lows. Missing: guidance for document work, budgets, deferring mediums on documents,
+  review dimensions per change, one reviewer for a document change, and one doc rule (three
+  disagree today: `isDocFile`, `isDocPath`, a copy of the regex in the reasoning gate).
+
+Decided by the user (2026-10-16), all three as recommended:
+- Into track I: the guidance as I1b (#7) right after I1; the classifier and the review
+  dimensions into I3 (#4); the product-criterion rule into I2: a product criterion
+  (`PT-*`, `UIUX-*`) is met only by a test of the product code, never by a check of the
+  requirements document.
+- Static previews: `docs/versions/*/preview/**` by default, other paths as `decide: human`
+  entries in `.goodboy/policy.md`, pinned at session start like `coverage-exempt`. Not the
+  proposed `.claude/goodboy.json`: goodboy's project settings live in `.goodboy/`, and the
+  pin already stops a session from lowering its own checks.
+- No `document-check` evidence kind for now: documents need no test record, so nothing has to
+  be manufactured; their evidence is the review (plan-completeness, hallucination).
+
+I1b (#7), guidance only:
+- A document change, until I3's classifier: every changed file is a doc by today's rule
+  (`isDocPath`), as the effort advice already decides it (`hooks/stop.ts`). Its budget: one
+  review of at most 10 minutes, presentation checks included; no test run (documents need
+  none). A mixed change gets no document budget.
+- `agents/test-unit.md`, `agents/review-all.md` and the Stop-hook messages, for a document
+  change:
+  - verify the delta and what it affects;
+  - run the existing relevant checks, and check changed claims against their sources;
+  - check presentation only where it changed (print only when pagination may change);
+  - build no new harness or mutation sweep;
+  - stop at the budget and list what was not verified;
+  - use one combined document review;
+  - report nonblocking medium and low findings and defer them to the next planned edit.
+- The Stop message shows the computed files, the change class and its budget first. A budget
+  is a limit, never a pass criterion.
+- The pre-edit guidance (B2, `lib/required-inputs.ts`): collect the user's open decisions in
+  one question before the first edit; record unanswered ones as assumptions.
+
+I3 (#4) additions:
+- `lib/verification-scope.ts::classifyVerificationScope()` sorts each file into document,
+  static preview or code, from the resolved repo-relative path, the artifact's role and its
+  content. It becomes the one doc rule for every call site of the three rules: the test gate
+  (`needsTestCoverage`), the review dimensions (`requiredDimensionsFor`), the skill rule
+  (`hooks/pre-tool-use.ts`), the effort advice (`hooks/stop.ts`), the docs role's write
+  limit (`lib/role-limits.ts`) and the reasoning gate's copy. Today's `DOC_DIR` matches a
+  `docs/` or `doc/` directory at any depth; the classifier decides by the artifact, not the
+  folder name alone.
+- A static preview is `.html`/`.css` only, with no `prototype` path component. Its HTML is
+  parsed (Bun's HTMLRewriter), not grepped: no scripts, inline handlers, `javascript:` URLs,
+  embedded executable documents or template directives. Its stylesheets and imports stay
+  within the declared assets. Anything else is code; code and prototypes under `docs/` need
+  tests again.
+- Review dimensions:
+
+  | Change | Dimensions |
+  |---|---|
+  | Requirements Markdown only | plan-completeness |
+  | Markdown and preview content | plan-completeness, ui-ux-accessibility (the changed content, not a viewport sweep) |
+  | Preview HTML only | ui-ux-accessibility, plus plan-completeness when the changed content states requirements |
+  | Preview CSS only | ui-ux-accessibility |
+  | Generic Markdown wording | none |
+
+  One reviewer covers them all plus hallucination. The freshness checks and
+  `currentFindings()` stay.
+- Mixed changes keep the code requirements for their code part. Diff size can raise
+  scrutiny, never prove a change harmless.
+
+Proposed, not scheduled: delta scoping for documents. It would keep immutable baseline
+snapshots with file and dependency hashes, have the plugin compute the delta, and fall back
+to full document scope on a missing baseline, unknown dependencies or a policy change.
+
+Not prevented: a business decision or a database-derived number cannot be proved without an
+authoritative input; semantic dependencies between prose sections are not all found; an
+agent can still over-investigate, edit before the answers arrive, or keep fixing optional
+findings. Budgets and check lists make that visible but do not stop it.
+
+## 16. J — Field reports (v0.34.0)
+
+Asked by the user on 2026-10-16: improvements and bugs found while using goodboy elsewhere
+should reach this repo in a form that can be checked and planned. Until now a report lived
+in another session's temporary scratchpad and was relayed by hand, with no fixed contents.
+
+| Step | Issue | Contents |
+|---|---|---|
+| J1 | #8 | The `report-goodboy` skill and a local inbox |
+| J2 | #9 | Inbox notice in this repo, the `triage-reports` skill, a GitHub issue form |
+| J3 | #11 | A friction notice at Stop that suggests a report |
+
+- J1: in any project with goodboy, the skill writes one English report from a fixed
+  template:
+  - what happened (observed vs. expected) and the user's words;
+  - evidence: goodboy and Claude Code versions, gate-log lines, block counts and timings,
+    the commands or files involved;
+  - suspected causes, a proposed change, and what is not known.
+
+  Reports go to `~/.claude/goodboy/inbox/`, never a temp dir or the versioned plugin cache.
+  A report keeps project details locally, and carries a public summary with project names,
+  paths, people and company details removed. A short Korean summary goes to the user.
+- Other users: goodboy runs no server, so the channel is this repo's issues. The repo is
+  public with issues open (checked 2026-10-16), so anyone with a GitHub account can file.
+  After the user confirms the text, the skill files the public summary with `gh`, with
+  `[field-report]` in the title: a non-collaborator cannot set labels, while the issue form
+  applies the `field-report` label.
+- J2: a session in this repo starts with one line when the inbox has new reports; nothing
+  runs by itself. `triage-reports` (repo-local, like `/verify`):
+  - reads the inbox and the field-report issues (by label or title);
+  - re-verifies every claim against the current source;
+  - merges duplicates and matches them to this plan, the backlog and open issues;
+  - proposes where each item goes;
+  - after the user approves, updates the plan and opens or comments on issues with public
+    summaries only;
+  - moves a triaged report to `inbox/done/`.
+- J3: it reads goodboy's own records, asks the model nothing and never blocks.
+  - Signals: a hook error or a fail-open path; a gate at its retry limit, or one gate
+    blocking again and again (all in the gate log today); verification over the budget of
+    its change class (I1b); a gate the user switched off during the session. The last two
+    need new records: the durations of the test and review runs, and the gate switches
+    each Stop sees.
+  - At most one Korean notice per session, with the signal and `/report-goodboy`. Off in
+    this repo; it has an env switch.
+  - Free-form improvement ideas are out: they would be noise; the user runs the skill for
+    them.
+- First candidate, seen here on 2026-10-16: while a background review or test agent is
+  still running, the Stop gates block every chat turn, and answering the user burns the
+  retries although the evidence is on its way.
+
+## 17. K — Update checkups (v0.35.0)
+
+From a field handoff of 2026-10-16 (Claude and Codex, two rounds; facts measured on Claude
+Code 2.1.301). The goal is to keep the user's customizations (skills, plugins, hooks,
+CLAUDE.md) working and useful across CLI and model updates.
+- CLI updates can change hook events, fields and frontmatter rules, or stop a plugin from
+  loading; they can also make a customization redundant.
+- Model updates can make detailed instructions hurt output quality.
+
+Decided by the user in that handoff:
+- two separate skills (CLI update, model update);
+- a detector only notifies;
+- third-party skills are pruned by usage only;
+- one fixed eval suite per target, versioned and extended only after a real failure;
+- every paid run and every customization fix needs the user's approval;
+- English reports with a short Korean summary.
+
+Measured (phase 0):
+- `claude -p "/skill-doctor"` costs nothing and prints usage per skill.
+- `claude plugin eval <skill folder>` runs a with/without ablation on a plain skill folder,
+  in isolation. Always pass `--output-dir`.
+- SessionStart input has no model in `-p`. `Pre/PostModelSwitch` fire on `/model`. Every
+  assistant transcript entry has `message.model` and `version`.
+- `--safe-mode` drops CLAUDE.md, settings hooks and installed plugins.
+  `--setting-sources project,local` drops user plugins and hooks but keeps the user
+  CLAUDE.md. `--bare` needs an API key.
+- `--debug-file` logs each hook run with its plugin and exit status.
+
+K1 (#10): a manual `cli-update-check` skill, with no new hook registrations and no gate
+exemptions.
+- State in `~/.claude/goodboy/checkups/`: atomic, locked writes. `observed`, `pending` and
+  `lastChecked` are kept apart, and only a completed check advances `lastChecked`.
+- Inventory: configured vs. loaded components, their source, hash and owner, and the hook
+  events, JSON fields, frontmatter keys and flags they use.
+- Changelog: the version range since the last check, from the local changelog cache. A gap
+  is "incomplete", never "nothing changed". Identifiers are matched first; then the whole
+  range is triaged, with a bucket for unmapped but possibly relevant entries. Each finding
+  carries the excerpt, the affected contract, a confidence and a proposed probe.
+- Health: `claude plugin validate`, plugin-load warnings from a debug log, `/skill-doctor`,
+  and a bounded `/doctor` that stops before repairs.
+- Smoke tests check trigger → decision → consequence, never just exit 0:
+  - goodboy's own hooks are fed hook JSON with zero model turns, unique session IDs and
+    disposable state, with the JSON `cwd` and the process cwd both set;
+  - then at most 3 small integration sessions, only after the user approves an estimate.
+- User hooks of other tools get smoke cases the user defines in local config next to the
+  state. The public plugin ships no one's personal setup (a change from the handoff, which
+  listed this user's hooks).
+- Reports go through a constrained CLI writer limited to `runs/<run-id>/`, run through Bash
+  so a report never goes through Edit/Write, and never a general write path.
+- `PostModelSwitch` is not registered while the README claims v2.1.138+: nothing guarantees
+  that older CLIs ignore an unknown event.
+- Tests: the state transitions; the changelog range (gaps, downgrades, empty); the writer's
+  containment (escapes, symlinks); the fixtures' isolation from real user state; every smoke
+  case, allowed and blocked.
+
+Proposals (later steps, not scheduled):
+- K2: quiet detection. A fail-open SessionStart reads the CLI version once, corroborated by
+  the transcript. Model observations come from main-session transcript entries read
+  incrementally at Stop, classified by family under the configured alias: an off-family ID
+  is an override, and "model updated" is set only after an explicit startup probe. One
+  notice per transition, with snooze; no instruction injection and no Stop gate.
+- K3: a `model-update-check` pilot on two self-written targets plus CLAUDE.md.
+  - `plugin eval` is the only suite, with frozen suite and grader hashes.
+  - Benefit is success with minus success without, reported with absolute success.
+  - Screening uses 3 pairs; confirmation uses 10 fresh pairs, judged by a 95% Newcombe
+    interval with a ±0.10 margin. At these sizes "equivalent" is out of reach, so
+    inconclusive means keep.
+  - Safety guards are never removed on saturated scores.
+- K4: goodboy self-evaluation on a frozen copy, with the gates active in the treatment arm.
+
+Not prevented:
+- A plugin that fails to load cannot report itself.
+- Isolated ablations miss interactions between skills, CLAUDE.md, hooks and MCP.
+- Headless smoke tests miss interactive approval, resume, compaction and long sessions.
+- A stable model ID can hide backend changes.
+- Usage counts prioritize; they do not justify a removal.
 
 ## Appendix — mutation set (2026-10-12 review)
 
