@@ -809,6 +809,15 @@ file every session reads first, splits every check into `ai` (evidence decides) 
   R2 for task prompts; SessionStart adds the project-knowledge lines).
 - A proposal to the user lists the lines of `~/.claude/CLAUDE.md` that hooks now enforce; none
   is removed without their OK.
+- Done in H5 (no code): what goodboy delivers without a global CLAUDE.md is already in place
+  and pinned by tests: R1 (ask when unsure) and R2 (no live systems) in UserPromptSubmit's
+  injection for task prompts (tests/user-prompt-submit-g1.test.ts), the leaf rule in every
+  goodboy agent's preloaded follow-agent-rules, and the delegation guard that denies the Agent
+  tool to every subagent but a lead and `claude -p` to every subagent
+  (tests/spawn-guard.test.ts), plus the H2–H4 SessionStart lines. The proposal (which lines
+  of the user's own file these cover) went to the user in the track H report, not into this
+  public repo; it holds only once a goodboy with track G is installed (v0.30.0 has neither
+  guard).
 
 ### 14.7 Test tier advice (H6)
 
