@@ -783,6 +783,24 @@ file every session reads first, splits every check into `ai` (evidence decides) 
   (300 lines, warned at SessionStart).
 - `/done` (outside this repo, not under git) is changed only with the user's OK, after a
   backup: it would read docs.json and never attach-and-delete a mapped doc.
+- Built in H4 (`lib/doc-map.ts`, `lib/test-catalog.ts`): the task is the edits since the
+  review cursor, inside the knowledge root; the rule runs after the test gate and before the
+  review gate (so the doc update is reviewed), with the user's Stop marker and
+  `GOODBOY_DOCS_GATE=off` as the only ways past (an edit that drops or narrows a map entry
+  is a change the review sees). The stop_hook_active path mirrors it (H4 review): while a doc
+  is stale it accepts no review, so a plain second Stop cannot move the cursor past the
+  change, and a doc fixed after the block goes on to the review gate, as a test accept does.
+  Edits to the doc map or to another mapped doc, with or without covers, make no doc stale.
+  A recorded `checked` (an ISO time with a zone) counts when it is at or after the change
+  (from the start of its second, as `date -u` writes) and no later than this task's edit of
+  docs.json, with no skew, so a time written ahead passes nothing. The test catalog is
+  checked by regenerating it (its CLI write leaves no edit record), so it carries no date;
+  when git cannot list the test files the CLI writes nothing and the rule fails open. Test
+  types come from paths and imports (e2e, integration, ui, else unit). The /init suggestion
+  is once per project per machine (`~/.claude/goodboy/logs/init-suggested.json`, startup
+  only) and only when the session gets no CLAUDE.md at all (the cwd and its parents count);
+  the size warning shows at startup and resume. Both are user-facing only. `/done` was not
+  changed (the user's OK is pending).
 
 ### 14.6 Global rules without a global CLAUDE.md (H5)
 

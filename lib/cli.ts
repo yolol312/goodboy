@@ -25,6 +25,7 @@ import { workTreeState } from './push-test';
 import { diffCoverageOf } from './diff-coverage';
 import { knowledgeRoot, validateKnowledge } from './project-knowledge';
 import { decisionItems } from './decision-authority';
+import { catalogRows, renderCatalog, TEST_CATALOG_FILE } from './test-catalog';
 import {
   findDevCycleArtifacts,
   prototypeContractWarnings,
@@ -667,7 +668,7 @@ async function cmdSkillGap(cwd: string, args: string[]): Promise<void> {
 
 const USAGE =
   '사용법: bun lib/cli.ts <command> [args...]\n' +
-  '명령: review-write | test-write | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>] | knowledge-check | decisions';
+  '명령: review-write | test-write | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>] | knowledge-check | decisions | test-catalog';
 
 async function main(): Promise<void> {
   const cwd = process.cwd();
@@ -709,6 +710,17 @@ async function main(): Promise<void> {
         // Every ai and human check for this cwd: the defaults and the policy entries (§14.4).
         process.stdout.write(JSON.stringify({ root: knowledgeRoot(cwd).root, items: decisionItems(cwd) }) + '\n');
         break;
+      case 'test-catalog': {
+        // Writes .goodboy/test-catalog.md, feature → test type, from the test files (§14.5).
+        const root = knowledgeRoot(cwd).root;
+        const rows = catalogRows(root);
+        // Never overwrite a catalog with an empty one because git could not list the files.
+        if (rows === null) fail(`test-catalog: git cannot list the test files in ${root} (not a repo, or git is missing)`);
+        mkdirSync(join(root, '.goodboy'), { recursive: true });
+        writeFileSync(join(root, TEST_CATALOG_FILE), renderCatalog(rows));
+        process.stdout.write(JSON.stringify({ ok: true, path: join(root, TEST_CATALOG_FILE), files: rows.length }) + '\n');
+        break;
+      }
       default:
         fail(`알 수 없는 명령: ${command}\n${USAGE}`);
     }

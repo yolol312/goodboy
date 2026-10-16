@@ -14,6 +14,8 @@ import type {
 } from '../lib';
 import { agentName, ROUTE } from '../lib/routing-policy';
 import { projectMode } from '../lib/project-mode';
+import { knowledgeRoot, readDocMap } from '../lib/project-knowledge';
+import { staleDocs, staleDocsReason, type StaleDoc } from '../lib/doc-map';
 import {
   citationBlockMessage,
   CLI_PATH,
@@ -200,6 +202,9 @@ const TEST_COUNT_FILE = '.goodboy-test-retry-count.txt';
 
 // (layer 0) the citation gate: it also fires on turns without edits.
 const CLAIM_COUNT_FILE = '.goodboy-claim-retry-count.txt';
+
+// (track H) the docs rule.
+const DOCS_COUNT_FILE = '.goodboy-docs-retry-count.txt';
 
 // 이번 Stop 실행에서 사용자에게 보일 토큰-습관 경고들(H1-01 긴 세션 경고, H1-03 compact 안내).
 // emit()이 모든 출력 경로(block/pass)의 systemMessage에 이 경고들을 덧붙인다 —
@@ -846,6 +851,45 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
   }
 }
 
+/** (track H §14.5) The docs rule: in a project, a doc whose covered files changed since the
+ *  review cursor (the task) while the doc did not, and no check of it was recorded after the
+ *  change (lib/doc-map.ts). Runs after the test gate and before the review gate, so a doc
+ *  update is reviewed with the change. Fails open. */
+function staleDocsNow(sessionId: string, cwd: string): StaleDoc[] | null {
+  if ((process.env.GOODBOY_DOCS_GATE ?? 'on').trim().toLowerCase() === 'off') return null;
+  if (projectMode(cwd, sessionId) === 'non-project') return null;
+  const { root } = knowledgeRoot(cwd);
+  const map = readDocMap(root);
+  if (map.problem) logGate(sessionId, 'docs', 'fail-open', map.problem);
+  // The whole map: a doc without covers still counts as a doc, not as code (H4 review).
+  if (!map.docs.some((d) => d.covers.length > 0)) return null;
+  const cursor = readReviewCursor(cwd, sessionId);
+  const edits = getEditsWithLastTimestampSince(sessionId, cursor ? cursor.turn : 0, root);
+  return edits.length === 0 ? [] : staleDocs({ root, edits, docs: map.docs });
+}
+
+function docsGate(sessionId: string, cwd: string): HookOutput | null {
+  try {
+    const stale = staleDocsNow(sessionId, cwd);
+    if (stale === null) return null;
+    if (stale.length === 0) {
+      resetRetryCount(sessionId, DOCS_COUNT_FILE);
+      return null;
+    }
+    if (userPass(sessionId, cwd, 'docs')) {
+      resetRetryCount(sessionId, DOCS_COUNT_FILE);
+      return null;
+    }
+    const count = readRetryCount(sessionId, DOCS_COUNT_FILE) + 1;
+    writeRetryCount(sessionId, count, DOCS_COUNT_FILE);
+    logGate(sessionId, 'docs', 'deny', stale.map((s) => s.doc).join(', '));
+    return blockOutput(sessionId, cwd, staleDocsReason(stale, resolvePath(import.meta.dir, '..', 'lib', 'cli.ts')), 'docs', 'GOODBOY_DOCS_GATE=off', count);
+  } catch (err) {
+    process.stderr.write(`[goodboy stop] docs rule error: ${String(err)}\n`);
+    return null;
+  }
+}
+
 /** Open findings, split by whose work they are about (A3).
  *  - own: from reviews that name a file this session edited, in reviewed_files or in a
  *    finding, whichever session wrote them. These gate the Stop.
@@ -1170,12 +1214,48 @@ function main(): void {
         // 층1도 같은 이유로 여기서 수락을 시도한다 — 표준 경로("차단 → 테스트 실행 →
         //   턴 종료")의 종료가 항상 stop_hook_active라, 여기서 수락하지 않으면 결과가
         //   검증되지 않은 채 세션이 끝난다(라이브 실측).
+        // (track H) The docs rule in this path too (H4 review): while a doc is stale no review
+        //   is accepted here, or one plain second Stop would move the cursor past the change
+        //   with no doc change and no check (the v0.26.8 F1.5/F2 mirror). Stale docs that have
+        //   not blocked yet (this Stop answers another gate's block) go on to the full
+        //   evaluation, so the docs block happens once; it is bounded, since the next active
+        //   Stop sees the count. A doc fixed since the docs block goes on to the review, as a
+        //   test accept does (P14 below).
+        let docsFixed = false;
+        let docsPending = false;
+        try {
+          const docsNow = staleDocsNow(sessionId, cwd);
+          const blocked = readRetryCount(sessionId, DOCS_COUNT_FILE) > 0;
+          if (docsNow !== null && docsNow.length > 0) {
+            if (blocked) {
+              logGate(sessionId, 'docs', 'warn', 'stale-on-stop-active');
+              emit({});
+              return;
+            }
+            docsPending = true;
+          }
+          docsFixed = docsNow !== null && docsNow.length === 0 && blocked;
+          if (docsFixed) resetRetryCount(sessionId, DOCS_COUNT_FILE);
+        } catch {
+          // fail-open
+        }
         const testAccepted = tryAcceptPendingTest(sessionId, cwd);
-        if (!testAccepted) {
+        if (docsPending) {
+          // The one docs block, given here and not by a full evaluation: an earlier gate that
+          //   keeps failing would otherwise re-block every active Stop (H4 confirm review).
+          //   It counts, so the next active Stop ends.
+          const docsBlock = docsGate(sessionId, cwd);
+          if (docsBlock) {
+            emit(docsBlock);
+            return;
+          }
+        }
+        if (!testAccepted && !docsFixed) {
           const acceptMsg = tryAcceptPendingReview(sessionId, cwd, input.transcript_path);
           emit(acceptMsg ? { systemMessage: acceptMsg } : {});
           return;
         }
+        if (!testAccepted) logGate(sessionId, 'docs', 'warn', 'continue-to-review-after-docs-fixed');
         // 층1을 방금 수락했다면 조기 return 하지 않고 **층2까지 이어서 판정한다.**
         //   조기 return의 목적은 "직전 차단에 대응한 턴을 또 막지 않기"인데, 테스트
         //   수락은 그 차단이 **해소됐다**는 뜻이므로 다음 층으로 넘어가는 것이 맞다.
@@ -1183,7 +1263,7 @@ function main(): void {
         //   테스트는 red-green까지 제대로 했는데 리뷰는 gate-log에 흔적조차 없이 종료.
         //   수락은 커서를 전진시켜 1회성이라(다음 Stop에선 recentEdits가 비어 false)
         //   이 경로가 반복되지 않는다 — 무한 루프가 되지 않는 근거다.
-        logGate(sessionId, 'test', 'warn', 'continue-to-review-after-accept');
+        if (testAccepted) logGate(sessionId, 'test', 'warn', 'continue-to-review-after-accept');
       }
 
       // (B2) 컨텍스트 사용량 측정. 측정 실패(null)면 강제/경고를 모두 생략한다(fail-open).
@@ -1349,6 +1429,13 @@ function main(): void {
       const testBlock = testGate(sessionId, cwd);
       if (testBlock) {
         emit(testBlock);
+        return;
+      }
+
+      // (track H) The docs rule, before the review so the doc update is reviewed too.
+      const docsBlock = docsGate(sessionId, cwd);
+      if (docsBlock) {
+        emit(docsBlock);
         return;
       }
 

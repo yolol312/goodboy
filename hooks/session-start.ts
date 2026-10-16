@@ -3,11 +3,13 @@
 // environment settings that override goodboy's routing policy (user-facing, so Korean). After
 // a compaction (source "compact", G0 M17) it resets what read-before-edit counts as known:
 // file contents read or edited before it left the context. In a project it also sends the
-// knowledge files to read first (H2) and the decision authority (H3). Never blocks.
+// knowledge files to read first (H2), the decision authority (H3) and the user's CLAUDE.md
+// notice (H4). Never blocks.
 
 import { pinCommitIssueSettings } from '../lib/commit-issue';
-import { pinProjectMode } from '../lib/project-mode';
-import { knowledgeSessionNotice } from '../lib/project-knowledge';
+import { pinProjectMode, projectMode } from '../lib/project-mode';
+import { knowledgeRoot, knowledgeSessionNotice } from '../lib/project-knowledge';
+import { claudeMdNotice } from '../lib/doc-map';
 import { decisionAuthorityContext } from '../lib/decision-authority';
 import { clearReadRecords } from '../lib/file-tracker';
 
@@ -93,7 +95,17 @@ if (import.meta.main) {
           decisions = null;
         }
       }
-      const messages = [...warnings, ...(knowledge.systemMessage ? [knowledge.systemMessage] : [])];
+      // (H4) The user's CLAUDE.md notice: /init once per project, or over its size budget.
+      let claudeMd: string | null = null;
+      if (sessionId) {
+        try {
+          const dir = input.cwd ?? process.cwd();
+          if (projectMode(dir, sessionId) !== 'non-project') claudeMd = claudeMdNotice(knowledgeRoot(dir).root, source, process.env, dir);
+        } catch {
+          claudeMd = null;
+        }
+      }
+      const messages = [...warnings, ...(knowledge.systemMessage ? [knowledge.systemMessage] : []), ...(claudeMd ? [claudeMd] : [])];
       const context = [knowledge.context, decisions].filter((c): c is string => !!c).join('\n\n');
       const out: Record<string, unknown> = {};
       if (messages.length > 0) out.systemMessage = messages.join('\n');

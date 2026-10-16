@@ -39,3 +39,5 @@ export * from './commit-issue';
 export * from './project-mode';
 export * from './project-knowledge';
 export * from './decision-authority';
+export * from './test-catalog';
+export * from './doc-map';

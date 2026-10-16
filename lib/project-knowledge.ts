@@ -23,6 +23,9 @@ export interface DocEntry {
   path: string;
   session_start: boolean;
   covers: string[];
+  /** When the doc was last checked against a change to what it covers (a UTC time; the docs
+   *  rule, lib/doc-map.ts). */
+  checked?: string;
 }
 
 /** The directory whose `.goodboy/` the session uses: the nearest one with policy.md from cwd
@@ -52,6 +55,7 @@ export function readDocMap(root: string): { docs: DocEntry[]; problem?: string }
         path: d.path,
         session_start: d.session_start === true,
         covers: Array.isArray(d.covers) ? d.covers.filter((c): c is string => typeof c === 'string') : [],
+        ...(typeof d.checked === 'string' ? { checked: d.checked } : {}),
       });
     }
     return { docs };

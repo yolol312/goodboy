@@ -37,9 +37,12 @@ Keep the project's knowledge files true, so the next session starts with them.
    the answers as the entries' text and source.
 4. Write `.goodboy/docs.json`: `{"docs": [{"path": ".goodboy/policy.md", "session_start": true,
    "covers": []}, {"path": "CLAUDE.md", "session_start": false, "covers": ["<globs>"]}, …]}` —
-   the key docs and the code paths each one describes.
+   the key docs and the code paths each one describes. When the project has tests, run
+   `bun "$GB/lib/cli.ts" test-catalog` and list `.goodboy/test-catalog.md` with the test globs.
 5. Update mode: add the task's human decisions as entries (they become `ai` checks when
    evidence can decide them next time), fix entries the change made wrong, refresh `checked`.
+   For each doc the docs rule names: update it, or, if it is still right, set its `checked`
+   in docs.json to `date -u +%Y-%m-%dT%H:%M:%SZ`; regenerate the test catalog after test changes.
 6. Keep policy.md within 200 lines: merge or drop stale entries rather than grow it.
 7. Check: `bun "$GB/lib/cli.ts" knowledge-check`; fix every problem it lists.
 
