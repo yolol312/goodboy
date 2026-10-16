@@ -64,6 +64,14 @@ export interface BashStartNote {
   markers?: string[];
   /** Production entries of each `.goodboy/hosts` in effect when the call started. */
   hosts?: Record<string, string[]>;
+  /** git's status when a call that can move files started: the repo top and its files
+   *  (absolute). The top tells whether the post hook's status is of the same repo. */
+  status?: GitStatusSnapshot;
+}
+
+export interface GitStatusSnapshot {
+  top: string;
+  files: string[];
 }
 
 function productionSnapshot(cwd: string): Record<string, string[]> {
@@ -89,8 +97,9 @@ function noteFile(sessionId: string, toolUseId: string): string {
 
 /** Notes when a Bash call started, where, and which of this session's markers existed then,
  *  so the post hooks can tell which markers the call created (by name, not by mtime, which the
- *  command controls: `touch -t`). */
-export function noteBashStart(sessionId: string, toolUseId: string, cwd: string, command?: string, agent?: string): void {
+ *  command controls: `touch -t`). `status`: git's status, for a call that can move files
+ *  (lib/write-sweep.ts). */
+export function noteBashStart(sessionId: string, toolUseId: string, cwd: string, command?: string, agent?: string, status?: GitStatusSnapshot): void {
   try {
     const note: BashStartNote = {
       t: Date.now(),
@@ -100,6 +109,7 @@ export function noteBashStart(sessionId: string, toolUseId: string, cwd: string,
       ...(agent ? { agent } : {}),
       markers: ownMarkerNames(sessionId, cwd),
       hosts: productionSnapshot(cwd),
+      ...(status ? { status } : {}),
     };
     writeFileSync(noteFile(sessionId, toolUseId), JSON.stringify(note), 'utf8');
   } catch {
@@ -110,10 +120,15 @@ export function noteBashStart(sessionId: string, toolUseId: string, cwd: string,
 export interface BashStart {
   since: number;
   dirs: string[];
+  /** The cwd the call started in, when the note had it (the post hook reports where the
+   *  shell ended, after any `cd`). */
+  cwd?: string;
   /** The start cwd and its marker names then, when the note had them. */
   snapshot?: { dir: string; markers: string[] };
   /** Production entries per hosts file at the start. */
   hosts?: Record<string, string[]>;
+  /** git's status at the start, when the note had it. */
+  status?: GitStatusSnapshot;
 }
 
 /** Puts back production entries of `.goodboy/hosts` that a Bash call removed (a deleted
@@ -150,6 +165,8 @@ export function takeBashStart(sessionId: string, toolUseId: string | undefined, 
   const dirs = new Set([resolvePath(cwd)]);
   let snapshot: BashStart['snapshot'];
   let hosts: BashStart['hosts'];
+  let status: GitStatusSnapshot | undefined;
+  let startCwd: string | undefined;
   if (toolUseId) {
     const file = noteFile(sessionId, toolUseId);
     try {
@@ -159,10 +176,13 @@ export function takeBashStart(sessionId: string, toolUseId: string | undefined, 
         recordBashWindow(sessionId, rec.t, Date.now());
       }
       if (typeof rec.cwd === 'string') {
-        dirs.add(resolvePath(rec.cwd));
+        startCwd = resolvePath(rec.cwd);
+        dirs.add(startCwd);
         if (Array.isArray(rec.markers)) snapshot = { dir: resolvePath(rec.cwd), markers: rec.markers.map(String) };
       }
       if (rec.hosts && typeof rec.hosts === 'object') hosts = rec.hosts;
+      const st = rec.status as Partial<GitStatusSnapshot> | undefined;
+      if (st && typeof st.top === 'string' && Array.isArray(st.files)) status = { top: st.top, files: st.files.map(String) };
     } catch {
       // no start note: the short fallback window above
     }
@@ -172,7 +192,14 @@ export function takeBashStart(sessionId: string, toolUseId: string | undefined, 
       // already gone
     }
   }
-  return { since, dirs: Array.from(dirs), ...(snapshot ? { snapshot } : {}), ...(hosts ? { hosts } : {}) };
+  return {
+    since,
+    dirs: Array.from(dirs),
+    ...(startCwd ? { cwd: startCwd } : {}),
+    ...(snapshot ? { snapshot } : {}),
+    ...(hosts ? { hosts } : {}),
+    ...(status ? { status } : {}),
+  };
 }
 
 /** Removes this session's markers that a Bash call created and returns them: in the start

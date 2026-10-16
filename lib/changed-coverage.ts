@@ -1,0 +1,396 @@
+// Changed-line coverage as a rule (track I, I1, issue #2): every changed code line runs in a
+// test of the recorded tree. The test records carry `coverage.changed` from `cli.ts
+// diff-coverage` (per file, the files the report saw at all, the files the diff has with their
+// added lines, and the base); the layer-1 gate reads them here. For each changed file only the
+// passing records the other layer-1 checks accepted and made after its last edit count. A
+// changed code file with added lines that the report lacks ran in no test (M24: code started
+// in a child process is not measured; M25), so it counts as not covered; so does an edited
+// file the diff does not have unless it equals the base (reverted): git can be told to hide a
+// file (ignore rules, assume-unchanged, a nested repo), so the diff alone is not evidence. Not
+// counted: a file that is not code, a JS/TS file with no runtime code (types only), a
+// deleted file.
+//
+// The user decides the exemptions: `coverage-exempt:` globs of `decide: human` entries in the
+// repo's policy file. SessionStart pins them with the HEAD the session started from (like the
+// project mode, lib/project-mode.ts; the state guard restores the pin after a Bash call): a
+// glob added during the session counts from the next one, so whatever writes it, the model
+// cannot exempt its own change. PreToolUse also denies an Edit/Write that adds one, as an early
+// explanation. A record measured against a commit made after the session started would hide
+// the committed changes, so it does not count; a session that started with no commit, or
+// outside a repo, accepts only the empty tree. A same-user limit stays: a glob written in one
+// session counts in the next. GOODBOY_DIFF_COVERAGE=on (default) | warn | off.
+
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
+import { ensureSessionDir } from './file-tracker';
+import { filterOffArgs, HOOK_GIT_ARGS, HOOK_GIT_ENV, NO_GRAFTS } from './hook-git';
+import { knowledgeRoot, parsePolicyEntries, POLICY_FILE } from './project-knowledge';
+import type { ChangedFileEdit } from './review-validator';
+import { isTrustedTimestamp } from './trusted-time';
+import type { TestResult } from './types';
+
+export type DiffCoverageMode = 'on' | 'warn' | 'off';
+
+export function diffCoverageMode(env: Record<string, string | undefined> = process.env): DiffCoverageMode {
+  const v = (env.GOODBOY_DIFF_COVERAGE ?? 'on').trim().toLowerCase();
+  return v === 'off' || v === 'warn' ? v : 'on';
+}
+
+export type CoverageGap =
+  /** `file` is relative to the repo top, `/` separators. */
+  | { file: string; covered: number; total: number }
+  /** The diff has added lines in the file and no test run loaded it. */
+  | { file: string; absent: true }
+  /** Edited, not in the record's diff, and not equal to the base. */
+  | { file: string; hidden: true }
+  /** No passing record made after the file's last edit measured it. */
+  | { file: string; unmeasured: true };
+
+const MAX_POLICY_BYTES = 256 * 1024;
+const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
+const PIN_FILE = 'coverage-pin.json';
+/** `--base empty`: diff against the empty tree (no commit when the session started). */
+export const EMPTY_BASE = 'empty';
+
+/** Files a coverage tool measures: a changed one the report lacks ran in no test. */
+const CODE_EXT = new Set([
+  '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.svelte',
+  '.py', '.go', '.java', '.kt', '.kts', '.scala', '.groovy', '.rb', '.rs', '.php', '.cs',
+  '.swift', '.dart', '.ex', '.exs', '.lua', '.c', '.cc', '.cpp', '.cxx', '.m', '.mm',
+]);
+const JS_EXT = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs']);
+
+/** git with no replace refs and no grafts (either would show another commit's tree or make a
+ *  later commit an ancestor). Exit -1: git did not run or timed out; 128: not a repo (or a bad
+ *  object). */
+function git(cwd: string, args: string[]): { code: number; out: string } {
+  try {
+    const r = Bun.spawnSync(['git', '--no-replace-objects', ...HOOK_GIT_ARGS, ...args], { cwd, env: { ...process.env, ...HOOK_GIT_ENV, ...NO_GRAFTS }, stdout: 'pipe', stderr: 'pipe', timeout: 5_000 });
+    return { code: r.exitCode ?? -1, out: r.stdout.toString() };
+  } catch {
+    return { code: -1, out: '' };
+  }
+}
+
+/** The empty tree's id in this repo's hash (sha1 or sha256), or null outside a repo. */
+export function emptyTree(cwd: string): string | null {
+  const r = git(cwd, ['hash-object', '-t', 'tree', '/dev/null']);
+  return r.code === 0 ? r.out.trim() : null;
+}
+
+/** A `.goodboy/policy.md` path, in any letter case (macOS file names ignore it). */
+export function isPolicyFile(p: string): boolean {
+  return basename(p).toLowerCase() === 'policy.md' && basename(dirname(resolvePath(p))).toLowerCase() === '.goodboy';
+}
+
+/** Splits `a/**, src/*.{ts,tsx}` on the commas outside braces. */
+function splitGlobs(text: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let cur = '';
+  for (const ch of text) {
+    if (ch === '{') depth++;
+    else if (ch === '}') depth = Math.max(0, depth - 1);
+    if (ch === ',' && depth === 0) {
+      out.push(cur);
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  out.push(cur);
+  return out.map((g) => g.trim()).filter(Boolean);
+}
+
+/** `coverage-exempt: <glob>, <glob>` of the `decide: human` entries in a policy text. An `ai`
+ *  entry cannot exempt anything. */
+export function exemptionsInText(text: string): string[] {
+  return parsePolicyEntries(text)
+    .filter((e) => e.fields.decide?.split(/\s/)[0] === 'human' && e.fields['coverage-exempt'])
+    .flatMap((e) => splitGlobs(e.fields['coverage-exempt']!));
+}
+
+/** Globs `after` exempts that `before` did not. */
+export function addedExemptions(before: string, after: string): string[] {
+  const had = new Set(exemptionsInText(before));
+  return [...new Set(exemptionsInText(after))].filter((g) => !had.has(g));
+}
+
+const outside = (r: string) => r === '..' || r.startsWith(`..${sep}`) || isAbsolute(r);
+
+/** The exemptions of the policy file at the knowledge root, as the file says now. Only a
+ *  policy file inside the repo counts (a parent directory's is not the project's). */
+export function coverageExemptions(cwd: string, top: string = repoTop(cwd)): string[] {
+  const { root, policyExists } = knowledgeRoot(cwd);
+  if (!policyExists || outside(relative(top, root))) return [];
+  try {
+    const p = join(root, POLICY_FILE);
+    if (!existsSync(p) || statSync(p).size > MAX_POLICY_BYTES) return [];
+    return exemptionsInText(readFileSync(p, 'utf8'));
+  } catch {
+    return [];
+  }
+}
+
+/** The repo top in cwd's own spelling (`--show-cdup`, not git's real path: through a symlinked
+ *  cwd the edit log's paths must still fall inside it), or the cwd outside a repo. */
+export function repoTop(cwd: string): string {
+  const r = git(cwd, ['rev-parse', '--show-cdup']);
+  return r.code === 0 ? resolvePath(cwd, r.out.trim() || '.') : resolvePath(cwd);
+}
+
+interface CoveragePin {
+  top: string;
+  /** HEAD when the session started; null: no commit, or no repo; absent: git could not say. */
+  head?: string | null;
+  exemptions: string[];
+}
+
+function readPin(sessionId: string): CoveragePin | null {
+  try {
+    const p = JSON.parse(readFileSync(join(ensureSessionDir(sessionId), PIN_FILE), 'utf8')) as CoveragePin;
+    const headOk = p?.head === undefined || p.head === null || typeof p.head === 'string';
+    const globsOk = Array.isArray(p?.exemptions) && p.exemptions.every((g) => typeof g === 'string');
+    return typeof p?.top === 'string' && headOk && globsOk ? p : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The start HEAD: a commit id; null in a repo with no commit or outside a repo (a repo made
+ *  later starts empty); undefined when git did not run. */
+function startHeadNow(top: string): string | null | undefined {
+  const now = git(top, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']);
+  if (now.code === 0) return now.out.trim();
+  const dir = git(top, ['rev-parse', '--git-dir']);
+  return dir.code === 0 || dir.code === 128 ? null : undefined;
+}
+
+/** SessionStart (startup, resume, clear): the exemptions as they are now, and the HEAD the
+ *  session started from (kept from the first start, so a resume does not move it past commits
+ *  made earlier in the session). */
+export function pinCoverageStart(sessionId: string, cwd: string): void {
+  try {
+    const top = repoTop(cwd);
+    const old = readPin(sessionId);
+    const head = old && old.top === top && old.head !== undefined ? old.head : startHeadNow(top);
+    const pin: CoveragePin = { top, ...(head !== undefined ? { head } : {}), exemptions: coverageExemptions(cwd, top) };
+    writeFileSync(join(ensureSessionDir(sessionId), PIN_FILE), JSON.stringify(pin), 'utf8');
+  } catch {
+    // best-effort: without a pin, the policy file counts only when older than the session
+  }
+}
+
+/** What the gate may use this session: the exemptions pinned at its start that the policy
+ *  file still has (without a pin: the file's, when it is older than the session dir), and the
+ *  start HEAD (undefined: unknown, no base check). A pin for another top (a repo made during
+ *  the session, a linked worktree) exempts nothing (its globs meant other paths) and keeps its
+ *  HEAD only when that commit is in this repo; otherwise only the empty tree counts. */
+export function sessionCoverageStart(sessionId: string, cwd: string, top: string): { exempt: string[]; head?: string | null } {
+  const current = coverageExemptions(cwd, top);
+  const pin = readPin(sessionId);
+  if (pin && pin.top === top) return { exempt: current.filter((g) => pin.exemptions.includes(g)), ...(pin.head !== undefined ? { head: pin.head } : {}) };
+  if (pin) {
+    const known = typeof pin.head === 'string' && git(top, ['cat-file', '-e', '--end-of-options', `${pin.head}^{commit}`]).code === 0;
+    return { exempt: [], head: known ? pin.head! : null };
+  }
+  if (current.length === 0) return { exempt: [] };
+  try {
+    const born = statSync(ensureSessionDir(sessionId)).birthtimeMs;
+    const changed = statSync(join(knowledgeRoot(cwd).root, POLICY_FILE)).mtimeMs;
+    return { exempt: born > 0 && changed <= born ? current : [] };
+  } catch {
+    return { exempt: [] };
+  }
+}
+
+/** A changed file that needs its lines run: an existing code file a coverage tool measures,
+ *  and for JS/TS only one with runtime code (types-only imports trimmed; a types-only file
+ *  transpiles to nothing but `export {}`). A `.d.ts` is a declaration file: TypeScript never
+ *  runs one (`export * from`, `export =` are declarations there), so it is not measured; code
+ *  hidden in one that a test imports by its full name is a known limit (plan §15.2a). */
+function measurableCode(abs: string): boolean {
+  const ext = extname(abs).toLowerCase();
+  if (!CODE_EXT.has(ext) || !existsSync(abs) || /\.d\.[mc]?ts$/i.test(abs)) return false;
+  if (!JS_EXT.has(ext)) return true;
+  try {
+    if (statSync(abs).size > MAX_SOURCE_BYTES) return true;
+    const loader = ext === '.tsx' ? 'tsx' : ext === '.jsx' ? 'jsx' : ['.js', '.mjs', '.cjs'].includes(ext) ? 'js' : 'ts';
+    const js = new Bun.Transpiler({ loader, trimUnusedImports: true }).transformSync(readFileSync(abs, 'utf8'));
+    return js.replace(/^\s*export\s*\{\s*\}\s*;?\s*$/gm, '').trim() !== '';
+  } catch {
+    return true;
+  }
+}
+
+/** The files of `rels` (repo-relative) that are not the base's blob, i.e. not an edit that was
+ *  undone. Hashed as git would store them (line-ending attributes apply) with every filter
+ *  driver emptied, so no program from the repo's config runs. Three git calls for all files. */
+function differFromBase(top: string, base: string, rels: string[]): Set<string> {
+  const out = new Set(rels);
+  if (rels.length === 0) return out;
+  const tree = git(top, ['ls-tree', '-z', '--end-of-options', base, '--', ...rels]);
+  if (tree.code !== 0) return out;
+  const want = new Map<string, string>();
+  for (const e of tree.out.split('\0')) {
+    const m = e.match(/^\d+ blob ([0-9a-f]+)\t([^]+)$/);
+    if (m) want.set(m[2]!, m[1]!);
+  }
+  const asked = rels.filter((r) => want.has(r));
+  if (asked.length === 0) return out;
+  const filters = filterOffArgs(git(top, ['config', '--name-only', '--get-regexp', '^filter\\.']).out);
+  const have = git(top, [...filters, 'hash-object', '--', ...asked]);
+  if (have.code !== 0) return out;
+  const ids = have.out.trim().split('\n');
+  asked.forEach((r, i) => {
+    if (ids[i] === want.get(r)) out.delete(r);
+  });
+  return out;
+}
+
+export interface GapsOut {
+  /** False when no record carries usable changed-line coverage (and some file needs it). */
+  measured: boolean;
+  gaps: CoverageGap[];
+  /** The record's base when the only measured runs diffed against a base after the start
+   *  (`head` null: the session started with no commit, so only the empty tree counts). */
+  lateBase?: { base: string; head: string | null };
+}
+
+/** The changed code files whose changed lines no recorded run executed. `results` are the
+ *  records the other layer-1 checks accepted. A record counts when it passed, has the whole
+ *  diff-coverage output (`files`, `in_report`, `diff_lines`, `base`) and its base is not after
+ *  the session's start; for each file, only such records that test it and were made after its
+ *  last edit, the best of them. */
+export function changedLineGaps(args: { results: TestResult[]; edits: ChangedFileEdit[]; top: string; exempt: string[]; startHead?: string | null }): GapsOut {
+  const nowMs = Date.now();
+  const whole = args.results.filter((r) => {
+    const ch = r.coverage?.status === 'measured' ? r.coverage.changed : undefined;
+    return (
+      r.verdict === 'pass' &&
+      isTrustedTimestamp(r.timestamp, nowMs) &&
+      !!ch &&
+      typeof ch.files === 'object' && ch.files !== null &&
+      Array.isArray(ch.in_report) &&
+      typeof ch.diff_lines === 'object' && ch.diff_lines !== null &&
+      typeof ch.base === 'string'
+    );
+  });
+  // The files that need their lines run: inside the repo, not exempt, existing code (or a
+  //   file a report measured).
+  const globs = args.exempt.map((g) => new Bun.Glob(g));
+  const need: { abs: string; file: string; last: string | null }[] = [];
+  const seen = new Set<string>();
+  for (const edit of [...args.edits].sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0))) {
+    const abs = resolvePath(edit.file);
+    if (seen.has(abs)) continue;
+    seen.add(abs);
+    const r = relative(args.top, abs);
+    if (r === '' || outside(r)) continue;
+    const file = r.split(sep).join('/');
+    if (globs.some((g) => g.match(file))) continue;
+    const reported = existsSync(abs) && whole.some((t) => Object.hasOwn(t.coverage!.changed!.files!, file));
+    if (!reported && !measurableCode(abs)) continue;
+    need.push({ abs, file, last: typeof edit.lastEditTimestamp === 'string' && edit.lastEditTimestamp !== '' ? edit.lastEditTimestamp : null });
+  }
+  if (need.length === 0) return { measured: true, gaps: [] };
+
+  const empty = args.startHead === null ? emptyTree(args.top) : null;
+  const baseOk = new Map<string, boolean>();
+  let lateBase: GapsOut['lateBase'];
+  const usable = whole.filter((r) => {
+    const base = r.coverage!.changed!.base!;
+    if (args.startHead === undefined) return true;
+    let ok = baseOk.get(base);
+    if (ok === undefined) {
+      ok =
+        args.startHead === null
+          ? base === empty
+          : base === args.startHead || git(args.top, ['merge-base', '--is-ancestor', '--end-of-options', base, args.startHead]).code === 0;
+      baseOk.set(base, ok);
+    }
+    if (!ok) lateBase ??= { base, head: args.startHead };
+    return ok;
+  });
+  if (usable.length === 0) return { measured: false, gaps: [], ...(lateBase ? { lateBase } : {}) };
+  const tested = new Map(usable.map((t) => [t, new Set((t.tested_files ?? []).map((f) => resolvePath(f)))]));
+
+  const gaps: CoverageGap[] = [];
+  const notInDiff = new Map<string, string[]>();
+  for (const { abs, file, last } of need) {
+    const fresh = usable.filter((t) => tested.get(t)!.has(abs) && (last === null || t.timestamp > last));
+    if (fresh.length === 0) {
+      gaps.push({ file, unmeasured: true });
+      continue;
+    }
+    let best: { covered: number; total: number } | undefined;
+    for (const t of fresh) {
+      const c = Object.hasOwn(t.coverage!.changed!.files!, file) ? t.coverage!.changed!.files![file] : undefined;
+      if (c && (!best || c.covered / Math.max(1, c.total) > best.covered / Math.max(1, best.total))) best = c;
+    }
+    if (best) {
+      if (best.covered < best.total) gaps.push({ file, covered: best.covered, total: best.total });
+      continue;
+    }
+    if (fresh.some((t) => t.coverage!.changed!.in_report!.includes(file))) continue;
+    const added = fresh.map((t) => t.coverage!.changed!.diff_lines![file]).filter((n): n is number => typeof n === 'number');
+    if (added.length === 0) {
+      const base = fresh[0]!.coverage!.changed!.base!;
+      notInDiff.set(base, [...(notInDiff.get(base) ?? []), file]);
+    } else if (Math.max(...added) > 0) {
+      gaps.push({ file, absent: true });
+    }
+  }
+  // Edited files the diff does not have: a gap unless they equal the base (one batch per base).
+  for (const [base, files] of notInDiff) {
+    for (const file of differFromBase(args.top, base, files)) gaps.push({ file, hidden: true });
+  }
+  gaps.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
+  return { measured: true, gaps };
+}
+
+/** The model-facing reason (English): what did not run, and the only ways forward. */
+export function changedLineReason(out: GapsOut, cliPath: string): string {
+  if (out.lateBase) {
+    const { base, head } = out.lateBase;
+    return (
+      `The changed-line coverage was measured against ${base.slice(0, 12)}, ` +
+      (head === null ? 'but this repo had no commit the session started from' :`which is not the commit this session started from (${head.slice(0, 12)}) or an ancestor of it`) +
+      `, so changes made since could be left out. Measure again with \`bun "${cliPath}" diff-coverage <report> --base ` +
+      `${head ?? EMPTY_BASE}\` and record it. (changed-line coverage)`
+    );
+  }
+  if (!out.measured) {
+    return (
+      'Changed-line coverage is not measured: run the measure-coverage skill and record the whole ' +
+      `\`bun "${cliPath}" diff-coverage <report>\` output as \`coverage.changed\` (with its \`files\`, \`in_report\`, ` +
+      '`diff_lines` and `base`) in a passing result. With no coverage tool in the project, record a `blocked` result ' +
+      "with the evidence; adding a tool is the user's decision. (changed-line coverage)"
+    );
+  }
+  const list = out.gaps
+    .slice(0, 6)
+    .map((g) =>
+      'absent' in g
+        ? `${g.file} (not in the coverage report)`
+        : 'unmeasured' in g
+          ? `${g.file} (no passing record after its last edit measured it)`
+          : 'hidden' in g
+            ? `${g.file} (edited, but not in the coverage diff)`
+            : `${g.file} (${g.covered} of ${g.total} lines ran)`,
+    )
+    .join('; ');
+  const hidden = out.gaps.some((g) => 'hidden' in g)
+    ? 'A file git does not show in the diff (ignored, assume-unchanged, a nested repo) has to be in it to be measured, or be the user\'s exemption. '
+    : '';
+  const absent = out.gaps.some((g) => 'absent' in g)
+    ? 'A file is missing from a report when no test loaded it, or when the report names it by a path outside this ' +
+      'repo (tests run in a container or another checkout): run the tests from this checkout. '
+    : '';
+  return (
+    `Changed lines that no test ran: ${list}${out.gaps.length > 6 ? ` and ${out.gaps.length - 6} more` : ''}. ` +
+    `Write tests that run them (write-regression-test) and record the coverage again. ${absent}${hidden}A file whose code runs only in a ` +
+    'child process needs an in-process test, or the user can exempt it: a `decide: human` entry in .goodboy/policy.md ' +
+    'with `coverage-exempt: <glob>`, which the user adds and which counts from the next session. (changed-line coverage)'
+  );
+}

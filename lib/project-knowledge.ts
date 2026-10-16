@@ -217,7 +217,7 @@ export function parsePolicyEntries(text: string): PolicyEntry[] {
       for (const line of rest) {
         // `[ \t]*`, not `\s*`: an empty `- source:` line must not borrow the next line's text.
         //   `s`: a value may hold U+2028, which `.` would not match.
-        const m = line.match(/^- ([a-z_]+):[ \t]*(\S.*)$/s);
+        const m = line.match(/^- ([a-z][a-z_-]*):[ \t]*(\S.*)$/s); // keys like `coverage-exempt` (I1)
         if (m && !(m[1]! in fields)) fields[m[1]!] = m[2]!.trim();
       }
       return { heading, id: sp < 0 ? heading : heading.slice(0, sp), title: sp < 0 ? '' : heading.slice(sp).trim(), fields };

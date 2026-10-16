@@ -4,7 +4,8 @@
 // a compaction (source "compact", G0 M17) it resets what read-before-edit counts as known:
 // file contents read or edited before it left the context. In a project it also sends the
 // knowledge files to read first (H2), the decision authority (H3), the user's CLAUDE.md
-// notice (H4) and the test tier advice (H6). Never blocks.
+// notice (H4) and the test tier advice (H6). It pins the coverage exemptions and the start
+// HEAD (I1). Never blocks.
 
 import { pinCommitIssueSettings } from '../lib/commit-issue';
 import { pinProjectMode, projectMode } from '../lib/project-mode';
@@ -13,6 +14,7 @@ import { claudeMdNotice } from '../lib/doc-map';
 import { tierAdvice } from '../lib/test-profile';
 import { decisionAuthorityContext } from '../lib/decision-authority';
 import { clearReadRecords } from '../lib/file-tracker';
+import { diffCoverageMode, pinCoverageStart } from '../lib/changed-coverage';
 
 interface SessionStartInput {
   session_id?: string;
@@ -74,6 +76,8 @@ if (import.meta.main) {
         // …and the project mode its cwd has now (lib/project-mode.ts; not on compact, which
         //   would trust a marker written during the session).
         pinProjectMode(sessionId, input.cwd ?? process.cwd());
+        // …and the coverage exemptions with the start HEAD (I1, lib/changed-coverage.ts).
+        if (diffCoverageMode() !== 'off') pinCoverageStart(sessionId, input.cwd ?? process.cwd());
       }
       const warnings = source === 'startup' || source === 'resume' ? configWarnings(process.env) : [];
       // (H2) Every source, project mode: the project's knowledge files to read first, or the

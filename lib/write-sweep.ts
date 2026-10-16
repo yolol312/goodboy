@@ -3,16 +3,19 @@
 // `sh -c "cat > a.ts"`). Seen live: a subagent edited test files with Python heredocs and none
 // of them reached the edit log, so the review and test gates did not ask for them. PostToolUse
 // now lists the files git sees changed since the call started and records them as edits.
-// Limited to commands that run such programs, so ordinary commands pay no `git status`.
+// Since track I (I1) also for commands that move or copy files into place (`mv`, `cp`, `git
+// checkout`…), whose named targets are recorded too (`mv` keeps the old mtime). Limited to
+// such commands, so ordinary commands pay no `git status`.
 
 import { statSync } from 'node:fs';
-import { join, resolve as resolvePath } from 'node:path';
+import { isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
 import { openBashCalls, restoreProductionHosts, sweepNewMarkers, takeBashStart } from './approval-marker';
+import { bashChangedPaths } from './role-limits';
 import { restoreGateState } from './state-guard';
 import { getCurrentTurn, isGoodboyArtifact, recordEdit } from './file-tracker';
 import { logGate } from './gate-log';
 import { filterOffArgs, HOOK_GIT_ARGS, HOOK_GIT_ENV } from './hook-git';
-import { commandSegments } from './outward-command';
+import { commandSegments, gitSubcommandAt } from './outward-command';
 import { envStr } from './token-habits';
 import { safeMtime } from './bash-read';
 
@@ -84,7 +87,36 @@ export function afterBash(
     }
     if (!opts.skipGit && envStr('GOODBOY_BASH_WRITE_GATE', 'deny') !== 'off' && typeof command === 'string' && writesIndirectly(command)) {
       // PostToolUse has 60 s and PostToolUseFailure 15 s; the Stop path (opts.gitTimeoutMs) less.
-      const written = changedFilesSince(cwd, start.since, opts.gitTimeoutMs ?? 12_000);
+      //   Three signals: files changed since the start by mtime or ctime; paths new in git's
+      //   status since the PreToolUse snapshot (a directory moved into place keeps its files'
+      //   times); and the targets the command names. Both repos are swept: the one the call
+      //   started in and the one its shell ended in (`cd <elsewhere> && mv x <start repo>/…`,
+      //   I1 review round 7). The snapshot counts only for its own repo: the other repo's
+      //   uncommitted files are not this call's writes (round 6). The named targets are read
+      //   from the start cwd, as the command's own `cd`s apply from there.
+      const timeoutMs = opts.gitTimeoutMs ?? 12_000;
+      const startCwd = start.cwd ?? resolvePath(cwd);
+      const topOf = new Map<string, string>();
+      const views = new Map<string, string[]>();
+      for (const dir of new Set([resolvePath(cwd), startCwd])) {
+        const s = statusFiles(dir, timeoutMs);
+        if (!s) continue;
+        topOf.set(dir, s.top);
+        if (!views.has(s.top)) views.set(s.top, s.files);
+      }
+      const fresh: string[] = [];
+      for (const [top, files] of views) {
+        const before = start.status && start.status.top === top ? new Set(start.status.files) : null;
+        for (const f of files) {
+          try {
+            const st = statSync(f);
+            if (st.isFile() && (Math.max(st.mtimeMs, st.ctimeMs) >= start.since || (before !== null && !before.has(f)))) fresh.push(f);
+          } catch {
+            // gone
+          }
+        }
+      }
+      const written = [...new Set([...fresh, ...placedFiles(command, startCwd, topOf.get(startCwd) ?? startCwd)])];
       if (written.length > 0) {
         const turn = getCurrentTurn(sessionId);
         for (const f of written) recordEdit(sessionId, f, turn, agentId, safeMtime(f));
@@ -102,18 +134,41 @@ export function afterBash(
 }
 
 const INTERPRETERS = /^(?:python[0-9.]*|node|perl|ruby|php|deno|tsx|ts-node|osascript|xargs|g?awk|parallel)$/;
+/** Programs that move or copy files into place (I1 security review: `mv a.ts b.ts` after a
+ *  test record put unrun code in a file no edit recorded). */
+const FILE_PLACERS = new Set(['mv', 'cp', 'ln', 'install', 'rsync', 'patch', 'tar', 'unzip', 'ditto']);
+const GIT_PLACING = new Set(['mv', 'checkout', 'restore', 'apply', 'am', 'cherry-pick', 'merge', 'pull', 'rebase', 'reset', 'revert', 'stash', 'switch', 'checkout-index', 'read-tree']);
 
 /** True when a shell command runs, in command position, a program that can write files the
- *  write gate cannot read: an interpreter, `xargs`/`awk`, `bun -e|run`, `sh -c`, `find -exec`. */
+ *  write gate cannot read: an interpreter, `xargs`/`awk`, `bun -e|run`, `sh -c`, `find -exec`,
+ *  or one that moves or copies files into place (`mv`, `cp`, `git checkout`…). */
 export function writesIndirectly(command: string): boolean {
   for (const words of commandSegments(command)) {
     const prog = (words[0] ?? '').split('/').pop() ?? '';
-    if (INTERPRETERS.test(prog)) return true;
+    if (INTERPRETERS.test(prog) || FILE_PLACERS.has(prog)) return true;
+    if (prog === 'git' && GIT_PLACING.has(words[gitSubcommandAt(words)] ?? '')) return true;
     if (prog === 'bun' && ['-e', '--eval', 'run', 'x'].includes(words[1] ?? '')) return true;
     if (/^(?:ba|z|da|k)?sh$/.test(prog) && words.includes('-c')) return true;
     if (prog === 'find' && words.some((w) => w === '-exec' || w === '-execdir')) return true;
   }
   return false;
+}
+
+/** The project files a `mv`/`cp`/`ln`/`install` names as its targets that exist after it
+ *  (absolute; inside the repo `top`, not under `.git`). A directory target is left to the
+ *  status snapshot (the files it holds are new paths there). */
+export function placedFiles(command: string, cwd: string, top: string = cwd): string[] {
+  const out: string[] = [];
+  for (const p of bashChangedPaths(command, cwd)) {
+    const r = relative(resolvePath(top), p);
+    if (r === '' || r === '..' || r.startsWith(`..${sep}`) || isAbsolute(r) || r === '.git' || r.startsWith(`.git${sep}`)) continue;
+    try {
+      if (statSync(p).isFile()) out.push(p);
+    } catch {
+      // gone (the source of a move)
+    }
+  }
+  return out;
 }
 
 /** git without optional locks (a `status` refresh must not hold the user's index.lock while a
@@ -135,20 +190,20 @@ function git(cwd: string, args: string[], timeoutMs: number): string | null {
   }
 }
 
-/** Project files (absolute paths) that git sees as modified or untracked and that changed at
- *  or after `sinceMs`. Ignored files, deletions and goodboy's own artifacts are left out.
- *  Empty outside a git repo. */
-export function changedFilesSince(cwd: string, sinceMs: number, timeoutMs = 30_000): string[] {
+/** The project files (absolute) git sees as modified, added, renamed or untracked, with the
+ *  repo top. Ignored files, deletions and goodboy's own artifacts are left out. Null outside a
+ *  git repo or when git fails. */
+export function statusFiles(cwd: string, timeoutMs = 30_000): { top: string; files: string[] } | null {
   // The top in cwd's own spelling (`--show-cdup`), not git's real path: on macOS /var is
   //   /private/var, and the edit log must match the paths the Stop gates compare with cwd.
   const cdup = git(cwd, ['rev-parse', '--show-cdup'], timeoutMs);
-  if (cdup === null) return [];
+  if (cdup === null) return null;
   const top = resolvePath(cwd, cdup.trim() || '.');
   // Every filter driver emptied: status runs a clean filter to hash a touched file (final G1
   //   test round). The sweep only needs names, so a filtered file reading as changed is fine.
   const filters = filterOffArgs(git(top, ['config', '--name-only', '--get-regexp', '^filter\\.'], timeoutMs) ?? '');
   const out = git(top, [...filters, 'status', '--porcelain=v1', '-z', '--untracked-files=all'], timeoutMs);
-  if (out === null) return [];
+  if (out === null) return null;
   const parts = out.split('\0');
   const files: string[] = [];
   for (let i = 0; i < parts.length; i++) {
@@ -158,10 +213,21 @@ export function changedFilesSince(cwd: string, sinceMs: number, timeoutMs = 30_0
     if (xy.includes('R') || xy.includes('C')) i++; // the next part is the original path
     if (xy.includes('D')) continue;
     const abs = join(top, entry.slice(3));
-    if (isGoodboyArtifact(abs)) continue;
+    if (!isGoodboyArtifact(abs)) files.push(abs);
+  }
+  return { top, files };
+}
+
+/** Project files (absolute paths) that git sees as modified or untracked and that changed at
+ *  or after `sinceMs`: modified or, by ctime, renamed, copied with their times (`mv`, `cp -p`,
+ *  `git mv`, an interpreter's rename keep the mtime; I1 security review). Ignored files,
+ *  deletions and goodboy's own artifacts are left out. Empty outside a git repo. */
+export function changedFilesSince(cwd: string, sinceMs: number, timeoutMs = 30_000): string[] {
+  const files: string[] = [];
+  for (const abs of statusFiles(cwd, timeoutMs)?.files ?? []) {
     try {
       const st = statSync(abs);
-      if (st.isFile() && st.mtimeMs >= sinceMs) files.push(abs);
+      if (st.isFile() && Math.max(st.mtimeMs, st.ctimeMs) >= sinceMs) files.push(abs);
     } catch {
       // gone meanwhile
     }

@@ -11,6 +11,10 @@ export const HOOK_GIT_ARGS: readonly string[] = ['-c', 'core.fsmonitor=false', '
  *  setting; GIT_NO_LAZY_FETCH needs git 2.44. */
 export const HOOK_GIT_ENV: Readonly<Record<string, string>> = { GIT_ALLOW_PROTOCOL: 'goodboy-none', GIT_NO_LAZY_FETCH: '1' };
 
+/** No grafts: `.git/info/grafts` rewrites history like a replace ref (with
+ *  `--no-replace-objects`, for the git whose diffs and ancestry are evidence: track I, I1). */
+export const NO_GRAFTS: Readonly<Record<string, string>> = { GIT_GRAFT_FILE: '/dev/null' };
+
 /** `-c` settings that empty every filter driver the repo's config names (`git status` runs
  *  a clean filter to hash a touched file), from `git config --name-only --get-regexp
  *  '^filter\.'` output. */

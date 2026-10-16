@@ -393,7 +393,8 @@ export function validateTestResultInput(parsed: unknown): {
     });
   }
 
-  // coverage: optional, from the project's own tool (measure-coverage); never a gate.
+  // coverage: optional, from the project's own tool (measure-coverage); line and branch are
+  //   never a gate, the changed lines are one (I1, lib/changed-coverage.ts).
   if (p.coverage !== undefined) validateCoverageInput(p.coverage, errors);
 
   // acceptance — red/green 증거는 여기가 1차 관문이다.
@@ -524,7 +525,31 @@ function validateCoverageInput(raw: unknown, errors: string[]): void {
     const ch = c.changed as Record<string, unknown> | null;
     const okNum = (v: unknown) => typeof v === 'number' && Number.isInteger(v) && v >= 0;
     if (typeof ch !== 'object' || ch === null || !okNum(ch.covered) || !okNum(ch.total) || (ch.covered as number) > (ch.total as number) || !Array.isArray(ch.files_without_executed_changes)) {
-      errors.push('coverage.changed must be the `cli.ts diff-coverage` output: {covered, total, files_without_executed_changes}.');
+      errors.push('coverage.changed must be the whole `cli.ts diff-coverage` output: {covered, total, files_without_executed_changes, files, in_report, diff_lines, base}.');
+      return;
+    }
+    // (I1) The per-file part the test gate reads.
+    if (ch.files !== undefined) {
+      const files = ch.files as Record<string, unknown> | null;
+      const bad =
+        typeof files !== 'object' || files === null || Array.isArray(files) ||
+        Object.values(files).some((t) => {
+          const v = t as Record<string, unknown> | null;
+          return typeof v !== 'object' || v === null || !okNum(v.covered) || !okNum(v.total) || (v.covered as number) > (v.total as number);
+        });
+      if (bad) errors.push('coverage.changed.files must map each file to {covered, total} (whole numbers, covered ≤ total), as diff-coverage prints it.');
+    }
+    if (ch.in_report !== undefined && (!Array.isArray(ch.in_report) || ch.in_report.some((f) => typeof f !== 'string'))) {
+      errors.push('coverage.changed.in_report must be the list of file paths diff-coverage prints.');
+    }
+    if (ch.diff_lines !== undefined) {
+      const d = ch.diff_lines as Record<string, unknown> | null;
+      if (typeof d !== 'object' || d === null || Array.isArray(d) || Object.values(d).some((n) => !okNum(n))) {
+        errors.push('coverage.changed.diff_lines must map each file to its added lines (a whole number), as diff-coverage prints it.');
+      }
+    }
+    if (ch.base !== undefined && (typeof ch.base !== 'string' || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(ch.base))) {
+      errors.push('coverage.changed.base must be the object id diff-coverage prints.');
     }
   }
 }
@@ -564,7 +589,7 @@ async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
   process.stdout.write(
     JSON.stringify({ ok: true, path: outPath, timestamp: result.timestamp }) + '\n',
   );
-  // A warning, not a block (track G §10.8: decided after a month of data).
+  // A warning here; the test gate blocks on unrun changed lines (track I, lib/changed-coverage.ts).
   const idle = (result.coverage?.changed?.files_without_executed_changes ?? []).filter((f) => result.tested_files.includes(f));
   if (idle.length > 0) {
     process.stderr.write(`warning: no changed line of these tested files ran in the tests: ${idle.join(', ')}\n`);
@@ -573,12 +598,12 @@ async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
 
 // ---- command: diff-coverage ----
 
-/** `diff-coverage <report> [--base <rev>]`: changed lines a coverage report saw executed. */
+/** `diff-coverage <report> [--base <rev>|empty]`: changed lines a coverage report saw executed. */
 function cmdDiffCoverage(cwd: string, args: string[]): void {
   const report = args.find((a, i) => !a.startsWith('--') && args[i - 1] !== '--base');
   const b = args.indexOf('--base');
   const base = b >= 0 ? args[b + 1] : undefined;
-  if (!report) fail('usage: diff-coverage <coverage report> [--base <rev>]');
+  if (!report) fail('usage: diff-coverage <coverage report> [--base <rev>|empty]');
   const out = diffCoverageOf(cwd, report, base);
   if ('error' in out) fail(out.error);
   process.stdout.write(JSON.stringify(out) + '\n');
@@ -679,7 +704,7 @@ async function cmdSkillGap(cwd: string, args: string[]): Promise<void> {
 
 const USAGE =
   '사용법: bun lib/cli.ts <command> [args...]\n' +
-  '명령: review-write | test-write | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>] | knowledge-check | decisions | test-catalog';
+  '명령: review-write | test-write | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog';
 
 async function main(): Promise<void> {
   const cwd = process.cwd();

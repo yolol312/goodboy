@@ -242,7 +242,7 @@ PreToolUse hook이 메인에서 탐색 도구 4종 호출을 차단하고 서브
 | 승인 마커는 사용자만 | 모델이 `.claude/.goodboy-*-approved-*` 마커(대소문자 무관)를 만들거나 고치면 차단한다. Bash 호출이 새로 만든 마커는 호출이 끝나면 지우고(이름으로 비교하므로 `touch -t`로 시각을 바꿔도 소용없음), 모델의 Bash 호출 중에 생긴 마커(다른 폴더 포함, 커널이 정하는 ctime으로 판단)는 쓰지 않는다. 사용자의 `! touch`는 도구 훅을 거치지 않으므로 그대로 동작한다 | `GOODBOY_MARKER_GUARD=off` |
 | 게이트 상태 보호 | Stop 게이트가 읽는 주요 세션 상태(편집 기록·리뷰/테스트 커서·디스패치 로그·스킬 근거·검증 실패 표시)를 Bash로 바꾸는 명령은 막고, 그래도 바뀌면 호출 뒤(사후 훅이 없으면 다음 Stop에서) 되돌린다 | — |
 | 결과 기록 제한 | 테스트 결과(`test-write`)는 테스트 에이전트만, 리뷰 결과(`review-write`)는 리뷰 에이전트만 기록한다(메인 세션 불가). `.claude/tests`·`.claude/reviews`에 직접 쓰거나 복사하는 것도 막는다(경로가 적힌 `python3 -c` 같은 스크립트 포함). `cat`·`sed -n`·`jq`·`git log` 같은 읽기와 다른 프로젝트(`mktemp` 샌드박스)의 결과 폴더는 해당 없음 | `GOODBOY_RESULT_GUARD=off` |
-| 간접 쓰기 기록 | `python3`/`node`/`sh -c`/`find -exec` 등이 쓴 프로젝트 파일은 편집 기록에 남겨 리뷰·테스트 대상이 되게 한다(차단은 아님) | `GOODBOY_BASH_WRITE_GATE=off` |
+| 간접 쓰기 기록 | `python3`/`node`/`sh -c`/`find -exec` 등이 쓴 프로젝트 파일과, `mv`/`cp`/`git mv`·`git checkout` 등으로 옮기거나 복사한 파일(시간이 그대로여도, 디렉터리째 옮겨도)은 편집 기록에 남겨 리뷰·테스트 대상이 되게 한다(차단은 아님) | `GOODBOY_BASH_WRITE_GATE=off` |
 | push 전 테스트 확인 | `git push`(기능 브랜치·태그 포함, `--dry-run`·삭제 제외; `sh -c`·git 별칭 안의 push 포함), MR/PR 생성(`gh pr create`, `glab mr create`), 샌드박스가 아닌 곳으로의 배포, `/ship`·`/land-and-deploy` 전에, **보내는 내용과 정확히 같은 트리**를 테스트한 통과 결과(실행된 스위트와 실재하는 테스트 파일 포함)가 있어야 한다. 테스트 후 커밋은 괜찮고, 테스트 후 편집은 다시 테스트해야 한다. 배포·publish는 작업 트리를 그대로 보내므로 작업 트리와 비교한다. `--all`·`--tags`·`--mirror`·`--follow-tags`, 설정(`remote.*.push`, `push.default=matching`)이나 환경 변수가 정하는 push, ref가 `$(…)`에서 나오는 push처럼 무엇이 나가는지 알 수 없는 push는 막는다(이름을 지정해 push). 환경 변수(`GIT_DIR`, `HOME`, `GIT_CONFIG*` 등)나 `--git-dir`·`-c include.*`로 설정·저장소를 바꾼 push, 그리고 그렇게 바꾼 상태의 별칭일 수 있는 git 명령도 막는다(`git log` 같은 내장 명령은 별칭이 될 수 없어 통과). `blocked` 결과로는 통과하지 않는다. 테스트 없이 보내려면 사용자가 `! touch .claude/.goodboy-push-test-approved-<세션>.txt`(한 번) | `GOODBOY_PUSH_TEST_GATE=on\|warn\|off` |
 | 커밋 이슈 번호 | 모든 `git commit`(메인·에이전트, `sh -c`·heredoc 스크립트·git 별칭 안 포함)은 메시지에 이슈 번호가 있어야 한다: Jira 키(`ABC-123`) 또는 `#123`·`owner/repo#123`(`UTF-8`, `GPL-3` 같은 표준·라이선스 표기는 제외). `-m`, `--trailer`, `-F` 파일(일반 파일만), heredoc 메시지(`-m "$(cat <<'EOF' …)"`)를 읽고, `--amend --no-edit`·`-C`·`--fixup`은 재사용하는 커밋의 메시지를, 충돌 병합 뒤 `--no-edit`은 병합 메시지를 본다. 메시지 없이 편집기를 여는 커밋도 막는다. 이슈 번호를 모르면 모델은 사용자에게 묻는다. 프로젝트별로 `.goodboy/commit-issue` 첫 줄에 정규식(예: `\bPROJ-\d+\b`)이나 `off`를 적는다. 세션은 시작할 때의 설정을 쓴다: 세션 중에 바꾸거나 지우거나 심볼릭 링크로 바꾼 파일은 다음 세션(재개 포함)부터 적용된다(모델이 스스로 끌 수 없게). `git merge`·`revert`·`cherry-pick`이 만드는 커밋은 대상이 아니다 | `GOODBOY_COMMIT_ISSUE=on\|off` |
 | 외부·운영 시스템 (R2) | `.goodboy/hosts`에 `production`으로 적힌 곳을 바꾸는 명령은 사용자 승인 마커가 있어야 한 번 실행된다. 서브에이전트가 목록에 없는 외부 시스템을 바꾸려 하면 차단(샌드박스로 바꾸거나 BLOCKED로 반환). 조회는 항상 통과. hosts 파일은 상위 폴더까지 모두 합쳐 읽으므로 하위 폴더의 파일이 상위의 production 항목을 없애지 못한다. 모델은 hosts를 추가할 수 있지만 production 항목을 지우거나 낮출 수 없다(Bash로 지우면 되돌림). 한 세션 안에서는 한 번 본 production 항목이 사라지지 않는다(파일을 못 읽게 만들어도 마찬가지). hosts 파일을 일반 파일로 읽을 수 없으면(권한 없음, 폴더로 바뀜 등) 고칠 때까지 모든 외부 호스트를 production으로 본다(다음 세션에도, 차단 문구에 그 파일 경로가 나옴). 사용자가 직접 지운 항목은 다음 세션부터 적용된다 | `GOODBOY_OUTWARD_GATE=on\|warn\|off` |
@@ -253,7 +253,7 @@ PreToolUse hook이 메인에서 탐색 도구 4종 호출을 차단하고 서브
 | effort 조언 | 같은 게이트에 두 번 막히면 한 단계 위를, 문서만 고치면 아래를 턴 끝에 한 번 권고 | `GOODBOY_EFFORT_ADVICE=off` |
 | 설정 경고 | 새/재개 세션에서 `CLAUDE_CODE_EFFORT_LEVEL`(모든 effort 덮어씀), 깊이 2 미만 설정을 경고 | — |
 | 스킬 effort | goodboy 스킬은 자기 effort(frontmatter)로 그 턴만 실행되고, 세션 effort와 다르면 한 줄로 알린다 | `GOODBOY_SKILL_EFFORT=auto\|off` |
-| 테스트 기록 측정 | 테스트 결과의 스위트마다 유형(`unit`·`integration`·`ui`·`e2e`)과 걸린 시간을 기록하고, 유형별 개수·시간 합계(`by_type`)를 남긴다. 커버리지는 프로젝트에 있는 도구로 재고(설치하지 않음), 바뀐 줄 중 실행된 줄(`cli.ts diff-coverage`)을 함께 기록한다. 측정만 하고 막지 않는다(바뀐 줄이 하나도 실행되지 않은 파일은 경고) | — |
+| 테스트 기록 측정 | 테스트 결과의 스위트마다 유형(`unit`·`integration`·`ui`·`e2e`)과 걸린 시간을 기록하고, 유형별 개수·시간 합계(`by_type`)를 남긴다. 커버리지는 프로젝트에 있는 도구로 재고(설치하지 않음), 바뀐 줄 중 실행된 줄(`cli.ts diff-coverage`)을 함께 기록한다. 퍼센트는 기록만 하고, 바뀐 줄은 트랙 I부터 모두 실행돼야 통과한다(층1 표 참고) | — |
 | Codex 2차 의견 | 켜면 리뷰마다 로컬 Codex CLI가 변경분을 읽기 전용으로 리뷰하고, 그 결과를 `source: "codex"`로 같은 리뷰 결과에 넣는다. 변경분이 사용자 본인의 Codex 로그인으로 OpenAI에 전송되므로 기본은 꺼짐. Codex가 없거나 실패하면 `skipped`로 기록하고 진행 | `GOODBOY_CODEX=on\|off`, `GOODBOY_CODEX_MODEL` |
 
 #### 프로젝트 모드 (v0.32.0, 트랙 H)
@@ -651,6 +651,7 @@ $TMPDIR/
 | **뮤테이션 프로브** (`PT-*`/`UIUX-*`) | 검증 대상을 훼손하면 실패해야 함. UI 단언은 훼손해도 통과하기 쉬움 |
 | 수용 기준 커버리지 | dev-cycle 산출물이 요구한 항목을 실제로 커버했는가 |
 | 가짜 테스트 패턴 | `waitForTimeout`, 빈 `catch`, `toBeGreaterThanOrEqual(0)`, `it.skip` 등 |
+| **바뀐 줄 100% 실행** (v0.33.0, 트랙 I) | 바뀐 코드 줄이 모두 기록된 테스트 실행에서 돌았는가(`cli.ts diff-coverage`). 파일마다 마지막 편집 뒤에 만든 통과 기록만 인정한다. 커버리지 보고서에 아예 없는 바뀐 코드 파일(어떤 테스트도 불러오지 않음, 자식 프로세스에서만 도는 코드)도 미실행으로 친다(타입만 있는 TS 파일, JSON·YAML 같은 코드가 아닌 파일은 제외). 비교 기준(base)이 세션 시작 뒤의 커밋이면 커밋된 변경이 가려지므로 인정하지 않는다. 편집한 파일이 diff에 없으면(ignore 등으로 가려짐) base와 내용이 같을 때만 통과한다. 예외는 사용자가 정한 정책 항목(`decide: human` + `coverage-exempt: <글롭>`)뿐이며, 세션 중에 추가한 예외는 다음 세션부터 적용된다(모델이 스스로 예외를 쓰는 Edit/Write는 막힌다). 커버리지 도구가 없으면 근거와 함께 `blocked`로 기록한다. 끄기·경고: `GOODBOY_DIFF_COVERAGE=off`/`warn` |
 
 ### 정답지 — dev-cycle 산출물
 

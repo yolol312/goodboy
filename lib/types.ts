@@ -93,7 +93,8 @@ export interface TestSuiteRun {
   duration_ms?: number;
 }
 
-/** Coverage from the project's own tool (`measure-coverage`): recorded, never a gate. */
+/** Coverage from the project's own tool (`measure-coverage`). The changed-line part is a gate
+ *  (track I, I1: lib/changed-coverage.ts); the percentages are recorded only. */
 export interface CoverageRecord {
   status: 'measured' | 'unavailable';
   /** The tool and command that measured it (`bun test --coverage`). */
@@ -101,8 +102,21 @@ export interface CoverageRecord {
   /** Line and branch coverage of the run, in percent. */
   line_pct?: number;
   branch_pct?: number;
-  /** Changed lines the run executed (`cli.ts diff-coverage`). */
-  changed?: { covered: number; total: number; files_without_executed_changes: string[] };
+  /** Changed lines the run executed (`cli.ts diff-coverage`): per file (paths relative to the
+   *  repo top), the changed files the report saw at all (`in_report`), the files the diff has
+   *  and its base. */
+  changed?: {
+    covered: number;
+    total: number;
+    files_without_executed_changes: string[];
+    files?: Record<string, { covered: number; total: number }>;
+    in_report?: string[];
+    /** Every file the diff has, with its added lines (I1: an edited file outside it must equal
+     *  the base; only one with added lines can be "absent" from the report). */
+    diff_lines?: Record<string, number>;
+    /** The commit (or the empty tree) the diff ran against (I1: not after the session's start). */
+    base?: string;
+  };
   /** Why coverage is unavailable (no tool, no report). */
   reason?: string;
 }

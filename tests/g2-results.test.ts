@@ -1,6 +1,7 @@
 // G2 result fields (track G §10.8): suites typed and timed with a per-type summary, coverage
-// recorded (never a gate), Codex findings marked, changed-line coverage from four report
-// formats, and the skill effort notice. Repos are temporary.
+// recorded (line and branch never a gate; changed lines are one since I1), Codex findings
+// marked, changed-line coverage from four report formats, and the skill effort notice. Repos
+// are temporary.
 import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -133,6 +134,9 @@ describe('changed-line coverage', () => {
       total: 3,
       files_without_executed_changes: [join(r, 'src', 'new.ts')],
       files: { 'src/a.ts': { covered: 1, total: 2 }, 'src/new.ts': { covered: 0, total: 1 } },
+      in_report: ['src/a.ts', 'src/new.ts'],
+      diff_lines: { 'lcov.info': 8, 'src/a.ts': 2, 'src/new.ts': 1 }, // the report itself is an untracked file
+      base: Bun.spawnSync(['git', 'rev-parse', 'HEAD'], { cwd: r }).stdout.toString().trim(),
     });
   });
 
@@ -159,7 +163,7 @@ describe('changed-line coverage', () => {
     expect(JSON.parse(p.stdout.toString())).toMatchObject({ covered: 1, total: 1 });
     const missing = Bun.spawnSync(['bun', CLI, 'diff-coverage', 'nope.info'], { cwd: r, stdout: 'pipe', stderr: 'pipe' });
     expect(missing.exitCode).not.toBe(0);
-    expect(diffCoverage(new Map(), r, new Map())).toEqual({ covered: 0, total: 0, files_without_executed_changes: [], files: {} });
+    expect(diffCoverage(new Map(), r, new Map())).toEqual({ covered: 0, total: 0, files_without_executed_changes: [], files: {}, in_report: [], diff_lines: {} });
   });
 });
 

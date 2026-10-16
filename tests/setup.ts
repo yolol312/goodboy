@@ -18,3 +18,8 @@ process.env.GOODBOY_SKILL_GATE = 'off';
 // The commit issue rule denies a `git commit` without an issue number, which older hook tests
 // that commit would hit first. Off for the suite; tests/commit-issue.test.ts turns it on.
 process.env.GOODBOY_COMMIT_ISSUE = 'off';
+
+// The changed-line coverage rule (track I, I1) blocks a test result without changed-line
+// coverage, which the older layer-1 fixtures do not carry. Off for the suite;
+// tests/i1-changed-lines.test.ts turns it on.
+process.env.GOODBOY_DIFF_COVERAGE = 'off';

@@ -642,3 +642,16 @@ export function getLatestEditTimestampSince(
   }
   return latest;
 }
+
+/** A file's text after this Write/Edit/MultiEdit, from its text before. The edit tools insert
+ *  `new_string` as it is, so `$&` and the like stay literal (a replacer function). */
+export function textAfterEdit(toolName: string, toolInput: Record<string, unknown>, before: string): string {
+  let after = toolName === 'Write' ? String(toolInput.content ?? '') : before;
+  const edits = toolName === 'Edit' ? [toolInput] : toolName === 'MultiEdit' && Array.isArray(toolInput.edits) ? (toolInput.edits as Record<string, unknown>[]) : [];
+  for (const e of edits) {
+    const o = String(e.old_string ?? '');
+    const n = String(e.new_string ?? '');
+    after = e.replace_all === true ? after.split(o).join(n) : after.replace(o, () => n);
+  }
+  return after;
+}

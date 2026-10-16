@@ -21,7 +21,8 @@ catch it breaking again.
 ## Tool skills
 1. check-spec-coverage, when `bun "$GB/lib/cli.ts" acceptance-list` lists criteria.
 2. write-regression-test, for each behavior change: red, green, mutation.
-3. measure-coverage, after the suites pass.
+3. measure-coverage, after the suites pass: every changed code line must have run (the gate
+   checks it); for a line that did not, go back to step 2.
 4. record-tests, last: every suite with `type` and `duration_ms`.
 
 ## Hand-back

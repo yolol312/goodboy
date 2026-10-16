@@ -3,6 +3,7 @@
 
 import { existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve as resolvePath, sep } from 'node:path';
+import { addedExemptions, diffCoverageMode, isPolicyFile } from '../lib/changed-coverage';
 import {
   appendDispatchLog,
   approvalMarkerPath,
@@ -24,6 +25,9 @@ import {
   decideSpawn,
   ensureApprovalDir,
   ensureSessionDir,
+  statusFiles,
+  textAfterEdit,
+  writesIndirectly,
   envInt,
   envStr,
   extractRecentAssistantTextEntries,
@@ -665,16 +669,7 @@ function main(): void {
             } catch {
               return null; // a new file removes nothing
             }
-            let after = before;
-            if (toolName === 'Write') after = String(toolInput.content ?? '');
-            const edits =
-              toolName === 'Edit' ? [toolInput] : Array.isArray(toolInput.edits) ? (toolInput.edits as Record<string, unknown>[]) : [];
-            for (const e of edits) {
-              const o = String(e.old_string ?? '');
-              const n = String(e.new_string ?? '');
-              after = e.replace_all === true ? after.split(o).join(n) : after.replace(o, n);
-            }
-            const removed = removedProduction(before, after);
+            const removed = removedProduction(before, textAfterEdit(toolName, toolInput, before));
             return removed.length > 0 ? removed : null;
           }
           if (toolName === 'Bash' && typeof toolInput.command === 'string') {
@@ -695,6 +690,32 @@ function main(): void {
             ),
           );
           return;
+        }
+      }
+
+      // (I1) Coverage exemptions are the user's (lib/changed-coverage.ts): an Edit/Write that adds
+      //   a `coverage-exempt` glob to a human policy entry is denied. The gate would ignore it
+      //   anyway (it uses the globs pinned at the session start); this explains it early.
+      if ((toolName === 'Write' || toolName === 'Edit' || toolName === 'MultiEdit') && diffCoverageMode() !== 'off') {
+        const fp = typeof toolInput.file_path === 'string' ? resolvePath(cwd, toolInput.file_path) : '';
+        if (fp && isPolicyFile(fp)) {
+          let before = '';
+          try {
+            before = readFileSync(fp, 'utf8');
+          } catch {
+            // a new file: every glob in it is added
+          }
+          const added = addedExemptions(before, textAfterEdit(toolName, toolInput, before));
+          if (added.length > 0) {
+            logGate(sessionId, 'coverage-exempt', 'deny', added.join(', '));
+            emit(
+              deny(
+                `Only the user exempts files from the changed-line coverage rule (decision G-exception); this edit adds ${added.join(', ')}. ` +
+                  'Write tests that run the code, or ask the user: they add the `coverage-exempt:` line themselves, and it counts from the next session.',
+              ),
+            );
+            return;
+          }
         }
       }
 
@@ -1603,7 +1624,14 @@ function main(): void {
       //   changed. Only for calls that run: a denied call fires no post hook, and its open note
       //   would make the user's `! touch` after the denial look model-made.
       if (toolName === 'Bash' && input.tool_use_id) {
-        noteBashStart(sessionId, input.tool_use_id, cwd, toolInput.command as string | undefined, input.agent_id);
+        // (I1) A call that can move files into place keeps their times: the post hook compares
+        //   git's status with this snapshot (lib/write-sweep.ts).
+        const command = typeof toolInput.command === 'string' ? toolInput.command : undefined;
+        const status =
+          command !== undefined && envStr('GOODBOY_BASH_WRITE_GATE', 'deny') !== 'off' && writesIndirectly(command)
+            ? (statusFiles(cwd, 5_000) ?? undefined)
+            : undefined;
+        noteBashStart(sessionId, input.tool_use_id, cwd, command, input.agent_id, status);
         snapshotGateState(sessionId, input.tool_use_id);
       }
 

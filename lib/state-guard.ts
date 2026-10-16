@@ -1,6 +1,7 @@
 // Gate state guard (track G security review): the Stop gates read state from the session dir
 // in $TMPDIR (edit log, review/test cursors, dispatch log, skill evidence, validation
-// failure, the commit issue pins), outside the project, where the Bash write gate allows writes. One
+// failure, the commit issue, project mode and coverage pins), outside the project, where the
+// Bash write gate allows writes. One
 // `rm "$TMPDIR"/goodboy-session-*/edits.jsonl` would end a turn with neither tests nor review.
 //
 // So a model Bash call is bracketed: PreToolUse snapshots the guarded files, and the post
@@ -16,7 +17,7 @@ import { ensureSessionDir } from './file-tracker';
 import { segmentChanging } from './outward-command';
 import { safeToolUseId } from './approval-marker';
 
-const GUARDED = /^(?:edits\.jsonl|dispatch-log\.jsonl|skill-evidence\.jsonl|commit-issue-pins\.json|marker-evidence\.jsonl|project-mode-pin\.json|\.goodboy-last-(?:review|test)-[0-9a-f]+\.json|\.goodboy-validation-failed\.json)$/;
+const GUARDED = /^(?:edits\.jsonl|dispatch-log\.jsonl|skill-evidence\.jsonl|commit-issue-pins\.json|marker-evidence\.jsonl|project-mode-pin\.json|coverage-pin\.json|\.goodboy-last-(?:review|test)-[0-9a-f]+\.json|\.goodboy-validation-failed\.json)$/;
 const CURSOR = /^\.goodboy-last-(?:review|test)-[0-9a-f]+\.json$/;
 /** Evidence logs: a line added during a model Bash call would be forged evidence (a skill run,
  *  the user's non-project answer), so these keep only their old lines, and one the call

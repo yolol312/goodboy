@@ -16,6 +16,7 @@ import { agentName, ROUTE } from '../lib/routing-policy';
 import { projectMode } from '../lib/project-mode';
 import { knowledgeRoot, readDocMap } from '../lib/project-knowledge';
 import { staleDocs, staleDocsReason, type StaleDoc } from '../lib/doc-map';
+import { changedLineGaps, changedLineReason, diffCoverageMode, repoTop, sessionCoverageStart } from '../lib/changed-coverage';
 import {
   citationBlockMessage,
   CLI_PATH,
@@ -627,6 +628,8 @@ function evaluateTestResults(
   results: TestResult[],
   changedEdits: ReturnType<typeof getEditsWithLastTimestampSince>,
   acceptance: AcceptanceReading,
+  cwd: string,
+  sessionId: string,
 ): TestEvaluation {
   const block = (reason: string): TestEvaluation => ({ kind: 'block', reason });
   const cov = validateTestCoverage(results, changedEdits);
@@ -677,6 +680,23 @@ function evaluateTestResults(
         `\`bun "${CLI_PATH}" acceptance-list\` 로 전체 목록을 확인하세요.`,
     );
   }
+  // (I1, plan §15) Every changed code line ran in a test of the recorded tree; a file no run
+  //   loaded counts as not run (lib/changed-coverage.ts). Only the records the checks above
+  //   accepted (`ran`), and per file those made after its last edit. Exemptions: the user's
+  //   policy globs pinned at the session start, which also pins the HEAD no record's base may
+  //   be after.
+  const mode = diffCoverageMode();
+  if (mode !== 'off') {
+    const top = repoTop(cwd);
+    const start = sessionCoverageStart(sessionId, cwd, top);
+    const out = changedLineGaps({ results: ran, edits: changedEdits, top, exempt: start.exempt, startHead: start.head });
+    if (!out.measured || out.gaps.length > 0) {
+      if (mode === 'on') return block(changedLineReason(out, CLI_PATH));
+      habitWarnings.push(
+        `[goodboy] 바뀐 줄 커버리지(경고 모드): ${out.measured ? `테스트가 실행하지 않은 파일 ${out.gaps.map((g) => g.file).slice(0, 3).join(', ')}` : '측정되지 않았어요'}.`,
+      );
+    }
+  }
   return { kind: 'accept' };
 }
 
@@ -726,7 +746,7 @@ function tryAcceptPendingTest(sessionId: string, cwd: string): boolean {
     const changedEdits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd).filter((e) =>
       needsTestCoverage(e.file, cwd),
     );
-    const ev = evaluateTestResults(results, changedEdits, acceptance);
+    const ev = evaluateTestResults(results, changedEdits, acceptance, cwd, sessionId);
     if (ev.kind === 'block') return false;
     if (ev.kind === 'accept-unverified') {
       acceptBlockedTests(sessionId, cwd, ev.blocked, 'blocked-on-stop-active');
@@ -835,7 +855,7 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
     const changedEdits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd).filter((e) =>
       needsTestCoverage(e.file, cwd),
     );
-    const ev = evaluateTestResults(results, changedEdits, acceptance);
+    const ev = evaluateTestResults(results, changedEdits, acceptance, cwd, sessionId);
     if (ev.kind === 'block') return block(ev.reason);
     if (ev.kind === 'accept-unverified') {
       acceptBlockedTests(sessionId, cwd, ev.blocked, 'blocked');

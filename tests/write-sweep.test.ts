@@ -58,7 +58,10 @@ describe('changedFilesSince', () => {
     const old = Date.now() / 1000 - 120;
     writeFileSync(join(r.cwd, 'src', 'stale.ts'), 'x'); // untracked, but written before the call
     utimesSync(join(r.cwd, 'src', 'stale.ts'), old, old);
-    const since = Date.now() - 1000;
+    // The sweep counts ctime too (a rename keeps the mtime: track I), and utimes sets the ctime
+    //   to now, so the call starts a little later.
+    Bun.sleepSync(300);
+    const since = Date.now() - 100;
     writeFileSync(join(r.cwd, 'src', 'old.ts'), 'changed\n');
     writeFileSync(join(r.cwd, 'src', 'new.ts'), 'new\n');
     mkdirSync(join(r.cwd, 'dist'));

@@ -420,7 +420,8 @@ Tool skills (hidden from the menu; main session and agents):
   with `source: "codex"` and are handled like any other finding. When Codex is missing, not
   logged in, over 10 minutes or failing, the round records `skipped` with the error output
   and goes on.
-- Coverage, measured and recorded, not a gate (`measure-coverage`):
+- Coverage, measured and recorded, not a gate (`measure-coverage`; since track I the
+  changed lines are a gate, §15.2a):
   - line and branch coverage from the project's own tool (bun, vitest, jest, pytest-cov,
     JaCoCo, go cover); nothing is installed, and a missing tool is recorded as
     `unavailable` with the reason;
@@ -429,8 +430,8 @@ Tool skills (hidden from the menu; main session and agents):
   - JS coverage of E2E runs on Chromium;
   - mutation detection rate.
   - The existing coverage checks (acceptance criteria, changed files, review axes) stay.
-  - A warning when a code file in `tested_files` has no executed changed line. Whether it
-    becomes a block is decided after a month of data.
+  - A warning when a code file in `tested_files` has no executed changed line. Track I made
+    unrun changed lines a test-gate block (§15.2a); test-write still only warns.
 - Push test check (G1, added by the user 2026-10-14): before every hand-off — `git push`
   (feature branches and tags; not `--dry-run` or deletions), MR/PR creation (`gh pr create`,
   `glab mr create`), a deploy that `lib/outward-command.ts` classifies as mutating toward a
@@ -476,7 +477,7 @@ Tool skills (hidden from the menu; main session and agents):
 | PreToolUse, Skill | `/ship` and `/land-and-deploy` need the push test evidence for HEAD |
 | PreToolUse, Write/Edit | role limits and result-path limits; skill rule; read-before-edit asks what the editor itself knows (its own reads and edits by `agent_id`, the file unchanged since by mtime, nothing from before the last compaction) |
 | PreToolUse, any write | approval markers are the user's: a model write to `.claude/.goodboy-*-approved-*` (any letter case) is denied; after a Bash call the post hooks remove the markers it created (by name against a snapshot taken at the start, not by mtime), and a marker made during a call that never reported back (`exit N`, M18) is not used |
-| PreToolUse/post hooks, Bash | gate state guard (`lib/state-guard.ts`): a command that changes a goodboy session dir is denied; the guarded files are snapshotted before each Bash call and restored after it (or at the next Stop); `.goodboy/hosts` production entries cannot be removed by the model (Edit/Write denied, a Bash removal restored), and the files are merged up the tree; files an interpreter or nested shell wrote are recorded as edits (`lib/write-sweep.ts`); a shell write into `.claude/tests` or `.claude/reviews` is a project write (results come only from the CLI) |
+| PreToolUse/post hooks, Bash | gate state guard (`lib/state-guard.ts`): a command that changes a goodboy session dir is denied; the guarded files are snapshotted before each Bash call and restored after it (or at the next Stop); `.goodboy/hosts` production entries cannot be removed by the model (Edit/Write denied, a Bash removal restored), and the files are merged up the tree; files an interpreter or nested shell wrote, and files moved or copied into place (`mv`, `cp`, `git mv`, `git checkout`…, by mtime, ctime and a git-status snapshot; track I), are recorded as edits (`lib/write-sweep.ts`); a shell write into `.claude/tests` or `.claude/reviews` is a project write (results come only from the CLI) |
 | PreToolUse, Bash in a read-only role | besides redirects: `cp`/`mv`/`rm`/`touch`/`chmod`…, `perl -i`, mutating git commands, and no `.git/`/`.claude/` exemptions |
 | PreToolUse, search | relax H2-03 so small searches run in the main session; a path the shell expands (`~`, `$VAR`, `$(…)`) is never small |
 | UserPromptSubmit | every prompt that is not a task notification gets the R1 (ask when unclear) and R2 lines; a workflow command gets R2 plus its checklist; fixed slash regex; argument-free commands allowed; the risk gate only from commands the user typed. Moved to G3: delegation lines and a skill or agent suggestion, registering a task once, and the effort check before a task's first action |
@@ -918,6 +919,96 @@ Consequences for the design:
 - E2E is detected by its config (`playwright.config.*`, `cypress.config.*`) or dependency
   (`@playwright/test`, `cypress`); without a runner or a browser the result is `blocked` with
   the evidence, for the user.
+
+### 15.2a Built in I1 (#2)
+
+- `lib/changed-coverage.ts`: the layer-1 gate's last check, after the acceptance criteria.
+  Every changed code file of the task (the test cursor's edits that need tests) must have all
+  its changed lines run in a record the other layer-1 checks accepted, made after its last
+  edit, that tests it (an older record's coverage would describe an older file; security
+  review); several such records: the best run counts. A file with added lines that the
+  report lacks counts as not run (M24/M25): diff coverage now lists the changed files a
+  report has (`in_report`) and every file the diff has with its added lines (`diff_lines`),
+  so a file whose changed lines are all non-executable is no gap, nor one with only removals.
+  An edited file the diff does not have must equal the base blob, hashed as git stores it
+  (line-ending attributes apply, filter drivers off): an undone edit. Git can hide a file
+  (ignore rules, assume-unchanged, a nested repo), and both libraries run git with
+  `--no-replace-objects` and no graft file. Only existing code a coverage tool measures
+  needs its lines run (not `package.json`, YAML, SQL…, nor a deleted file), and a JS/TS file
+  only when it has runtime code: types-only imports trimmed, a types-only file transpiles to
+  nothing but `export {}`; a `.d.ts` is a declaration file and never measured (code hidden in
+  one that a test imports by its full name is a known limit). A change with nothing to
+  measure passes.
+- Report paths are matched against every repo file, not only the changed ones (security
+  review): an absolute path only inside the repo; a Go module path through its go.mod's
+  `module` line; a path that exists but is no file the repo lists (`node_modules/…`) is not
+  ours; else, by base name, the repo file that ends with the report path (a Cobertura
+  `pkg/app.py` is `src/pkg/app.py`, not a root `app.py`); a tie matches nothing. A report
+  path longer than the repo file never matches it (round 6: a Go `-coverpkg=all` dependency's
+  `github.com/pkg/errors/errors.go`, or `../shared/index.ts`, credited the root file). A
+  report path outside the repo (tests run in a container, `/app/src/a.ts`) matches nothing,
+  and the gate says so. A pure rename is in the diff with no added line; the diff detects
+  renames but not copies, whatever `diff.renames` says.
+- Moved and copied files: the after-Bash sweep now also runs for `mv`, `cp`, `ln`,
+  `install`, `rsync`, `patch`, `tar`, `unzip` and the git commands that put files in place
+  (`checkout`, `restore`, `apply`, `mv`…). `mv`, `cp -p` and an interpreter's rename keep the
+  mtime, so a file counts by mtime or ctime; a directory moved into place keeps its files'
+  times, so PreToolUse snapshots git's status for such a command and the post hook records
+  every path new in it (only when both are of the same repo: after `cd <other repo>` its
+  uncommitted files are not the call's writes, round 6). The sweep covers both the repo the
+  call started in and the one its shell ended in (`cd <elsewhere> && mv x <start repo>/…`,
+  round 7); a call that starts outside any repo and moves a directory into one has no
+  snapshot, so that move is not seen (a known limit). The targets the command names count too,
+  read from the start cwd (security review: a move
+  after a record put unrun code in a file no edit recorded; the review gate missed it too).
+- Paths: the repo top in the cwd's own spelling (`--show-cdup`), so a symlinked cwd is still
+  checked; a file name that starts with `..` is inside the repo.
+- The base: diff coverage records the object it diffed against (`base`). SessionStart pins
+  the HEAD the session started from (kept on resume); a record whose base is after it would
+  hide committed changes, so it does not count, and the gate prints the right `--base`. A
+  session that started with no commit, or outside a repo, pins null: only `--base empty`
+  (the empty tree) counts. A repo whose top differs from the pinned one (made during the
+  session, a linked worktree) keeps the pinned HEAD only when that commit is in it, and no
+  exemptions (their globs meant other paths).
+- Exemptions: `coverage-exempt: <glob>, …` lines of `decide: human` policy entries only (the
+  policy parser now takes keys with a hyphen; commas inside braces stay in the glob). An `ai`
+  entry exempts nothing. They are the user's, so the model cannot write its own (security
+  review): SessionStart pins them, and a glob added during a session counts from the next one
+  (like the project mode, §14.2), whatever wrote it (`cp`, an interpreter). The state guard
+  restores the pin after a Bash call, like the other session pins. PreToolUse also denies an
+  Edit/Write that adds one to any `.goodboy/policy.md` (any letter case of the path), as an
+  early explanation; the gate counts only a policy file inside the repo. A same-user limit
+  stays: a glob the model wrote in one session counts in the next.
+- No changed-line coverage in the result: blocked, with the way out (measure it; or, with no
+  tool, a `blocked` result with the evidence, which ends the turn as unverified).
+- `GOODBOY_DIFF_COVERAGE=on` (default) | `warn` (a Korean line to the user) | `off`. The test
+  suite runs with it off (tests/setup.ts), like the skill and commit-issue rules; the I1
+  tests turn it on.
+- measure-coverage and test-unit say the rule; the record keeps diff coverage whole (`files`,
+  `in_report`, `diff_lines`, `base`; test-write checks their shape when present); the gate
+  counts a record without one of them as not measured.
+- goodboy itself: its hook tests spawn the hooks, so with the rule on its own hook files
+  need in-process tests or the user's exemption (a decision for when a version with I1 is
+  installed).
+- Deferred (low findings of the round-6 and round-7 reviews):
+  - Programs whose writes the sweep does not see: shell scripts (`bash x.sh`, `./x.sh`),
+    build and fix tools (`npm run`, `make`, `prettier --write`, `eslint --fix`), downloads
+    and clones (`curl -o`, `git clone`, `git worktree add`), `gtar`, `bsdtar`, `gmv`.
+  - `ditto` is missing from the list of placing programs above.
+  - `differFromBase` fails as a whole batch (one directory or unreadable path makes every
+    file in it hidden), and a name starting with `:` is read as pathspec magic.
+  - `git reset --soft HEAD~1` records committed, tested files as edits again.
+  - Report paths `src/./a.ts`, and a different letter case on macOS, match nothing. Since
+    round 6 these forms match nothing either (fail-closed, never another file): a
+    `../shared/…` path of a sibling package, Kotlin sources whose package differs from their
+    dir, Go without a go.mod, a path with an extra root prefix.
+  - The snapshot's top and the post hook's are compared as strings; a cwd spelled through a
+    symlink in one hook and not the other loses the directory-move signal.
+  - An unstaged `mv` counts every line of the file; a staged rename counts none.
+  - `changedFilesSince` is unused in production; `matchFile` is quadratic for huge reports,
+    and its scoring loop and the `copy to` branch of `changedLines` are dead since round 6;
+    the git helpers and the empty-tree lookup are duplicated.
+  - Older: files under `build/`, `dist/` and similar dirs never reach the edit scope.
 
 ### 15.3 Steps
 
