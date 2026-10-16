@@ -1074,7 +1074,10 @@ I1b (#7), guidance only:
   a document: code under a docs dir, MDX, `requirements.txt` (dependency-risk),
   `CMakeLists.txt` (the I1b review). The effort advice uses the same rule. Its budget: one
   review of at most 10 minutes, presentation checks included; no test run (documents need
-  none). A mixed change gets no document budget.
+  none). A mixed change gets no document budget. 10 minutes is a first value: the field
+  report's document reviews took 5 to 10 minutes each, and the I1b probe's whole session
+  about 40 seconds. A large rewrite may need more; the reviewer then lists what it did not
+  verify. J3's duration records will tune the value, or scale it by size.
 - `agents/test-unit.md`, `agents/review-all.md` and the Stop-hook messages, for a document
   change:
   - verify the delta and what it affects;
@@ -1189,9 +1192,11 @@ in another session's temporary scratchpad and was relayed by hand, with no fixed
 
 ## 17. K — Update checkups (v0.35.0)
 
-From a field handoff of 2026-10-16 (Claude and Codex, two rounds; facts measured on Claude
-Code 2.1.301). The goal is to keep the user's customizations (skills, plugins, hooks,
-CLAUDE.md) working and useful across CLI and model updates.
+From a field handoff of 2026-10-16 (Claude and Codex, three rounds; facts measured on Claude
+Code 2.1.301). The goal is to keep the user's customizations (skills, subagent definitions,
+plugins, hooks, CLAUDE.md) working and useful across CLI and model updates. Subagent
+definitions were added in round 3, by the user's decision: their instructions can lose
+quality on a model update like a skill's.
 - CLI updates can change hook events, fields and frontmatter rules, or stop a plugin from
   loading; they can also make a customization redundant.
 - Model updates can make detailed instructions hurt output quality.
@@ -1214,6 +1219,14 @@ Measured (phase 0):
   `--setting-sources project,local` drops user plugins and hooks but keeps the user
   CLAUDE.md. `--bare` needs an API key.
 - `--debug-file` logs each hook run with its plugin and exit status.
+- Subagents, from the docs and the changelog:
+  - `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` sets the nesting depth. 2.1.217 turned nesting
+    off by default; 2.1.219 turned it back on, to depth 3.
+  - The retirement or remap warning covers agent frontmatter. In `-p` it goes to stderr,
+    and only with text output. The result's `modelUsage` shows what ran.
+  - `plugin eval` loads a plugin's agents; in the no-plugin baseline arm a dispatch fails
+    with "Agent type … not found". A project's `.claude/agents/` never loads in eval.
+  - A definition without `tools:` inherits every tool, the Agent tool included.
 
 K1 (#10): a manual `cli-update-check` skill, with no new hook registrations and no gate
 exemptions.
@@ -1238,16 +1251,67 @@ exemptions.
   so a report never goes through Edit/Write, and never a general write path.
 - `PostModelSwitch` is not registered while the README claims v2.1.138+: nothing guarantees
   that older CLIs ignore an unknown event.
+- Subagent definitions (round 3):
+  - Inventory: goodboy's own agents, user agents, and project agents from an explicit
+    registry of project paths. The registry holds the current project automatically; other
+    paths come from the user, and discovered ones are only suggested, never scanned
+    silently. Per definition:
+    - canonical path, scope, owner;
+    - configured, loaded or shadowed;
+    - whole-file, body and frontmatter hashes;
+    - raw frontmatter, the requested model and the observed model with its source;
+    - tool restrictions, delegation references, unresolved contracts.
+  - Static checks, each with versioned evidence and an uncertainty flag:
+    - pinned model IDs, kept apart from verified retirement, remap or unavailability;
+    - `tools:` that resolves to nothing (MCP availability stays unknown until runtime);
+    - MCP `tools:` syntax against the running CLI's contract;
+    - frontmatter keys the running CLI ignores (not counted as load failures);
+    - duplicate names in one scope, and shadowing across scopes, reported separately;
+    - copies grouped by hash, with their differences (divergence alone is no defect);
+    - delegation against policy: a definition that can call the Agent tool, given
+      `disallowedTools`, the depth setting and goodboy's delegation guard. goodboy's leads
+      (`test-lead`, `review-lead`, `research-lead`) delegate by design (§10.7). Any other
+      definition that inherits the Agent tool conflicts with the leaf rule.
+  - Agent-related changelog entries are matched too, including changed defaults that touch
+    omitted fields (depth, background spawns, tool filters).
+  - Zero model turns: parsing, hashing, collisions, drift, contract matching, log reading.
+    They cannot prove a dispatch or the effective tools.
+  - Model-turn probes, inside K1's approved integration budget: a dispatch, the effective
+    tools, depth enforcement and model resolution.
+    - The depth probe is one Haiku parent dispatching one Haiku child. It passes only on
+      tool-schema evidence of what the child can call; a self-reported tool list is not
+      enough, and without that evidence the result is inconclusive.
+    - Forks need a separate check.
+    - The probe never runs an uncontrolled recursive chain.
+  - A pinned model ID is "pinned; intent unconfirmed". Its lifecycle:
+    - retirement announced: breakage risk;
+    - verified rejection: unavailable;
+    - verified substitution: behavior change.
+
+    First check: the text-mode stderr warning (silence proves nothing). Then, with
+    approval, one minimal request read through `modelUsage`.
+  - The depth setting: the checkup recommends `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=2` as a
+    user-settings change outside goodboy, with its own approval. That is main → lead →
+    member, goodboy's designed depth. The handoff proposed `1`, but it was written against
+    v0.30.0, which had only leaf agents; `1` would stop goodboy's leads. Within depth 2,
+    goodboy's delegation guard still allows only a lead to delegate. The setting also covers
+    sessions where goodboy is off. Rate limits stay: depth does not bound sibling dispatches.
 - Tests: the state transitions; the changelog range (gaps, downgrades, empty); the writer's
   containment (escapes, symlinks); the fixtures' isolation from real user state; every smoke
-  case, allowed and blocked.
+  case, allowed and blocked. For agents: frontmatter parsing and unknown keys; collisions
+  and shadowing; `tools:` resolution; delegation-policy conflicts (goodboy's leads allowed);
+  pin classification; hash dedupe and drift; project-registry isolation.
+- Reports keep problems that already existed apart from update regressions.
 
 Proposals (later steps, not scheduled):
 - K2: quiet detection. A fail-open SessionStart reads the CLI version once, corroborated by
   the transcript. Model observations come from main-session transcript entries read
   incrementally at Stop, classified by family under the configured alias: an off-family ID
   is an override, and "model updated" is set only after an explicit startup probe. One
-  notice per transition, with snooze; no instruction injection and no Stop gate.
+  notice per transition, with snooze; no instruction injection and no Stop gate. Agents use
+  aliases other than the main session's: an approved startup probe per alias in use (for
+  example `sonnet` and `opus`; `inherit` follows the parent). Passive subagent-transcript
+  observations are deferred and may only support a finding.
 - K3: a `model-update-check` pilot on two self-written targets plus CLAUDE.md.
   - `plugin eval` is the only suite, with frozen suite and grader hashes.
   - Benefit is success with minus success without, reported with absolute success.
@@ -1255,6 +1319,19 @@ Proposals (later steps, not scheduled):
     interval with a ±0.10 margin. At these sizes "equivalent" is out of reach, so
     inconclusive means keep.
   - Safety guards are never removed on saturated scores.
+  - Agents: the no-plugin delta measures "agent missing", so it is not used.
+    - Two wrapper-plugin variants with matched definitions differ only in the body: the
+      custom body vs. a minimal neutral one. Name, description, tools, model, effort,
+      permissions and the required safety rules are the same in both.
+    - They run through the frozen suite with `--ablation none` and are compared by the same
+      pairing and statistics.
+    - Wrapper loading and arm equivalence are proved by a positive control first.
+    - One representative self-written leaf agent joins the pilot estimate.
+    - An unchanged pinned model is left out of alias-update runs, not out of manual
+      benefit tests.
+  - Deferred for agents: orchestrator quality evals, cross-repo sync, passive subagent model
+    tracking, description and routing ablations, and settings or guard fixes. Native
+    multi-component interaction evals go to K4.
 - K4: goodboy self-evaluation on a frozen copy, with the gates active in the treatment arm.
 
 Not prevented:
