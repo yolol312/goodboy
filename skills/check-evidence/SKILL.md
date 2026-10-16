@@ -31,7 +31,12 @@ Find claims the code or the record does not support.
      into the code is `high`.
 5. Project rules: CLAUDE.md, README and the existing patterns; a broken rule is `low` to
    `medium`.
-6. Record each assumption and guess in `unknown_assumptions_checked` with `reasonable` and a
+6. Decision authority: `bun "$GB/lib/cli.ts" decisions` lists the ai and human checks. A
+   human item the change settles needs the user's decision (in the request, the answers the
+   caller passes, or a policy entry): without one, `high` for a project (`policy`) entry and
+   `medium` for a goodboy default. An ai item the change relies on needs its evidence: none
+   is `medium`.
+7. Record each assumption and guess in `unknown_assumptions_checked` with `reasonable` and a
    note on what you checked.
 
 ## Output

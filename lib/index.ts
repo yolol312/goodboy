@@ -38,3 +38,4 @@ export * from './state-guard';
 export * from './commit-issue';
 export * from './project-mode';
 export * from './project-knowledge';
+export * from './decision-authority';

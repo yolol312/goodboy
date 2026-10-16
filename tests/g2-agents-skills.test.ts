@@ -1,4 +1,5 @@
-// G2 contract (track G §10.3–10.4): the 24 agent files and the 23 tool skills match the plan.
+// G2 contract (track G §10.3–10.4): the 24 agent files and the tool skills (23 from G2, one
+// from H2) match the plan.
 // The expected values are an independent fixture taken from the plan's tables, not the policy
 // table itself (§10.10: contract tests use independent fixtures).
 import { describe, expect, test } from 'bun:test';
@@ -36,7 +37,8 @@ const AGENTS: Record<string, { model: string; effort: string; write: boolean; ag
   'test-probe': { model: 'sonnet', effort: 'high', write: false, agent: false, web: true },
 };
 
-/** Plan §10.4: the 23 tool skills and their effort (follow-agent-rules is a preload, no effort). */
+/** Plan §10.4 and §14.3: the 24 tool skills and their effort (follow-agent-rules is a preload,
+ *  no effort). */
 const TOOL_SKILLS: Record<string, string | null> = {
   'write-migration': 'xhigh',
   'isolate-cause': 'high',

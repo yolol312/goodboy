@@ -750,10 +750,25 @@ file every session reads first, splits every check into `ai` (evidence decides) 
   check that evidence can decide is `ai`; otherwise, or when unsure, `human`. Neither has a
   written-reason escape.
 - goodboy ships the generic defaults (`lib/decision-authority.ts`); policy.md adds project
-  items. The hook-enforced `human` checks are the existing ones (R2 and `.goodboy/hosts`, the
-  risk gate, dev-cycle stage gates); policy `human` entries reach the model through the
+  items. The hook-enforced `human` checks are the existing ones, and they hold only part of
+  their category (H3 review): the outward-command gate denies changes to hosts
+  `.goodboy/hosts` lists as production (other hosts get the R2 advice), the risk gate holds
+  a goodboy workflow command whose prompt names `rm -rf`, `--force` or a migration, and dev-cycle's stage approvals are a
+  skill's, not a hook's. Policy `human` entries reach the model through the
   SessionStart context and reviews (review-evidence, review-spec). Recorded human decisions
   become `ai` entries next time (update mode).
+- Built in H3 (`lib/decision-authority.ts`): nine human defaults (the categories above) and
+  seven ai defaults, each ai one naming its evidence and the hook that decides it. A policy
+  entry is `ai` only when tagged so with an `evidence:` line; any other tag, or none, is
+  `human`. Policy entries add to the defaults and never replace one. SessionStart (every
+  source, project mode only, not tied to `GOODBOY_POLICY_GATE`) sends the rule, the defaults,
+  the project's human entries (twelve named, the rest counted) and `cli.ts decisions`, the
+  full list. An item the request, the user's answers or a policy entry already settles is
+  not open. Reviews: check-evidence raises a human item settled without the user's decision
+  as `high` for a project entry and `medium` for a default (a fuzzy default as `high` would
+  hold reviews shut); check-spec-coverage raises unapproved scope as `medium` (was `low`);
+  follow-agent-rules points R1 at the list. The done check and the decision list read entries
+  with one parser, `parsePolicyEntries` (lib/project-knowledge.ts).
 
 ### 14.5 Doc map and docs rule (H4)
 

@@ -22,10 +22,12 @@ Show, criterion by criterion, where the change meets its spec and where it does 
 3. For each criterion, find the test that exercises it and the assertion that would fail if it
    broke; write "no test" when none does.
 4. Check the reverse: changed behavior no criterion asks for (scope creep, or a missing
-   criterion to raise with the user).
+   criterion to raise with the user). A scope change is a human check
+   (`bun "$GB/lib/cli.ts" decisions`): it needs the user's approval in the request or the
+   answers the caller passes.
 5. Reviewing: a criterion with no code is `high`; with code but no test, `medium`; behavior no
-   criterion covers, `low` with a note. Testing: write the missing tests (write-regression-test
-   or run-e2e) before recording.
+   criterion covers, `medium`, or `low` with a note when the user approved it.
+   Testing: write the missing tests (write-regression-test or run-e2e) before recording.
 
 ## Output
 A coverage table in the result (review findings or test `acceptance` entries), shaped like:

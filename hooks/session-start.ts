@@ -2,11 +2,13 @@
 // SessionStart hook (track G §10.5) — configuration warnings for new and resumed sessions:
 // environment settings that override goodboy's routing policy (user-facing, so Korean). After
 // a compaction (source "compact", G0 M17) it resets what read-before-edit counts as known:
-// file contents read or edited before it left the context. Never blocks.
+// file contents read or edited before it left the context. In a project it also sends the
+// knowledge files to read first (H2) and the decision authority (H3). Never blocks.
 
 import { pinCommitIssueSettings } from '../lib/commit-issue';
 import { pinProjectMode } from '../lib/project-mode';
 import { knowledgeSessionNotice } from '../lib/project-knowledge';
+import { decisionAuthorityContext } from '../lib/decision-authority';
 import { clearReadRecords } from '../lib/file-tracker';
 
 interface SessionStartInput {
@@ -81,10 +83,21 @@ if (import.meta.main) {
           knowledge = {};
         }
       }
+      // (H3) Every source, project mode: which checks are ai and which the user decides
+      //   (lib/decision-authority.ts); not tied to the read gate's switch.
+      let decisions: string | null = null;
+      if (sessionId) {
+        try {
+          decisions = decisionAuthorityContext(input.cwd ?? process.cwd(), sessionId);
+        } catch {
+          decisions = null;
+        }
+      }
       const messages = [...warnings, ...(knowledge.systemMessage ? [knowledge.systemMessage] : [])];
+      const context = [knowledge.context, decisions].filter((c): c is string => !!c).join('\n\n');
       const out: Record<string, unknown> = {};
       if (messages.length > 0) out.systemMessage = messages.join('\n');
-      if (knowledge.context) out.hookSpecificOutput = { hookEventName: 'SessionStart', additionalContext: knowledge.context };
+      if (context !== '') out.hookSpecificOutput = { hookEventName: 'SessionStart', additionalContext: context };
       process.stdout.write(JSON.stringify(out));
     })
     .catch(() => {

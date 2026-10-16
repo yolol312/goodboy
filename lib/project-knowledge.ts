@@ -120,7 +120,9 @@ export function knowsCurrentContent(sessionId: string, file: string, turn: numbe
   const known = lastKnownVersion(sessionId, file, turn, Number.MAX_SAFE_INTEGER, 'main');
   if (known === null) return false;
   if (known.mtime !== null && Math.abs(known.mtime - st.mtimeMs) > 1) return false; // changed since
-  if (known.via === 'edit') return true; // the session wrote what is there
+  // The session wrote what is there. Its edit passed this gate, so the file was known before
+  //   it (a file that became required only later, by a doc map edit, is the gap).
+  if (known.via === 'edit') return true;
   const reads = readRangesSince(sessionId, file, st.mtimeMs, 'main');
   if (reads.full) return true;
   let lines: number;
@@ -188,6 +190,36 @@ export function knowledgeSessionNotice(cwd: string, sessionId: string): { contex
   return { context: notes.join('\n') };
 }
 
+export interface PolicyEntry {
+  /** The `## ` line without the hashes: `<id> <title>`. */
+  heading: string;
+  id: string;
+  title: string;
+  /** The entry's `- key: value` lines (the first of each key; an empty value is no field). */
+  fields: Record<string, string>;
+}
+
+/** The entries of a policy file, one per `## <id> <title>` section. Shared by the done check
+ *  and the decision list (lib/decision-authority.ts), so the two read entries alike. */
+export function parsePolicyEntries(text: string): PolicyEntry[] {
+  return text
+    .split(/^## /m)
+    .slice(1)
+    .map((s) => {
+      const [first = '', ...rest] = s.split(/\r\n|\r|\n/);
+      const heading = first.trim();
+      const sp = heading.search(/\s/);
+      const fields: Record<string, string> = {};
+      for (const line of rest) {
+        // `[ \t]*`, not `\s*`: an empty `- source:` line must not borrow the next line's text.
+        //   `s`: a value may hold U+2028, which `.` would not match.
+        const m = line.match(/^- ([a-z_]+):[ \t]*(\S.*)$/s);
+        if (m && !(m[1]! in fields)) fields[m[1]!] = m[2]!.trim();
+      }
+      return { heading, id: sp < 0 ? heading : heading.slice(0, sp), title: sp < 0 ? '' : heading.slice(sp).trim(), fields };
+    });
+}
+
 /** The skill's done criteria, checkable: the files exist, every policy entry has its
  *  `decide`, `source`, `date` and `checked` lines, and docs.json marks policy.md
  *  session-start. Problems, or [] when done. */
@@ -196,17 +228,15 @@ export function validateKnowledge(root: string): string[] {
   const policy = join(root, POLICY_FILE);
   if (!existsSync(policy)) return [`${POLICY_FILE} is missing`];
   const text = readFileSync(policy, 'utf8');
-  const sections = text.split(/^## /m).slice(1);
-  if (sections.length === 0) problems.push(`${POLICY_FILE} has no entries (## <id> <title>)`);
-  for (const s of sections) {
-    const title = s.split('\n')[0]!.trim();
-    // `[ \t]*`, not `\s*`: an empty `- source:` line must not borrow the next line's text.
+  const entries = parsePolicyEntries(text);
+  if (entries.length === 0) problems.push(`${POLICY_FILE} has no entries (## <id> <title>)`);
+  for (const e of entries) {
     for (const field of ['decide', 'source', 'date', 'checked']) {
-      if (!new RegExp(`^- ${field}:[ \\t]*\\S`, 'm').test(s)) problems.push(`entry "${title}" has no ${field}: line`);
+      if (!(field in e.fields)) problems.push(`entry "${e.heading}" has no ${field}: line`);
     }
-    const decide = s.match(/^- decide:[ \t]*(\S+)/m)?.[1];
-    if (decide && decide !== 'ai' && decide !== 'human') problems.push(`entry "${title}" has decide: ${decide} (ai or human)`);
-    if (decide === 'ai' && !/^- evidence:[ \t]*\S/m.test(s)) problems.push(`entry "${title}" is ai but names no evidence: line`);
+    const decide = e.fields.decide?.split(/\s/)[0];
+    if (decide && decide !== 'ai' && decide !== 'human') problems.push(`entry "${e.heading}" has decide: ${decide} (ai or human)`);
+    if (decide === 'ai' && !('evidence' in e.fields)) problems.push(`entry "${e.heading}" is ai but names no evidence: line`);
   }
   if (lineCount(text) > POLICY_LINE_BUDGET) problems.push(`${POLICY_FILE} is over ${POLICY_LINE_BUDGET} lines`);
   const map = readDocMap(root);

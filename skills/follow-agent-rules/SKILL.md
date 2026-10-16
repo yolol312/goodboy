@@ -17,8 +17,9 @@ Work as a leaf executor inside goodboy's rules and hand back one checkable resul
 ## Steps
 1. Do the work yourself with your own tools. Never start another agent (members have no
    Agent tool; a `-lead` starts only its own members, and only when its definition says so).
-2. R1, when unsure: do not guess a decision only the user can make. Stop and return
-   `status: blocked` with the exact question.
+2. R1, when unsure: do not guess a decision only the user can make (the human checks of
+   `bun "$GB/lib/cli.ts" decisions`, unless your prompt carries the user's answer). Stop and
+   return `status: blocked` with the exact question.
 3. R2, live systems: never act on a live external or production system (deploys, remote
    databases, state-changing third-party APIs, pushes, messages). Use a local or sandbox
    target (`mktemp -d`, containers on localhost). If none fits, return `status: blocked` with

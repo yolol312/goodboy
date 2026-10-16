@@ -276,6 +276,22 @@ AskUserQuestion에서 `non-project`가 들어간 답을 고른 경우에만 모�
 안내한다(프로젝트인지 한 번 묻고, 저장소를 살펴 초안을 만든 뒤 사람이 정할 항목만 묻는다). 정책 파일은 200줄
 예산이 있다. 끄기: `GOODBOY_POLICY_GATE=off`. 완료 확인: `bun lib/cli.ts knowledge-check`.
 
+#### 결정 권한: ai와 human (v0.32.0, 트랙 H)
+
+모든 확인 항목은 `ai`(증거로 판정: 명령·테스트·파일 확인으로 통과시키고 묻지 않는다) 아니면 `human`(사용자가
+정한다: 정해질 때까지 그 일은 멈춘다)이다. 이유를 적는다고 바뀌지 않는다. 기본 human 항목은 요구사항 해석,
+범위 변경, UX 선택, 라이브·외부 시스템, 되돌릴 수 없는 삭제·마이그레이션, 보안·비용 트레이드오프, 정책 예외,
+문구·어조, 증거로 판정하지 못한 ai 항목이다. 훅은 이 가운데 일부만 막는다: `.goodboy/hosts`에 production으로
+적힌 호스트를 바꾸는 명령(다른 호스트는 R2 안내만), goodboy 워크플로 명령(`/fix-bug` 등)의 프롬프트에
+`rm -rf`·`--force`·마이그레이션이 있는 작업(위험 게이트, 사용자 승인 마커까지). 나머지는 묻는 것이 모델의 몫이다. 기본 ai 항목은 goodboy 훅이 이미 증거로 판정하는 것들이다(지식 파일
+읽기, 편집 전 읽기, 인용 확인, 타입 검사, 테스트, 리뷰, 커밋 이슈 번호). 프로젝트 항목은 `.goodboy/policy.md`가
+더한다: `ai`는 `evidence:`가 있어야 ai이고, 그 밖에는 모두 human으로 친다(애매하면 사람이 정한다). 메인 세션은
+게이트마다 열린 human 항목을 한 번에 묶어 한국어로 묻고, 서브에이전트는 `status: blocked`로 질문을 돌려준다.
+요청이나 사용자 답, 정책 항목으로 이미 정해진 것은 다시 묻지 않는다. 세션 시작 시 이 규칙이 모델에 전달되고
+(프로젝트 폴더만), 리뷰(check-evidence, check-spec-coverage)는 `bun lib/cli.ts decisions` 목록으로 사용자 결정
+없이 정해진 human 항목을 찾는다(프로젝트 항목은 high, 기본 항목은 medium). 사용자가 내린 결정은 정책 항목으로
+기록되어(`keep-project-knowledge` 갱신 모드) 다음부터 ai 항목이 된다.
+
 #### 에이전트 24개와 도구 스킬 24개
 
 에이전트 이름은 `<팀>-<역할>`이고 리드는 `-lead`로 끝난다(전체 표: 계획서 §10.3). 리뷰 게이트는
@@ -296,7 +312,7 @@ AskUserQuestion에서 `non-project`가 들어간 답을 고른 경우에만 모�
 check-spec-coverage, check-security, check-infra-config, check-evidence, write-regression-test,
 probe-runtime, attack-sandbox, cite-sources, summarize-diff, follow-design-tokens, check-code-quality,
 check-ui-states, run-e2e, record-review, record-tests, run-long-command, run-codex-review,
-measure-coverage, follow-agent-rules.
+measure-coverage, follow-agent-rules, keep-project-knowledge(`/` 메뉴에도 보임, 트랙 H).
 
 ## 결정 근거 기록 (4분류)
 
