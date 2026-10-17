@@ -4,6 +4,8 @@
 import { existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve as resolvePath, sep } from 'node:path';
 import { addedUserGlobs, diffCoverageMode, isPolicyFile, type UserGlobKey } from '../lib/changed-coverage';
+import { checkRegression, readRegressionRecords, type RegressionOutcome, regressionMessage, regressionMode } from '../lib/regression';
+import { agentName, ROUTE } from '../lib/routing-policy';
 import { testTypesMode } from '../lib/test-types';
 import { classifyPath } from '../lib/verification-scope';
 import {
@@ -170,6 +172,10 @@ function reasoningGateWindow(): number {
 //   escape 시 지연 모드 마커를 남기고, 섹션이 실제로 인식될 때까지 차단하지 않는다.
 //   인식 성공 = 지연 해소의 증거이므로 그때 마커를 지우고 게이트를 재무장한다.
 const REASONING_DENY_ESCAPE = 3;
+
+/** (I4) A hand-off past the one-hour tier: the layer-1 result sufficed (user-visible, Korean). */
+const RELAXED_NOTE =
+  '[goodboy] 전체 회귀가 1시간을 넘는 프로젝트라 이번 push는 변경 테스트 결과만 확인했어요. 영향받는 테스트 선별은 I5에서 들어와요.';
 
 // v0.26.4 — 상태 파일을 에이전트 스코프로 분리(리뷰 지적): sessionId만으로 키잉하면
 //   서브에이전트의 지연 모드가 메인 게이트까지 무장해제하고, 메인의 섹션 인식이
@@ -769,6 +775,7 @@ function main(): void {
       //   env GOODBOY_PUSH_TEST_GATE=on|warn|off (default on). Fails closed in a subagent.
       if (envStr('GOODBOY_PUSH_TEST_GATE', 'on') !== 'off' && (toolName === 'Bash' || toolName === 'Skill')) {
         const warnOnly = envStr('GOODBOY_PUSH_TEST_GATE', 'on') === 'warn';
+        const regMode = regressionMode();
         const inSubagent = !!input.agent_type;
         try {
           const handoffs =
@@ -781,21 +788,54 @@ function main(): void {
                 : [];
           if (handoffs.length > 0) {
             const results = findRecentTestFiles(resolvePath(cwd, '.claude', 'tests'), envInt('GOODBOY_TEST_WINDOW_MIN', 1440));
+            // One tree hash per revision for both checks: a deploy hashes the whole working tree,
+            //   and two hashes could overrun the hook timeout (I4 review).
+            const trees = new Map<string, string | null>();
+            const treeOf = (c: string, rev: string): string | null => {
+              const k = `${c}\0${rev}`;
+              if (!trees.has(k)) trees.set(k, revisionTree(c, rev));
+              return trees.get(k)!;
+            };
             for (const h of handoffs) {
-              const o = checkHandoff(h, results);
-              if (o.ok) continue;
+              const o = checkHandoff(h, results, treeOf);
+              // (I4, lib/regression.ts) Then a full regression goodboy ran on each tree handed off,
+              //   from this session's records only (another checkout's are not guarded).
+              let reg: Extract<RegressionOutcome, { ok: false }> | null = null;
+              if (o.ok && regMode !== 'off') {
+                const records = readRegressionRecords(cwd);
+                let relaxed = false;
+                for (const rev of h.revs) {
+                  const tree = treeOf(h.cwd, rev);
+                  const r = tree === null ? ({ ok: false, why: 'none', rev, tree: '' } as const) : checkRegression(rev, tree, records);
+                  if (!r.ok) {
+                    reg = r;
+                    break;
+                  }
+                  relaxed ||= r.relaxed === true;
+                }
+                if (relaxed && reg === null) preWarnings.push(RELAXED_NOTE);
+              }
+              if (o.ok && reg === null) continue;
+              // Warn mode never uses the user's one-use marker, and lets the other hand-offs be checked.
+              if (reg !== null && regMode === 'warn') {
+                logGate(sessionId, 'push-test', 'warn', `regression-${reg.why} ${h.what}`);
+                preWarnings.push(`${regressionMessage(h.what, reg, CLI_PATH, agentName(ROUTE.test))} (push regression check, warn mode)`);
+                continue;
+              }
               const marker = approvalMarkerPath(cwd, 'push-test', sessionId);
               if (!inSubagent && userMarkerPresent(sessionId, marker, input.tool_use_id)) {
                 pendingPushTestApproval = { markerPath: marker, what: h.what };
                 break;
               }
-              const msg = pushTestMessage(h.what, o);
+              const failed = o.ok ? null : o;
+              const msg = reg !== null ? regressionMessage(h.what, reg, CLI_PATH, agentName(ROUTE.test)) : pushTestMessage(h.what, failed!);
+              const why = reg !== null ? `regression-${reg.why}` : failed!.why;
               if (warnOnly) {
-                logGate(sessionId, 'push-test', 'warn', `${o.why} ${h.what}`);
-                preWarnings.push(`${msg} (push test check, warn mode)`);
+                logGate(sessionId, 'push-test', 'warn', `${why} ${h.what}`);
+                preWarnings.push(`${msg} (${reg !== null ? 'push regression check' : 'push test check'}, warn mode)`);
                 break;
               }
-              logGate(sessionId, 'push-test', 'deny', `${o.why} ${h.what}`);
+              logGate(sessionId, 'push-test', 'deny', `${why} ${h.what}`);
               ensureApprovalDir(cwd);
               emit({
                 ...deny(inSubagent ? `${msg} Agents never hand off untested work: return BLOCKED.` : msg),
@@ -803,9 +843,9 @@ function main(): void {
                   ? {}
                   : {
                       systemMessage:
-                        `[goodboy] 통과한 테스트 결과 없이 ${h.what}을(를) 하려는 걸 막았어요` +
-                        (o.why === 'blocked' ? `(테스트를 실행하지 못함: ${o.blocked?.blocked?.reason ?? ''})` : '') +
-                        `. 테스트 없이 보내려면 \`! touch ${approvalMarkerRelPath('push-test', sessionId)}\`(이번 한 번)을 실행하거나 GOODBOY_PUSH_TEST_GATE=off로 끄세요.`,
+                        `[goodboy] ${reg !== null ? '통과한 전체 회귀 기록' : '통과한 테스트 결과'} 없이 ${h.what}을(를) 하려는 걸 막았어요` +
+                        (failed?.why === 'blocked' ? `(테스트를 실행하지 못함: ${failed.blocked?.blocked?.reason ?? ''})` : '') +
+                        `. 테스트 없이 보내려면 \`! touch ${approvalMarkerRelPath('push-test', sessionId)}\`(이번 한 번)을 실행하거나 ${reg !== null ? 'GOODBOY_PUSH_REGRESSION' : 'GOODBOY_PUSH_TEST_GATE'}=off로 끄세요.`,
                     }),
               });
               return;

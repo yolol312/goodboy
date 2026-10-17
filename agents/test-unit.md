@@ -34,5 +34,12 @@ catch it breaking again.
    checks it); for a line that did not, go back to step 2.
 4. record-tests, last: every suite with `type` and `duration_ms`.
 
+## Full regression (before a push)
+When the prompt or a push check asks for it: `bun "$GB/lib/cli.ts" regression` from the repo.
+goodboy picks the whole-suite command, runs it, times it and records it with the tree; you
+pass nothing. A long suite: run it in the background and wait for it. A failure goes in your
+hand-back for the main session (never weaken or skip a test to pass); no command found: record
+a `blocked` result with the CLI's output.
+
 ## Hand-back
 The follow-agent-rules block; `artifacts` is the test JSON path and the test files.

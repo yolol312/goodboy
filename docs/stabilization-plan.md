@@ -1028,7 +1028,7 @@ Consequences for the design:
 | I1b | #7 | Bounded verification for document changes: guidance (§15.4) |
 | I2 | #3 | Every acceptance criterion has a test; a document check never satisfies a product criterion (§15.4) |
 | I3 | #4 | Test types complete per change kind; several types go to test-lead. Also the change classifier and the review dimensions per change (§15.4). Done: I3a 6b26102, I3b (§15.6) |
-| I4 | #5 | Full regression on the pushed tree before a push |
+| I4 | #5 | Full regression on the pushed tree before a push (§15.7) |
 | I5 | #6 | Existing tests that cover the change run with it; weakening a test is a finding |
 
 Each step: tests first, the §14.7a review sizing, a /verify probe per new rule, README
@@ -1330,6 +1330,59 @@ I3b: the test types.
   - The agents: test-unit labels a suite `integration` only when it runs the real boundary;
     record-tests says the gate counts types per file; the reviewer's hallucination pass checks
     suite labels against the test files.
+
+### 15.7 I4 (#5): full regression before a push
+
+The push test check (track G, `lib/push-test.ts`) already needs a passing layer-1 result for
+the exact tree handed off. That result proves the change's own tests; I4 adds the rest of the
+suite (§15.1, guarantee 4).
+
+- `cli.ts regression` (`lib/regression.ts`): goodboy, not the agent, picks the project's whole
+  test command from the repo top, runs it, times it and records it with the tree it ran on:
+  - commands, every ecosystem found: package.json `scripts.test:all`, else `scripts.test`
+    (npm's exact "no test specified" placeholder is none), run by the lockfile's package
+    manager (bun, pnpm, yarn, else npm), then a `test:e2e`, `e2e` or `test-e2e` script; pytest
+    (`pytest.ini`, `conftest.py`, `tox.ini`, `[tool.pytest` in pyproject.toml); `go test ./...`;
+    `cargo test`; a Makefile `test` target only when nothing else is found. All commands run,
+    through `sh -c`, each with its exit code, the program it resolved to on PATH (evidence), its
+    time to exit, and the last 6000 characters of stdout and 2000 of stderr. After a command
+    exits its pipes are read 2 s longer, so a background child neither holds the run nor
+    stretches its time; a command still running at `--timeout-min` (default 180, at most a
+    day) is killed and
+    fails (124). None found: the CLI says so, nothing is recorded, and the agent records a
+    `blocked` result for the user.
+  - the record (`.claude/tests/regression/<ts>.json` under the CLI's cwd, like `test-write`;
+    the newest 20 kept; outside the layer-1 records the Stop reads): HEAD and the working tree
+    hash when the run started (`workTreeState`), the tree when it ended, the source, the runs,
+    the total time, the verdict. A run that changed the working tree fails and lists the
+    changed files: it proves neither tree (review: a file present only during the run).
+  - Only test agents run it: the result guard counts it with `test-write`, and so does a
+    command with a JS runtime that names `writeRegressionRecord` or `lib/regression` anywhere
+    (a variable, a heredoc). The agent passes nothing but the call (a timeout
+    can only make a run fail).
+- The push check: after the layer-1 check passes for a hand-off, each revision's tree needs a
+  passing regression record of that tree (every run exited 0, the tree unchanged at the end),
+  read from the session's cwd only (review high: a forged record in another worktree passed a
+  `git -C <worktree> push`). Otherwise the hand-off is denied with what to run, or with the
+  failing command and its output tail. Each revision is hashed once for both checks (a deploy
+  hashes the whole working tree; two hashes could overrun the hook timeout). The user's
+  one-use push-test marker covers it; warn mode never uses the marker and goes on to the next
+  hand-off. `GOODBOY_PUSH_REGRESSION=on` (default) | `warn` | `off` (off in tests/setup.ts);
+  `GOODBOY_PUSH_TEST_GATE=off` turns off both.
+- The one-hour tier (§15.1, H6): when the newest passing regression goodboy timed (any tree)
+  took over an hour, the layer-1 result suffices and the user is told once per hand-off. A
+  failing run proves no length (a crafted command could sleep). I5 will replace this with the
+  affected tests.
+- Known limits (the same-user limits of §10.10): the whole-suite command comes from the repo's
+  own files, which the model can edit (a changed `scripts.test` is part of the diff the review
+  sees, and of the tree handed off, except for the one-hour tier: a passing run of a
+  temporarily slowed script, reverted afterwards, relaxes later pushes and is in neither);
+  the run inherits the caller's environment, so a PATH that
+  puts a fake runner first records a pass (the resolved `program` shows it); a copied or
+  symlinked CLI under another name, or code read from a file at run time (`bun -e "$(cat
+  x)"`), is not recognized as a result write; killing `sh` at the
+  timeout may leave its children running. No user override of the command yet. A suite longer
+  than the agent's Bash timeout runs in the background (agents/test-unit.md).
 
 ## 16. J — Field reports (v0.34.0)
 

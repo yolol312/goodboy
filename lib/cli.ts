@@ -21,7 +21,8 @@ import type {
   TestVerdict,
   Verdict,
 } from './types';
-import { workTreeState } from './push-test';
+import { topOf, treeDiff, workTreeState } from './push-test';
+import { DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, outputSummary, type RegressionRecord, regressionCommands, runCommands, writeRegressionRecord } from './regression';
 import { diffCoverageOf } from './diff-coverage';
 import { criteriaNow } from './session-criteria';
 import { requiresMutationProbe } from './test-validator';
@@ -611,6 +612,58 @@ async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
   }
 }
 
+// ---- command: regression (track I, I4) ----
+
+/** `regression [--timeout-min <n>]`: runs the project's whole test command from the repo top
+ *  and records it under the cwd (lib/regression.ts). The agent supplies nothing but the call
+ *  (a timeout can only make a run fail): goodboy picks the commands, times them and takes the
+ *  tree. A run that changes the working tree fails. Exit 0 on a pass, 1 otherwise. */
+async function cmdRegression(cwd: string, args: string[]): Promise<void> {
+  const t = args.indexOf('--timeout-min');
+  const minutes = t >= 0 ? Number(args[t + 1]) : NaN;
+  const timeoutMs = Number.isFinite(minutes) && minutes > 0 ? Math.min(minutes * 60_000, MAX_TIMEOUT_MS) : DEFAULT_TIMEOUT_MS;
+  const top = topOf(cwd);
+  if (top === null) fail('regression: not inside a git repository; the push check compares git trees.');
+  const found = regressionCommands(top);
+  if (found === null) {
+    fail(
+      'regression: goodboy found no whole-suite test command (package.json scripts.test or scripts.test:all, ' +
+        'pytest, go.mod, Cargo.toml, a Makefile test target). Record a `blocked` result with this output and tell the user.',
+    );
+  }
+  const before = workTreeState(top);
+  if (before.tree === null) fail('regression: git could not hash the working tree.');
+  const timestamp = new Date().toISOString();
+  const t0 = Date.now();
+  const runs = await runCommands(top, found.commands, timeoutMs);
+  const after = workTreeState(top);
+  const changed = after.tree !== before.tree;
+  const rec: RegressionRecord = {
+    timestamp,
+    commit: before.commit,
+    tree: before.tree,
+    tree_after: after.tree,
+    ...(changed ? { changed_files: (after.tree ? (treeDiff(top, before.tree, after.tree) ?? []) : []).slice(0, 50) } : {}),
+    source: found.source,
+    runs,
+    duration_ms: Date.now() - t0,
+    verdict: runs.every((r) => r.exit_code === 0) && !changed ? 'pass' : 'fail',
+  };
+  const path = writeRegressionRecord(cwd, rec);
+  process.stdout.write(
+    JSON.stringify({ ok: rec.verdict === 'pass', path, verdict: rec.verdict, source: rec.source, commands: found.commands, duration_ms: rec.duration_ms, tree: rec.tree }) + '\n',
+  );
+  const bad = runs.find((r) => r.exit_code !== 0);
+  if (bad) process.stderr.write(`regression failed: \`${bad.command}\` exited ${bad.exit_code}\n${outputSummary(bad.output_tail, 1500, 500)}\n`);
+  if (changed) {
+    process.stderr.write(
+      `regression failed: the run changed the working tree (${(rec.changed_files ?? []).slice(0, 10).join(', ') || 'unknown files'}), ` +
+        'so it proves neither tree. Ignore what the tests generate (e.g. coverage/) or commit it, then run again.\n',
+    );
+  }
+  if (rec.verdict !== 'pass') process.exit(1);
+}
+
 // ---- command: diff-coverage ----
 
 /** `diff-coverage <report> [--base <rev>|empty]`: changed lines a coverage report saw executed. */
@@ -723,7 +776,7 @@ async function cmdSkillGap(cwd: string, args: string[]): Promise<void> {
 
 const USAGE =
   '사용법: bun lib/cli.ts <command> [args...]\n' +
-  '명령: review-write | test-write | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog';
+  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog';
 
 async function main(): Promise<void> {
   const cwd = process.cwd();
@@ -741,6 +794,9 @@ async function main(): Promise<void> {
         break;
       case 'test-write':
         await cmdTestWrite(cwd, args);
+        break;
+      case 'regression':
+        await cmdRegression(cwd, args);
         break;
       case 'acceptance-list':
         cmdAcceptanceList(cwd);

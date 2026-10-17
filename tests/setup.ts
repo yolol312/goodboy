@@ -27,3 +27,8 @@ process.env.GOODBOY_DIFF_COVERAGE = 'off';
 // The test-type rule (track I, I3b) asks boundary and UI code for typed suites, which the older
 // layer-1 fixtures do not have. Off for the suite; tests/i3b-test-types.test.ts turns it on.
 process.env.GOODBOY_TEST_TYPES = 'off';
+
+// The push regression check (track I, I4) asks a hand-off for a full regression goodboy ran,
+// which the older push test fixtures do not have. Off for the suite; tests/i4-regression.test.ts
+// turns it on.
+process.env.GOODBOY_PUSH_REGRESSION = 'off';

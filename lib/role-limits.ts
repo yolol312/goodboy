@@ -149,7 +149,16 @@ const UNREADABLE = /[$`*?[]/;
  *  project's own `bun src/cli.ts --help` are no result writes). The script is a `lib/cli.ts`
  *  path, or a variable or glob (`bun "$C" …`, `bun lib/cli.t[s] …`) that may be one. */
 export function resultCliWrite(command: string): 'test' | 'review' | 'unknown' | null {
-  for (const words of commandSegments(command)) {
+  // (I4) A JS runtime that calls the regression record writer or loads lib/regression itself
+  //   records a test result as much as the CLI does, wherever the name sits in the command (a
+  //   variable, a heredoc fed to `bun -`); a grep or a commit message naming it, with no JS
+  //   runtime, does not (round-2 review, closing check). Code read from a file at run time
+  //   (`bun -e "$(cat x)"`) is a same-user limit (plan §15.7).
+  const segments = commandSegments(command);
+  if (/\bwriteRegressionRecord\b|\blib\/regression(?:\.ts)?\b/.test(command) && segments.some((w) => JS_RUNTIMES.test(basename(w[0] ?? '')))) {
+    return 'test';
+  }
+  for (const words of segments) {
     const prog = basename(words[0] ?? '');
     let at = -1;
     if (/(?:^|\/)lib\/cli\.ts$/.test(plainWord(words[0] ?? ''))) at = 0; // run as an executable
@@ -166,7 +175,8 @@ export function resultCliWrite(command: string): 'test' | 'review' | 'unknown' |
     }
     if (at < 0) continue;
     const rest = words.slice(at + 1);
-    if (rest.includes('test-write')) return 'test';
+    // `regression` (I4) records the full regression run, a test result too.
+    if (rest.includes('test-write') || rest.includes('regression')) return 'test';
     if (rest.includes('review-write')) return 'review';
     // A literal subcommand (`review-axes`, `--help`) is no result write; one built at run time
     //   (`${k}-write`, `$(printf 'test-%s' write)`) cannot be read.

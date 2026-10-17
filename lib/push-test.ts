@@ -50,7 +50,7 @@ export interface Handoff {
 export const WORKTREE = ':worktree';
 
 /** A git object id as stored by test-write; anything else is never passed to git. */
-const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+export const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 
 /** Runs git with a time limit: a stalled git (a hung network mount, a slow fsmonitor) fails
  *  the call, so a hand-off check denies instead of being cancelled by the hook timeout. It
@@ -73,7 +73,7 @@ function git(cwd: string, args: string[], env: Record<string, string> = {}, time
 }
 
 /** The repo's top directory in cwd's own spelling, or null outside a repo. */
-function topOf(cwd: string): string | null {
+export function topOf(cwd: string): string | null {
   const cdup = git(cwd, ['rev-parse', '--show-cdup']);
   return cdup === null ? null : resolvePath(cwd, cdup || '.');
 }
