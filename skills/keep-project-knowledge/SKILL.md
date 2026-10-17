@@ -35,6 +35,8 @@ Keep the project's knowledge files true, so the next session starts with them.
    ```
    `ai` when evidence can decide the check; otherwise, or unsure, `human`. A new or changed
    `test:` line makes the test gate ask for a test with the id `POL-<id>` in that session.
+   Never write the user's glob lines (`coverage-exempt:`, `static-preview:`): only the user
+   adds them to a `human` entry, and they count from the next session.
 3. Ask the user once, batched in Korean, about every `human` entry and every unknown; record
    the answers as the entries' text and source.
 4. Write `.goodboy/docs.json`: `{"docs": [{"path": ".goodboy/policy.md", "session_start": true,

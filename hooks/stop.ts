@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // Stop hook — 턴 증가, 리뷰 강제/검증, 재시도 카운터, 커서/차원 검사
 
-import { isAbsolute, relative, resolve as resolvePath, sep } from 'node:path';
+import { relative, resolve as resolvePath } from 'node:path';
 import type {
   AcceptanceProblem,
   AcceptanceReading,
@@ -16,7 +16,8 @@ import { agentName, ROUTE } from '../lib/routing-policy';
 import { projectMode } from '../lib/project-mode';
 import { knowledgeRoot, readDocMap } from '../lib/project-knowledge';
 import { staleDocs, staleDocsReason, type StaleDoc } from '../lib/doc-map';
-import { changedLineGaps, changedLineReason, diffCoverageMode, repoTop, sessionCoverageStart } from '../lib/changed-coverage';
+import { changedLineGaps, changedLineReason, diffCoverageMode, repoTop, sessionCoverageStart, sessionUserGlobs } from '../lib/changed-coverage';
+import { needsTests } from '../lib/verification-scope';
 import { documentChangeNote, isDocumentChange } from '../lib/doc-verification';
 import { productEvidenceProblems, sessionCriteria } from '../lib/session-criteria';
 import {
@@ -35,7 +36,6 @@ import {
   extractRecentUserTexts,
   assistantTextFreshness,
   gateMessage,
-  isDocFile,
   isGateMessage,
   hallucinatedCitations,
   hasAnyReadRecords,
@@ -68,7 +68,6 @@ import {
   getEditsWithLastTimestampSince,
   hasReasoningSection,
   incrementTurn,
-  isTestFile,
   logGate,
   parseReasoningSection,
   readGateLog,
@@ -86,7 +85,6 @@ import {
   writeStatusSnapshot,
   effortNotice,
   hasRepeatedBlock,
-  isDocPath,
   readLastAdvice,
   recommendEffort,
   writeLastAdvice,
@@ -577,19 +575,31 @@ function acceptanceFor(cwd: string): AcceptanceReading {
  * Both checks see the path below `cwd` only. On the absolute path, a repo that lives under
  * a tests/ or spec/ directory made every file a "test file" and silently turned layer 1
  * off (layer-1 test run).
+ *
+ * (I3a) Documents and static previews by the one classifier (lib/verification-scope.ts);
+ * code and prototypes under docs/ need tests.
  */
-function needsTestCoverage(file: string, cwd: string): boolean {
-  const rel = relative(resolvePath(cwd), file);
-  const scoped = rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel) ? rel : file;
-  // isDocPath (extension, or anything under docs/) is the rule the skill rule and role limits
-  //   use; with no count-based escape, a docs/diagram.svg edit must not demand a test forever.
-  return !isTestFile(scoped) && !isDocFile(scoped) && !isDocPath(scoped.split(sep).join('/'));
+function needsTestCoverage(file: string, cwd: string, sessionId: string): boolean {
+  const s = scopeOf(sessionId, cwd);
+  return needsTests(file, s.top, s.previews);
+}
+
+/** (I3a) The repo top and the user's static-preview globs pinned at the session start, read
+ *  once per Stop. Paths are classed relative to the top, as the coverage exemptions are. */
+let scopeRead: { sessionId: string; top: string; previews: string[] } | null = null;
+function scopeOf(sessionId: string, cwd: string): { top: string; previews: string[] } {
+  if (scopeRead?.sessionId !== sessionId) {
+    const top = repoTop(cwd);
+    scopeRead = { sessionId, top, previews: sessionUserGlobs(sessionId, cwd, top, 'static-preview') };
+  }
+  return scopeRead;
 }
 
 /** (I1b) The document note after a review-gate message, with its separating space; empty
  *  when the change is not a document change (lib/doc-verification.ts). */
-function withDocNote(files: string[], cwd: string): string {
-  const note = documentChangeNote(files, resolvePath(cwd));
+function withDocNote(files: string[], cwd: string, sessionId: string): string {
+  const s = scopeOf(sessionId, cwd);
+  const note = documentChangeNote(files, s.top, s.previews);
   return note ? ` ${note}` : '';
 }
 
@@ -769,14 +779,14 @@ function tryAcceptPendingTest(sessionId: string, cwd: string): boolean {
   try {
     const cursor = readTestCursor(cwd, sessionId);
     const cursorTurn = cursor ? cursor.turn : 0;
-    const recentEdits = getEditsSince(sessionId, cursorTurn, cwd).filter((f) => needsTestCoverage(f, cwd));
+    const recentEdits = getEditsSince(sessionId, cursorTurn, cwd).filter((f) => needsTestCoverage(f, cwd, sessionId));
     if (recentEdits.length === 0) return false;
     const acceptance = acceptanceFor(cwd);
     if (!testGateActive(cwd, acceptance, sessionId).active) return false;
     const results = findRecentTestFiles(resolvePath(cwd, '.claude', 'tests'), testWindowMinutes());
     if (results.length === 0) return false;
     const changedEdits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd).filter((e) =>
-      needsTestCoverage(e.file, cwd),
+      needsTestCoverage(e.file, cwd, sessionId),
     );
     const ev = evaluateTestResults(results, changedEdits, acceptance, cwd, sessionId);
     if (ev.kind === 'block') return false;
@@ -816,7 +826,7 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
     const cursor = readTestCursor(cwd, sessionId);
     const cursorTurn = cursor ? cursor.turn : 0;
     // 문서·테스트 파일만 바뀐 턴은 층1의 관심사가 아니다 — 요구해도 해소할 방법이 없다.
-    const recentEdits = getEditsSince(sessionId, cursorTurn, cwd).filter((f) => needsTestCoverage(f, cwd));
+    const recentEdits = getEditsSince(sessionId, cursorTurn, cwd).filter((f) => needsTestCoverage(f, cwd, sessionId));
     if (recentEdits.length === 0) {
       statusSnapshot.testPending = false;
       return null;
@@ -885,7 +895,7 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
     //   된다(라이브 실측: `tests/hello.test.ts` 가 "테스트되지 않은 변경 파일"로 잡혔다).
     //   문서도 같은 이유로 뺀다(라이브 실측: README.md 등 5개를 요구했다).
     const changedEdits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd).filter((e) =>
-      needsTestCoverage(e.file, cwd),
+      needsTestCoverage(e.file, cwd, sessionId),
     );
     const ev = evaluateTestResults(results, changedEdits, acceptance, cwd, sessionId);
     if (ev.kind === 'block') return block(ev.reason);
@@ -1220,7 +1230,8 @@ function main(): void {
           const last = readLastAdvice(sessionId);
           const reviewCursor = readReviewCursor(cwd, sessionId);
           const changed = getEditsSince(sessionId, reviewCursor ? reviewCursor.turn : 0, cwd);
-          const docOnly = isDocumentChange(changed, resolvePath(cwd));
+          const scope = scopeOf(sessionId, cwd);
+          const docOnly = isDocumentChange(changed, scope.top, scope.previews);
           const category = st?.category ?? null;
           const advice = recommendEffort({
             current,
@@ -1540,7 +1551,7 @@ function main(): void {
               `Run \`bun "${CLI_PATH}" review-axes <files>\`: its plan says whether one ` +
               `${agentName(ROUTE.review)} covers every axis (a small diff) or one runs per axis (or use /request-review).` +
               // (I1b) A document change: its class, budget and guidance.
-              withDocNote(recentEdits, cwd),
+              withDocNote(recentEdits, cwd, sessionId),
             'review',
             '',
             count,
@@ -1583,7 +1594,7 @@ function main(): void {
                     `${agentName(ROUTE.review)} with \`mode: delta\` and these files; it reads the newest review that lists them ` +
                     `and checks only what changed since, on every dimension \`bun "${CLI_PATH}" review-axes <files>\` lists for them.`
                   : `Run the review again (\`bun "${CLI_PATH}" review-axes <files>\` gives the plan, or /request-review).`) +
-                withDocNote(recentEdits, cwd),
+                withDocNote(recentEdits, cwd, sessionId),
               'review',
               '',
               count,

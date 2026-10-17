@@ -424,12 +424,13 @@ describe('end to end', () => {
     expect(out.criteria.map((c) => c.id)).not.toContain('REQ-2');
   });
 
-  test('AC-9: SessionStart pins the criteria, also with the changed-line rule off (which pins no coverage start)', async () => {
+  // I3a: the coverage pin is written with the rule off too: it holds the static-preview globs.
+  test('AC-9: SessionStart pins the criteria and the user globs, also with the changed-line rule off', async () => {
     const d = devCycleRepo(reqs([[1, '내보내기', '구현중'], [2, '알림', '구현완료']]));
     const r = rig(d);
     await r.run('session-start', { hook_event_name: 'SessionStart', source: 'startup' }, { GOODBOY_DIFF_COVERAGE: 'off' });
     const dir = join(r.box, `goodboy-session-${r.s}`);
-    expect(existsSync(join(dir, 'coverage-pin.json'))).toBe(false);
+    expect(existsSync(join(dir, 'coverage-pin.json'))).toBe(true);
     expect(existsSync(join(dir, 'criteria-pin.json'))).toBe(true);
     const pin = JSON.parse(readFileSync(join(dir, 'criteria-pin.json'), 'utf8')) as { rows: { rank: string; title: string; status: string }[] };
     expect(pin.rows).toEqual([

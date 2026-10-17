@@ -146,22 +146,6 @@ export function isTestFile(filePath: string): boolean {
   return false;
 }
 
-/**
- * 문서 파일인가 — 층1 커버리지 요구 대상에서 뺀다.
- *
- * README를 단위 테스트할 수는 없다. 그런데 층1은 `isTestFile` 제외만 넣고 문서를
- * 빠뜨려서, 문서만 고친 턴에도 "테스트되지 않은 변경 파일"로 차단했다(실측:
- * README.md·agents/*.md·skills/*.md 5개를 요구). 해소할 방법이 없으니 3회 차단 후
- * escape로만 끝나는, 게이트의 최악 결말이다.
- *
- * 추론 게이트가 문서를 면제하는 근거와 같다(`GOODBOY_REASONING_DOC_EXEMPT`):
- * 실익은 낮은데 마찰은 코드와 동일하다. 확장자 목록도 그쪽과 맞춘다.
- */
-export function isDocFile(filePath: string): boolean {
-  if (typeof filePath !== 'string' || filePath === '') return false;
-  const f = filePath.split('\\').join('/').toLowerCase();
-  return /\.(md|markdown|mdx|txt|rst|adoc|asciidoc)$/.test(f);
-}
 
 /**
  * 이 저장소에 **테스트를 돌릴 수단이 있는가**.

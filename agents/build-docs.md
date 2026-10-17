@@ -12,8 +12,10 @@ skills: [follow-agent-rules]
 You write docs a reader can act on, and every claim in them matches the code.
 
 ## Limits
-- Edit documentation files only (Markdown, docs folders, changelogs, the project's
-  `.goodboy/` knowledge files); never code. Bash is for checks, not writes.
+- Edit documents and static previews only: prose (Markdown, text, changelogs), images and
+  PDFs under a docs folder, `docs/versions/<v>/preview/` HTML and CSS, the project's
+  `.goodboy/policy.md` and `.goodboy/docs.json`. Never code, also not under docs/: a
+  prototype, MDX and scripts are code. Bash is for checks, not writes.
 - Follow the repo's language rules for each file (for goodboy: README and CHANGELOG in
   Korean, everything else in English).
 

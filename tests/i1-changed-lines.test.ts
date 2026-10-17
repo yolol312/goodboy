@@ -10,7 +10,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
-  addedExemptions,
+  addedUserGlobs,
   changedLineGaps,
   changedLineReason,
   coverageExemptions,
@@ -715,11 +715,12 @@ describe('exemptions', () => {
     expect(isPolicyFile('/r/.goodboy/hosts')).toBe(false);
   });
 
-  test('addedExemptions: new human globs only', () => {
-    expect(addedExemptions(policy('a/**'), policy('a/**, b/**'))).toEqual(['b/**']);
-    expect(addedExemptions('', policy('**'))).toEqual(['**']);
-    expect(addedExemptions(policy('a/**'), policy('a/**') + '\nmore text\n')).toEqual([]);
-    expect(addedExemptions(policy('a/**').replace('human', 'ai'), policy('a/**'))).toEqual(['a/**']); // ai → human
+  test('addedUserGlobs: new human coverage exemptions only', () => {
+    const added = (before: string, after: string) => addedUserGlobs(before, after).map((a) => `${a.key}: ${a.glob}`);
+    expect(added(policy('a/**'), policy('a/**, b/**'))).toEqual(['coverage-exempt: b/**']);
+    expect(added('', policy('**'))).toEqual(['coverage-exempt: **']);
+    expect(added(policy('a/**'), policy('a/**') + '\nmore text\n')).toEqual([]);
+    expect(added(policy('a/**').replace('human', 'ai'), policy('a/**'))).toEqual(['coverage-exempt: a/**']); // ai → human
   });
 
   test('textAfterEdit inserts new_string as it is', () => {

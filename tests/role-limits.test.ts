@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { roleOf } from '../lib/routing-policy';
-import { isDocPath, isTestPath, projectRelative, skillDenial, writeDenial } from '../lib/role-limits';
+import { isTestPath, projectRelative, skillDenial, writeDenial } from '../lib/role-limits';
+import { classifyPath } from '../lib/verification-scope';
 
 // Track G role limits. Roles come from the table by name; the expectations are literal.
 
@@ -30,10 +31,10 @@ describe('test and doc paths', () => {
     }
   });
 
-  test('doc files', () => {
-    expect(isDocPath('README.md')).toBe(true);
-    expect(isDocPath('docs/guide/setup.png')).toBe(true);
-    expect(isDocPath('src/a.ts')).toBe(false);
+  test('doc files (the I3a classifier)', () => {
+    expect(classifyPath('README.md')).toBe('document');
+    expect(classifyPath('docs/guide/setup.png')).toBe('document');
+    expect(classifyPath('src/a.ts')).toBe('code');
   });
 });
 

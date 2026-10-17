@@ -13,7 +13,6 @@ import {
   evidenceProblems,
   failingSuites,
   findRecentTestFiles,
-  isDocFile,
   isTestFile,
   missingTestFiles,
   requiresMutationProbe,
@@ -23,6 +22,7 @@ import {
   validateEvidence,
   validateTestCoverage,
 } from '../lib/test-validator';
+import { classifyPath } from '../lib/verification-scope';
 
 const sandboxes: string[] = [];
 function newSandbox(): string {
@@ -344,30 +344,24 @@ describe('isTestFile — 테스트 파일은 커버리지 요구 대상이 아�
 // 라이브 실측: 문서만 고친 턴에 층1이 README.md·agents/*.md·skills/*.md 5개를 두고
 // "테스트되지 않은 변경 파일"로 차단했다. README를 단위 테스트할 수는 없으니 해소
 // 방법이 없고, 3회 차단 후 escape로만 끝난다 — 게이트의 최악 결말이다.
-describe('isDocFile — 문서는 커버리지 요구 대상이 아니다', () => {
-  test('문서 확장자를 인식한다 (추론 게이트의 면제 목록과 동일)', () => {
-    for (const f of [
-      'README.md',
-      'docs/GUIDE.markdown',
-      'site/page.mdx',
-      'notes.txt',
-      'doc.rst',
-      'a.adoc',
-      'b.asciidoc',
-    ]) {
-      expect(isDocFile(f)).toBe(true);
+// I3a: the rule is the one classifier (lib/verification-scope.ts); MDX is code now (it holds
+//   components).
+describe('documents need no coverage (classifyPath)', () => {
+  test('prose extensions are documents', () => {
+    for (const f of ['README.md', 'docs/GUIDE.markdown', 'notes.txt', 'doc.rst', 'a.adoc', 'b.asciidoc']) {
+      expect([f, classifyPath(f)]).toEqual([f, 'document']);
     }
   });
 
-  test('대소문자를 가리지 않는다', () => {
-    expect(isDocFile('README.MD')).toBe(true);
+  test('letter case does not matter', () => {
+    expect(classifyPath('README.MD')).toBe('document');
   });
 
-  test('소스는 문서가 아니다', () => {
-    expect(isDocFile('src/a.ts')).toBe(false);
-    expect(isDocFile('lib/readme.ts')).toBe(false); // 이름에 readme가 들어갈 뿐
-    expect(isDocFile('mdx.ts')).toBe(false); // 확장자가 아니라 이름에 mdx
-    expect(isDocFile('')).toBe(false);
+  test('source is not a document', () => {
+    expect(classifyPath('src/a.ts')).toBe('code');
+    expect(classifyPath('lib/readme.ts')).toBe('code'); // readme is only in the name
+    expect(classifyPath('mdx.ts')).toBe('code'); // mdx is the name, not the extension
+    expect(classifyPath('site/page.mdx')).toBe('code');
   });
 });
 

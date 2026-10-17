@@ -8,6 +8,8 @@
 // 의도적으로 단순하게 유지한다 — 오탐(필요 없는 차원 요구)은 retry-cap escape로
 // 영구 차단되지 않고, 미탐(필요한데 안 잡음)이 더 위험하므로 넓게 잡는다.
 
+import { classifyPath, isRequirementsDoc } from './verification-scope';
+
 export type ReviewDimension =
   | 'ui-ux-accessibility'
   | 'plan-completeness'
@@ -177,10 +179,11 @@ function looksLikeAuthSurface(lower: string): boolean {
   ]);
 }
 
-/** 의존성 매니페스트/락파일. 경로의 마지막 조각(파일명)으로만 판정한다. */
+/** 의존성 매니페스트/락파일. 경로의 마지막 조각(파일명)으로만 판정한다.
+ *  (I3a) Every `requirements*.txt` and `constraints*.txt`, not only `requirements.txt`. */
 function isDependencyManifest(lower: string): boolean {
   const base = lower.split(/[\\/]/).pop() ?? '';
-  return /^(package\.json|package-lock\.json|bun\.lock|bun\.lockb|yarn\.lock|pnpm-lock\.yaml|requirements\.txt|pyproject\.toml|poetry\.lock|go\.mod|go\.sum|cargo\.toml|cargo\.lock|gemfile(\.lock)?)$/.test(
+  return /^(package\.json|package-lock\.json|bun\.lock|bun\.lockb|yarn\.lock|pnpm-lock\.yaml|requirements[^/]*\.txt|constraints[^/]*\.txt|pyproject\.toml|poetry\.lock|go\.mod|go\.sum|cargo\.toml|cargo\.lock|gemfile(\.lock)?)$/.test(
     base,
   );
 }
@@ -221,6 +224,20 @@ export function requiredDimensionsFor(changedFiles: string[]): ReviewDimension[]
   for (const raw of changedFiles) {
     if (typeof raw !== 'string' || raw.trim() === '') continue;
     const lower = raw.toLowerCase();
+
+    // (I3a, plan §15.6) Documents and static previews by the one classifier: requirements
+    //   Markdown needs the plan checked, a preview its presentation (and, for HTML, the
+    //   requirements it states); other documents need no dimension.
+    const scope = classifyPath(raw);
+    if (scope === 'document') {
+      if (isRequirementsDoc(raw)) required.add('plan-completeness');
+      continue;
+    }
+    if (scope === 'preview') {
+      required.add('ui-ux-accessibility');
+      if (/\.html?$/.test(lower)) required.add('plan-completeness');
+      continue;
+    }
 
     if (isFrontendFile(lower)) {
       required.add('ui-ux-accessibility');

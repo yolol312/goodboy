@@ -14,7 +14,7 @@ import { claudeMdNotice } from '../lib/doc-map';
 import { tierAdvice } from '../lib/test-profile';
 import { decisionAuthorityContext } from '../lib/decision-authority';
 import { clearReadRecords } from '../lib/file-tracker';
-import { diffCoverageMode, pinCoverageStart } from '../lib/changed-coverage';
+import { pinCoverageStart } from '../lib/changed-coverage';
 import { pinSessionCriteria } from '../lib/session-criteria';
 
 interface SessionStartInput {
@@ -77,8 +77,9 @@ if (import.meta.main) {
         // …and the project mode its cwd has now (lib/project-mode.ts; not on compact, which
         //   would trust a marker written during the session).
         pinProjectMode(sessionId, input.cwd ?? process.cwd());
-        // …and the coverage exemptions with the start HEAD (I1, lib/changed-coverage.ts).
-        if (diffCoverageMode() !== 'off') pinCoverageStart(sessionId, input.cwd ?? process.cwd());
+        // …and the user's policy globs with the start HEAD (I1, lib/changed-coverage.ts). Pinned
+        //   whatever the changed-line mode: the static previews (I3a) count without it.
+        pinCoverageStart(sessionId, input.cwd ?? process.cwd());
         // …and the requirement rows and policy `test:` lines it starts from (I2).
         pinSessionCriteria(sessionId, input.cwd ?? process.cwd());
       }

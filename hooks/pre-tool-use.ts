@@ -3,7 +3,8 @@
 
 import { existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve as resolvePath, sep } from 'node:path';
-import { addedExemptions, diffCoverageMode, isPolicyFile } from '../lib/changed-coverage';
+import { addedUserGlobs, diffCoverageMode, isPolicyFile } from '../lib/changed-coverage';
+import { classifyPath } from '../lib/verification-scope';
 import {
   appendDispatchLog,
   approvalMarkerPath,
@@ -39,7 +40,6 @@ import {
   hasAssistantMessages,
   hasReasoningSection,
   hasSkillEvidenceSince,
-  isDocPath,
   isGoodboyArtifact,
   isPartialRead,
   isReadOnlyBash,
@@ -693,10 +693,11 @@ function main(): void {
         }
       }
 
-      // (I1) Coverage exemptions are the user's (lib/changed-coverage.ts): an Edit/Write that adds
-      //   a `coverage-exempt` glob to a human policy entry is denied. The gate would ignore it
-      //   anyway (it uses the globs pinned at the session start); this explains it early.
-      if ((toolName === 'Write' || toolName === 'Edit' || toolName === 'MultiEdit') && diffCoverageMode() !== 'off') {
+      // (I1, I3a) The user globs are the user's (lib/changed-coverage.ts): an Edit/Write that adds
+      //   a `coverage-exempt` or `static-preview` glob to a human policy entry is denied. The
+      //   gates would ignore it anyway (they use the globs pinned at the session start); this
+      //   explains it early.
+      if (toolName === 'Write' || toolName === 'Edit' || toolName === 'MultiEdit') {
         const fp = typeof toolInput.file_path === 'string' ? resolvePath(cwd, toolInput.file_path) : '';
         if (fp && isPolicyFile(fp)) {
           let before = '';
@@ -705,13 +706,20 @@ function main(): void {
           } catch {
             // a new file: every glob in it is added
           }
-          const added = addedExemptions(before, textAfterEdit(toolName, toolInput, before));
+          const added = addedUserGlobs(before, textAfterEdit(toolName, toolInput, before)).filter(
+            (a) => a.key !== 'coverage-exempt' || diffCoverageMode() !== 'off',
+          );
           if (added.length > 0) {
-            logGate(sessionId, 'coverage-exempt', 'deny', added.join(', '));
+            const keys = [...new Set(added.map((a) => a.key))];
+            const list = keys.map((k) => `${k}: ${added.filter((a) => a.key === k).map((a) => a.glob).join(', ')}`).join('; ');
+            logGate(sessionId, added[0]!.key, 'deny', list);
+            const why = added.some((a) => a.key === 'coverage-exempt')
+              ? 'Only the user exempts files from the changed-line coverage rule (decision G-exception)'
+              : 'Only the user declares static previews, which need no test';
             emit(
               deny(
-                `Only the user exempts files from the changed-line coverage rule (decision G-exception); this edit adds ${added.join(', ')}. ` +
-                  'Write tests that run the code, or ask the user: they add the `coverage-exempt:` line themselves, and it counts from the next session.',
+                `${why}; this edit adds ${list}. Write tests that run the code, or ask the user: they add the line ` +
+                  'themselves, and it counts from the next session.',
               ),
             );
             return;
@@ -936,7 +944,7 @@ function main(): void {
         if (p) {
           const abs = resolvePath(cwd, p);
           const rel = projectRelative(abs, resolvePath(cwd));
-          if (rel !== null && !isDocPath(rel) && !isGoodboyArtifact(abs)) {
+          if (rel !== null && classifyPath(rel) === 'code' && !isGoodboyArtifact(abs)) {
             const cursor = readReviewCursor(cwd, sessionId);
             const since = cursor ? Date.parse(cursor.timestamp) : 0;
             if (!hasSkillEvidenceSince(sessionId, Number.isFinite(since) ? since : 0)) {
@@ -1271,10 +1279,12 @@ function main(): void {
       // (C0) 문서 파일 면제 (v0.27.0, 실사용 피드백): 문서-only 편집(.md/.txt 등)은
       //   추론 4분류의 실익이 낮은데 게이트 마찰(지연 하니스의 헛 차단)은 코드와 동일하게
       //   발생한다. 기본 면제하고, env GOODBOY_REASONING_DOC_EXEMPT=off로 복원 가능.
-      const editTargetLower = ((toolInput.file_path as string | undefined) ?? '').toLowerCase();
+      //   (I3a) Documents and previews by the one classifier (lib/verification-scope.ts).
+      const editTarget = typeof toolInput.file_path === 'string' ? resolvePath(cwd, toolInput.file_path) : '';
       const reasoningDocExempt =
         isEditTool &&
-        /\.(md|markdown|mdx|txt|rst|adoc|asciidoc)$/.test(editTargetLower) &&
+        editTarget !== '' &&
+        classifyPath(projectRelative(editTarget, resolvePath(cwd)) ?? editTarget) !== 'code' &&
         envStr('GOODBOY_REASONING_DOC_EXEMPT', 'on') !== 'off';
 
       // (C) 추론 게이트

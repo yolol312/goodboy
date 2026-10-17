@@ -1183,8 +1183,8 @@ Every acceptance criterion a session works on has a test (`lib/session-criteria.
   Stop runs removes the `criteria-seen.json` (or cursor) that Stop first writes, as created,
   as the mtime rule did; an unreadable UIUX.md or prototype warns (F2), it does not block;
   UIUX and prototype criteria are not pinned, so editing those documents can still drop them.
-- Older than I2, found by its round-4 security review, left to a separate issue (the track G
-  state guard): the session files besides the cursors, evidence logs and pins are outside the
+- Older than I2, found by its round-4 security review, left to a separate issue (#12, the
+  track G state guard): the session files besides the cursors, evidence logs and pins are outside the
   name-based removal and the regular-file reads (`turn.txt` is not guarded at all; a
   directory at `edits.jsonl` before the first edit; a FIFO at a file a hook reads hangs every
   Stop); a Stop restores the snapshot of a Bash call that is still running (a background
@@ -1205,6 +1205,103 @@ Every acceptance criterion a session works on has a test (`lib/session-criteria.
   limit.
 - Docs: `skills/record-tests`, `skills/check-spec-coverage`, `skills/keep-project-knowledge`
   (the `test:` line), README. Tests: `tests/i2-acceptance.test.ts`.
+
+### 15.6 I3 (#4) design
+
+Two commits under #4: I3a (the classifier and the review dimensions, §15.4) and I3b (the test
+types). The user chose on 2026-10-17: boundary code is found by path and by content, broadly,
+with the user's exemption for false positives; every code file needs a test of any type, and
+the types below come on top.
+
+I3a: one classifier, `lib/verification-scope.ts`.
+- `classifyPath(rel)`: `document`, `preview` or `code` from the repo-relative path (`/`
+  separators, letter case ignored for dirs and extensions):
+  - `document`: prose (`.md`, `.markdown`, `.txt`, `.rst`, `.adoc`, `.asciidoc`) anywhere;
+    images, PDFs, video and diagram sources (`.svg`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`,
+    `.avif`, `.bmp`, `.ico`, `.tif(f)`, `.pdf`, `.mp4`, `.webm`, `.drawio`, `.excalidraw`, `.mmd`,
+    `.puml`) under a `docs/` or `doc/` dir; the doc map `.goodboy/docs.json`. Never a document: a path with a `prototype`
+    component, a dependency or build file (`requirements*.txt`, `constraints*.txt`,
+    `CMakeLists.txt`), MDX.
+  - `preview`: `.html`, `.htm` or `.css` under `docs/versions/<v>/preview/` or a pinned
+    `static-preview:` glob, with no `prototype` component.
+  - `code`: everything else, code and prototypes under `docs/` included.
+- `classifyFile(abs, root, globs)`: the path class, and a `preview` only when its content is
+  static (read through `lib/safe-read.ts`; unreadable or over the cap is `code`). HTML is parsed
+  with Bun's HTMLRewriter: no `script`, `iframe`, `frame`, `object`, `embed`, `portal` or `base`
+  element, no `on*` attribute, no template directive (`{{`, `{%`, `<%`, or `v-`, `x-`, `ng-`,
+  `hx-`, `:` and `@` attributes), no `javascript:` or `vbscript:` URL (also in SVG animation
+  `values`/`to`/`from`/`by`) and `data:` only for images. Attribute values are decoded first
+  (numeric and named character references; an unknown named one fails the URL). A link
+  (`a`/`area` `href`, `ping`) may point anywhere but never at a script URL; every other
+  `href`, `src`, `srcset`, `action` and CSS `url()`, `image-set()` string and `@import` is
+  relative and resolves inside the preview's `preview/` dir (or its glob's base). Element and
+  attribute names count by their local part (`svg:script`, `x:href`), and a DTD entity
+  declaration is code.
+- CSS (files, `<style>` text decoded like an SVG's, `style` attributes) does not emulate the
+  CSS tokenizer: two review rounds found escapes, comments and strings read differently from a
+  browser each time. It fails closed instead: any backslash escape is code; `expression(`,
+  `behavior`, `-moz-binding`, `javascript:`, `vbscript:` anywhere are code; comments are not
+  removed, so a commented-out remote URL counts too; after every `url(`, `image-set(` and
+  `@import`, each quoted string and a bare `url(` argument within 1024 characters is checked as
+  a resource URL, and a quoted URL that does not close there (other than a data image) is code.
+  More than 2000 references is code. That keeps a Stop fast: the round-1 regexes took 5.3 s on
+  120 KB and the round-2 scan 15.8 s on 450 KB, against the 15 s Stop timeout that skips every
+  gate.
+- Also code: a document or preview that is a hard link (it shares its content with another
+  path), an SVG document with active content (checked like preview HTML, without the locality
+  rule; one over 2 MB too), and a test-named file that is a hard link or a symlink into code.
+  Each Stop classifies a file once until it changes (memo by path and file identity).
+- Known limits (I3a review lows, accepted): CSS escapes in a static preview (`content:
+  "\201C"`) make it code; any string near a reference that names a remote URL does too; so
+  does CSS with a character whose lower case is longer (`İ`, U+0130: the closing review found
+  it shifted every window past its URL). CSS 4 `src()` counts as a reference.
+- `static-preview: <glob>, …` lines of `decide: human` policy entries: the user's, pinned at
+  every session start next to the coverage exemptions (`coverage-pin.json`, now written
+  whatever `GOODBOY_DIFF_COVERAGE` is), counted from the next session when added during one;
+  PreToolUse denies an Edit/Write that adds one. The globs match repo-top-relative paths, like
+  the coverage exemptions.
+- The call sites: the test gate (`needsTestCoverage`: only `code` needs tests), the I1b note
+  and the effort advice (every file `document` or `preview`, content read), the skill rule and
+  the reasoning gate's exemption, the docs role's write limit, `requiredDimensionsFor`, and
+  I2's product-evidence check (`isProductDoc`), the last four by path. Known limit: the
+  path-only sites do not know the user's glob previews, so such a file is code there (more
+  dimensions and the skill rule, never less checking).
+- Deferred (I3a review lows): the "realpath, else the nearest existing parent" helper exists
+  four times (`review-scope`, `session-criteria`, `file-tracker`, `verification-scope`).
+- Review dimensions of documents and previews (code keeps its rules):
+
+  | File | Dimensions |
+  |---|---|
+  | Requirements Markdown: `.md` under `docs/versions/`, `REQUIREMENTS*.md`, `BACKLOG*.md`, `docs/CYCLE.md` | plan-completeness |
+  | Preview HTML | ui-ux-accessibility, plan-completeness (a preview states requirements; checking that is cheap when it does not) |
+  | Preview CSS | ui-ux-accessibility |
+  | Other documents | none |
+
+  A change's dimensions are the union of its files'.
+
+I3b: the test types.
+- Every changed `code` file needs a test, as today (`tested_files`, I1's changed lines). On
+  top, per file:
+  - `integration` (an `integration` or `e2e` suite) for boundary code: a path token of a
+    server, route, API, handler, database, SQL, migration, shell, exec, spawn or CLI (`cli`,
+    `bin/`), or content that imports or calls file, network, database or process IO (JS/TS:
+    `fs`, `child_process`, `net`, `http`, `https`, `http2`, `dgram`, `tls`, `fetch(`,
+    `axios`, `undici`, `ws`, database clients, `Bun.spawn`, `Bun.serve`, `Bun.file`,
+    `Bun.write`, `bun:sqlite`, `process.argv`; Python: `subprocess`, `socket`, `requests`,
+    `httpx`, `sqlite3`, `open(`; Go: `os/exec`, `net/http`, `database/sql`, `os.Open`);
+  - `ui` (a `ui` or `e2e` suite) for UI code: `.jsx`, `.tsx`, `.vue`, `.svelte`, `.html`,
+    `.css`, `.scss`, `.sass`, `.less`, and `client` paths (the review rule's `isFrontendFile`).
+- A type is met by a passing record, made after the file's last edit, that lists the file in
+  `tested_files` and has a suite of that type (`suites[].type`, required since G2). The suite
+  type is the test agent's label; the reviewer checks it against the test files.
+- The block names each file with its missing types. A change that needs more than one type
+  goes to test-lead (its members: test-unit, test-ui, test-spec); the gate messages name it.
+- No runner or browser for a type: the agent records `blocked` with the evidence (the turn ends
+  unverified, as today); adding the tool is the user's decision.
+- `test-type-exempt: <glob>, …` lines of `decide: human` entries: for the matching files any
+  test type is enough. Pinned and guarded like `coverage-exempt`.
+- `GOODBOY_TEST_TYPES=on` (default) | `warn` (a Korean line to the user) | `off`; off in the
+  test suite (tests/setup.ts), like the changed-line rule.
 
 ## 16. J — Field reports (v0.34.0)
 

@@ -102,18 +102,29 @@ function splitGlobs(text: string): string[] {
   return out.map((g) => g.trim()).filter(Boolean);
 }
 
-/** `coverage-exempt: <glob>, <glob>` of the `decide: human` entries in a policy text. An `ai`
- *  entry cannot exempt anything. */
-export function exemptionsInText(text: string): string[] {
+/** Policy keys whose globs only the user sets: the changed-line exemptions (I1), the static
+ *  previews (I3a, lib/verification-scope.ts). All are pinned at session start together. */
+export const USER_GLOB_KEYS = ['coverage-exempt', 'static-preview'] as const;
+export type UserGlobKey = (typeof USER_GLOB_KEYS)[number];
+
+/** `<key>: <glob>, <glob>` of the `decide: human` entries in a policy text. An `ai` entry
+ *  sets nothing. */
+export function globsInText(text: string, key: UserGlobKey): string[] {
   return parsePolicyEntries(text)
-    .filter((e) => e.fields.decide?.split(/\s/)[0] === 'human' && e.fields['coverage-exempt'])
-    .flatMap((e) => splitGlobs(e.fields['coverage-exempt']!));
+    .filter((e) => e.fields.decide?.split(/\s/)[0] === 'human' && e.fields[key])
+    .flatMap((e) => splitGlobs(e.fields[key]!));
 }
 
-/** Globs `after` exempts that `before` did not. */
-export function addedExemptions(before: string, after: string): string[] {
-  const had = new Set(exemptionsInText(before));
-  return [...new Set(exemptionsInText(after))].filter((g) => !had.has(g));
+export function exemptionsInText(text: string): string[] {
+  return globsInText(text, 'coverage-exempt');
+}
+
+/** The user globs `after` sets that `before` did not, per key. */
+export function addedUserGlobs(before: string, after: string): { key: UserGlobKey; glob: string }[] {
+  return USER_GLOB_KEYS.flatMap((key) => {
+    const had = new Set(globsInText(before, key));
+    return [...new Set(globsInText(after, key))].filter((g) => !had.has(g)).map((glob) => ({ key, glob }));
+  });
 }
 
 const outside = (r: string) => r === '..' || r.startsWith(`..${sep}`) || isAbsolute(r);
@@ -121,12 +132,17 @@ const outside = (r: string) => r === '..' || r.startsWith(`..${sep}`) || isAbsol
 /** The exemptions of the policy file at the knowledge root, as the file says now. Only a
  *  policy file inside the repo counts (a parent directory's is not the project's). */
 export function coverageExemptions(cwd: string, top: string = repoTop(cwd)): string[] {
+  return policyGlobs(cwd, top, 'coverage-exempt');
+}
+
+/** A user glob key's globs in the policy file at the knowledge root, as the file says now. */
+function policyGlobs(cwd: string, top: string, key: UserGlobKey): string[] {
   const { root, policyExists } = knowledgeRoot(cwd);
   if (!policyExists || outside(relative(top, root))) return [];
   try {
     const p = join(root, POLICY_FILE);
     if (!existsSync(p) || statSync(p).size > MAX_POLICY_BYTES) return [];
-    return exemptionsInText(readFileSync(p, 'utf8'));
+    return globsInText(readFileSync(p, 'utf8'), key);
   } catch {
     return [];
   }
@@ -144,14 +160,18 @@ interface CoveragePin {
   /** HEAD when the session started; null: no commit, or no repo; absent: git could not say. */
   head?: string | null;
   exemptions: string[];
+  /** The other user globs by key (I3a); absent in a pin from before them: none. */
+  globs?: Partial<Record<UserGlobKey, string[]>>;
 }
+
+const stringList = (v: unknown): v is string[] => Array.isArray(v) && v.every((g) => typeof g === 'string');
 
 function readPin(sessionId: string): CoveragePin | null {
   try {
     const p = JSON.parse(readFileSync(join(ensureSessionDir(sessionId), PIN_FILE), 'utf8')) as CoveragePin;
     const headOk = p?.head === undefined || p.head === null || typeof p.head === 'string';
-    const globsOk = Array.isArray(p?.exemptions) && p.exemptions.every((g) => typeof g === 'string');
-    return typeof p?.top === 'string' && headOk && globsOk ? p : null;
+    const globsOk = p?.globs === undefined || (typeof p.globs === 'object' && p.globs !== null && Object.values(p.globs).every(stringList));
+    return typeof p?.top === 'string' && headOk && stringList(p.exemptions) && globsOk ? p : null;
   } catch {
     return null;
   }
@@ -174,7 +194,12 @@ export function pinCoverageStart(sessionId: string, cwd: string): void {
     const top = repoTop(cwd);
     const old = readPin(sessionId);
     const head = old && old.top === top && old.head !== undefined ? old.head : startHeadNow(top);
-    const pin: CoveragePin = { top, ...(head !== undefined ? { head } : {}), exemptions: coverageExemptions(cwd, top) };
+    const pin: CoveragePin = {
+      top,
+      ...(head !== undefined ? { head } : {}),
+      exemptions: coverageExemptions(cwd, top),
+      globs: { 'static-preview': policyGlobs(cwd, top, 'static-preview') },
+    };
     writeFileSync(join(ensureSessionDir(sessionId), PIN_FILE), JSON.stringify(pin), 'utf8');
   } catch {
     // best-effort: without a pin, the policy file counts only when older than the session
@@ -187,20 +212,33 @@ export function pinCoverageStart(sessionId: string, cwd: string): void {
  *  the session, a linked worktree) exempts nothing (its globs meant other paths) and keeps its
  *  HEAD only when that commit is in this repo; otherwise only the empty tree counts. */
 export function sessionCoverageStart(sessionId: string, cwd: string, top: string): { exempt: string[]; head?: string | null } {
-  const current = coverageExemptions(cwd, top);
   const pin = readPin(sessionId);
-  if (pin && pin.top === top) return { exempt: current.filter((g) => pin.exemptions.includes(g)), ...(pin.head !== undefined ? { head: pin.head } : {}) };
+  const exempt = sessionUserGlobs(sessionId, cwd, top, 'coverage-exempt', pin);
+  if (pin && pin.top === top) return { exempt, ...(pin.head !== undefined ? { head: pin.head } : {}) };
   if (pin) {
     const known = typeof pin.head === 'string' && git(top, ['cat-file', '-e', '--end-of-options', `${pin.head}^{commit}`]).code === 0;
-    return { exempt: [], head: known ? pin.head! : null };
+    return { exempt, head: known ? pin.head! : null };
   }
-  if (current.length === 0) return { exempt: [] };
+  return { exempt };
+}
+
+/** A user glob key's globs this session may use: those pinned at its start that the policy
+ *  file still has. Without a pin: the file's, when it is older than the session dir. A pin for
+ *  another top sets none (its globs meant other paths). */
+export function sessionUserGlobs(sessionId: string, cwd: string, top: string, key: UserGlobKey, pin: CoveragePin | null = readPin(sessionId)): string[] {
+  const current = policyGlobs(cwd, top, key);
+  if (pin) {
+    if (pin.top !== top) return [];
+    const pinned = key === 'coverage-exempt' ? pin.exemptions : (pin.globs?.[key] ?? []);
+    return current.filter((g) => pinned.includes(g));
+  }
+  if (current.length === 0) return [];
   try {
     const born = statSync(ensureSessionDir(sessionId)).birthtimeMs;
     const changed = statSync(join(knowledgeRoot(cwd).root, POLICY_FILE)).mtimeMs;
-    return { exempt: born > 0 && changed <= born ? current : [] };
+    return born > 0 && changed <= born ? current : [];
   } catch {
-    return { exempt: [] };
+    return [];
   }
 }
 

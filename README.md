@@ -366,7 +366,7 @@ measure-coverage, follow-agent-rules, keep-project-knowledge(`/` 메뉴에도 �
 ```
 
 PreToolUse의 근거 게이트는 코드 편집(Edit/Write/MultiEdit) 직전에 최근 assistant 텍스트에서 이 섹션을 찾는다.
-문서 파일(.md/.txt 등) 편집은 기본 면제.
+문서와 정적 미리보기 편집은 기본 면제(트랙 I3a 분류기 기준, MDX는 코드).
 
 | env | 효과 |
 |---|---|
@@ -717,8 +717,21 @@ dev-cycle 문서가 있는데 수용 기준이 하나도 나오지 않으면(현
 delta 리뷰로 마무리하고, low는 보류한다.
 
 **문서 변경** (v0.33.0, 트랙 I1b): 바뀐 파일이 모두 문서이면 Stop의 리뷰 안내가 먼저 파일·분류(`class:
-document`)·예산을 보여 준다. 문서는 `.md`·`.txt`·`.rst` 같은 글이나 `docs/` 아래의 html/css·이미지 같은 정적
-자료다. `docs/` 아래의 코드, MDX, `prototype` 폴더, `requirements.txt` 같은 매니페스트는 문서가 아니다. 이 안내는
+document`)·예산을 보여 준다.
+
+**문서·미리보기·코드 분류** (v0.33.0, 트랙 I3a): 모든 게이트가 한 분류기(`lib/verification-scope.ts`)로 파일을 나눈다.
+- 문서: `.md`·`.txt`·`.rst` 같은 글, `docs/` 아래의 이미지·PDF·동영상·다이어그램 원본, `.goodboy/docs.json`.
+  스크립트가 든 SVG, 다른 경로와 내용을 공유하는 하드 링크는 코드로 본다.
+- 정적 미리보기: `docs/versions/<버전>/preview/` 아래의 html/css. 다른 위치는 사용자가 정책 항목(`decide: human` +
+  `static-preview: <글롭>`)으로 정하고, 세션 중에 추가한 글롭은 다음 세션부터 적용된다(모델이 쓰는 Edit/Write는 막힌다).
+  내용도 검사한다. 스크립트, 이벤트 핸들러, `javascript:` URL, iframe 같은 내장 문서, 템플릿 지시자가 있거나
+  미리보기 폴더 밖에서 자원을 불러오면 코드로 본다.
+- 코드: 그 밖의 전부. `docs/` 아래의 코드와 `prototype` 폴더, MDX, `requirements*.txt` 같은 매니페스트도 코드라서
+  테스트가 필요하다.
+
+문서와 미리보기는 테스트가 필요 없고, 리뷰 차원은 요구사항 Markdown(`docs/versions/` 아래, `REQUIREMENTS*.md`,
+`BACKLOG*.md`, `docs/CYCLE.md`)이 plan-completeness, 미리보기 HTML은 ui-ux-accessibility와 plan-completeness, 미리보기
+CSS는 ui-ux-accessibility이며 다른 문서는 없다. 이 안내는
 리뷰 에이전트에게 보이지 않으므로 메인 세션이 리뷰 프롬프트에 그대로 넣는다. 예산은
 **리뷰 1회, 최대 10분**이고 테스트는 돌리지 않는다(문서는 테스트가 필요 없다). 예산은 한도일 뿐
 통과 기준이 아니다. 리뷰어는 바뀐 부분과 그 영향(개수·ID·상호 참조·공유 스타일)만 확인하고,
@@ -814,7 +827,7 @@ v0.31.0부터는 "편집하는 쪽이 지금 그 파일을 알고 있는가"를 
 텍스트를 입력받지 못해 최초 1회는 구조적으로 남음). 차단 이후 새로 출력된 근거(순응)는 전환
 사유가 아니므로 지연 없는 하니스에서 게이트 강도가 유지됩니다. 지연 모드는 세션 내내 유지되며,
 인식 성공 시 재무장하는 구 동작은 `GOODBOY_REASONING_LAG_STICKY=rearm`, 지연 확정만 끄려면
-`GOODBOY_REASONING_LAG_CONFIRM=off`. 문서 파일(.md/.txt/.rst/.adoc 등) 편집은 기본
+`GOODBOY_REASONING_LAG_CONFIRM=off`. 문서와 정적 미리보기 편집은 기본
 면제됩니다(`GOODBOY_REASONING_DOC_EXEMPT=off`로 복원). 서브에이전트가 편집할 때는
 **서브에이전트 자신이 쓴** 근거 섹션으로 판정합니다(메인의 글이 아님).
 
