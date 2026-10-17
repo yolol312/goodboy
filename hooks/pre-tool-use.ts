@@ -3,7 +3,8 @@
 
 import { existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve as resolvePath, sep } from 'node:path';
-import { addedUserGlobs, diffCoverageMode, isPolicyFile } from '../lib/changed-coverage';
+import { addedUserGlobs, diffCoverageMode, isPolicyFile, type UserGlobKey } from '../lib/changed-coverage';
+import { testTypesMode } from '../lib/test-types';
 import { classifyPath } from '../lib/verification-scope';
 import {
   appendDispatchLog,
@@ -693,10 +694,10 @@ function main(): void {
         }
       }
 
-      // (I1, I3a) The user globs are the user's (lib/changed-coverage.ts): an Edit/Write that adds
-      //   a `coverage-exempt` or `static-preview` glob to a human policy entry is denied. The
-      //   gates would ignore it anyway (they use the globs pinned at the session start); this
-      //   explains it early.
+      // (I1, I3a, I3b) The user globs are the user's (lib/changed-coverage.ts): an Edit/Write that
+      //   adds a `coverage-exempt`, `static-preview` or `test-type-exempt` glob to a human policy
+      //   entry is denied, an exemption only while its rule is on. The gates would ignore it
+      //   anyway (they use the globs pinned at the session start); this explains it early.
       if (toolName === 'Write' || toolName === 'Edit' || toolName === 'MultiEdit') {
         const fp = typeof toolInput.file_path === 'string' ? resolvePath(cwd, toolInput.file_path) : '';
         if (fp && isPolicyFile(fp)) {
@@ -707,15 +708,20 @@ function main(): void {
             // a new file: every glob in it is added
           }
           const added = addedUserGlobs(before, textAfterEdit(toolName, toolInput, before)).filter(
-            (a) => a.key !== 'coverage-exempt' || diffCoverageMode() !== 'off',
+            (a) =>
+              (a.key !== 'coverage-exempt' || diffCoverageMode() !== 'off') &&
+              (a.key !== 'test-type-exempt' || testTypesMode() !== 'off'),
           );
           if (added.length > 0) {
             const keys = [...new Set(added.map((a) => a.key))];
             const list = keys.map((k) => `${k}: ${added.filter((a) => a.key === k).map((a) => a.glob).join(', ')}`).join('; ');
             logGate(sessionId, added[0]!.key, 'deny', list);
-            const why = added.some((a) => a.key === 'coverage-exempt')
-              ? 'Only the user exempts files from the changed-line coverage rule (decision G-exception)'
-              : 'Only the user declares static previews, which need no test';
+            const WHY: Record<UserGlobKey, string> = {
+              'coverage-exempt': 'Only the user exempts files from the changed-line coverage rule (decision G-exception)',
+              'static-preview': 'Only the user declares static previews, which need no test',
+              'test-type-exempt': 'Only the user exempts files from the test-type rule',
+            };
+            const why = keys.map((k) => WHY[k]).join('; ');
             emit(
               deny(
                 `${why}; this edit adds ${list}. Write tests that run the code, or ask the user: they add the line ` +

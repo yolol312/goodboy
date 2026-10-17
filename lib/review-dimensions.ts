@@ -93,8 +93,9 @@ export function axesOfDimensions(dims: readonly string[]): string[] {
 }
 
 /** 프론트엔드/클라이언트 표면을 건드리는 파일.
- *  HTML/CSS/JSX/TSX/Vue/Svelte, 또는 클라이언트 JS(파일명에 client 포함). */
-function isFrontendFile(lower: string): boolean {
+ *  HTML/CSS/JSX/TSX/Vue/Svelte, 또는 클라이언트 JS(파일명에 client 포함).
+ *  Also the UI files of the test-type rule (lib/test-types.ts, I3b). */
+export function isFrontendFile(lower: string): boolean {
   if (/\.(html?|css|scss|sass|less|jsx|tsx|vue|svelte)$/.test(lower)) return true;
   // client-side JS: <name>.client.ts/js, /client/ 경로 등
   if (/(^|[\/.])client[\/.]/.test(lower)) return true;

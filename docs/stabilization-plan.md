@@ -1027,7 +1027,7 @@ Consequences for the design:
 | I1 | #2 | Changed lines run in tests: diff coverage from a warning to a rule. Done: bcbabc1 |
 | I1b | #7 | Bounded verification for document changes: guidance (§15.4) |
 | I2 | #3 | Every acceptance criterion has a test; a document check never satisfies a product criterion (§15.4) |
-| I3 | #4 | Test types complete per change kind; several types go to test-lead. Also the change classifier and the review dimensions per change (§15.4) |
+| I3 | #4 | Test types complete per change kind; several types go to test-lead. Also the change classifier and the review dimensions per change (§15.4). Done: I3a 6b26102, I3b (§15.6) |
 | I4 | #5 | Full regression on the pushed tree before a push |
 | I5 | #6 | Existing tests that cover the change run with it; weakening a test is a finding |
 
@@ -1241,8 +1241,8 @@ I3a: one classifier, `lib/verification-scope.ts`.
   CSS tokenizer: two review rounds found escapes, comments and strings read differently from a
   browser each time. It fails closed instead: any backslash escape is code; `expression(`,
   `behavior`, `-moz-binding`, `javascript:`, `vbscript:` anywhere are code; comments are not
-  removed, so a commented-out remote URL counts too; after every `url(`, `image-set(` and
-  `@import`, each quoted string and a bare `url(` argument within 1024 characters is checked as
+  removed, so a commented-out remote URL counts too; after every `url(`, `src(`, `image-set(`
+  and `@import`, each quoted string and a bare `url(` argument within 1024 characters is checked as
   a resource URL, and a quoted URL that does not close there (other than a data image) is code.
   More than 2000 references is code. That keeps a Stop fast: the round-1 regexes took 5.3 s on
   120 KB and the round-2 scan 15.8 s on 450 KB, against the 15 s Stop timeout that skips every
@@ -1302,6 +1302,34 @@ I3b: the test types.
   test type is enough. Pinned and guarded like `coverage-exempt`.
 - `GOODBOY_TEST_TYPES=on` (default) | `warn` (a Korean line to the user) | `off`; off in the
   test suite (tests/setup.ts), like the changed-line rule.
+- Built (I3b, `lib/test-types.ts`; the Stop's layer-1 decision, after the criteria and before
+  the changed lines):
+  - Path words are split at `/`, `.`, `_`, `-` and camelCase (acronyms too: `HTTPServer`),
+    the extension included (`userRoutes.ts`, `schema.sql`); plurals, `router`, `endpoint`,
+    `controller`, `middleware`, `db`, `http` and `socket` count too, and so do shell scripts.
+    Content is read for JS/TS (imports by module, IO names imported from `bun`, calls in code
+    without comments and literals), Python (`import a, b` lists too) and Go; other languages by
+    path only. A types-only import does no IO: the nearest `import`/`export` before its `from`
+    starts a statement, says `type`, and no `;` or quote lies between (2000 characters back at
+    most). More than 5000 module specifiers, a source that is not a regular file or one over
+    2 MB is boundary code (fails closed); a deleted one needs nothing. A `client` path is UI
+    unless the file is boundary code (`src/db/client.ts`).
+  - A type may come from any record that meets it, not only the newest per file: a test-lead
+    run leaves one record per member. A record the other checks did not already accept counts
+    only when it stands alone (no failing suite, its test files exist, its evidence holds, no
+    do-nothing pattern).
+  - The tester: test-lead when the change needs `ui` and another type (unit or integration),
+    test-ui for UI only, else test-unit (it writes unit and integration tests, so a
+    unit-plus-integration change needs no lead); for a type gap, by what is missing. A gate
+    names test-ui or test-lead only once its capability check passed (`CHECKED_ROLES`, §10.3,
+    review medium); until then it names test-unit with the types. Follow-up: the capability
+    checks of test-ui (needs a browser) and test-lead. The no-record block names the types per
+    file.
+  - `test-type-exempt` joins the user globs: pinned in `coverage-pin.json` with the others,
+    and PreToolUse denies adding one while the rule is on.
+  - The agents: test-unit labels a suite `integration` only when it runs the real boundary;
+    record-tests says the gate counts types per file; the reviewer's hallucination pass checks
+    suite labels against the test files.
 
 ## 16. J — Field reports (v0.34.0)
 

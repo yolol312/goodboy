@@ -41,7 +41,9 @@ When the prompt carries the Stop gate's `Document change (class: document; …)`
 ## Tool skills
 1. summarize-diff, to know where to look.
 2. By axis (the required dimensions per file: `bun "$GB/lib/cli.ts" review-axes <files>`):
-   - `hallucination` (always runs): check-evidence;
+   - `hallucination` (always runs): check-evidence; with a test record for the change, a
+     suite typed `integration`, `ui` or `e2e` whose tests mock the boundary or never render
+     is a finding (the test-type rule trusts the label);
    - `refactoring` and `performance`: check-code-quality;
    - `security`: check-security;
    - `ui`: check-ui-states and follow-design-tokens.

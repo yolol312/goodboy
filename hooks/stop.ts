@@ -12,11 +12,12 @@ import type {
   StatusSnapshot,
   TestResult,
 } from '../lib';
-import { agentName, ROUTE } from '../lib/routing-policy';
+import { agentName, CHECKED_ROLES, ROUTE } from '../lib/routing-policy';
 import { projectMode } from '../lib/project-mode';
 import { knowledgeRoot, readDocMap } from '../lib/project-knowledge';
 import { staleDocs, staleDocsReason, type StaleDoc } from '../lib/doc-map';
 import { changedLineGaps, changedLineReason, diffCoverageMode, repoTop, sessionCoverageStart, sessionUserGlobs } from '../lib/changed-coverage';
+import { missingTestTypes, testerFor, testTypesMode, type TypeNeed, typeGapReason, typeGapWarning, typeNeedOf } from '../lib/test-types';
 import { needsTests } from '../lib/verification-scope';
 import { documentChangeNote, isDocumentChange } from '../lib/doc-verification';
 import { productEvidenceProblems, sessionCriteria } from '../lib/session-criteria';
@@ -722,6 +723,22 @@ function evaluateTestResults(
         `\`bun "${CLI_PATH}" acceptance-list\` (the dev-cycle criteria and the rows in progress now) does not show.`,
     );
   }
+  // (I3b, plan §15.6) Test types per change kind: boundary code needs an integration or e2e
+  //   suite, UI code a ui or e2e suite (lib/test-types.ts). Records other than `ran` count when
+  //   they stand alone: a test-lead run leaves one record per member.
+  const typesMode = testTypesMode();
+  if (typesMode !== 'off') {
+    const top = repoTop(cwd);
+    const exempt = sessionUserGlobs(sessionId, cwd, top, 'test-type-exempt');
+    const out = missingTestTypes({ results, accepted: new Set(ran), edits: changedEdits, top, exempt });
+    if (out.gaps.length > 0) {
+      // The tester for what is missing, not for the whole change.
+      const left = out.gaps.map((g) => ({ abs: '', rel: g.rel, types: g.missing, why: g.why }));
+      if (typesMode === 'on') return block(typeGapReason(out.gaps, routedTester(left)));
+      logGate(sessionId, 'test', 'warn', `test-types: ${out.gaps.map((g) => g.rel).join(', ')}`);
+      habitWarnings.push(typeGapWarning(out.gaps));
+    }
+  }
   // (I1, plan §15) Every changed code line ran in a test of the recorded tree; a file no run
   //   loaded counts as not run (lib/changed-coverage.ts). Only the records the checks above
   //   accepted (`ran`), and per file those made after its last edit. Exemptions: the user's
@@ -740,6 +757,40 @@ function evaluateTestResults(
     }
   }
   return { kind: 'accept' };
+}
+
+/** (I3b) The tester a gate names for these needs: test-ui and test-lead only once their
+ *  capability check passed (CHECKED_ROLES, plan §10.3); until then the default tester, which
+ *  the message gives the types. */
+function routedTester(needs: readonly (TypeNeed | null)[]): string {
+  const t = testerFor(needs);
+  return agentName(CHECKED_ROLES.has(t) ? t : ROUTE.test);
+}
+
+/** (I3b) Which tester to run for the changed code files, and the types they need. Without the
+ *  test-type rule: the default tester for unit and integration tests. */
+function testerAdvice(files: string[], cwd: string, sessionId: string): string {
+  const plain = `Run ${agentName(ROUTE.test)} to write and run unit and integration tests and record the result`;
+  if (testTypesMode() === 'off') return plain;
+  try {
+    const top = repoTop(cwd);
+    const exempt = sessionUserGlobs(sessionId, cwd, top, 'test-type-exempt');
+    const needs = files.map((f) => typeNeedOf(resolvePath(cwd, f), top, exempt));
+    const typed = needs.filter((n) => n !== null);
+    if (typed.length === 0) return plain;
+    const list = typed
+      .slice(0, 5)
+      .map((n) => `${n.rel}: ${n.types.map((t) => `${t} or e2e (${n.why[t]})`).join(', ')}`)
+      .join('; ');
+    const tester = routedTester(needs);
+    const how =
+      tester === agentName('test-lead')
+        ? `Run ${tester}: it starts one environment and runs test-unit and test-ui on it`
+        : `Run ${tester}`;
+    return `Besides a test for every changed file, these need a test type (plan §15.6): ${list}. ${how}, and record the results`;
+  } catch {
+    return plain;
+  }
 }
 
 /** Accepts an evidence-backed BLOCKED test result (track G): the cursor moves and the user
@@ -885,10 +936,7 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
     if (results.length === 0) {
       const preview = recentEdits.slice(0, 5).join(', ');
       const more = recentEdits.length > 5 ? ` and ${recentEdits.length - 5} more` : '';
-      return block(
-        `No test result covers the changed code. Run ${agentName(ROUTE.test)} to write and run ` +
-          `unit and integration tests and record the result: ${preview}${more}`,
-      );
+      return block(`No test result covers the changed code. ${testerAdvice(recentEdits, cwd, sessionId)}: ${preview}${more}`);
     }
 
     // 테스트 파일 자체는 커버리지 요구 대상에서 뺀다 — 테스트를 테스트하라는 무한 후퇴가

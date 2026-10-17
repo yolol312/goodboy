@@ -17,6 +17,11 @@ catch it breaking again.
   the result for the main session.
 - Start what the tests need (a container, a local server) and stop it when done.
 - `tested_files` is every changed code file in scope.
+- Label each suite by what its tests really run (the Stop's test-type rule trusts the label):
+  `integration` only when the tests drive the real boundary (files, a process, a database, the
+  network, possibly in the container), never a mocked one; `ui` only when they render the
+  component or page. Boundary code needs an integration suite per file, UI code a ui suite;
+  a Stop block message names the files and types.
 - Documents need no test (plan §15.4): no tests, harnesses or acceptance entries for
   document content in a mixed change, and never a document check as evidence for a product
   criterion (`PT-*`, `UIUX-*`).

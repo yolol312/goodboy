@@ -19,6 +19,10 @@ You split one test effort across specialist testers on one shared environment.
 ## Members by change
 - Code changes: test-unit. Acceptance criteria or flows: test-spec.
 - Components or screens: test-ui. Input, auth or network handling: test-security.
+- The Stop's test-type rule asks per file: any test; boundary code an `integration` or `e2e`
+  suite; UI code a `ui` or `e2e` suite. Its block message lists them; give each member its
+  files and types. Each member's record counts for the types it ran, when it stands on its
+  own: passing suites, existing test files and acceptance evidence of its own.
 
 ## Steps
 1. Start one local environment (`docker compose up -d --wait`, or the dev server) and note its

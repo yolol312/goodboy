@@ -103,8 +103,9 @@ function splitGlobs(text: string): string[] {
 }
 
 /** Policy keys whose globs only the user sets: the changed-line exemptions (I1), the static
- *  previews (I3a, lib/verification-scope.ts). All are pinned at session start together. */
-export const USER_GLOB_KEYS = ['coverage-exempt', 'static-preview'] as const;
+ *  previews (I3a, lib/verification-scope.ts), the test-type exemptions (I3b,
+ *  lib/test-types.ts). All are pinned at session start together. */
+export const USER_GLOB_KEYS = ['coverage-exempt', 'static-preview', 'test-type-exempt'] as const;
 export type UserGlobKey = (typeof USER_GLOB_KEYS)[number];
 
 /** `<key>: <glob>, <glob>` of the `decide: human` entries in a policy text. An `ai` entry
@@ -198,7 +199,7 @@ export function pinCoverageStart(sessionId: string, cwd: string): void {
       top,
       ...(head !== undefined ? { head } : {}),
       exemptions: coverageExemptions(cwd, top),
-      globs: { 'static-preview': policyGlobs(cwd, top, 'static-preview') },
+      globs: Object.fromEntries(USER_GLOB_KEYS.filter((k) => k !== 'coverage-exempt').map((k) => [k, policyGlobs(cwd, top, k)])),
     };
     writeFileSync(join(ensureSessionDir(sessionId), PIN_FILE), JSON.stringify(pin), 'utf8');
   } catch {

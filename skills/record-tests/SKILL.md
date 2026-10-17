@@ -21,7 +21,9 @@ Record one layer-1 test result the Stop gate and the push check can read.
 3. `environment`: `{mode: container | local | none, command?, services?, evidence?}`. Give the
    mode you really used, with the health-check output as evidence.
 4. `suites`: one entry per run, `{name, command, passed, failed, output, type,
-   duration_ms}`. `type` is `unit`, `integration`, `ui` or `e2e`; `duration_ms` is the run's
+   duration_ms}`. `type` is `unit`, `integration`, `ui` or `e2e`, by what the suite really
+   runs (the gate counts types per file: boundary code needs `integration` or `e2e`, UI code
+   `ui` or `e2e`); `duration_ms` is the run's
    wall time (from the runner's report, or `date +%s%N`-style timing around the command).
 5. `acceptance`: one entry per criterion from `bun "$GB/lib/cli.ts" acceptance-list` and
    per criterion a Stop block message listed (acceptance-list shows the documents now; the
