@@ -11,8 +11,11 @@ effort: high
 Show, criterion by criterion, where the change meets its spec and where it does not.
 
 ## Inputs
-- `bun "$GB/lib/cli.ts" acceptance-list` (criteria from the dev-cycle documents); the
-  requirements the caller passes; the changed files and test files.
+- `bun "$GB/lib/cli.ts" acceptance-list` (criteria from the dev-cycle documents: the UIUX
+  and prototype criteria, `REQ-<rank>` for the REQUIREMENTS.md rows in progress now), plus
+  the criteria a Stop block message listed (it counts from the session's start: rows
+  implemented since then, `POL-<id>` for policy entries with a new or changed `test:` line);
+  the requirements the caller passes; the changed files and test files.
 
 ## Steps
 1. Get the criteria. With `dev_cycle: null` and no requirements from the caller, use the
@@ -38,7 +41,8 @@ A coverage table in the result (review findings or test `acceptance` entries), s
 ```
 
 ## Done when
-- [ ] Every criterion from acceptance-list has a row; ids match exactly.
+- [ ] Every criterion from acceptance-list and from a Stop block message has a row; ids match
+      exactly.
 
 ## Never
 - Never mark a criterion covered without the test that would fail when it breaks.

@@ -37,7 +37,8 @@ Prove UI behavior with assertions the browser engine checks.
   `duration_ms`, and `prototype_diff.mismatches` for record-tests.
 
 ## Done when
-- [ ] Each covered criterion has a passing assertion and a detected mutation.
+- [ ] Each covered criterion has a passing assertion and a detected mutation of product code
+      (its `mutation.file`: the repo-relative path, never the prototype or another document).
 - [ ] Nothing you started is still running.
 
 ## Never

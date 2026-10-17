@@ -26,8 +26,9 @@
 // red-green + 뮤테이션만 남는다). goodboy는 범용 플러그인이므로 dev-cycle 의존을
 // 필수로 만들지 않는다.
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
+import { MAX_DOC_BYTES, readRegular } from './safe-read';
 
 export type AcceptanceSource =
   | 'uiux-new'
@@ -36,7 +37,10 @@ export type AcceptanceSource =
   | 'uiux-component-state'
   | 'prototype-structure'
   | 'prototype-control'
-  | 'prototype-regression';
+  | 'prototype-regression'
+  /** (I2) A REQUIREMENTS.md row a session works on, and a policy entry's `test:` line. */
+  | 'requirement'
+  | 'policy';
 
 export interface AcceptanceCriterion {
   /** 안정적인 ID. 테스트 결과의 acceptance[].id가 이 값과 일치해야 커버로 인정된다. */
@@ -200,13 +204,8 @@ export function parseCurrentVersion(cycleMd: string): string | null {
 
 /** docs/CYCLE.md: its text, `missing`, or `unreadable` when it exists but cannot be read. */
 function readCycleMd(cwd: string): { text: string } | 'missing' | 'unreadable' {
-  const cyclePath = resolvePath(cwd, 'docs', 'CYCLE.md');
-  try {
-    if (!existsSync(cyclePath)) return 'missing';
-    return { text: readFileSync(cyclePath, 'utf8') };
-  } catch {
-    return 'unreadable';
-  }
+  const read = readRegular(resolvePath(cwd, 'docs', 'CYCLE.md'), MAX_DOC_BYTES);
+  return read === 'absent' ? 'missing' : read === 'refused' ? 'unreadable' : { text: read.text };
 }
 
 /** 프로젝트에서 dev-cycle 산출물을 찾는다. 없으면 null. */
@@ -449,29 +448,34 @@ export function extractPrototypeCriteria(html: string): AcceptanceCriterion[] {
   return out;
 }
 
-function criteriaOf(art: DevCycleArtifacts): AcceptanceCriterion[] {
-  const out: AcceptanceCriterion[] = [];
-  if (art.uiuxPath) {
-    try {
-      out.push(...extractUiuxCriteria(readFileSync(art.uiuxPath, 'utf8')));
-    } catch {
-      // best-effort
+/** The criteria of UIUX.md and the prototype, and those of the two that cannot be read. */
+function criteriaOf(art: DevCycleArtifacts): { criteria: AcceptanceCriterion[]; unreadable: string[] } {
+  const criteria: AcceptanceCriterion[] = [];
+  const unreadable: string[] = [];
+  const sources: [string | null, (text: string) => AcceptanceCriterion[]][] = [
+    [art.uiuxPath, extractUiuxCriteria],
+    [art.prototypePath, extractPrototypeCriteria],
+  ];
+  for (const [path, extract] of sources) {
+    if (!path) continue;
+    const read = readRegular(path, MAX_DOC_BYTES);
+    if (read === 'refused') unreadable.push(path);
+    else if (read !== 'absent') {
+      try {
+        criteria.push(...extract(read.text));
+      } catch {
+        // best-effort
+      }
     }
   }
-  if (art.prototypePath) {
-    try {
-      out.push(...extractPrototypeCriteria(readFileSync(art.prototypePath, 'utf8')));
-    } catch {
-      // best-effort
-    }
-  }
-  return out;
+  return { criteria, unreadable };
 }
 
 export type AcceptanceProblem =
   /** docs/CYCLE.md exists but has no current-version line in either language. */
   | { kind: 'no-version-key' }
-  /** docs/CYCLE.md exists but cannot be read (permissions, a directory). */
+  /** docs/CYCLE.md, UIUX.md or the prototype exists but cannot be read (permissions, a
+   *  directory, a FIFO, a huge file). */
   | { kind: 'unreadable'; files: string[] }
   /** UIUX.md or the prototype exists, but no criterion came out of it. */
   | { kind: 'no-criteria'; files: string[] };
@@ -518,12 +522,17 @@ export function readAcceptance(cwd: string): AcceptanceReading {
     if (!CURRENT_VERSION_LINE.test(cycle.text)) return { ...NO_ACCEPTANCE, problem: { kind: 'no-version-key' } };
     const art = artifactsFrom(cwd, cycle.text);
     if (!art) return NO_ACCEPTANCE;
-    const criteria = criteriaOf(art);
+    const { criteria, unreadable } = criteriaOf(art);
     const files = [art.uiuxPath, art.prototypePath].filter((p): p is string => p !== null);
     return {
       devCycle: true,
       criteria,
-      problem: criteria.length === 0 && files.length > 0 ? { kind: 'no-criteria', files } : null,
+      problem:
+        unreadable.length > 0
+          ? { kind: 'unreadable', files: unreadable }
+          : criteria.length === 0 && files.length > 0
+            ? { kind: 'no-criteria', files }
+            : null,
     };
   } catch {
     return NO_ACCEPTANCE;

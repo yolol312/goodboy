@@ -35,7 +35,9 @@ Leave a test in the repo that really guards the change.
 
 ## Output
 - The test file in the repo, and for record-tests: `red`, `green` and `mutation` with each
-  command, output and exit code.
+  command, output and exit code; `mutation.file` is the repo-relative path of the file you
+  broke (not its scratch copy's path), product code for a `PT-*`, `UIUX-*` or `REQ-*`
+  criterion.
 
 ## Done when
 - [ ] red exit code is not 0, green is 0, and the mutation was detected.

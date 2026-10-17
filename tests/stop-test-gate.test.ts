@@ -488,7 +488,8 @@ describe('Stop hook — 층1 테스트 게이트', () => {
     const screen = goodAcceptance({
       id: 'UIUX-NEW-1',
       description: '설정 화면',
-      mutation: { command: 'remove the settings route', output: '1 failed', detected: true }, // a UI criterion needs one
+      // A UI criterion needs one, naming the product file it broke (I2).
+      mutation: { command: 'remove the settings route', output: '1 failed', detected: true, file: CODE_FILE },
     });
     expect(await accepted([goodAcceptance(), screen])).toBe(true);
   }, 30_000);

@@ -22,13 +22,14 @@
 //   hook past its timeout or killed it, and either lets the call through). The git it runs
 //   starts no program from the repo's config (fsmonitor, gpg.program).
 
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync, renameSync, statSync, writeFileSync, type Stats } from 'node:fs';
+import { lstatSync, realpathSync, renameSync, statSync, writeFileSync, type Stats } from 'node:fs';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 import { stripHeredocs, type HeredocOwner } from './bash-write';
 import { ensureSessionDir } from './file-tracker';
 import { HOOK_GIT_ARGS, HOOK_GIT_ENV, splitAliasValue } from './hook-git';
 import { GIT_VALUE_OPTS, WHOLE_SUBSTITUTION, cdTarget, mentionsGit, readCommand, shellReadsStdin } from './outward-command';
 import { GIT_BUILTINS } from './push-test';
+import { readRegular } from './safe-read';
 
 /** Tokens shaped like a Jira key that name standards or licenses, not issues (`UTF-8`). */
 const NOT_ISSUE_KEYS: ReadonlySet<string> = new Set(['UTF', 'SHA', 'ISO', 'RFC', 'CVE', 'GPT', 'AES', 'RSA', 'TLS', 'SSL', 'HTTP', 'IPV', 'ECMA', 'PEP', 'WCAG', 'GPL', 'LGPL', 'AGPL', 'PHP', 'BSD', 'MPL']);
@@ -60,34 +61,6 @@ const PINS_FILE = 'commit-issue-pins.json';
 interface SessionPins {
   since: number;
   pins: Record<string, string>;
-}
-
-/** A regular file of at most `max` bytes, opened without blocking (a FIFO or a device is
- *  refused, never waited on); with `noFollow`, a symlink at the path is refused too. */
-function readRegular(p: string, max: number, noFollow = false): { text: string; st: Stats } | 'absent' | 'refused' {
-  let fd: number;
-  try {
-    fd = openSync(p, constants.O_RDONLY | constants.O_NONBLOCK | (noFollow ? constants.O_NOFOLLOW : 0));
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    return code === 'ENOENT' || code === 'ENOTDIR' ? 'absent' : 'refused';
-  }
-  try {
-    const st = fstatSync(fd);
-    if (!st.isFile() || st.size > max) return 'refused';
-    const buf = Buffer.alloc(st.size);
-    let got = 0;
-    while (got < st.size) {
-      const k = readSync(fd, buf, got, st.size - got, got);
-      if (k === 0) break;
-      got += k;
-    }
-    return { text: buf.subarray(0, got).toString('utf8'), st };
-  } catch {
-    return 'refused';
-  } finally {
-    closeSync(fd);
-  }
 }
 
 /** The directory with symlinks resolved, so a symlinked spelling of a repo finds its pins. */

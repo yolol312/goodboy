@@ -1,23 +1,25 @@
 // Gate state guard (track G security review): the Stop gates read state from the session dir
 // in $TMPDIR (edit log, review/test cursors, dispatch log, skill evidence, validation
-// failure, the commit issue, project mode and coverage pins), outside the project, where the
-// Bash write gate allows writes. One
+// failure, the commit issue, project mode, coverage and criteria pins, the criteria a Stop
+// required), outside the project, where the Bash write gate allows writes. One
 // `rm "$TMPDIR"/goodboy-session-*/edits.jsonl` would end a turn with neither tests nor review.
 //
 // So a model Bash call is bracketed: PreToolUse snapshots the guarded files, and the post
 // hooks put back what the call removed or rewrote (append-only logs keep their old lines;
-// cursors return to their old content; a cursor the call created is removed). A call that
+// cursors return to their old content; a cursor, an evidence log or a file only the hooks
+// write that the call created is removed, by name: an mtime can be set back). A call that
 // never reports back (`exit N`, G0 M18) is restored at the next Stop. A command that names a
 // session dir with a mutating program is denied up front. Hooks and the model run as the same
 // OS user, so this raises the bar; it cannot make the state tamper-proof.
 
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
 import { segmentChanging } from './outward-command';
 import { safeToolUseId } from './approval-marker';
+import { MAX_STATE_BYTES } from './safe-read';
 
-const GUARDED = /^(?:edits\.jsonl|dispatch-log\.jsonl|skill-evidence\.jsonl|commit-issue-pins\.json|marker-evidence\.jsonl|project-mode-pin\.json|coverage-pin\.json|\.goodboy-last-(?:review|test)-[0-9a-f]+\.json|\.goodboy-validation-failed\.json)$/;
+const GUARDED = /^(?:edits\.jsonl|dispatch-log\.jsonl|skill-evidence\.jsonl|commit-issue-pins\.json|marker-evidence\.jsonl|project-mode-pin\.json|coverage-pin\.json|criteria-pin\.json|criteria-seen\.json|\.goodboy-last-(?:review|test)-[0-9a-f]+\.json|\.goodboy-validation-failed\.json)$/;
 const CURSOR = /^\.goodboy-last-(?:review|test)-[0-9a-f]+\.json$/;
 /** Evidence logs: a line added during a model Bash call would be forged evidence (a skill run,
  *  the user's non-project answer), so these keep only their old lines, and one the call
@@ -25,6 +27,10 @@ const CURSOR = /^\.goodboy-last-(?:review|test)-[0-9a-f]+\.json$/;
  *  model to record it through `cli.ts skill-gap` from Bash, and it is the model's own note
  *  (H1 review: dropping it kept the skill rule denying). */
 const EVIDENCE = /^(?:skill-evidence|marker-evidence)\.jsonl$/;
+/** Written only by SessionStart (the pins) and the Stop (the criteria it required): one a Bash
+ *  call created would set the session's start or criteria (I2 security review round 2: a
+ *  crafted seen list failed the gate open). */
+const HOOK_ONLY = /^(?:project-mode-pin|coverage-pin|criteria-pin|criteria-seen)\.json$/;
 
 function keptEvidenceLine(name: string, line: string): boolean {
   if (name !== 'skill-evidence.jsonl') return false;
@@ -42,7 +48,6 @@ function evidenceText(name: string, before: string, now: string | null): string 
   return before + added.map((l) => `${l}\n`).join('');
 }
 const SNAP_PREFIX = 'bash-guard-';
-const MAX_BYTES = 16 * 1024 * 1024;
 
 function snapDir(sessionId: string, toolUseId: string): string {
   return join(ensureSessionDir(sessionId), `${SNAP_PREFIX}${safeToolUseId(toolUseId)}`);
@@ -55,19 +60,21 @@ export function snapshotGateState(sessionId: string, toolUseId: string): void {
     const snap = snapDir(sessionId, toolUseId);
     mkdirSync(snap, { recursive: true });
     const names: string[] = [];
+    const present: string[] = []; // every guarded name, copied or not: what the call did not create
     for (const name of readdirSync(dir)) {
       if (!GUARDED.test(name)) continue;
+      present.push(name);
       const p = join(dir, name);
       try {
         const st = lstatSync(p);
-        if (!st.isFile() || st.size > MAX_BYTES) continue;
+        if (!st.isFile() || st.size > MAX_STATE_BYTES) continue;
         writeFileSync(join(snap, name), readFileSync(p));
         names.push(name);
       } catch {
         // unreadable: not guarded this time
       }
     }
-    writeFileSync(join(snap, '.index.json'), JSON.stringify({ t: Date.now(), names }), 'utf8');
+    writeFileSync(join(snap, '.index.json'), JSON.stringify({ t: Date.now(), names, present }), 'utf8');
   } catch {
     // best-effort
   }
@@ -76,13 +83,14 @@ export function snapshotGateState(sessionId: string, toolUseId: string): void {
 function restoreFrom(sessionId: string, snap: string): string[] {
   const dir = ensureSessionDir(sessionId);
   const restored: string[] = [];
-  let names: string[] = [];
+  let index: { names?: unknown; present?: unknown } = {};
   try {
-    names = (JSON.parse(readFileSync(join(snap, '.index.json'), 'utf8')) as { names?: string[] }).names ?? [];
+    index = (JSON.parse(readFileSync(join(snap, '.index.json'), 'utf8')) as typeof index) ?? {};
   } catch {
-    names = [];
+    index = {};
   }
-  const had = new Set(names);
+  const strings = (v: unknown): string[] | null => (Array.isArray(v) ? v.filter((n): n is string => typeof n === 'string') : null);
+  const names = strings(index.names) ?? [];
   for (const name of names) {
     const p = join(dir, name);
     let before: string;
@@ -98,7 +106,7 @@ function restoreFrom(sessionId: string, snap: string): string[] {
       let now: string | null = null;
       try {
         const st = lstatSync(p);
-        if (st.isFile() && st.size <= MAX_BYTES) now = readFileSync(p, 'utf8');
+        if (st.isFile() && st.size <= MAX_STATE_BYTES) now = readFileSync(p, 'utf8');
         else rmSync(p, { recursive: true, force: true });
       } catch {
         now = null;
@@ -125,22 +133,34 @@ function restoreFrom(sessionId: string, snap: string): string[] {
     }
   }
   // A cursor the call created would accept work without a review or test; an evidence log it
-  //   created would be forged evidence.
+  //   created would be forged evidence; a pin or criteria list it created would set the
+  //   session's start or criteria. Created = absent from the snapshot's list of every guarded
+  //   name (not by mtime, which a call can set back; I2 security review round 3). Each is
+  //   removed on its own, whatever it is (a directory made unlinkSync throw and ended the loop).
+  //   Without the list, what existed is unknown, so nothing counts as created.
+  const present = strings(index.present);
+  const existed = new Set(present ?? []);
+  let now: string[] = [];
   try {
-    for (const name of readdirSync(dir)) {
-      if ((CURSOR.test(name) || EVIDENCE.test(name)) && !had.has(name)) {
-        const created = statSync(join(dir, name)).mtimeMs;
-        const t = (JSON.parse(readFileSync(join(snap, '.index.json'), 'utf8')) as { t?: number }).t ?? 0;
-        if (created >= t - 1000) {
-          const kept = EVIDENCE.test(name) ? evidenceText(name, '', readFileSync(join(dir, name), 'utf8')) : '';
-          if (kept === '') unlinkSync(join(dir, name));
-          else writeFileSync(join(dir, name), kept, 'utf8');
-          restored.push(name);
-        }
-      }
-    }
+    now = present ? readdirSync(dir) : [];
   } catch {
-    // best-effort
+    now = [];
+  }
+  for (const name of now) {
+    if (!(CURSOR.test(name) || EVIDENCE.test(name) || HOOK_ONLY.test(name)) || existed.has(name)) continue;
+    const p = join(dir, name);
+    try {
+      let kept = '';
+      if (EVIDENCE.test(name)) {
+        const st = lstatSync(p);
+        if (st.isFile() && st.size <= MAX_STATE_BYTES) kept = evidenceText(name, '', readFileSync(p, 'utf8'));
+      }
+      if (kept === '') rmSync(p, { recursive: true, force: true });
+      else writeFileSync(p, kept, 'utf8');
+      restored.push(name);
+    } catch {
+      // this one could not be removed; the others still are
+    }
   }
   rmSync(snap, { recursive: true, force: true });
   return restored;

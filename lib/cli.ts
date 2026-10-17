@@ -9,7 +9,7 @@
 //   review-write [file]   (없으면 stdin에서 ReviewResult JSON을 읽음)
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { isAbsolute, join, resolve, sep } from 'node:path';
 import type {
   ReviewFinding,
   ReviewResult,
@@ -23,6 +23,8 @@ import type {
 } from './types';
 import { workTreeState } from './push-test';
 import { diffCoverageOf } from './diff-coverage';
+import { criteriaNow } from './session-criteria';
+import { requiresMutationProbe } from './test-validator';
 import { knowledgeRoot, validateKnowledge } from './project-knowledge';
 import { decisionItems } from './decision-authority';
 import { catalogRows, renderCatalog, TEST_CATALOG_FILE } from './test-catalog';
@@ -35,6 +37,7 @@ import {
   requiredAcceptanceCriteria,
 } from './acceptance';
 import { AXIS_DIMENSIONS, axesFor, requiredDimensionsFor } from './review-dimensions';
+import { MAX_DOC_BYTES, readRegular } from './safe-read';
 import { appendSkillGapLog, recordSkillEvidence, validateSkillGapNote } from './skill-rule';
 
 // ---- 유틸 ----
@@ -434,6 +437,18 @@ export function validateTestResultInput(parsed: unknown): {
               `acceptance[${i}].mutation.detected는 boolean이어야 합니다(훼손 후 테스트가 실패했는가).`,
             );
           }
+          // (I2) A product criterion's probe names the product file it broke (never a document).
+          const fileBad =
+            mut.file !== undefined
+              ? typeof mut.file !== 'string' || mut.file.trim() === '' || isAbsolute(mut.file)
+              : requiresMutationProbe(String(cov.id ?? ''));
+          if (fileBad) {
+            errors.push(
+              `acceptance[${i}].mutation.file must be the repo-relative path of the file the probe broke (in its ` +
+                'scratch copy: the path that file has in this repo). For a PT-* or UIUX-* criterion it is required and is ' +
+                'product code, never a document such as the requirements or the prototype.',
+            );
+          }
         }
       }
       // red가 성공(exit 0)이면 그 테스트는 아무것도 검증하지 않는다 — 쓰기 시점에 거부.
@@ -614,11 +629,15 @@ function cmdDiffCoverage(cwd: string, args: string[]): void {
 /** 이 프로젝트의 필수 수용 기준을 JSON으로 출력한다(테스트 에이전트가 커버 목록을 맞추는 데 사용). */
 function cmdAcceptanceList(cwd: string): void {
   const artifacts = findDevCycleArtifacts(cwd);
-  const criteria = requiredAcceptanceCriteria(cwd);
+  // (I2) Plus the requirements in progress. The rest of the session's criteria (rows done or
+  //   policy lines added since its start) need the session's pin: the gate's message lists them.
+  const criteria = [...requiredAcceptanceCriteria(cwd), ...criteriaNow(cwd)];
   const warnings: string[] = [];
   if (artifacts?.prototypePath) {
+    // Not a plain read: a FIFO there hung acceptance-list (I2 refactoring review round 4).
+    const read = readRegular(artifacts.prototypePath, MAX_DOC_BYTES);
     try {
-      warnings.push(...prototypeContractWarnings(readFileSync(artifacts.prototypePath, 'utf8')));
+      if (typeof read !== 'string') warnings.push(...prototypeContractWarnings(read.text));
     } catch {
       // best-effort
     }

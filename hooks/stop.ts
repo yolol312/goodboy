@@ -18,6 +18,7 @@ import { knowledgeRoot, readDocMap } from '../lib/project-knowledge';
 import { staleDocs, staleDocsReason, type StaleDoc } from '../lib/doc-map';
 import { changedLineGaps, changedLineReason, diffCoverageMode, repoTop, sessionCoverageStart } from '../lib/changed-coverage';
 import { documentChangeNote, isDocumentChange } from '../lib/doc-verification';
+import { productEvidenceProblems, sessionCriteria } from '../lib/session-criteria';
 import {
   citationBlockMessage,
   CLI_PATH,
@@ -596,7 +597,9 @@ function withDocNote(files: string[], cwd: string): string {
  *  Unrecognized keys or headings used to drop the criteria to zero with no sign, and in
  *  auto mode turn layer 1 off. The warning shows once per session; the reading behind it
  *  is the one the gate takes its criteria from. Not a block: a version without new or
- *  changed screens gives zero criteria legitimately. */
+ *  changed screens gives zero criteria legitimately. `unreadable` (CYCLE.md, UIUX.md or the
+ *  prototype cannot be read) can come with the other file's criteria; it warns too, while
+ *  an unreadable REQUIREMENTS.md or policy.md blocks (I2; plan §15.5 known limits). */
 function warnAcceptanceProblem(sessionId: string, cwd: string, problem: AcceptanceProblem | null): void {
   if (problem === null) return;
   try {
@@ -610,7 +613,8 @@ function warnAcceptanceProblem(sessionId: string, cwd: string, problem: Acceptan
         ? 'docs/CYCLE.md 에서 현재 버전 줄(`- **현재 버전**:` 또는 `- **Current version**:`)을 찾지 ' +
             '못했습니다 — 층1이 수용 기준을 읽지 못합니다.'
         : problem.kind === 'unreadable'
-          ? 'docs/CYCLE.md 를 읽을 수 없습니다(권한 등) — 층1이 수용 기준을 읽지 못합니다.'
+          ? `${problem.files.map((f) => relative(cwd, f)).join(', ')} 를 읽을 수 없습니다(권한, 일반 파일이 아님 등) — ` +
+            '층1이 그 수용 기준을 읽지 못합니다.'
           : `dev-cycle 문서(${problem.files.map((f) => relative(cwd, f)).join(', ')})에서 수용 기준을 ` +
             '하나도 읽지 못했습니다 — 표 제목(`화면 목록`/`Screens` 등)이나 구분 값(`신규`/`new` 등)을 ' +
             '확인하세요. 이번 버전에 신규·변경 화면이 정말 없다면 무시해도 됩니다.',
@@ -673,18 +677,39 @@ function evaluateTestResults(
         `${forbidden.length > 3 ? ` 외 ${forbidden.length - 3}건` : ''}`,
     );
   }
+  // (I2) A product criterion's evidence is a test of the product, never a document check.
+  const productIssues = productEvidenceProblems(ran, resolvePath(cwd));
+  if (productIssues.length > 0) {
+    return block(
+      `${productIssues.slice(0, 3).join(' ')}${productIssues.length > 3 ? ` (${productIssues.length - 3} more)` : ''}` +
+        (productIssues.some((p) => p.includes('is a document') || p.includes('broke a document'))
+          ? ' Checking the requirements or the prototype proves the document, not that the product meets it.'
+          : ''),
+    );
+  }
   // Criteria the blocked runs were for stay uncovered: that is what "unverified" means.
   if (blocked.length > 0) return { kind: 'accept-unverified', blocked: blocked[0]! };
-  const uncovered = uncoveredCriteria(ran, acceptance.criteria);
+  // (I2) Besides the dev-cycle UIUX and prototype criteria: the requirements and the policy
+  //   entries this session works on (lib/session-criteria.ts). Criteria that cannot be read
+  //   are not covered.
+  const session = sessionCriteria(sessionId, cwd);
+  if (session.problem) {
+    logGate(sessionId, 'test', 'deny', 'criteria-unreadable');
+    return block(`${session.problem} Fix the file (or ask the user); until then its criteria count as untested.`);
+  }
+  const uncovered = uncoveredCriteria(ran, [...acceptance.criteria, ...session.criteria]);
   if (uncovered.length > 0) {
+    // The uncovered ones, up to 20: the list is the session's, which acceptance-list (the
+    //   documents now) cannot show.
     const list = uncovered
-      .slice(0, 3)
+      .slice(0, 20)
       .map((c) => `${c.id}(${c.description})`)
       .join('; ');
     return block(
       `확정된 요구사항/프로토타입이 요구하는 수용 기준이 테스트로 커버되지 않았습니다: ` +
-        `${list}${uncovered.length > 3 ? ` 외 ${uncovered.length - 3}건` : ''}. ` +
-        `\`bun "${CLI_PATH}" acceptance-list\` 로 전체 목록을 확인하세요.`,
+        `${list}${uncovered.length > 20 ? ` 외 ${uncovered.length - 20}건` : ''}. ` +
+        `This list is the gate's: it counts from the session's start, so it can hold criteria that ` +
+        `\`bun "${CLI_PATH}" acceptance-list\` (the dev-cycle criteria and the rows in progress now) does not show.`,
     );
   }
   // (I1, plan §15) Every changed code line ran in a test of the recorded tree; a file no run

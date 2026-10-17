@@ -15,6 +15,7 @@ import { tierAdvice } from '../lib/test-profile';
 import { decisionAuthorityContext } from '../lib/decision-authority';
 import { clearReadRecords } from '../lib/file-tracker';
 import { diffCoverageMode, pinCoverageStart } from '../lib/changed-coverage';
+import { pinSessionCriteria } from '../lib/session-criteria';
 
 interface SessionStartInput {
   session_id?: string;
@@ -78,6 +79,8 @@ if (import.meta.main) {
         pinProjectMode(sessionId, input.cwd ?? process.cwd());
         // …and the coverage exemptions with the start HEAD (I1, lib/changed-coverage.ts).
         if (diffCoverageMode() !== 'off') pinCoverageStart(sessionId, input.cwd ?? process.cwd());
+        // …and the requirement rows and policy `test:` lines it starts from (I2).
+        pinSessionCriteria(sessionId, input.cwd ?? process.cwd());
       }
       const warnings = source === 'startup' || source === 'resume' ? configWarnings(process.env) : [];
       // (H2) Every source, project mode: the project's knowledge files to read first, or the

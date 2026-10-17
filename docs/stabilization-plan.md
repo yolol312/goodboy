@@ -714,7 +714,7 @@ file every session reads first, splits every check into `ai` (evidence decides) 
 - Non-project mode turns off the policy read gate, the docs rule and the test gate. The
   review gate stays (evidence and hallucination checks included), and so do R2, the spawn
   and recursion guards and write-bypass detection.
-- `/Users/seongmo/ccworkspace/CLAUDE.md` gets the marker only with the user's OK.
+- The user's workspace `CLAUDE.md` gets the marker only with the user's OK.
 
 ### 14.3 Policy file, read gate and the knowledge skill (H2)
 
@@ -1139,6 +1139,73 @@ authoritative input; semantic dependencies between prose sections are not all fo
 agent can still over-investigate, edit before the answers arrive, or keep fixing optional
 findings. Budgets and check lists make that visible but do not stop it.
 
+### 15.5 Built in I2 (#3)
+
+Every acceptance criterion a session works on has a test (`lib/session-criteria.ts`):
+- The criteria:
+  - the dev-cycle UIUX and prototype criteria, as before;
+  - `REQ-<rank>`: the rows of the version's `REQUIREMENTS.md` that were in progress at the
+    start (by their start rank and title, whatever the file says now), the rows in progress
+    now, and the rows implemented now that were not at the start (matched by rank and title
+    as a multiset: one start row excuses one current row). A row implemented before the
+    session was tested then; breaking it later is for I4 and I5;
+  - `POL-<id>`: `.goodboy/policy.md` entries whose optional `test:` line is new or changed.
+- The tables: the first table under every `## 요구사항…` or `## Requirements…` heading (an
+  added section never hides the real one), fenced code skipped; rank, requirement and status
+  columns found by their header names; ranks like `1`, `1.`, `P1`, `#3`; escaped or
+  backticked `|` kept in a cell; statuses in Korean or English, with decorations
+  (`🚧 구현중`, `구현완료 ✅`, `진행중 (50%)`).
+- "The start": SessionStart pins the rows and the `test:` lines of the working tree
+  (`criteria-pin.json`; a resumed session keeps its pin), so an uncommitted row done in an
+  earlier session is not asked again, and a commit made during the session hides nothing.
+  Every Stop remembers what it required (`criteria-seen.json`). Both files are state-guarded:
+  put back after a Bash call that changed them, and removed when a call created them. A
+  created file is told by name, against the snapshot's list of every guarded name, not by
+  mtime, which a call can set back; this also covers the cursors, the evidence logs and the
+  coverage and project-mode pins (I2 security review round 3). They are read only as regular
+  files, never through a link, and written by a rename; a seen entry is rebuilt from its
+  string fields (ids of at most 6 rank digits or 40 policy characters, at most 1000 entries).
+  Editing the documents never drops a criterion: setting a row back, renaming or deleting it,
+  changing a heading or the version, removing the file or a `test:` line (I2 security review,
+  two highs). With no pin, only the rows in progress now count, and no policy entry.
+- A requirements or policy file that cannot be read (a FIFO, a directory, too large) blocks
+  with the reason instead of counting as no criteria. Every dev-cycle document (`docs/CYCLE.md`,
+  UIUX.md, the prototype, the requirements, the policy) is read through one descriptor opened
+  without waiting on a FIFO, only when regular and at most 2 MB: a FIFO or a link to
+  `/dev/zero` hung every Stop. An unreadable UIUX.md or prototype is the F2 `unreadable`
+  warning, naming the file. The tables are parsed in linear time (the columns are found once
+  per table: a crafted header made a 0.44 MB file take 24 s).
+- Known limits (I2 review lows, deferred): the pin is ignored when the repo top changes (a
+  `git init` in a subdirectory); no warning when there is no pin; a `test:` line added and
+  removed between two Stops leaves no criterion; heading or header variants outside the
+  template give zero rows without a warning; the product-evidence check reads path strings
+  (a named test, a nonexistent `mutation.file`); a Bash call whose PreToolUse comes while a
+  Stop runs removes the `criteria-seen.json` (or cursor) that Stop first writes, as created,
+  as the mtime rule did; an unreadable UIUX.md or prototype warns (F2), it does not block;
+  UIUX and prototype criteria are not pinned, so editing those documents can still drop them.
+- Older than I2, found by its round-4 security review, left to a separate issue (the track G
+  state guard): the session files besides the cursors, evidence logs and pins are outside the
+  name-based removal and the regular-file reads (`turn.txt` is not guarded at all; a
+  directory at `edits.jsonl` before the first edit; a FIFO at a file a hook reads hangs every
+  Stop); a Stop restores the snapshot of a Bash call that is still running (a background
+  subagent's), so what that call writes afterwards stays; the guard trusts the snapshot index
+  kept in the same session dir.
+- The gate blocks on an uncovered criterion and lists up to 20: the gate's list is the
+  session's. `acceptance-list` shows the dev-cycle criteria and the rows in progress now, as
+  advice.
+- A product criterion (`PT-*`, `UIUX-*`, `REQ-*`) is never met by a document: a document by
+  the I1b rule (`isDocumentFile`) or a dev-cycle artifact (`docs/CYCLE.md`, anything under
+  `docs/versions/`, the prototype included). Code under a `docs/` folder and MDX are product
+  code. Its `test` may not be one, and a `PT-*` or `UIUX-*` mutation names the file it broke
+  as a repo-relative path (`mutation.file`, required by `test-write`; a scratch copy's path
+  is refused), which may not be one either. Symlinks are resolved. A check of the
+  requirements or the prototype proves the document, not the product.
+- The task's stated goals stay self-numbered `AC-n` under the existing rule (at least one
+  entry, each with red and green). Nothing extracts them from the prompt; that is a known
+  limit.
+- Docs: `skills/record-tests`, `skills/check-spec-coverage`, `skills/keep-project-knowledge`
+  (the `test:` line), README. Tests: `tests/i2-acceptance.test.ts`.
+
 ## 16. J — Field reports (v0.34.0)
 
 Asked by the user on 2026-10-16: improvements and bugs found while using goodboy elsewhere
@@ -1271,13 +1338,15 @@ exemptions.
     - delegation against policy: a definition that can call the Agent tool, given
       `disallowedTools`, the depth setting and goodboy's delegation guard. goodboy's leads
       (`test-lead`, `review-lead`, `research-lead`) delegate by design (§10.7). Any other
-      definition that inherits the Agent tool conflicts with the leaf rule.
+      definition that can call the Agent tool (it lists it, or inherits it with no `tools:`)
+      conflicts with the leaf rule.
   - Agent-related changelog entries are matched too, including changed defaults that touch
     omitted fields (depth, background spawns, tool filters).
   - Zero model turns: parsing, hashing, collisions, drift, contract matching, log reading.
     They cannot prove a dispatch or the effective tools.
-  - Model-turn probes, inside K1's approved integration budget: a dispatch, the effective
-    tools, depth enforcement and model resolution.
+  - Model-turn probes: a dispatch, the effective tools, depth enforcement and model
+    resolution. They share K1's sessions where they can (at most 3); any beyond those are in
+    the same estimate the user approves.
     - The depth probe is one Haiku parent dispatching one Haiku child. It passes only on
       tool-schema evidence of what the child can call; a self-reported tool list is not
       enough, and without that evidence the result is inconclusive.
@@ -1291,9 +1360,12 @@ exemptions.
     First check: the text-mode stderr warning (silence proves nothing). Then, with
     approval, one minimal request read through `modelUsage`.
   - The depth setting: the checkup recommends `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=2` as a
-    user-settings change outside goodboy, with its own approval. That is main → lead →
-    member, goodboy's designed depth. The handoff proposed `1`, but it was written against
-    v0.30.0, which had only leaf agents; `1` would stop goodboy's leads. Within depth 2,
+    user-settings change outside goodboy, with its own approval. The documented semantic is
+    the number of subagent layers below the main conversation (`1`: a subagent cannot start
+    another); the depth probe confirms it under `2` before the checkup recommends the value.
+    `2` is main → lead → member, goodboy's designed depth. The handoff proposed `1`, but it
+    was written against v0.30.0, which had only leaf agents; under `1` goodboy's leads still
+    run but cannot start their members (SessionStart already warns below 2). Within depth 2,
     goodboy's delegation guard still allows only a lead to delegate. The setting also covers
     sessions where goodboy is off. Rate limits stay: depth does not bound sibling dispatches.
 - Tests: the state transitions; the changelog range (gaps, downgrades, empty); the writer's
@@ -1326,7 +1398,8 @@ Proposals (later steps, not scheduled):
     - They run through the frozen suite with `--ablation none` and are compared by the same
       pairing and statistics.
     - Wrapper loading and arm equivalence are proved by a positive control first.
-    - One representative self-written leaf agent joins the pilot estimate.
+    - One representative self-written leaf agent joins the pilot as a third target, in the
+      same per-run estimate.
     - An unchanged pinned model is left out of alias-update runs, not out of manual
       benefit tests.
   - Deferred for agents: orchestrator quality evals, cross-repo sync, passive subagent model

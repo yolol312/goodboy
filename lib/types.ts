@@ -75,8 +75,10 @@ export interface AcceptanceCoverage {
   red: TestEvidence;
   /** 현재 통과함을 보인 실행 */
   green: TestEvidence;
-  /** 뮤테이션 프로브 — 검증 대상을 훼손했을 때 테스트가 실패했는가(detected=true여야 유효) */
-  mutation?: { command: string; output: string; detected: boolean };
+  /** 뮤테이션 프로브 — 검증 대상을 훼손했을 때 테스트가 실패했는가(detected=true여야 유효).
+   *  `file`: the file the probe broke; for a product criterion (PT-*, UIUX-*) required and
+   *  never a document (I2). */
+  mutation?: { command: string; output: string; detected: boolean; file?: string };
 }
 
 /** A test type (track G §10.8): each layer-1 result counts and times its suites per type. */

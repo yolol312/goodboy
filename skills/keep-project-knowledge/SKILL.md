@@ -30,9 +30,11 @@ Keep the project's knowledge files true, so the next session starts with them.
    - date: YYYY-MM-DD
    - checked: YYYY-MM-DD
    - evidence: <the command, test or file check that decides it>   (ai entries)
+   - test: <what a test of the code checks>   (optional: a rule the product must keep)
    <one or two lines: the rule>
    ```
-   `ai` when evidence can decide the check; otherwise, or unsure, `human`.
+   `ai` when evidence can decide the check; otherwise, or unsure, `human`. A new or changed
+   `test:` line makes the test gate ask for a test with the id `POL-<id>` in that session.
 3. Ask the user once, batched in Korean, about every `human` entry and every unknown; record
    the answers as the entries' text and source.
 4. Write `.goodboy/docs.json`: `{"docs": [{"path": ".goodboy/policy.md", "session_start": true,

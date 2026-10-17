@@ -22,7 +22,8 @@ catch it breaking again.
   criterion (`PT-*`, `UIUX-*`).
 
 ## Tool skills
-1. check-spec-coverage, when `bun "$GB/lib/cli.ts" acceptance-list` lists criteria.
+1. check-spec-coverage, when `bun "$GB/lib/cli.ts" acceptance-list` or a Stop block message
+   lists criteria.
 2. write-regression-test, for each behavior change: red, green, mutation.
 3. measure-coverage, after the suites pass: every changed code line must have run (the gate
    checks it); for a line that did not, go back to step 2.
