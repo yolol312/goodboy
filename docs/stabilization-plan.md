@@ -1034,6 +1034,7 @@ Consequences for the design:
 | I5 | #6 | Existing tests that cover the change run with it; weakening a test is a finding (§15.8) |
 | I6 | #13 | Fixes from the first real-use trial (§15.9) |
 | I7 | #14 | Fixes from the second real-use trial (§15.10) |
+| I8 | #15 | Fixes from the third real-use trial (§15.11) |
 
 Each step: tests first, the §14.7a review sizing, a /verify probe per new rule, README
 (Korean), and `/done #<issue>` (GitHub mode) to close it. Merge and push wait for the user.
@@ -1568,6 +1569,65 @@ Four new problems:
 - Seen and left as designed: the skill rule denied a batch of five parallel edits before the
   workflow skill (as in §15.9 item 7); read-before-edit denied an Edit in a test agent's
   temporary copy that it had not read.
+
+### 15.11 I8 (#15): fixes from the third real-use trial
+
+The same four tasks on a fresh copy after I7 (2026-10-19). The push went through with no user
+approval: the code sessions recorded tests with JaCoCo changed-line coverage, the commit
+session committed, the push check asked for a full regression, the test agent ran
+`cli.ts regression` (`./gradlew test`), and the push passed. (The first commit session was cut
+off by an account switch and ran again.) Two problems:
+
+1. The changed-line rule asked for lines of a MyBatis mapper interface (two parameter types
+   changed). An interface with only abstract methods has no bytecode lines, so JaCoCo leaves
+   it out of the report and no test can ever run it; the session ended asking the user to
+   waive the check. A changed `.java` file that declares only interfaces or annotation types,
+   with no method body, no class, enum or record and no field but compile-time constants (a
+   primitive or String field set to a literal; `null`, `Foo.class`, a method reference or any
+   other initializer runs in a static initializer), now has nothing to measure, like a
+   types-only TypeScript file. It is read by linear scans (the shared literal stripper, which
+   now knows Java text blocks, then annotations), never by a regex that backtracks: a crafted
+   file ran the Stop past its timeout (I8 review). A unicode escape anywhere (javac reads
+   `\u007b` as `{`), a FIFO or anything unsure counts as code, and so does any character
+   outside comments and strings that is not printable ASCII or whitespace: javac takes
+   non-ASCII names (`class 매출`) and ignores control and format characters inside a word
+   (round 2). A lone CR ends a line comment, for the JS forbidden-pattern scan too. Reading
+   changed files to tell has 3 s in all; after that a file counts as code unread. It matters
+   only for a file missing from every report: a file in a report is measured as before.
+2. `git add … && git commit … && git push` was judged before the command ran, so against the
+   commit before the new one, and the denial said the content was edited after the tests. A
+   command before a push or an MR creation (`gh pr create`, `glab mr create`) in the same
+   command that may change commits now gets a denial that names it and says to run it first
+   and the hand-off as a separate command (the user's notice says so too); between two pushes
+   it counts for the later one (closing check). After the last push in a plain sequence it
+   runs too late to matter (round 2: `git push && git switch main`); with
+   a loop or a function (`for`, `while`, `until`, `select`, `function`, `()`) any position
+   counts. Read-only git: status, log, diff, show, add, rm, mv, restore, rev-parse and the
+   other plumbing readers, push; `branch` and `tag` when every flag only reads (a read mode
+   such as `--list` or `--contains`, or a listing option) and, with operands, a read mode is
+   set (round 2: `tag -a` annotates, `branch -v -f` moves, git deletes before it lists);
+   `checkout` and `reset` with paths after a `--` (a bare `--` at the end names none),
+   `reset` without an operand, `stash` but `stash branch`, `remote` with no operand, `show`
+   or `get-url`, `config` reads, `fetch` with no `:` in any word (a `src:dst` refspec or
+   `--refmap`). A git command with a config set for it (`-c`, `--config-env`, `--exec-path`,
+   or GIT_CONFIG*, GIT_EXTERNAL_DIFF or GIT_EXEC_PATH in its env) or a flag that runs a
+   program (`--upload-pack`, `--exec`, `grep -O`) counts as a change: `diff.external` ran a
+   commit. So does an alias, an unknown git command, and any other
+   program but a short list of readers (echo, printf, test, sleep, ls, cat, head, tail, grep
+   and the like, `command -v`, and the loop and flow words): `npm version`, `make release`
+   and scripts commit (round 2). A shell's `-c`, `eval`, `xargs`
+   and `find -exec` are not counted themselves, as their command is read. A git command is
+   named before another program. It only ever denies. A push in a `trap` is now unclear (it
+   was never read: I8 review).
+
+- Known limits: Kotlin and Groovy interfaces still count as code, and so does a constant
+  expression (`1 << 10`, `"a" + "b"`), an annotation-only `package-info.java` or a Java file
+  with non-ASCII names (the safe side). Some harmless commands next to a push are denied too
+  (`git branch feat`, `git checkout main`, `bun test && git push`, `git fetch <url>`): the
+  denial says to split the command. Not seen: a program the repo's own config runs from a
+  read-only git command (`core.fsmonitor`, a textconv driver) or from another global config
+  (a HOME or XDG_CONFIG_HOME set for it), a redirect that writes into `.git`, and a fetch
+  refspec from the remote's config that writes local branches.
 
 ## 16. J — Field reports (v0.34.0)
 

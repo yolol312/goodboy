@@ -853,7 +853,9 @@ function main(): void {
                   ? {}
                   : {
                       systemMessage:
-                        `[goodboy] ${reg !== null ? '통과한 전체 회귀 기록' : '통과한 테스트 결과'} 없이 ${h.what}을(를) 하려는 걸 막았어요` +
+                        (failed?.runFirst
+                          ? `[goodboy] 한 명령 안에서 \`${failed.runFirst}\` 뒤에 ${h.what}을(를) 하려는 걸 막았어요(push는 명령 실행 전에 검사해서 나눠서 해야 해요)`
+                          : `[goodboy] ${reg !== null ? '통과한 전체 회귀 기록' : '통과한 테스트 결과'} 없이 ${h.what}을(를) 하려는 걸 막았어요`) +
                         (failed?.why === 'blocked' ? `(테스트를 실행하지 못함: ${failed.blocked?.blocked?.reason ?? ''})` : '') +
                         `. 테스트 없이 보내려면 \`! touch ${approvalMarkerRelPath('push-test', sessionId)}\`(이번 한 번)을 실행하거나 ${reg !== null ? 'GOODBOY_PUSH_REGRESSION' : 'GOODBOY_PUSH_TEST_GATE'}=off로 끄세요.`,
                     }),

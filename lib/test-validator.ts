@@ -503,6 +503,9 @@ export interface ForbiddenHit {
   message: string;
 }
 
+/** What ends a `//` comment: LF, CR, and U+2028 and U+2029 (JS line terminators). */
+const LINE_END = new Set(['\n', '\r', String.fromCharCode(0x2028), String.fromCharCode(0x2029)]);
+
 /**
  * 문자열·템플릿 리터럴·주석의 **내용**을 공백으로 지운다(길이·줄바꿈은 보존).
  *
@@ -518,8 +521,11 @@ export interface ForbiddenHit {
  * 정규식 리터럴은 별도로 파싱하지 않는다. 다만 일반 코드의 `\` 는 다음 글자를
  * 건너뛴다 — `/https?:\/\//` 같은 정규식의 `\/` 가 줄 주석 시작으로 오인돼
  * 그 줄이 통째로 지워지는 것(= 위반 미검출)을 막기 위해서다.
+ *
+ * `javaTextBlocks` (#15, lib/changed-coverage.ts): a Java text block (`"""` … `"""`, a backslash
+ * escapes the next character) is one literal across lines.
  */
-export function stripLiteralsAndComments(source: string): string {
+export function stripLiteralsAndComments(source: string, javaTextBlocks = false): string {
   if (typeof source !== 'string' || source === '') return '';
   const out = source.split('');
   const blank = (from: number, to: number): void => {
@@ -537,8 +543,10 @@ export function stripLiteralsAndComments(source: string): string {
       continue;
     }
     if (c === '/' && next === '/') {
-      const end = source.indexOf('\n', i);
-      const stop = end === -1 ? n : end;
+      // A lone CR ends a line too, to javac and to JS (I8 review: a comment ended only at LF
+      //   hid the code after a CR); so do U+2028 and U+2029 in JS.
+      let stop = i + 2;
+      while (stop < n && !LINE_END.has(source[stop]!)) stop++;
       blank(i, stop);
       i = stop;
       continue;
@@ -548,6 +556,13 @@ export function stripLiteralsAndComments(source: string): string {
       const stop = end === -1 ? n : end + 2;
       blank(i, stop);
       i = stop;
+      continue;
+    }
+    if (javaTextBlocks && source.startsWith('"""', i)) {
+      let j = i + 3;
+      while (j < n && !source.startsWith('"""', j)) j += source[j] === '\\' ? 2 : 1;
+      blank(i + 3, Math.min(j, n));
+      i = Math.min(j + 3, n);
       continue;
     }
     if (c === '"' || c === "'" || c === '`') {
@@ -562,7 +577,7 @@ export function stripLiteralsAndComments(source: string): string {
         if (d === quote) break;
         // 따옴표 문자열은 줄을 넘지 않는다 — 닫히지 않은 따옴표(아포스트로피 등)가
         //   파일 끝까지 삼켜 위반을 통째로 숨기는 것을 막는다. 템플릿은 넘어간다.
-        if (d === '\n' && quote !== '`') break;
+        if ((d === '\n' || d === '\r') && quote !== '`') break;
         j++;
       }
       blank(i + 1, Math.min(j, n));

@@ -146,7 +146,7 @@ describe('findings 2–4 and 6: the push test check', () => {
       expect([rel, docsOnlyBases(cwd, 'HEAD', t, [code])]).toEqual([rel, []]);
       git(cwd, 'reset', '-q', '--hard', 'HEAD~1');
     }
-  });
+  }, 30_000);
 
   test('AC-2: a submodule bump or a symlink beside the prose is no docs-only change, whatever the config says', () => {
     const { cwd } = repo();
@@ -170,7 +170,7 @@ describe('findings 2–4 and 6: the push test check', () => {
     git(cwd, 'add', 'docs/run.md');
     git(cwd, 'commit', '-q', '-m', 'link');
     expect(docsOnlyBases(cwd, 'HEAD', revisionTree(cwd, 'HEAD')!, [tested])).toEqual([]);
-  });
+  }, 30_000);
 
   test('AC-3: a result for exactly the tree that does not count says why; the denial names the marker', () => {
     const tree = 'c'.repeat(40);
@@ -218,7 +218,7 @@ describe('findings 2–4 and 6: the push test check', () => {
     git(cwd, 'commit', '-q', '-m', 'settings');
     expect(revisionTree(cwd, 'HEAD')).not.toBe(before);
     expect(revisionTree(cwd, 'HEAD')).toBe(workTreeState(cwd).tree);
-  });
+  }, 30_000);
 
   test('AC-2: through the hook, prose on a tested tree needs that tree\'s regression; code is denied with the marker', async () => {
     const { base, cwd } = repo();

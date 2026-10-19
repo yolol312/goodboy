@@ -254,7 +254,8 @@ describe('layer-1 mutants: spellings the fixes handle that no test pinned', () =
       'cd ../B && git commit -m "fix: x (y)" && git push origin main',
       "cd ../B && git commit -q -F - <<'EOF'\nfix: x (y)\nEOF\ngit push origin main",
     ]) {
-      expect([c, handoffsOf(c, '/x/A', rules)[0]]).toEqual([c, expect.objectContaining({ cwd: '/x/B', revs: ['main'] })]);
+      // (#15) The commit before the push in one command is named; the push is read in B.
+      expect([c, handoffsOf(c, '/x/A', rules)[0]]).toEqual([c, expect.objectContaining({ cwd: '/x/B', what: 'git push origin main', runFirst: 'git commit' })]);
     }
   });
 

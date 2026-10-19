@@ -44,6 +44,69 @@ export interface Handoff {
   revs: string[];
   /** Set when goodboy cannot tell what is handed off (a push of every branch or tag). */
   unclear?: string;
+  /** (#15) The command that may change commits before the push in the same command (`git
+   *  commit`, `npm version`): the check runs before the command, so it would judge the commits
+   *  as they were. */
+  runFirst?: string;
+}
+
+/** git commands that leave commits, refs and config as they are: anything else before a push
+ *  in one command may change what it hands off (#15; an alias or an unknown command counts). */
+const READ_ONLY_GIT = new Set([
+  'status', 'log', 'diff', 'show', 'add', 'rm', 'mv', 'restore', 'rev-parse', 'rev-list', 'ls-files', 'ls-tree',
+  'ls-remote', 'describe', 'grep', 'blame', 'shortlog', 'cat-file', 'show-ref', 'for-each-ref', 'name-rev', 'var', 'version',
+  'help', 'count-objects', 'diff-tree', 'diff-index', 'diff-files', 'merge-base', 'check-ignore', 'check-attr', 'whatchanged',
+  'push',
+]);
+/** Programs that leave commits, refs and config as they are (#15, I8 review): any other program
+ *  before a push in one command (`npm version patch`, `make release`, a script) may commit. */
+const READ_ONLY_PROGS = new Set([
+  'echo', 'printf', 'true', 'false', ':', 'test', '[', '[[', 'sleep', 'pwd', 'ls', 'cat', 'head', 'tail', 'wc', 'grep',
+  'which', 'type', 'date', 'set', 'unset', 'wait', 'for', 'select', 'case', 'done', 'fi', 'esac', 'break', 'continue',
+  'exit', 'return', 'shift',
+]);
+/** `git branch`/`git tag` flags that make it only read: a read mode (its operands are patterns
+ *  or names to show), or a listing option (I8 review: `tag -a` annotates, `branch -f` moves). */
+const REF_READ_MODE: Readonly<Record<string, ReadonlySet<string>>> = {
+  branch: new Set(['-l', '--list', '--show-current', '--contains', '--no-contains', '--merged', '--no-merged', '--points-at']),
+  tag: new Set(['-l', '--list', '--contains', '--no-contains', '--merged', '--no-merged', '--points-at', '-v', '--verify']),
+};
+const REF_LISTING: Readonly<Record<string, ReadonlySet<string>>> = {
+  branch: new Set(['-v', '-vv', '--verbose', '-a', '--all', '-r', '--remotes', '--format', '--sort', '--color', '--no-color', '--column', '--no-column', '-i', '--ignore-case', '--abbrev', '--no-abbrev', '--omit-empty']),
+  tag: new Set(['--format', '--sort', '--color', '--no-color', '--column', '--no-column', '-i', '--ignore-case', '--omit-empty']),
+};
+const CONFIG_READING = new Set(['--get', '--get-all', '--get-regexp', '--get-urlmatch', '--list', '-l']);
+
+/** The hand-off `h`, judged before a command ahead of it in the same command changes commits (#15). */
+function runFirstHandoff(h: Handoff, moved: string): Handoff {
+  return { kind: h.kind, what: h.what, cwd: h.cwd, revs: [], unclear: `it runs \`${moved}\` before it`, runFirst: moved };
+}
+
+/** Whether `git <sub> <args>` may change commits, refs or config (#15): `branch` and `tag` not
+ *  when they only read, `checkout` not when it restores paths (after a `--`), `reset` not
+ *  without an operand or with paths, `stash` not unless it makes a branch, `remote` not when it
+ *  shows, `config` not when it reads, `fetch` not without a `src:dst` refspec or refmap. */
+function changesCommits(sub: string, args: readonly string[]): boolean {
+  // A flag that runs a program (closing check: `fetch --upload-pack=…`, `grep -O…`).
+  if (args.some((w) => /^(?:--upload-pack|--exec|--open-files-in-pager|-O)/.test(w))) return true;
+  if (READ_ONLY_GIT.has(sub)) return false;
+  const operands = args.filter((w) => !w.startsWith('-'));
+  // Paths after a `--`: a bare one at the end names none (`checkout -B main other --`).
+  const dd = args.indexOf('--');
+  const paths = dd >= 0 && dd < args.length - 1;
+  const mode = REF_READ_MODE[sub];
+  if (mode) {
+    const flags = args.filter((w) => w.startsWith('-')).map((w) => (w.startsWith('--') ? w.split('=')[0]! : w));
+    if (!flags.every((f) => mode.has(f) || REF_LISTING[sub]!.has(f))) return true;
+    return operands.length > 0 && !flags.some((f) => mode.has(f));
+  }
+  if (sub === 'checkout') return !paths;
+  if (sub === 'reset') return operands.length > 0 && !paths;
+  if (sub === 'stash') return operands[0] === 'branch';
+  if (sub === 'remote') return operands.length > 0 && operands[0] !== 'show' && operands[0] !== 'get-url';
+  if (sub === 'config') return !args.some((w) => CONFIG_READING.has(w));
+  if (sub === 'fetch') return args.some((w) => w.includes(':'));
+  return true;
 }
 
 /** The working tree itself as a hand-off revision (deploys, publishes). */
@@ -352,6 +415,8 @@ function mrHandoff(words: string[], cwd: string): Handoff[] {
 
 /** Env names that move git's config or repository (security reviews, rounds 3–4). */
 const GIT_ENV = /^(?:GIT_CONFIG\w*|HOME|XDG_CONFIG_HOME|GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR)$/;
+/** Env that sets config or a program for one git command (#15). */
+const GIT_RUNS_ENV = /^(?:GIT_CONFIG\w*|GIT_EXTERNAL_DIFF|GIT_EXEC_PATH)$/;
 const SHELLS = /^(?:ba|z|da|k|c|tc|fi)?sh$/;
 const ASSIGNING = new Set(['export', 'declare', 'typeset', 'local', 'readonly']);
 
@@ -398,6 +463,16 @@ function handoffsOfAt(command: string, cwd: string, depth: number, rules?: HostR
   // Env set for every later command: `export HOME=/x;`, a bare `GIT_DIR=x;` (HOME is already
   //   exported, so a bare assignment reaches git too).
   const shellEnv = new Set<string>();
+  // (#15) A command before a push in the same command that may change commits (`git commit
+  //   … && git push`, `npm version patch && git push`, also between two pushes: closing
+  //   check). One after the last push runs too late to matter (I8 review: `git push && git
+  //   switch main`), unless a loop or a function may run it first. `at` is how many hand-offs
+  //   came before it.
+  const anyOrder = /\b(?:for|while|until|select|function)\b|\(\s*\)/.test(command);
+  const movers: { name: string; git: boolean; at: number }[] = [];
+  const mark = (what: string, git: boolean): void => {
+    movers.push({ name: what.replace(/\s+/g, ' ').slice(0, 60), git, at: anyOrder ? 0 : out.length });
+  };
   for (const { words, env, dir: here } of segments) {
     if (words.length === 0) {
       for (const n of env) shellEnv.add(n);
@@ -424,6 +499,8 @@ function handoffsOfAt(command: string, cwd: string, depth: number, rules?: HostR
     //   (`-s` counts before the first operand only: `bash release.sh -s` passes -s to the script)
     //   (`bash -o errexit` and `bash /dev/stdin` read stdin too: shellReadsStdin)
     if (SHELLS.test(prog) && mentionsPush && shellReadsStdin(words)) return unclear('it feeds a script to a shell on stdin');
+    // - a `trap` that runs a push later, on a signal or at exit (I8 review: never read);
+    if (prog === 'trap' && mentionsPush) return unclear('it runs a push from a trap');
     // - git run by xargs, whose arguments are known only at run time;
     //   a built-in other than push takes its arguments from xargs harmlessly (`… | xargs git add`).
     if (prog === 'xargs') {
@@ -445,11 +522,25 @@ function handoffsOfAt(command: string, cwd: string, depth: number, rules?: HostR
       const envConfig = [...env, ...shellEnv].some((n) => GIT_ENV.test(n));
       const found = gitHandoff(words, here ?? cwd, depth, budget, envConfig);
       if (here === null && found.length > 0) return unclear(LOST_DIR);
+      const at = gitSubcommandAt(words, 1);
+      const sub = words[at];
+      // A config set for this command (`git -c diff.external=… diff`, GIT_CONFIG_* env) can run
+      //   a program from any git command (I8 review). (A HOME or GIT_DIR for it reads another
+      //   file or repo: still read-only, final G1 layer-1.)
+      const configured =
+        [...env, ...shellEnv].some((n) => GIT_RUNS_ENV.test(n)) || words.slice(1, at).some((w) => /^(?:-c|--config-env|--exec-path)/.test(w));
+      // A segment that hands off (an alias of push too) is the hand-off, not a change next to it.
+      if (found.length === 0 && sub !== undefined && (configured || changesCommits(sub, words.slice(at + 1)))) mark(`git ${sub}`, true);
       out.push(...found);
     } else if (prog === 'gh' || prog === 'glab') {
       const found = mrHandoff([prog, ...words.slice(1)], here ?? cwd);
       if (here === null && found.length > 0) return unclear(LOST_DIR);
+      if (found.length === 0) mark(words.slice(0, 3).join(' '), false);
       out.push(...found);
+    } else if (!READ_ONLY_PROGS.has(prog) && !(prog === 'command' && /^-[a-zA-Z]*[vV]/.test(words[1] ?? '')) && prog !== 'eval' && shellC < 0 && prog !== 'xargs' && !(prog === 'find' && words.some((w) => /^-(?:exec|execdir|ok|okdir)$/.test(w)))) {
+      // A program that runs a command from its arguments (`sh -c`, `eval`, `xargs`, `find
+      //   -exec`) is no change itself: the command it runs is read as its own segment.
+      mark(words.slice(0, 2).join(' '), false);
     }
     // Checked inside the loop, so a long command stops early (final review): the first unclear
     //   hand-off decides, and so do too many refs.
@@ -458,6 +549,11 @@ function handoffsOfAt(command: string, cwd: string, depth: number, rules?: HostR
     if (out.reduce((n, h) => n + h.revs.length, 0) > 10) return unclear('it hands off too many refs to check');
   }
   if (out.some((h) => h.kind === 'push') && substitutedPush(command)) return unclear('its refs come from a command substitution');
+  // The hand-off after a mover; a git command is named before another program (a function's
+  //   name reads as one).
+  const after = (m: { at: number }) => out.slice(m.at).find((h) => (h.kind === 'push' || h.kind === 'mr') && !h.unclear);
+  const first = movers.find((m) => m.git && after(m)) ?? movers.find((m) => after(m));
+  if (first) return [runFirstHandoff(after(first)!, first.name)];
   // A deploy ships the files as they are: the working tree it runs in must be the tested one.
   for (const d of deploys.slice(0, 3)) {
     if (d.dir === null) return [{ kind: 'deploy', what: d.what, cwd, revs: [], unclear: LOST_DIR }];
@@ -496,6 +592,8 @@ export type PushTestOutcome =
       /** Why the newest result for exactly this tree did not count (#13: the denial said
        *  "no passing result" although one existed). */
       rejected?: string;
+      /** (#15) See Handoff.runFirst. */
+      runFirst?: string;
     };
 
 /** Paths that differ between two tree hashes, or null when git cannot tell. */
@@ -576,6 +674,13 @@ export function pushTestMessage(what: string, o: Exclude<PushTestOutcome, { ok: 
 }
 
 function pushTestText(what: string, o: Exclude<PushTestOutcome, { ok: true }>): string {
+  if (o.runFirst) {
+    return (
+      `This command runs \`${o.runFirst}\` before \`${what}\`. goodboy checks a push before the command runs, so it would ` +
+      `judge the commits as they were before the \`${o.runFirst}\`. Run that part on its own first, then \`${what}\` as a ` +
+      'separate command; the tested content still has to match what you hand off. (push test check)'
+    );
+  }
   if (o.why === 'unclear') {
     return (
       `goodboy cannot tell what \`${what}\` hands off: ${o.rev}. Push the branches or tags you mean by name ` +
@@ -618,7 +723,7 @@ export function checkHandoff(
   diffOf: (cwd: string, a: string, b: string) => string[] | null = treeDiff,
   docsOnly: (cwd: string, rev: string, tree: string, passTrees: readonly string[]) => string[] = docsOnlyBases,
 ): PushTestOutcome {
-  if (h.unclear) return { ok: false, why: 'unclear', rev: h.unclear, tree: null };
+  if (h.unclear) return { ok: false, why: 'unclear', rev: h.unclear, tree: null, ...(h.runFirst ? { runFirst: h.runFirst } : {}) };
   const docRevs: Record<string, string[]> = {};
   const passed = results.filter(passing);
   for (const rev of h.revs) {

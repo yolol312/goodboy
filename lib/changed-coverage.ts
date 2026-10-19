@@ -25,6 +25,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve as reso
 import { ensureSessionDir } from './file-tracker';
 import { filterOffArgs, HOOK_GIT_ARGS, HOOK_GIT_ENV, NO_GRAFTS } from './hook-git';
 import { knowledgeRoot, parsePolicyEntries, POLICY_FILE } from './project-knowledge';
+import { stripLiteralsAndComments } from './test-validator';
 import type { ChangedFileEdit } from './review-validator';
 import { isTrustedTimestamp } from './trusted-time';
 import type { TestResult } from './types';
@@ -48,6 +49,8 @@ export type CoverageGap =
 
 const MAX_POLICY_BYTES = 256 * 1024;
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
+/** Time for reading changed files to see whether they hold code, across all of them. */
+const READ_BUDGET_MS = 3_000;
 const PIN_FILE = 'coverage-pin.json';
 /** `--base empty`: diff against the empty tree (no commit when the session started). */
 export const EMPTY_BASE = 'empty';
@@ -247,19 +250,118 @@ export function sessionUserGlobs(sessionId: string, cwd: string, top: string, ke
  *  and for JS/TS only one with runtime code (types-only imports trimmed; a types-only file
  *  transpiles to nothing but `export {}`). A `.d.ts` is a declaration file: TypeScript never
  *  runs one (`export * from`, `export =` are declarations there), so it is not measured; code
- *  hidden in one that a test imports by its full name is a known limit (plan §15.2a). */
-function measurableCode(abs: string): boolean {
+ *  hidden in one that a test imports by its full name is a known limit (plan §15.2a). After
+ *  `until` (epoch ms) a file counts as code unread (I8 review: many crafted files must not run
+ *  the Stop past its timeout). */
+function measurableCode(abs: string, until: number): boolean {
   const ext = extname(abs).toLowerCase();
   if (!CODE_EXT.has(ext) || !existsSync(abs) || /\.d\.[mc]?ts$/i.test(abs)) return false;
+  if (Date.now() > until) return true;
+  if (ext === '.java') return !codeFreeJava(abs);
   if (!JS_EXT.has(ext)) return true;
   try {
-    if (statSync(abs).size > MAX_SOURCE_BYTES) return true;
+    // A FIFO or a device named like code would never finish reading (I8 review).
+    const st = statSync(abs);
+    if (!st.isFile() || st.size > MAX_SOURCE_BYTES) return true;
     const loader = ext === '.tsx' ? 'tsx' : ext === '.jsx' ? 'jsx' : ['.js', '.mjs', '.cjs'].includes(ext) ? 'js' : 'ts';
     const js = new Bun.Transpiler({ loader, trimUnusedImports: true }).transformSync(readFileSync(abs, 'utf8'));
     return js.replace(/^\s*export\s*\{\s*\}\s*;?\s*$/gm, '').trim() !== '';
   } catch {
     return true;
   }
+}
+
+/** (#15) A Java file that declares only interfaces or annotation types with no executable code:
+ *  no method body (default, static or private methods), no class, enum or record, and no field
+ *  but compile-time constants (a primitive or String field set to a literal; any other
+ *  initializer, `null`, `Foo.class` or a method reference runs in a static initializer). The
+ *  compiler emits no bytecode lines for it, so JaCoCo leaves it out of the report and no test
+ *  can run its lines (real-use trial 3: a MyBatis mapper interface). Read without comments,
+ *  strings and annotations by linear scans (no regex that backtracks: a crafted file must not
+ *  run the Stop past its timeout). Anything unsure counts as code: a unicode escape (javac
+ *  reads a backslash, `u` and four hex digits as that character before anything else), and,
+ *  outside comments and strings, any character but printable ASCII and whitespace (I8 review:
+ *  javac takes non-ASCII names, `class 매출`, and ignores control and format characters
+ *  inside a word, so `cl`, U+0001, `ass` is `class`). */
+export function codeFreeJava(abs: string): boolean {
+  let text: string;
+  try {
+    const st = statSync(abs);
+    // A FIFO or a device named `.java` would never finish reading.
+    if (!st.isFile() || st.size > MAX_SOURCE_BYTES) return false;
+    text = readFileSync(abs, 'utf8');
+  } catch {
+    return false;
+  }
+  if (/\\u+[0-9a-fA-F]{4}/.test(text)) return false;
+  const bare = withoutAnnotations(stripLiteralsAndComments(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text, true));
+  if (bare === null || /[^\t\n\f\r\x20-\x7e]/.test(bare) || !/\binterface\b/.test(bare)) return false;
+  if (/\b(?:class|enum|record)\s+[A-Za-z_$]/.test(bare)) return false;
+  if (hasMethodBody(bare)) return false;
+  // Every `=` must start a compile-time constant: `int A = 1;`, `String S = "…";` (blanked).
+  for (const part of bare.split(/[;{}]/)) {
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    if (!CONSTANT_LEFT.test(part.slice(0, eq)) || !CONSTANT_RIGHT.test(part.slice(eq + 1))) return false;
+  }
+  return true;
+}
+
+const CONSTANT_LEFT = /^\s*(?:(?:public|static|final)\s+)*(?:byte|short|int|long|float|double|boolean|char|String)\s+[A-Za-z_$][\w$]*\s*$/;
+const CONSTANT_RIGHT = /^\s*(?:[-+]?\s*[0-9][0-9a-fA-FxXbB_.]*(?:[eE][-+]?[0-9]+)?[lLfFdD]?|"\s*"|"""\s*"""|'\s*'|true|false)\s*$/;
+
+/** Whether some `)` opens a body: `) {`, `)[] {`, `) throws A, B {`. Each `)` scans only the
+ *  run after it, and no run holds a `)`, so the scans never overlap. */
+function hasMethodBody(text: string): boolean {
+  for (let i = text.indexOf(')'); i >= 0; i = text.indexOf(')', i + 1)) {
+    let j = i + 1;
+    const skip = () => {
+      while (j < text.length && /\s/.test(text[j]!)) j++;
+    };
+    skip();
+    while (text[j] === '[') {
+      j++;
+      skip();
+      if (text[j] !== ']') break;
+      j++;
+      skip();
+    }
+    if (text.startsWith('throws', j) && !/[\w$]/.test(text[j + 6] ?? '')) {
+      j += 6;
+      while (j < text.length && /[\w$.<>,?&\s]/.test(text[j]!)) j++;
+    }
+    if (text[j] === '{') return true;
+  }
+  return false;
+}
+
+/** `text` without its annotations (`@Name`, `@a.b.Name(…)` with balanced parentheses; strings
+ *  are already blanked), or null when the parentheses do not balance. `@interface` stays. */
+function withoutAnnotations(text: string): string | null {
+  const name = /@\s*([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)/y;
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    name.lastIndex = i;
+    const m = text[i] === '@' ? name.exec(text) : null;
+    if (!m || m[1] === 'interface') {
+      out += text[i];
+      continue;
+    }
+    let j = i + m[0].length;
+    while (j < text.length && /\s/.test(text[j]!)) j++;
+    if (text[j] === '(') {
+      let depth = 0;
+      for (; j < text.length; j++) {
+        if (text[j] === '(') depth++;
+        else if (text[j] === ')' && --depth === 0) break;
+      }
+      if (depth !== 0) return null;
+      j++;
+    }
+    out += ' ';
+    i = j - 1;
+  }
+  return out;
 }
 
 /** The files of `rels` (repo-relative) that are not the base's blob, i.e. not an edit that was
@@ -320,6 +422,7 @@ export function changedLineGaps(args: { results: TestResult[]; edits: ChangedFil
   const globs = args.exempt.map((g) => new Bun.Glob(g));
   const need: { abs: string; file: string; last: string | null }[] = [];
   const seen = new Set<string>();
+  const readUntil = Date.now() + READ_BUDGET_MS;
   for (const edit of [...args.edits].sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0))) {
     const abs = resolvePath(edit.file);
     if (seen.has(abs)) continue;
@@ -329,7 +432,7 @@ export function changedLineGaps(args: { results: TestResult[]; edits: ChangedFil
     const file = r.split(sep).join('/');
     if (globs.some((g) => g.match(file))) continue;
     const reported = existsSync(abs) && whole.some((t) => Object.hasOwn(t.coverage!.changed!.files!, file));
-    if (!reported && !measurableCode(abs)) continue;
+    if (!reported && !measurableCode(abs, readUntil)) continue;
     need.push({ abs, file, last: typeof edit.lastEditTimestamp === 'string' && edit.lastEditTimestamp !== '' ? edit.lastEditTimestamp : null });
   }
   if (need.length === 0) return { measured: true, gaps: [] };
