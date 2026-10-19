@@ -65,8 +65,10 @@ const TOOL_SKILLS: Record<string, string | null> = {
   'follow-agent-rules': null,
   // Track H (§14.3): also user-invocable.
   'keep-project-knowledge': 'high',
+  // Track J (§16, J1): user-invocable, run by the user in any project.
+  'report-goodboy': 'medium',
 };
-const USER_INVOCABLE_TOOL_SKILLS = new Set(['keep-project-knowledge']);
+const USER_INVOCABLE_TOOL_SKILLS = new Set(['keep-project-knowledge', 'report-goodboy']);
 
 function frontmatter(path: string): { fields: Record<string, string>; body: string; lines: number } {
   const text = readFileSync(path, 'utf8');
@@ -113,7 +115,7 @@ describe('the 24 agents', () => {
   }
 });
 
-describe('the 24 tool skills (23 from G2, keep-project-knowledge from H2)', () => {
+describe('the 25 tool skills (23 from G2, keep-project-knowledge from H2, report-goodboy from J1)', () => {
   for (const [name, effort] of Object.entries(TOOL_SKILLS)) {
     test(`${name}: format`, () => {
       const path = join(ROOT, 'skills', name, 'SKILL.md');

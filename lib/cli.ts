@@ -40,6 +40,7 @@ import {
 import { AXIS_DIMENSIONS, axesFor, requiredDimensionsFor } from './review-dimensions';
 import { MAX_DOC_BYTES, readRegular } from './safe-read';
 import { appendSkillGapLog, recordSkillEvidence, validateSkillGapNote } from './skill-rule';
+import { collectEvidence, findSession, privateTerms, publicLeaks, REPORT_REPO, REPORT_TITLE_TAG, validateFieldReport, writeFieldReport } from './field-report';
 
 // ---- 유틸 ----
 
@@ -805,11 +806,64 @@ async function cmdSkillGap(cwd: string, args: string[]): Promise<void> {
   process.stdout.write(JSON.stringify({ ok: true, recorded: ts }) + '\n');
 }
 
+// ---- commands: report-evidence, report-write (track J1, #8) ----
+
+/** `--session <id or tag>` and the other words of `args`. */
+function sessionOpt(args: string[]): { session?: string; rest: string[] } {
+  const i = args.indexOf('--session');
+  if (i < 0) return { rest: args };
+  const session = (args[i + 1] ?? '').trim();
+  if (!/^[0-9a-f-]{8,36}$/.test(session)) fail('--session takes a session id or its 8-character tag');
+  return { session, rest: [...args.slice(0, i), ...args.slice(i + 2)] };
+}
+
+/** Prints what goodboy recorded about the session (the newest one of this dir by default). */
+function cmdReportEvidence(cwd: string, args: string[]): void {
+  const { session } = sessionOpt(args);
+  const s = findSession(cwd, session);
+  if (session && !s) fail(`report-evidence: no session ${session} for this directory`);
+  process.stdout.write(JSON.stringify(collectEvidence(s, GOODBOY_ROOT), null, 2) + '\n');
+}
+
+/** Writes a field report to the inbox with the session's evidence, after checking the public
+ *  summary for the user's paths, names, hosts and secrets. */
+async function cmdReportWrite(cwd: string, args: string[]): Promise<void> {
+  const { session, rest } = sessionOpt(args);
+  let raw: string;
+  if (rest[0]) {
+    // A FIFO or a device as the file is refused, never waited on (J1 review).
+    const r = readRegular(resolve(cwd, rest[0]), 1024 * 1024);
+    if (typeof r !== 'object') fail(`report-write: ${rest[0]} is missing, not a regular file, or over 1 MB`);
+    raw = r.text;
+  } else raw = await readAllStdin();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    fail('report-write: the input is not JSON (see the report-goodboy skill for the template)');
+  }
+  const res = validateFieldReport(parsed);
+  if (!res.ok || !res.value) fail(`report-write: the report does not follow the template:\n- ${res.errors.join('\n- ')}`);
+  const s = findSession(cwd, session);
+  if (session && !s) fail(`report-write: no session ${session} for this directory`);
+  const ev = collectEvidence(s, GOODBOY_ROOT);
+  // The model's text only: goodboy's own lines (versions, gate names) are not the user's, and
+  //   a repo named like one of them could never pass (J1 review).
+  const leaks = publicLeaks(`${res.value.public_summary.title}\n${res.value.public_summary.body}`, privateTerms(cwd));
+  if (leaks.length > 0) {
+    fail(`report-write: the public summary names private details; remove each one (describe it generically, never respell it):\n- ${leaks.join('\n- ')}`);
+  }
+  const out = writeFieldReport(res.value, ev, { cwd, root: GOODBOY_ROOT });
+  process.stdout.write(
+    JSON.stringify({ ok: true, path: out.path, public_path: out.publicPath, issue_title: `${REPORT_TITLE_TAG} ${res.value.public_summary.title}`, repo: REPORT_REPO, evidence: { goodboy: ev.goodboy_version, claude_code: ev.claude_code_version, session: ev.session } }) + '\n',
+  );
+}
+
 // ---- main ----
 
 const USAGE =
   '사용법: bun lib/cli.ts <command> [args...]\n' +
-  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog';
+  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | report-evidence [--session <id>] | report-write [--session <id>] [file]';
 
 async function main(): Promise<void> {
   const cwd = process.cwd();
@@ -865,6 +919,12 @@ async function main(): Promise<void> {
         process.stdout.write(JSON.stringify({ ok: true, path: join(root, TEST_CATALOG_FILE), files: rows.length }) + '\n');
         break;
       }
+      case 'report-evidence':
+        cmdReportEvidence(cwd, args);
+        break;
+      case 'report-write':
+        await cmdReportWrite(cwd, args);
+        break;
       default:
         fail(`알 수 없는 명령: ${command}\n${USAGE}`);
     }

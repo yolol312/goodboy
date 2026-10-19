@@ -1651,6 +1651,45 @@ in another session's temporary scratchpad and was relayed by hand, with no fixed
   Reports go to `~/.claude/goodboy/inbox/`, never a temp dir or the versioned plugin cache.
   A report keeps project details locally, and carries a public summary with project names,
   paths, people and company details removed. A short Korean summary goes to the user.
+- J1 as built (`lib/field-report.ts`, `cli.ts report-evidence` / `report-write`, the
+  user-invocable `report-goodboy` skill):
+  - The session is the one named by `--session <id or tag>`, else the one the command runs
+    in (`CLAUDE_CODE_SESSION_ID`, set for Claude Code's Bash calls), else the newest
+    transcript of the dir and all its parents in Claude Code's projects dir (a link named like
+    a transcript is skipped; another terminal in the same dir may be newer, so the skill
+    names `--session`). goodboy attaches the evidence itself: its version (plugin.json), the
+    Claude Code version (the transcript's last `version`), gate decisions per gate, the first
+    and last gate-log time, the last 30 gate-log lines (local only) and the Stop retry
+    counters. The gate log is read without blocking: a FIFO or a device there is refused
+    (also for the Stop gates that share the reader).
+  - The report is JSON with exactly the template's fields (unknown fields, gaps and long texts
+    are refused). The public summary's title holds no quotes, backticks, `$`, backslashes or
+    line breaks, as it goes into a `gh issue create --title "…"` line.
+  - The public summary (its title and body; goodboy's own footer of versions and gate counts
+    is not the user's) is refused when it holds a local path (any absolute path with a
+    directory, a home path but `~/.claude/`, a file URL, a Windows path), an email, an IPv4
+    or IPv6 address, a URL with any scheme to a host but goodboy's repo and Anthropic's, a
+    domain ending in a top-level domain or a backwards package name (well-known public
+    library roots aside), a secret (cloud, GitHub, GitLab, Stripe-style, Google, npm and
+    Slack tokens, private keys, JWTs, bearer tokens, a password in a URL, `key: value` and
+    `--password x` forms with a value that has a letter), or a name this machine knows to be
+    the user's: the repo's dir name; each remote's owner and repo name, and its host's
+    labels when it is not a public code host; git's whole user.name and the parts of
+    user.email; the login and the host name. Names match in any case, NFC or NFD, with `-`,
+    `_`, `.`, a space or nothing between their parts, as whole words; generic words (`api`,
+    `platform`) are no names, and a first or last name alone is not checked. Company names
+    that appear nowhere on the machine are left to the skill's instructions and the user's
+    confirmation of the exact text.
+  - The inbox (`GOODBOY_INBOX_DIR` for tests) is refused inside goodboy's own dir, in a temp
+    dir by default (both judged with every link resolved, as far up as the path exists),
+    when it is a link, another user's, or writable by others; it is made 0700. A report is
+    two new files, `<time>-<slug>.json` (report, evidence, status `new`) and `.public.md`
+    (the issue body), each created exclusively (mode 600): a file or a link at either name
+    is never written through or reused; the next free name is used.
+  - Known limits: a private name inside a longer camelCase identifier (`billingCoreService`),
+    a UNC path, `~bob/x` and a path of non-ASCII directory names only are not found; plain
+    phrases such as `GET /api/users`, `/tmp/x` or `password: required` are refused and need
+    rewording. The user's confirmation of the exact text is the last check.
 - Other users: goodboy runs no server, so the channel is this repo's issues. The repo is
   public with issues open (checked 2026-10-16), so anyone with a GitHub account can file.
   After the user confirms the text, the skill files the public summary with `gh`, with

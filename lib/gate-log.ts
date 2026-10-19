@@ -19,6 +19,7 @@
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
+import { MAX_STATE_BYTES, readRegular } from './safe-read';
 
 export type GateDecision = 'deny' | 'warn' | 'fail-open';
 
@@ -58,9 +59,11 @@ export function logGate(
 export function readGateLog(sessionId: string): GateEvent[] {
   try {
     const path = join(ensureSessionDir(sessionId), GATE_LOG_FILE);
-    if (!existsSync(path)) return [];
+    // A FIFO or a link to a device at the path is refused, never waited on (J1 review).
+    const r = readRegular(path, MAX_STATE_BYTES, true);
+    if (typeof r !== 'object') return [];
     const out: GateEvent[] = [];
-    for (const line of readFileSync(path, 'utf8').split(/\r?\n/)) {
+    for (const line of r.text.split(/\r?\n/)) {
       const trimmed = line.trim();
       if (trimmed === '') continue;
       try {

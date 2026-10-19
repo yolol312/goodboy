@@ -419,7 +419,8 @@ Agent 도구와 모든 서브에이전트의 `claude -p` 차단), 훅이 검사�
 check-spec-coverage, check-security, check-infra-config, check-evidence, write-regression-test,
 probe-runtime, attack-sandbox, cite-sources, summarize-diff, follow-design-tokens, check-code-quality,
 check-ui-states, run-e2e, record-review, record-tests, run-long-command, run-codex-review,
-measure-coverage, follow-agent-rules, keep-project-knowledge(`/` 메뉴에도 보임, 트랙 H).
+measure-coverage, follow-agent-rules, keep-project-knowledge(`/` 메뉴에도 보임, 트랙 H),
+report-goodboy(`/report-goodboy`, 트랙 J: goodboy 자체의 문제를 현장 리포트로 남김).
 
 ## 결정 근거 기록 (4분류)
 
@@ -645,7 +646,7 @@ goodboy/                                # 플러그인 루트
 │   ├── write-doc/SKILL.md
 │   ├── request-review/SKILL.md
 │   ├── setup-statusline/SKILL.md       # 상태바 설치/연동
-│   └── <도구 스킬 24개>/SKILL.md        # 에이전트가 쓰는 절차 (check-*, record-*, run-*, write-* …, keep-project-knowledge)
+│   └── <도구 스킬 25개>/SKILL.md        # 에이전트가 쓰는 절차 (check-*, record-*, run-*, write-* …, keep-project-knowledge, report-goodboy)
 ├── agents/                             # 에이전트 24개 (research-*, build-*, review-*, test-*)
 │   ├── test-unit.md                    # 층1 — 테스트 작성/실행·red-green·커버리지 (구 test-changes)
 │   └── review-all.md                   # 층2 — 전 축 또는 축 하나 리뷰 (구 review-changes)
@@ -1252,8 +1253,8 @@ v0.8.0까지의 환경변수는 `VCF_` 접두였고, v0.9.0부터 `GOODBOY_`로 
 <details>
 <summary><b>v0.34.0</b> — 미정 · 현장 리포트 (계획, 트랙 J)</summary>
 
-- (계획) J1 (#8): 다른 프로젝트에서 goodboy를 쓰다 겪은 문제를 정해진 양식으로 남기는 `report-goodboy` 스킬과 로컬 inbox(`~/.claude/goodboy/inbox/`)
-- 공개 요약은 프로젝트명·경로·사람·회사 정보를 지운 뒤, 사용자 확인을 거쳐 GitHub 이슈로 올린다
+- J1 (#8): 다른 프로젝트에서 goodboy를 쓰다 겪은 문제를 정해진 양식으로 남기는 `/report-goodboy` 스킬과 로컬 inbox(`~/.claude/goodboy/inbox/`). 버전·게이트 판정 횟수·재시도 횟수 같은 세션 증거는 goodboy가 직접 붙인다(`cli.ts report-evidence`, `report-write`)
+- 공개 요약은 경로·이메일·IP·다른 호스트·패키지명·비밀값과 이 컴퓨터·저장소의 이름(저장소 디렉터리, 리모트 소유자·이름, git 사용자, 로그인·호스트명)이 들어 있으면 거부되고, 사용자 확인을 거쳐서만 GitHub 이슈(`[field-report]`)로 올린다
 - J2 (#9): 이 저장소 세션 시작 때 새 리포트 알림 한 줄, `triage-reports` 스킬, GitHub 이슈 양식
 - J3 (#11): 훅 오류, 같은 게이트의 반복 차단, 검증 예산 초과 같은 마찰 신호가 보이면 Stop에서 세션당 한 번 리포트를 권한다(차단하지 않음)
 
