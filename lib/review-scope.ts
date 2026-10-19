@@ -18,7 +18,7 @@ function git(cwd: string, args: string[]): string | null {
 
 /** git's top-level is a real path; so must the files be, or a checkout reached through a
  *  symlink would see every file as outside it (H7 review). */
-function realish(p: string): string {
+export function realish(p: string): string {
   try {
     return realpathSync(p);
   } catch {

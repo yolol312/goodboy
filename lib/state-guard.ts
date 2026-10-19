@@ -178,13 +178,16 @@ export function restoreGateState(sessionId: string, toolUseId: string | undefine
   }
 }
 
-/** At Stop: restores the snapshots of calls that never reported back (`exit N`). */
-export function restoreOrphanGateState(sessionId: string): string[] {
+/** At Stop: restores the snapshots of calls that never reported back (`exit N`), except those
+ *  of `open` calls: a running agent's call the Stop noted again keeps its fresh snapshot for
+ *  its own post hook (#14). */
+export function restoreOrphanGateState(sessionId: string, open: readonly string[] = []): string[] {
   const out: string[] = [];
   try {
     const dir = ensureSessionDir(sessionId);
+    const keep = new Set(open.map((t) => `${SNAP_PREFIX}${safeToolUseId(t)}`));
     for (const name of readdirSync(dir)) {
-      if (name.startsWith(SNAP_PREFIX)) out.push(...restoreFrom(sessionId, join(dir, name)));
+      if (name.startsWith(SNAP_PREFIX) && !keep.has(name)) out.push(...restoreFrom(sessionId, join(dir, name)));
     }
   } catch {
     // best-effort

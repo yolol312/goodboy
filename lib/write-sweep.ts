@@ -9,9 +9,9 @@
 
 import { statSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
-import { openBashCalls, restoreProductionHosts, sweepNewMarkers, takeBashStart } from './approval-marker';
+import { noteBashStart, openBashCalls, restoreProductionHosts, sweepNewMarkers, takeBashStart } from './approval-marker';
 import { bashChangedPaths } from './role-limits';
-import { restoreGateState } from './state-guard';
+import { restoreGateState, snapshotGateState } from './state-guard';
 import { getCurrentTurn, isGoodboyArtifact, recordEdit } from './file-tracker';
 import { logGate } from './gate-log';
 import { filterOffArgs, HOOK_GIT_ARGS, HOOK_GIT_ENV } from './hook-git';
@@ -21,19 +21,32 @@ import { safeMtime } from './bash-read';
 
 /** At Stop: finishes the session's Bash calls that never reported back (`exit N` fires no post
  *  hook, G0 M18) as their post hook would have: markers swept, hosts restored, indirect writes
- *  recorded, gate state put back. Runs before the gates read anything. */
-export function finishOpenBashCalls(sessionId: string): { context?: string; notice?: string } {
+ *  recorded, gate state put back. Runs before the gates read anything.
+ *  `keepAgentsOpen` (a subagent still runs): an agent's call may still be running, not ended.
+ *  Finished here, its late post hook found no start note and recorded every file changed in
+ *  the last five minutes as its edits, and nothing watched what it did after the Stop (#14).
+ *  So after finishing it, the Stop notes it again as a call that starts now (from its old
+ *  start when this Stop could not sweep its writes), with a fresh gate state snapshot: its
+ *  post hook, the next Stop, or its agent's SubagentStop finishes it.
+ *  `agent` (SubagentStop): only that agent's calls, which have all ended. */
+export function finishOpenBashCalls(sessionId: string, opts: { keepAgentsOpen?: boolean; agent?: string } = {}): { context?: string; notice?: string } {
   const contexts: string[] = [];
   const notices: string[] = [];
   // The Stop has 15 s (security review round 3: three open calls with a slow fsmonitor took
   //   18 s, and a timed-out Stop blocks nothing). After 5 s the git-based write sweep is
   //   skipped; the file restores are cheap and always run.
   const started = Date.now();
-  for (const n of openBashCalls(sessionId).slice(-20)) {
+  const open = openBashCalls(sessionId).filter((n) => opts.agent === undefined || n.agent === opts.agent);
+  for (const n of open.slice(-20)) {
     if (!n.tuid) continue;
+    const at = Date.now();
     const r = afterBash(sessionId, n.tuid, n.cwd, n.command, n.agent, { skipGit: Date.now() - started > 5_000, gitTimeoutMs: 3_000 });
     if (r.context) contexts.push(r.context);
     if (r.notice) notices.push(r.notice);
+    if (opts.keepAgentsOpen && n.agent) {
+      noteBashStart(sessionId, n.tuid, n.cwd, n.command, n.agent, undefined, r.swept === false ? n.t : at);
+      snapshotGateState(sessionId, n.tuid);
+    }
   }
   return { ...(contexts.length > 0 ? { context: contexts.join('\n') } : {}), ...(notices.length > 0 ? { notice: notices.join('\n') } : {}) };
 }
@@ -49,9 +62,12 @@ export function afterBash(
   command: unknown,
   agentId: string | undefined,
   opts: { skipGit?: boolean; gitTimeoutMs?: number } = {},
-): { context?: string; notice?: string } {
+): { context?: string; notice?: string; swept?: false } {
   const notes: string[] = [];
   const notices: string[] = [];
+  // Whether the indirect-write sweep this call needs ran in full (none needed counts); the
+  //   result says `swept: false` only when it did not.
+  let swept = true;
   try {
     const start = takeBashStart(sessionId, toolUseId, cwd);
     const stateRestored = restoreGateState(sessionId, toolUseId);
@@ -85,7 +101,9 @@ export function afterBash(
         notices.push(`[goodboy] .goodboy/hosts에서 지워진 production 항목을 되돌렸어요: ${restored.join(', ')}`);
       }
     }
-    if (!opts.skipGit && envStr('GOODBOY_BASH_WRITE_GATE', 'deny') !== 'off' && typeof command === 'string' && writesIndirectly(command)) {
+    const sweep = envStr('GOODBOY_BASH_WRITE_GATE', 'deny') !== 'off' && typeof command === 'string' && writesIndirectly(command);
+    if (sweep && opts.skipGit) swept = false;
+    if (sweep && !opts.skipGit && typeof command === 'string') {
       // PostToolUse has 60 s and PostToolUseFailure 15 s; the Stop path (opts.gitTimeoutMs) less.
       //   Three signals: files changed since the start by mtime or ctime; paths new in git's
       //   status since the PreToolUse snapshot (a directory moved into place keeps its files'
@@ -100,7 +118,10 @@ export function afterBash(
       const views = new Map<string, string[]>();
       for (const dir of new Set([resolvePath(cwd), startCwd])) {
         const s = statusFiles(dir, timeoutMs);
-        if (!s) continue;
+        if (!s) {
+          swept = false;
+          continue;
+        }
         topOf.set(dir, s.top);
         if (!views.has(s.top)) views.set(s.top, s.files);
       }
@@ -128,9 +149,10 @@ export function afterBash(
       }
     }
   } catch (err) {
+    swept = false;
     process.stderr.write(`[goodboy] after-Bash sweep error: ${String(err)}\n`);
   }
-  return { ...(notes.length > 0 ? { context: notes.join('\n') } : {}), ...(notices.length > 0 ? { notice: notices.join('\n') } : {}) };
+  return { ...(notes.length > 0 ? { context: notes.join('\n') } : {}), ...(notices.length > 0 ? { notice: notices.join('\n') } : {}), ...(swept ? {} : { swept: false as const }) };
 }
 
 const INTERPRETERS = /^(?:python[0-9.]*|node|perl|ruby|php|deno|tsx|ts-node|osascript|xargs|g?awk|parallel)$/;

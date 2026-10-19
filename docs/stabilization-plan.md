@@ -1033,6 +1033,7 @@ Consequences for the design:
 | I4 | #5 | Full regression on the pushed tree before a push (§15.7) |
 | I5 | #6 | Existing tests that cover the change run with it; weakening a test is a finding (§15.8) |
 | I6 | #13 | Fixes from the first real-use trial (§15.9) |
+| I7 | #14 | Fixes from the second real-use trial (§15.10) |
 
 Each step: tests first, the §14.7a review sizing, a /verify probe per new rule, README
 (Korean), and `/done #<issue>` (GitHub mode) to close it. Merge and push wait for the user.
@@ -1524,6 +1525,49 @@ the gates around it ran into eight problems:
 - Known limits: tests that read prose under `docs/` or a root README would not run for a
   docs-only hand-off (2); a docs-only push on top of content no goodboy result covers needs
   the user's marker (2).
+
+### 15.10 I7 (#14): fixes from the second real-use trial
+
+The same four tasks ran on a fresh copy of the same project after I6 (2026-10-19; about 19
+minutes and $5.6). The I6 fixes held: both code sessions did the task first and offered the
+knowledge files at the end; the push passed layer 1 as prose (the docs session's change) on
+the feature session's tested tree; the denial named the marker and the model asked the user
+for it with the exact command; after the result guard's denial the model read with `jq`.
+Four new problems:
+
+1. Layer 1 was off in the JVM project: `detectTestInfrastructure` knew no `src/test`,
+   `build.gradle(.kts)`, `settings.gradle(.kts)` or `pom.xml` (gate log "inactive:
+   no-test-infrastructure"). Tests were written only because the workflow skills asked. Now
+   those count, like `go.mod`; Gradle's files are one list for this and the regression.
+2. `cli.ts regression` found no whole-suite command for Gradle or Maven, so every push of a JVM
+   project needed the user's marker; the test agent then wrote a stray layer-1 record trying to
+   satisfy the check. Now Gradle (`build.gradle(.kts)` or `settings.gradle(.kts)`) runs the
+   repo's `./gradlew test` (`sh ./gradlew test` when the wrapper is not executable) or
+   `gradle test`, and Maven (`pom.xml`) `./mvnw test` or `mvn test`; both when both are
+   there. Gradle skips a test task whose inputs match a run that passed, which counts as a pass.
+3. Review agents ran `cd <plugin root> && bun lib/cli.ts review-write`, so records landed in
+   goodboy's own directory, where no gate of the project reads them (and the session then
+   deleted them there, outside its project). `review-write` and `test-write` now refuse, when
+   they run anywhere inside goodboy's own directory (an installed plugin's is no git repo), a
+   record that names a file outside it; the agent rule says to run the CLI from the project's
+   directory.
+4. The main session's Stop finished a background agent's Bash call that was still running
+   (it took every open call for one that ended with `exit N`). The call's real post hook then
+   found no start note and fell back to a five-minute window, so seven unchanged files were
+   recorded as the agent's edits and a finished review turned stale; and nothing watched what
+   the call did after the Stop (an approval marker it made then counted as the user's: I7
+   review, as at HEAD). The Stop still finishes every open call (leaving an agent's call open
+   let one that ended with `exit N` keep a model-made marker past the 30-minute note limit:
+   I7 review), and while a subagent runs it notes each agent call again as one that starts at
+   the Stop (from its old start when the Stop could not sweep its writes), with a fresh gate
+   state snapshot that the Stop's orphan-snapshot restore leaves alone. The call's own post
+   hook, the next Stop, or the agent's SubagentStop (new:
+   it finishes that agent's open calls, which have all ended) closes it. A marker the user
+   makes while such a call is open counts as the model's, as during any open model call.
+
+- Seen and left as designed: the skill rule denied a batch of five parallel edits before the
+  workflow skill (as in §15.9 item 7); read-before-edit denied an Edit in a test agent's
+  temporary copy that it had not read.
 
 ## 16. J — Field reports (v0.34.0)
 

@@ -30,7 +30,7 @@ import { knowledgeRoot, validateKnowledge } from './project-knowledge';
 import { decisionItems } from './decision-authority';
 import { catalogRows, renderCatalog, TEST_CATALOG_FILE } from './test-catalog';
 import { recordTestProfile } from './test-profile';
-import { changedLineCount, reviewPlan, reviewPlanNote } from './review-scope';
+import { changedLineCount, realish, reviewPlan, reviewPlanNote } from './review-scope';
 import { agentName, ROUTE } from './routing-policy';
 import {
   findDevCycleArtifacts,
@@ -235,6 +235,35 @@ async function readInput(fileArg: string | undefined, schemaName: string): Promi
   return raw;
 }
 
+/** goodboy's own directory: the parent of lib/. */
+const GOODBOY_ROOT = resolve(import.meta.dir, '..');
+
+/** (#14) A result written from inside goodboy's own directory for files elsewhere: agents ran
+ *  `cd <plugin root> && bun lib/cli.ts review-write`, and the record landed where no gate of the
+ *  project reads it (second real-use trial). Any cwd under the plugin root counts (an installed
+ *  plugin's directory is no git repo). Returns the first such file, or null. */
+export function recordOutsideRepo(cwd: string, files: readonly unknown[]): string | null {
+  const root = realish(GOODBOY_ROOT);
+  const here = realish(resolve(cwd));
+  if (here !== root && !here.startsWith(root + sep)) return null;
+  for (const f of files) {
+    if (typeof f !== 'string' || f === '') continue;
+    const abs = resolve(cwd, f);
+    const p = realish(abs);
+    if (p !== root && !p.startsWith(root + sep)) return f;
+    // A relative name that is no goodboy file is another project's (`src/a.ts`).
+    if (!isAbsolute(f) && !existsSync(abs)) return f;
+  }
+  return null;
+}
+
+function failOutsideRepo(cmd: string, file: string): never {
+  fail(
+    `${cmd}: ${file} is outside goodboy's own directory, where this command runs. ` +
+      `Run \`bun "<goodboy>/lib/cli.ts" ${cmd}\` from the project's directory (cd there first); the gates read results there.`,
+  );
+}
+
 async function cmdReviewWrite(cwd: string, args: string[]): Promise<void> {
   const raw = await readInput(args[0], 'ReviewResult');
 
@@ -251,6 +280,8 @@ async function cmdReviewWrite(cwd: string, args: string[]): Promise<void> {
   }
 
   const result = validated.value;
+  const outside = recordOutsideRepo(cwd, result.reviewed_files ?? []);
+  if (outside !== null) failOutsideRepo('review-write', outside);
   const reviewsDir = join(cwd, '.claude', 'reviews');
   ensureDir(reviewsDir);
   const outPath = uniqueJsonPath(reviewsDir, timestampToFilename(result.timestamp));
@@ -585,6 +616,8 @@ async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
   }
 
   const result = validated.value;
+  const outside = recordOutsideRepo(cwd, result.tested_files ?? []);
+  if (outside !== null) failOutsideRepo('test-write', outside);
   // The tested content, taken here and never from the agent (lib/push-test.ts): the push
   //   test check matches a hand-off against `tree`.
   const state = workTreeState(cwd);
@@ -628,7 +661,7 @@ async function cmdRegression(cwd: string, args: string[]): Promise<void> {
   if (found === null) {
     fail(
       'regression: goodboy found no whole-suite test command (package.json scripts.test or scripts.test:all, ' +
-        'pytest, go.mod, Cargo.toml, a Makefile test target). Record a `blocked` result with this output and tell the user.',
+        'pytest, go.mod, Cargo.toml, Gradle, Maven, a Makefile test target). Record a `blocked` result with this output and tell the user.',
     );
   }
   const before = workTreeState(top);

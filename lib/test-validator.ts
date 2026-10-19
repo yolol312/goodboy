@@ -182,7 +182,11 @@ const TEST_CONFIG_FILES = [
   '.rspec',
 ];
 
-const TEST_DIRS = ['tests', 'test', '__tests__', 'spec', 'e2e'];
+/** A Gradle build, at its root (#14; lib/regression.ts runs it). */
+export const GRADLE_FILES = ['build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts'];
+
+// `src/test`: the Maven and Gradle layout (#14).
+const TEST_DIRS = ['tests', 'test', '__tests__', 'spec', 'e2e', 'src/test'];
 
 /** npm init이 넣어 두는 자리표시자 — 테스트가 있다는 증거가 아니다. */
 const NPM_PLACEHOLDER_TEST = /no test specified/i;
@@ -216,6 +220,9 @@ export function detectTestInfrastructure(cwd: string): TestInfraSignal {
     if (existsSync(join(cwd, 'Cargo.toml'))) {
       return { present: true, evidence: 'Cargo.toml (cargo test)' };
     }
+    // The JVM build tools run tests with no extra config (#14: a Gradle project had layer 1 off).
+    for (const f of GRADLE_FILES) if (existsSync(join(cwd, f))) return { present: true, evidence: `${f} (gradle test)` };
+    if (existsSync(join(cwd, 'pom.xml'))) return { present: true, evidence: 'pom.xml (mvn test)' };
     return none;
   } catch {
     // 판별 실패는 "없다"로 본다 — 확신 없이 차단하지 않는다.

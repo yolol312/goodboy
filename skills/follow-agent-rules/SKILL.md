@@ -27,7 +27,8 @@ Work as a leaf executor inside goodboy's rules and hand back one checkable resul
 4. Keep probes and scratch files in `mktemp -d`, never in the project.
 5. Write results the gates read only through the CLI: `bun "$GB/lib/cli.ts" review-write` or
    `test-write` (JSON on stdin; see record-review and record-tests). Never write files under
-   `.claude/reviews/` or `.claude/tests/` yourself.
+   `.claude/reviews/` or `.claude/tests/` yourself. Run the CLI from the project's directory,
+   never after `cd "$GB"`: it writes to the current directory's `.claude/`.
 6. Use only the tool skills your definition lists, with the Skill tool.
 7. A lead summarizes its members' results in its own words; it never pastes them verbatim.
 

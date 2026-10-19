@@ -2,10 +2,10 @@
 // SubagentStop hook (track G §10.7) — records that an agent finished, and whether its final
 // text says BLOCKED, so the delegation guard stops counting it as running. A background
 // agent's Agent call returned at launch (G0 M10), so this is the hook event that carries its
-// completion (the main session also gets a <task-notification> prompt).
-// Never blocks; any error is swallowed.
+// completion (the main session also gets a <task-notification> prompt). It also finishes the
+// agent's open Bash calls (lib/write-sweep.ts). Never blocks; any error is swallowed.
 
-import { appendDispatchLog, outcomeOf } from '../lib';
+import { appendDispatchLog, finishOpenBashCalls, outcomeOf } from '../lib';
 
 interface SubagentStopInput {
   session_id?: string;
@@ -33,6 +33,13 @@ readStdin()
           agentId: input.agent_id,
           outcome: outcomeOf(last),
         });
+        // (#14) The agent has ended, so its Bash calls have: finish the ones that never
+        //   reported back (`exit N`), or that the main session's Stop noted again.
+        try {
+          finishOpenBashCalls(input.session_id ?? 'unknown', { agent: input.agent_id });
+        } catch {
+          // best-effort
+        }
       }
     } catch (err) {
       process.stderr.write(`[goodboy subagent-stop] ${String(err)}\n`);

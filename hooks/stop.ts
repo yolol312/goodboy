@@ -106,6 +106,7 @@ import {
   ensureApprovalDir,
   restoreOrphanGateState,
   finishOpenBashCalls,
+  openBashCalls,
 } from '../lib';
 
 interface StopInput {
@@ -1285,9 +1286,14 @@ function main(): void {
       //   The whole post-hook work runs for those calls (markers, hosts, indirect writes),
       //   then any snapshot left without a note is restored.
       try {
-        const finished = finishOpenBashCalls(sessionId);
+        // (#14) A running subagent's open call may still be running: noted again from here.
+        const keepAgentsOpen = (input.background_tasks ?? []).some((t) => t && t.type === 'subagent' && t.status === 'running');
+        const finished = finishOpenBashCalls(sessionId, { keepAgentsOpen });
         if (finished.notice) habitWarnings.push(finished.notice);
-        const restored = restoreOrphanGateState(sessionId);
+        const restored = restoreOrphanGateState(
+          sessionId,
+          keepAgentsOpen ? openBashCalls(sessionId).flatMap((n) => (n.tuid ? [n.tuid] : [])) : [],
+        );
         if (restored.length > 0) {
           logGate(sessionId, 'state-guard', 'deny', `restored ${restored.join(', ')}`);
           habitWarnings.push(`[goodboy] 명령이 바꾼 goodboy 게이트 상태를 되돌렸어요: ${restored.join(', ')}`);

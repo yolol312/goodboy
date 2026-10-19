@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync
 import { join } from 'node:path';
 import { OBJECT_ID } from './push-test';
 import { readRegular } from './safe-read';
+import { GRADLE_FILES } from './test-validator';
 
 export const REGRESSION_DIR = join('.claude', 'tests', 'regression');
 /** Regression records kept per project (newest by name); older ones are pruned. */
@@ -83,11 +84,23 @@ function readText(p: string, max: number): string | null {
   return typeof r === 'string' ? null : r.text;
 }
 
+/** `./<name> test` for a build tool wrapper script at the repo top (`sh ./<name> test` when it
+ *  is not executable, as in a checkout made on Windows), or null when there is none. */
+function wrapper(top: string, name: string): string | null {
+  try {
+    const st = statSync(join(top, name));
+    if (!st.isFile()) return null;
+    return (st.mode & 0o111) !== 0 ? `./${name} test` : `sh ./${name} test`;
+  } catch {
+    return null;
+  }
+}
+
 /** The project's whole test suite as commands run from the repo top, or null when goodboy
  *  finds none. Every ecosystem found counts (a repo with package.json, pytest and Go runs all
  *  three): package.json's `test:all`, else `test`, then an e2e script, by the lockfile's
- *  package manager; pytest; Go; Cargo. A Makefile `test` target only when nothing else is
- *  found (it often wraps the others). */
+ *  package manager; pytest; Go; Cargo; Gradle; Maven. A Makefile `test` target only when
+ *  nothing else is found (it often wraps the others). */
 export function regressionCommands(top: string): { commands: string[]; source: string } | null {
   const commands: string[] = [];
   const sources: string[] = [];
@@ -123,6 +136,17 @@ export function regressionCommands(top: string): { commands: string[]; source: s
   if (existsSync(join(top, 'Cargo.toml'))) {
     commands.push('cargo test');
     sources.push('Cargo.toml');
+  }
+  // JVM (#14: a Gradle project had no regression, so every push needed the user's marker):
+  //   the repo's wrapper when it has one (it pins the tool's version), else the tool on PATH.
+  //   Gradle skips a test task whose inputs match a run that passed, which is a pass too.
+  if (GRADLE_FILES.some((f) => existsSync(join(top, f)))) {
+    commands.push(wrapper(top, 'gradlew') ?? 'gradle test');
+    sources.push('Gradle');
+  }
+  if (existsSync(join(top, 'pom.xml'))) {
+    commands.push(wrapper(top, 'mvnw') ?? 'mvn test');
+    sources.push('pom.xml');
   }
   if (commands.length === 0) {
     const make = readText(join(top, 'Makefile'), MAX_MANIFEST_BYTES);

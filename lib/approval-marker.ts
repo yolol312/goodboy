@@ -98,11 +98,20 @@ function noteFile(sessionId: string, toolUseId: string): string {
 /** Notes when a Bash call started, where, and which of this session's markers existed then,
  *  so the post hooks can tell which markers the call created (by name, not by mtime, which the
  *  command controls: `touch -t`). `status`: git's status, for a call that can move files
- *  (lib/write-sweep.ts). */
-export function noteBashStart(sessionId: string, toolUseId: string, cwd: string, command?: string, agent?: string, status?: GitStatusSnapshot): void {
+ *  (lib/write-sweep.ts). `t`: the start, when not now (a call the Stop finished while it may
+ *  still run, lib/write-sweep.ts). */
+export function noteBashStart(
+  sessionId: string,
+  toolUseId: string,
+  cwd: string,
+  command?: string,
+  agent?: string,
+  status?: GitStatusSnapshot,
+  t: number = Date.now(),
+): void {
   try {
     const note: BashStartNote = {
-      t: Date.now(),
+      t,
       cwd,
       tuid: toolUseId,
       ...(typeof command === 'string' ? { command: command.slice(0, 20_000) } : {}),
