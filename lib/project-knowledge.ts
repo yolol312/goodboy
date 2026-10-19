@@ -172,11 +172,14 @@ export function knowledgeSessionNotice(cwd: string, sessionId: string): { contex
   if (projectMode(cwd, sessionId) === 'non-project') return {};
   const { root, policyExists } = knowledgeRoot(cwd);
   if (!policyExists) {
+    // After the task, never before it (real-use trial, #13): asking "is this a project?" first
+    //   held up the user's task, and a headless session ended with no work done.
     return {
       context:
-        `This project has no ${POLICY_FILE} yet. Before the first task, run the goodboy:${KNOWLEDGE_SKILL} skill in create mode: ` +
-        'it asks once whether this directory is a project, then drafts the policy file and the doc map. (project knowledge)',
-      systemMessage: `[goodboy] 이 프로젝트에는 정책 파일(${POLICY_FILE})이 없어요. 첫 작업 전에 만들고, 프로젝트가 맞는지 한 번 여쭤볼게요.`,
+        `This project has no ${POLICY_FILE} yet. Do the user's task first; do not ask about it before. A directory with a ` +
+        `git repo and source code is a project. When the task is done, offer once, in one line, to draft the policy file ` +
+        `and the doc map with the goodboy:${KNOWLEDGE_SKILL} skill in create mode, and draft them when the user agrees. (project knowledge)`,
+      systemMessage: `[goodboy] 이 프로젝트에는 정책 파일(${POLICY_FILE})이 없어요. 작업을 마친 뒤 만들지 여쭤볼게요.`,
     };
   }
   const files = requiredKnowledgeFiles(root).map((f) => relative(cwd, f) || f);

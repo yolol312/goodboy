@@ -1,7 +1,7 @@
 ---
 name: keep-project-knowledge
 description: Create or update the project's knowledge files — .goodboy/policy.md (policies and past decisions, each tagged ai or human) and .goodboy/docs.json (the doc map) — so every session starts from them.
-when_to_use: Use in create mode when SessionStart says the project has no policy file, and in update mode at the end of a task that made a decision or changed what a mapped doc describes.
+when_to_use: Use in create mode when the user agrees to it (SessionStart says the project has no policy file; offer it once after the first task, never before it), and in update mode at the end of a task that made a decision or changed what a mapped doc describes.
 user-invocable: true
 effort: high
 ---
@@ -17,10 +17,12 @@ Keep the project's knowledge files true, so the next session starts with them.
   task's changes and the decisions the user made during it.
 
 ## Steps
-1. Create mode, first (the main session; an agent without AskUserQuestion uses the answers its
-   prompt gives, or returns BLOCKED with the question): ask once with AskUserQuestion whether
-   this directory is a project, options "project (프로젝트)" and "non-project (프로젝트 아님)".
-   Non-project: add the line `goodboy: non-project` to this directory's CLAUDE.md and stop.
+1. Create mode, first: a directory with a git repo and source code is a project; go on. Only
+   when that is unclear (no repo, or no code) ask once with AskUserQuestion whether this
+   directory is a project, options "project (프로젝트)" and "non-project (프로젝트 아님)" (an
+   agent without AskUserQuestion uses the answers its prompt gives, or returns BLOCKED with the
+   question). Non-project: add the line `goodboy: non-project` to this directory's CLAUDE.md
+   and stop.
 2. Create mode, a project: draft entries from what the repo says (rules in CLAUDE.md, README
    conventions, configs, recurring commit decisions). Each entry in `.goodboy/policy.md`:
    ```

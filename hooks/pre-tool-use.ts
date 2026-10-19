@@ -86,6 +86,7 @@ import {
   userMarkerPresent,
   useUserMarker,
   findRecentTestFiles,
+  handoffApprovalAsk,
   handoffsOf,
   isApprovalMarkerPath,
   isHandoffSkill,
@@ -749,7 +750,8 @@ function main(): void {
         const denial = kind
           ? resultWriterDenial(kind, input.agent_type, roleOf(input.agent_type))
           : intoResults
-            ? `Results come only from the goodboy CLI (test-write / review-write); this command would write ${intoResults} directly.`
+            ? `Results come only from the goodboy CLI (test-write / review-write); this command would write ${intoResults} directly. ` +
+              'To read a result, use the Read tool, `cat` or `jq`: interpreter code that names a result dir counts as a write (#13).'
             : null;
         if (denial) {
           logGate(sessionId, 'result-guard', 'deny', `${kind} ${input.agent_type ?? 'main'}`);
@@ -806,7 +808,10 @@ function main(): void {
                 let relaxed = false;
                 for (const rev of h.revs) {
                   const tree = treeOf(h.cwd, rev);
-                  const r = tree === null ? ({ ok: false, why: 'none', rev, tree: '' } as const) : checkRegression(rev, tree, records);
+                  let r: RegressionOutcome = tree === null ? { ok: false, why: 'none', rev, tree: '' } : checkRegression(rev, tree, records);
+                  // (#13) Prose on top of a passing tree: that tree's regression counts too, unless
+                  //   the tree handed off has a failed run of its own (a README doctest).
+                  if (!r.ok && r.why === 'none' && o.docsOnly?.[rev]?.some((b) => checkRegression(rev, b, records).ok)) r = { ok: true };
                   if (!r.ok) {
                     reg = r;
                     break;
@@ -828,7 +833,12 @@ function main(): void {
                 break;
               }
               const failed = o.ok ? null : o;
-              const msg = reg !== null ? regressionMessage(h.what, reg, CLI_PATH, agentName(ROUTE.test)) : pushTestMessage(h.what, failed!);
+              // (#13) The model sees the user's marker path too: it guessed the session tag.
+              const markerRel = inSubagent ? undefined : approvalMarkerRelPath('push-test', sessionId);
+              const msg =
+                reg !== null
+                  ? regressionMessage(h.what, reg, CLI_PATH, agentName(ROUTE.test)) + (markerRel ? handoffApprovalAsk(markerRel) : '')
+                  : pushTestMessage(h.what, failed!, markerRel);
               const why = reg !== null ? `regression-${reg.why}` : failed!.why;
               if (warnOnly) {
                 logGate(sessionId, 'push-test', 'warn', `${why} ${h.what}`);
@@ -909,7 +919,10 @@ function main(): void {
               emit(
                 deny(
                   `This command changes an external system (${what}) that .goodboy/hosts does not list, which agents may not do (stop rule R2). ` +
-                    'Point it at a local or sandbox target (one listed as `allow` in .goodboy/hosts), or return BLOCKED with the exact command for the user to run.',
+                    'Point it at a local or sandbox target (one listed as `allow` in .goodboy/hosts), or return BLOCKED with the exact command for the user to run.' +
+                    (target?.host.startsWith('$') && /^(?:psql|pg_)/.test(target.kind)
+                      ? ' goodboy cannot read a host held in a variable; a unix socket directory written as a literal absolute path (`-h /tmp/pgsock`) counts as local.'
+                      : ''),
                 ),
               );
               return;

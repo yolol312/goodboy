@@ -772,6 +772,29 @@ function positionals(args: string[], valueFlags: ReadonlySet<string>): string[] 
   return out;
 }
 
+/** Every value of the flags `names`, in order. */
+function flagValues(args: string[], names: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    for (const n of names) {
+      if (a === n && i + 1 < args.length) {
+        out.push(args[++i]!);
+        break;
+      }
+      if (a.startsWith(`${n}=`)) {
+        out.push(a.slice(n.length + 1));
+        break;
+      }
+      if (n.length === 2 && !n.startsWith('--') && a.startsWith(n) && a.length > 2 && !a.startsWith('--')) {
+        out.push(a.slice(2));
+        break;
+      }
+    }
+  }
+  return out;
+}
+
 function flagValue(args: string[], names: string[]): string | null {
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
@@ -996,10 +1019,15 @@ const DB_READ_ONLY = new Set(['pg_dump', 'pg_dumpall', 'mysqldump', 'mongodump',
 
 function dbTargets(prog: string, args: string[]): OutwardTarget[] {
   const uri = args.find((a) => /^(postgres(ql)?|mysql|mariadb|mongodb(\+srv)?|redis|rediss|clickhouse):\/\//i.test(a));
-  let host = uri ? hostOf(uri) : (flagValue(args, ['-h', '--host', '-H', '--hostname', '-S', '--server']) ?? '');
-  if (prog === 'sqlcmd') host = host.replace(/^tcp:/i, '').split(/[,\\]/)[0] ?? host;
-  if (host === '') return []; // a local socket
-  return [{ kind: prog, host: host.toLowerCase(), mutating: !DB_READ_ONLY.has(prog) }];
+  const given = uri ? [hostOf(uri)] : flagValues(args, ['-h', '--host', '-H', '--hostname', '-S', '--server']);
+  // Every host the call may reach: each flag (the last `-h` wins, and mysql takes `-S` as its
+  //   socket next to an `-h` host) and each entry of a libpq host list (`-h /tmp,db`).
+  const hosts = given.flatMap((h) => (prog === 'sqlcmd' ? [h.replace(/^tcp:/i, '').split(/[,\\]/)[0] ?? h] : h.split(',')));
+  // None is a local socket. A unix socket dir is local too (#13: a test agent's temporary
+  //   Postgres was denied as an unlisted host), only as a literal path: a variable's value
+  //   cannot be read reliably from the command text (I6 review), so `-h $D` stays a host.
+  const mutating = !DB_READ_ONLY.has(prog);
+  return hosts.filter((h) => h !== '' && !h.startsWith('/')).map((h) => ({ kind: prog, host: h.toLowerCase(), mutating }));
 }
 
 /** Every outward target a shell command names. */

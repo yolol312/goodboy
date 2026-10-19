@@ -723,8 +723,9 @@ file every session reads first, splits every check into `ai` (evidence decides) 
   `evidence:` for an `ai` entry). Size budget: 200 lines; SessionStart warns above it.
 - `.goodboy/docs.json`, the doc map: `{"docs": [{"path", "session_start", "covers": [globs]}]}`.
 - SessionStart (all four sources, project mode): names the required files (policy.md and the
-  `session_start` docs) and tells the model to Read them first; a missing policy.md asks for
-  the skill's create mode, with a Korean notice to the user.
+  `session_start` docs) and tells the model to Read them first; a missing policy.md asks the
+  model to offer the skill's create mode once after the first task, never before it (I6, #13),
+  with a Korean notice to the user.
 - Read gate (PreToolUse, main session only; subagents get the policy in their prompt): until
   each required file has a full Read in this session, every other tool is denied with the
   unread files named. Evidence is the read log; partial reads count when their ranges cover
@@ -733,8 +734,9 @@ file every session reads first, splits every check into `ai` (evidence decides) 
   AskUserQuestion, ToolSearch. The required files are exempt from the re-read gate. An
   unreadable file fails open with a warning. No model-side escape; `GOODBOY_POLICY_GATE=off`
   for the user.
-- The skill `keep-project-knowledge` (§10.4 format, user-invocable too): create mode asks
-  once whether the directory is a project (not one: write the marker; one: scan README,
+- The skill `keep-project-knowledge` (§10.4 format, user-invocable too): create mode takes a
+  directory with a git repo and source code as a project and asks only when that is unclear
+  (I6, #13) (not one: write the marker; one: scan README,
   CLAUDE.md, docs, configs and git history, draft entries with sources and tags, ask once
   about the `human` and unknown items, write both files); update mode at task end applies the
   change, records the human decisions of the task and refreshes `checked`. Done when the files
@@ -1030,6 +1032,7 @@ Consequences for the design:
 | I3 | #4 | Test types complete per change kind; several types go to test-lead. Also the change classifier and the review dimensions per change (§15.4). Done: I3a 6b26102, I3b (§15.6) |
 | I4 | #5 | Full regression on the pushed tree before a push (§15.7) |
 | I5 | #6 | Existing tests that cover the change run with it; weakening a test is a finding (§15.8) |
+| I6 | #13 | Fixes from the first real-use trial (§15.9) |
 
 Each step: tests first, the §14.7a review sizing, a /verify probe per new rule, README
 (Korean), and `/done #<issue>` (GitHub mode) to close it. Merge and push wait for the user.
@@ -1467,6 +1470,60 @@ Two rules (`lib/existing-tests.ts`), both against the session's start HEAD (pinn
   its counts and is neither weakened nor really run; the user's marker on a review gate pins
   the weakened tests without naming them again; the module keeps its own git runner (a
   shared one is a later refactor).
+
+### 15.9 I6 (#13): fixes from the first real-use trial
+
+The unreleased G, H and I work ran for the first time on a real project (2026-10-19): a copy of
+a Java 21 / Spring Boot / Gradle repo, headless `claude -p` on opus, the repo plugin only,
+endpoints pointed at dead local ports, a local bare repo as the remote. Tasks: a bug fix, a
+feature, a docs-only change, commit and push. The work was good (red-checked tests, caught
+mutants, kept scope, a policy file with the decisions; about $10 and 29 minutes in all), but
+the gates around it ran into eight problems:
+
+1. The project knowledge notice asked for the knowledge files before the first task, so the
+   model asked "is this directory a project?" and a headless session ended with no work done.
+   Now the notice says to do the task first and offer the files once afterwards; a directory
+   with a git repo and source code is a project (the skill asks only when that is unclear).
+2. A docs-only push needed red-green acceptance evidence, which a document change cannot have.
+   Now a hand-off revision whose tree differs from the tree of a passing result (one of the
+   newest five) only in prose passes without a new result: Markdown, reStructuredText or
+   AsciiDoc under a top-level `docs/` or `doc/`, or a root README, CHANGELOG, LICENSE and the
+   like, as regular files (no submodule or symlink; `git diff-tree --ignore-submodules=none`,
+   which no diff config changes; replace refs and grafts are off for every push check git
+   call, so `git replace` cannot make code read as prose or a commit as a tested one). Not
+   when the tree handed off has a failed result of its own. Its full regression may be the
+   one of a tested tree under it, unless the tree handed off has a failed run itself. Not
+   every `classifyPath` document: a requirements.txt, a prompt the app loads or a SKILL.md
+   that tests assert can break a run. Not on top of what the remote-tracking refs have
+   either: the model can move them (`git update-ref`, `git fetch . HEAD:refs/remotes/…`), so
+   a docs-only push with no tested tree under it needs the user's marker (4). A deploy of the
+   working tree never passes this way (I6 review).
+3. The push denial said there was no passing result when one for exactly that tree existed and
+   was rejected; it now says why the newest result for the tree did not count.
+4. The push denial (and the regression denial) did not give the model the user's marker path,
+   so it guessed the session tag; the main session's denial now names it.
+5. The result guard took a read-only `python3 -c "json.load(open('.claude/tests/…'))"` for a
+   result write. It still does: telling reading code from writing code by its text failed
+   (the I6 review wrote a fake result with `from os import remove`, `require('fs')['…']` and
+   the like through a pattern of write calls, and the pattern was quadratic on large code).
+   The denial now says to read results with the Read tool, `cat` or `jq`, which pass.
+6. A new, uncommitted `.goodboy/policy.md` made the tested tree differ from every commit that
+   left it out. goodboy's own files there (`policy.md`, `docs.json`, `test-catalog.md`,
+   `hosts`, `commit-issue`) join its artifacts, which never count as content on either side of
+   the comparison, as regular files only; other files under `.goodboy/`, or a directory named
+   like one of these, still do (code the project may load).
+7. The skill rule denied seven edits at once: one assistant message with seven parallel edits
+   before a workflow skill. The next message used the skill, so the deny worked; no change.
+8. The outward gate denied `psql -h $D` to a temporary unix-socket Postgres. A database host
+   written as a literal absolute path is a local socket now, when every host the call names
+   is one (each `-h`/`--host` and `-S`, each entry of a libpq host list). A host in a variable stays a
+   host: its value cannot be read from the command text (assigned later, as a command prefix,
+   inside a string, by `read`, `for` or `printf -v`; I6 review). A subagent's denial for such
+   a host says to write the socket directory as a literal path.
+
+- Known limits: tests that read prose under `docs/` or a root README would not run for a
+  docs-only hand-off (2); a docs-only push on top of content no goodboy result covers needs
+  the user's marker (2).
 
 ## 16. J — Field reports (v0.34.0)
 

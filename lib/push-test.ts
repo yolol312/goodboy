@@ -13,7 +13,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, uti
 import { tmpdir } from 'node:os';
 import { basename, join, resolve as resolvePath } from 'node:path';
 import { stripHeredocs } from './bash-write';
-import { HOOK_GIT_ARGS, HOOK_GIT_ENV, splitAliasValue } from './hook-git';
+import { HOOK_GIT_ARGS, HOOK_GIT_ENV, NO_GRAFTS, splitAliasValue } from './hook-git';
 import { agentName, ROUTE } from './routing-policy';
 import {
   classifyHost,
@@ -55,12 +55,13 @@ export const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 /** Runs git with a time limit: a stalled git (a hung network mount, a slow fsmonitor) fails
  *  the call, so a hand-off check denies instead of being cancelled by the hook timeout. It
  *  starts no program from the repo's config (lib/hook-git.ts), except a clean filter in the
- *  work-tree hash (docs/stabilization-plan.md §10.10). */
+ *  work-tree hash (docs/stabilization-plan.md §10.10). No replace refs or grafts: `git replace
+ *  <code tree> <prose tree>` made untested code read as tested or as prose (I6 review). */
 function git(cwd: string, args: string[], env: Record<string, string> = {}, timeoutMs = 15_000): string | null {
   try {
-    const proc = Bun.spawnSync(['git', ...HOOK_GIT_ARGS, ...args], {
+    const proc = Bun.spawnSync(['git', '--no-replace-objects', ...HOOK_GIT_ARGS, ...args], {
       cwd,
-      env: { ...process.env, ...HOOK_GIT_ENV, ...env },
+      env: { ...process.env, ...HOOK_GIT_ENV, ...NO_GRAFTS, ...env },
       stdout: 'pipe',
       stderr: 'pipe',
       timeout: timeoutMs,
@@ -80,9 +81,30 @@ export function topOf(cwd: string): string | null {
 
 /** goodboy's own artifacts never count as content, on either side of the comparison:
  *  `.claude/tests` is written after the tree is taken, and repos that do not ignore `.claude/`
- *  may commit them. */
-const ARTIFACT_PATHS = ['.claude/tests', '.claude/reviews', '.claude/pending'];
-const ARTIFACT_REMOVE = ['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', ...ARTIFACT_PATHS, ':(glob).claude/.goodboy-*'];
+ *  may commit them. Nor do goodboy's project files under `.goodboy/` (policy, doc map, test
+ *  catalog, hosts, commit issue rule): no test runs them, and a task often leaves a new one
+ *  uncommitted, which made every tested tree differ from the commits handed off (real-use
+ *  trial, #13). Only these, and only as regular files: other files there, or a directory named
+ *  like one of these, may be code the project loads (I6 review). */
+const ARTIFACT_DIRS = ['.claude/tests', '.claude/reviews', '.claude/pending'];
+const GOODBOY_FILES = ['.goodboy/policy.md', '.goodboy/docs.json', '.goodboy/test-catalog.md', '.goodboy/hosts', '.goodboy/commit-issue'];
+
+/** A path (repo-relative) that may be goodboy's own and never content. */
+function isArtifactPath(p: string): boolean {
+  return ARTIFACT_DIRS.some((a) => p === a || p.startsWith(`${a}/`)) || GOODBOY_FILES.includes(p) || p.startsWith('.claude/.goodboy-');
+}
+
+/** Drops goodboy's artifacts from the index `env` names: the result dirs and markers, and the
+ *  project files under `.goodboy/` that are regular files in it. */
+function dropArtifacts(top: string, env: Record<string, string>): void {
+  git(top, ['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', ...ARTIFACT_DIRS, ':(glob).claude/.goodboy-*'], env);
+  const staged = git(top, ['ls-files', '-s', '-z', '--', ...GOODBOY_FILES], env) ?? '';
+  const files = staged
+    .split('\0')
+    .map((l) => (/^100(?:644|755) /.test(l) ? l.slice(l.indexOf('\t') + 1) : ''))
+    .filter((p) => GOODBOY_FILES.includes(p));
+  if (files.length > 0) git(top, ['rm', '-q', '--cached', '--', ...files], env);
+}
 
 /** The working tree as a git tree hash, untracked files included (ignored ones and goodboy
  *  artifacts not), plus HEAD. Taken at the repo top, whatever the cwd. Works on a copy of the
@@ -121,7 +143,7 @@ export function workTreeState(
     //   ("paths are ignored"), which left the tree null in exactly such repos (layer-1 round).
     //   The artifacts are dropped from the copied index right after instead.
     if (git(top, ['add', '-A', '--', '.'], env, opts.timeoutMs ?? 120_000) === null) return { commit, tree: null };
-    git(top, ARTIFACT_REMOVE, env);
+    dropArtifacts(top, env);
     return { commit, tree: git(top, ['write-tree'], env) };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -137,10 +159,8 @@ export function revisionTree(cwd: string, rev: string): string | null {
   // `--end-of-options`: a rev from the command line never reads as an option.
   const tree = git(cwd, ['rev-parse', '--verify', '-q', '--end-of-options', `${rev}^{tree}`]);
   if (tree === null) return null;
-  const inClaude = git(cwd, ['ls-tree', '--name-only', '--full-tree', tree, '.claude/']);
-  const hasArtifacts = (inClaude ?? '')
-    .split('\n')
-    .some((p) => ARTIFACT_PATHS.includes(p) || p.startsWith('.claude/.goodboy-'));
+  const listed = git(cwd, ['ls-tree', '--name-only', '--full-tree', tree, '.claude/', '.goodboy/']);
+  const hasArtifacts = (listed ?? '').split('\n').some((p) => p !== '' && isArtifactPath(p));
   if (!hasArtifacts) return tree;
   const top = topOf(cwd);
   if (top === null) return null;
@@ -148,7 +168,7 @@ export function revisionTree(cwd: string, rev: string): string | null {
   try {
     const env = { GIT_INDEX_FILE: join(dir, 'index') };
     if (git(top, ['read-tree', tree], env) === null) return null;
-    git(top, ARTIFACT_REMOVE, env);
+    dropArtifacts(top, env);
     return git(top, ['write-tree'], env);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -459,7 +479,12 @@ export function isHandoffSkill(name: string): boolean {
 }
 
 export type PushTestOutcome =
-  | { ok: true }
+  | {
+      ok: true;
+      /** Revisions that passed as prose on top of passing trees (#13), with those trees: their
+       *  regression counts for them. */
+      docsOnly?: Record<string, string[]>;
+    }
   | {
       ok: false;
       why: 'unresolved' | 'no-result' | 'blocked' | 'unclear';
@@ -468,6 +493,9 @@ export type PushTestOutcome =
       blocked?: TestResult;
       /** Files where the handed-off tree differs from the newest passing result's tree. */
       differs?: string[];
+      /** Why the newest result for exactly this tree did not count (#13: the denial said
+       *  "no passing result" although one existed). */
+      rejected?: string;
     };
 
 /** Paths that differ between two tree hashes, or null when git cannot tell. */
@@ -477,26 +505,77 @@ export function treeDiff(cwd: string, a: string, b: string): string[] | null {
   return out === null ? null : out.split('\n').filter((l) => l !== '');
 }
 
-/** A passing result with the evidence the Stop test gate asks for (the same checks, so the two
- *  cannot drift): verdict pass, a well-formed tree, at least one suite that ran, no failing
- *  suite, test files that exist, red-green evidence, no always-true test patterns. A hand-made
- *  JSON with only `verdict` and `tree` is not one. */
-function passing(r: TestResult): boolean {
-  if (r.verdict !== 'pass' || typeof r.tree !== 'string' || !OBJECT_ID.test(r.tree)) return false;
+/** Why a result is not a passing one with the evidence the Stop test gate asks for (the same
+ *  checks, so the two cannot drift), or null when it is: verdict pass, a well-formed tree, at
+ *  least one suite that ran, no failing suite, test files that exist, red-green evidence, no
+ *  always-true test patterns. A hand-made JSON with only `verdict` and `tree` is not one. */
+function notPassing(r: TestResult): string | null {
+  if (r.verdict !== 'pass') return `its verdict is ${String(r.verdict)}`;
+  if (typeof r.tree !== 'string' || !OBJECT_ID.test(r.tree)) return 'it records no tested tree';
   const suites = Array.isArray(r.suites) ? r.suites : [];
-  if (!suites.some((s) => typeof s?.passed === 'number' && s.passed > 0)) return false;
+  if (!suites.some((s) => typeof s?.passed === 'number' && s.passed > 0)) return 'no suite ran a passing test';
   const files = Array.isArray(r.test_files) ? r.test_files : [];
-  if (files.length === 0 || !files.every((f) => typeof f === 'string' && existsSync(f))) return false;
-  return (
-    failingSuites([r]) === null &&
-    missingTestFiles([r]) === null &&
-    validateEvidence([r]) === null &&
-    scanForbiddenPatterns(files).length === 0
-  );
+  if (files.length === 0 || !files.every((f) => typeof f === 'string' && existsSync(f))) return 'it lists no test file, or one that does not exist';
+  if (failingSuites([r]) !== null) return 'a suite failed';
+  if (missingTestFiles([r]) !== null) return 'a test file it names is missing';
+  if (validateEvidence([r]) !== null) {
+    return (Array.isArray(r.acceptance) ? r.acceptance.length : 0) === 0
+      ? 'it has no acceptance criterion with red-green evidence'
+      : "an acceptance criterion's red-green evidence does not hold (its red run, green run or mutation probe)";
+  }
+  if (scanForbiddenPatterns(files).length > 0) return 'a test file has an always-true pattern';
+  return null;
+}
+const passing = (r: TestResult): boolean => notPassing(r) === null;
+
+/** Prose a docs-only hand-off may change (#13): Markdown, reStructuredText or AsciiDoc under a
+ *  top-level `docs/` or `doc/`, or a root file such as README.md, CHANGELOG.md or LICENSE. Not
+ *  every `document` in lib/verification-scope.ts: a requirements.txt, a prompt the app loads or
+ *  a SKILL.md that tests assert can break a run (I6 review). */
+const DOCS_DIR_PROSE = /^docs?\/.*\.(?:md|markdown|rst|adoc|asciidoc)$/i;
+const ROOT_PROSE =
+  /^(?:readme|changelog|changes|history|contributing|license|licence|notice|authors|code_of_conduct|security|support)(?:\.(?:md|markdown|rst|adoc|asciidoc|txt))?$/i;
+
+/** (#13) The passing trees (of the newest five) that `tree` (handed off as `rev`) adds only
+ *  prose to. Such a hand-off needs no new test result: a prose change cannot carry red-green
+ *  evidence (real-use trial); the full regression of one of those trees still counts. Only
+ *  regular files count: a submodule or a symlink named like a doc does not, and
+ *  `--ignore-submodules=none` overrides a config that would hide a submodule bump. A deploy of
+ *  the working tree never counts. */
+export function docsOnlyBases(cwd: string, rev: string, tree: string, passTrees: readonly string[]): string[] {
+  const bases: string[] = [];
+  if (rev === WORKTREE || !OBJECT_ID.test(tree)) return bases;
+  for (const t of passTrees.slice(0, 5)) {
+    if (!OBJECT_ID.test(t)) continue;
+    const out = git(cwd, ['diff-tree', '-r', '-z', '--raw', '--no-abbrev', '--no-renames', '--ignore-submodules=none', '--end-of-options', t, tree]);
+    if (out === null) continue;
+    const f = out.split('\0');
+    let n = 0;
+    let prose = true;
+    for (let i = 0; i + 1 < f.length && prose; i += 2) {
+      const m = /^:(\d{6}) (\d{6}) /.exec(f[i]!);
+      const ok = (mode: string) => mode === '100644' || mode === '100755' || mode === '000000';
+      prose = m !== null && ok(m[1]!) && ok(m[2]!) && (DOCS_DIR_PROSE.test(f[i + 1]!) || ROOT_PROSE.test(f[i + 1]!));
+      n++;
+    }
+    if (prose && n > 0) bases.push(t);
+  }
+  return bases;
 }
 
-/** The model-facing denial for a failed hand-off check (English, per the repo rule). */
-export function pushTestMessage(what: string, o: Exclude<PushTestOutcome, { ok: true }>): string {
+/** The sentence that tells the model the user's one-use approval for a hand-off (#13: the model
+ *  guessed the marker's session tag). */
+export function handoffApprovalAsk(marker: string): string {
+  return ` Only the user can approve a hand-off without it: they run \`! touch ${marker}\` (this once).`;
+}
+
+/** The model-facing denial for a failed hand-off check (English, per the repo rule). `marker`:
+ *  the user's one-use approval path, for the main session (#13: the model guessed it). */
+export function pushTestMessage(what: string, o: Exclude<PushTestOutcome, { ok: true }>, marker?: string): string {
+  return pushTestText(what, o) + (marker ? handoffApprovalAsk(marker) : '');
+}
+
+function pushTestText(what: string, o: Exclude<PushTestOutcome, { ok: true }>): string {
   if (o.why === 'unclear') {
     return (
       `goodboy cannot tell what \`${what}\` hands off: ${o.rev}. Push the branches or tags you mean by name ` +
@@ -518,10 +597,15 @@ export function pushTestMessage(what: string, o: Exclude<PushTestOutcome, { ok: 
         ' (edited after the tests, or untracked files present at test time that are not committed).'
       : '';
   const rev = o.rev === WORKTREE ? 'the working tree as it is' : o.rev;
+  const rejected = o.rejected ? ` A result for exactly this tree exists but does not count: ${o.rejected}.` : '';
   return (
     `${what} hands off ${rev} without a passing test result for exactly that content ` +
-    `(tree ${o.tree?.slice(0, 10) ?? '?'}).${differs} Run the layer-1 tests (${agentName(ROUTE.test)}; \`test-write\` records the tested tree) ` +
-    'on what you hand off, then try again. A commit made after the tests still matches; any edit after them does not. (push test check)'
+    `(tree ${o.tree?.slice(0, 10) ?? '?'}).${rejected}${differs} Run the layer-1 tests (${agentName(ROUTE.test)}; \`test-write\` records the tested tree) ` +
+    'on what you hand off, then try again. A commit made after the tests still matches; any edit after them does not. ' +
+    (o.rev === WORKTREE
+      ? ''
+      : 'Commits that change only prose (Markdown under docs/, or a root README, CHANGELOG or LICENSE) on top of a tested tree need no new tests; that tree\'s full regression still counts. ') +
+    '(push test check)'
   );
 }
 
@@ -532,8 +616,11 @@ export function checkHandoff(
   results: TestResult[],
   treeOf: (cwd: string, rev: string) => string | null = revisionTree,
   diffOf: (cwd: string, a: string, b: string) => string[] | null = treeDiff,
+  docsOnly: (cwd: string, rev: string, tree: string, passTrees: readonly string[]) => string[] = docsOnlyBases,
 ): PushTestOutcome {
   if (h.unclear) return { ok: false, why: 'unclear', rev: h.unclear, tree: null };
+  const docRevs: Record<string, string[]> = {};
+  const passed = results.filter(passing);
   for (const rev of h.revs) {
     const tree = treeOf(h.cwd, rev);
     if (tree === null) return { ok: false, why: 'unresolved', rev, tree };
@@ -541,9 +628,16 @@ export function checkHandoff(
     if (forTree.some(passing)) continue;
     const blocked = forTree.find((r) => r.verdict === 'blocked');
     if (blocked) return { ok: false, why: 'blocked', rev, tree, blocked };
-    const newestPass = results.find(passing);
+    // Not when the tree handed off has a failed result of its own (a README doctest).
+    const bases = forTree.some((r) => r.verdict !== 'pass') ? [] : docsOnly(h.cwd, rev, tree, passed.map((r) => r.tree!));
+    if (bases.length > 0) {
+      docRevs[rev] = bases;
+      continue;
+    }
+    const newestPass = passed[0];
     const differs = newestPass ? (diffOf(h.cwd, newestPass.tree!, tree) ?? undefined) : undefined;
-    return { ok: false, why: 'no-result', rev, tree, ...(differs ? { differs } : {}) };
+    const rejected = forTree.length > 0 ? (notPassing(forTree[0]!) ?? undefined) : undefined;
+    return { ok: false, why: 'no-result', rev, tree, ...(differs ? { differs } : {}), ...(rejected ? { rejected } : {}) };
   }
-  return { ok: true };
+  return Object.keys(docRevs).length > 0 ? { ok: true, docsOnly: docRevs } : { ok: true };
 }
