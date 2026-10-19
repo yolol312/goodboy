@@ -1029,7 +1029,7 @@ Consequences for the design:
 | I2 | #3 | Every acceptance criterion has a test; a document check never satisfies a product criterion (§15.4) |
 | I3 | #4 | Test types complete per change kind; several types go to test-lead. Also the change classifier and the review dimensions per change (§15.4). Done: I3a 6b26102, I3b (§15.6) |
 | I4 | #5 | Full regression on the pushed tree before a push (§15.7) |
-| I5 | #6 | Existing tests that cover the change run with it; weakening a test is a finding |
+| I5 | #6 | Existing tests that cover the change run with it; weakening a test is a finding (§15.8) |
 
 Each step: tests first, the §14.7a review sizing, a /verify probe per new rule, README
 (Korean), and `/done #<issue>` (GitHub mode) to close it. Merge and push wait for the user.
@@ -1371,8 +1371,9 @@ suite (§15.1, guarantee 4).
   `GOODBOY_PUSH_TEST_GATE=off` turns off both.
 - The one-hour tier (§15.1, H6): when the newest passing regression goodboy timed (any tree)
   took over an hour, the layer-1 result suffices and the user is told once per hand-off. A
-  failing run proves no length (a crafted command could sleep). I5 will replace this with the
-  affected tests.
+  failing run proves no length (a crafted command could sleep). The push check asks only for
+  a passing layer-1 result of the tree; that the existing tests ran with the change is the
+  Stop's rule (§15.8), which warn or off mode relaxes.
 - Known limits (the same-user limits of §10.10): the whole-suite command comes from the repo's
   own files, which the model can edit (a changed `scripts.test` is part of the diff the review
   sees, and of the tree handed off, except for the one-hour tier: a passing run of a
@@ -1383,6 +1384,89 @@ suite (§15.1, guarantee 4).
   x)"`), is not recognized as a result write; killing `sh` at the
   timeout may leave its children running. No user override of the command yet. A suite longer
   than the agent's Bash timeout runs in the background (agents/test-unit.md).
+
+### 15.8 I5 (#6): existing tests run with the change and are never quietly weakened
+
+Two rules (`lib/existing-tests.ts`), both against the session's start HEAD (pinned in
+`coverage-pin.json`); without a start commit there are no existing tests.
+
+- Affected tests (layer 1, the Stop's test decision, after the test types and before the
+  changed lines): the test files tracked at the start HEAD (by name: `*.test.*`, `*.spec.*`,
+  `*_test.go`, `test_*.py`, `*_test.py`) that load a changed code file:
+  - JS/TS: a relative import, require or dynamic import resolving to it (extension and
+    `index` resolution, a `.js` specifier naming a `.ts` source);
+  - Python: an import of its module or a module under it (`a.b`, also without a leading
+    `src/`), or `from a import b`;
+  - Go: the `_test.go` files of its dir.
+  - Candidates come from one `git grep` of the start tree for the changed files' stems (an
+    index file: its dir's name and the `.`/`..` specifiers), and each is read once from the
+    start tree (`git cat-file --batch`) and parsed once into what it loads (set lookups, not a
+    scan per changed file): the start content decides, so a test emptied in the session still
+    counts. One over 1 MB, or past 64 MB read in all, counts as loading the file (fails
+    closed). Direct loads only, not transitive ones.
+  - A test is required at its path now: a renamed one is followed (git's rename detection
+    against the start HEAD, or an untracked test file with the same content after a plain
+    `mv`, each copy taken once); a deleted one is not required here, it is a weakened test
+    (below).
+  - Each needs a passing record with a trusted timestamp after the code file's last edit that
+    lists it in `test_files` and has a passing suite that ran it. `suiteRan` reads only the
+    test runs of the command (`bun test`, `npm test`/`run test:*`, `jest`, `vitest`, `pytest`,
+    `go test`, `cargo test`, `node --test`, a test script by name…); setup steps before them
+    (`node scripts/setup.js &&`, `bun build … &&`) name no tests, and a command with no test
+    run ran nothing known. A test-name or partial-selection flag (`-t`, `--testNamePattern`,
+    `--testPathPattern`, jest and vitest projects, `-k`, pytest `-m`/`--deselect`/`--lf`,
+    `--grep`, `--fgrep`, `-run`, `-skip`, `--shard`, changed-only runs, a cargo filter or
+    target) or a pytest node id (`x.py::t`) makes it partial; otherwise a test path naming the
+    file or a dir above it (also an absolute one inside the repo, or a `--dir`/`--root` value;
+    for bun, jest and vitest any part of the path, as their path filters work), or no test
+    path at all (the whole suite). Redirects, the values of flags named like a path, file,
+    output or setting, and absolute paths outside the repo are not test paths. For `go test`
+    the package patterns decide (`./...`, `./x/...`, `./x`; none is the top package). A record
+    outside the accepted set counts when it stands alone (as in I3b). The block names each
+    file and its tests and says a failing existing test is updated, never weakened. An error
+    in this rule is logged and skips only it, not the changed-line rule after it.
+- Weakened tests (layer 2, the review gate, after the dimensions; also in the stop_hook_active
+  accept): the start test files under the cwd that git sees changed against the start HEAD
+  (`git diff --raw -M`, so a deletion or a rename by any command counts, not only recorded
+  edits; the repo's filter drivers are emptied for it, as in I1, or a configured clean filter
+  would run inside the hook: round-2 security review) whose checks went down: fewer
+  assertions or cases, or more skips (JS/TS `.skip`, `.todo`, `.only` and `fit`/`xit`; Python
+  `skip*`/`xfail` marks, `skipTest`, `pytest.skip`; Go `t.Skip*`), counted in code without
+  comments (JS/TS also without literals, Python without triple-quoted strings, Go without
+  block comments) by linear patterns. A deleted
+  test, one renamed to a non-test name, or a changed one over 1 MB counts as weakened (fails
+  closed); a rename is compared with its source. Each needs a finding on that file (its start
+  path or its path now; relative to the cwd or the repo top, a `:line` suffix ignored) in a
+  recent review with a trusted timestamp after the test last changed (the file's change time;
+  for a deletion or a move, the time of the dir it left), any recent review, also one that
+  lists only a deleted test ("weakening a test is a review finding", #6): a finding made
+  before a further weakening does not judge it (round-2 review high). The reviewer rates it
+  (high when it hides a regression, low with the reason when the behavior changed on
+  purpose), and the usual severity rules follow. Like a missing dimension, only the user's
+  marker passes it. Every accepted review pins the weakened tests it let through by their
+  path and content hash (`judged-weakened.json` in the session dir, written only by the Stop
+  and kept by the state guard), so a later change is not asked again unless the test's
+  content changes. The list is computed once per Stop.
+- `GOODBOY_EXISTING_TESTS=on` (default) | `warn` (a Korean line to the user) | `off`; off in
+  tests/setup.ts.
+- I4's one-hour tier: past an hour, a push needs the layer-1 result of its tree; the push
+  check does not repeat this rule, so the result ran the affected tests only when the Stop's
+  rule was on for it.
+- Agents: test-unit runs the listed existing tests (or the whole suite) and updates a failing
+  one to the new behavior; review-all records a finding on each weakened test.
+- Known limits: languages other than JS/TS, Python and Go have no affected tests; transitive
+  loads (a test of a module that imports the changed one) are not required; a suite command
+  is the agent's report (as everywhere in layer 1), and `suiteRan` reads it lexically: a
+  bare path filter word (`bun test calc`), a dotted unittest module or a `cd` into a subdir
+  before the runner is read as the whole suite; counting checks is lexical, so moving
+  assertions into a helper reads as weakening (the reviewer then rates it low); a test moved
+  with a plain `mv` and edited, or rewritten past git's rename threshold, counts as deleted;
+  a change pulled from upstream that weakens a start test asks for a finding too; the review
+  gate starts from recorded edits, so a turn whose only change is deleting a test is asked at
+  the next review of the session; a test moved into a dir the runner does not collect keeps
+  its counts and is neither weakened nor really run; the user's marker on a review gate pins
+  the weakened tests without naming them again; the module keeps its own git runner (a
+  shared one is a later refactor).
 
 ## 16. J — Field reports (v0.34.0)
 

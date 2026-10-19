@@ -1,7 +1,7 @@
 // Gate state guard (track G security review): the Stop gates read state from the session dir
 // in $TMPDIR (edit log, review/test cursors, dispatch log, skill evidence, validation
 // failure, the commit issue, project mode, coverage and criteria pins, the criteria a Stop
-// required), outside the project, where the Bash write gate allows writes. One
+// required, the weakened tests a review judged), outside the project, where the Bash write gate allows writes. One
 // `rm "$TMPDIR"/goodboy-session-*/edits.jsonl` would end a turn with neither tests nor review.
 //
 // So a model Bash call is bracketed: PreToolUse snapshots the guarded files, and the post
@@ -19,7 +19,7 @@ import { segmentChanging } from './outward-command';
 import { safeToolUseId } from './approval-marker';
 import { MAX_STATE_BYTES } from './safe-read';
 
-const GUARDED = /^(?:edits\.jsonl|dispatch-log\.jsonl|skill-evidence\.jsonl|commit-issue-pins\.json|marker-evidence\.jsonl|project-mode-pin\.json|coverage-pin\.json|criteria-pin\.json|criteria-seen\.json|\.goodboy-last-(?:review|test)-[0-9a-f]+\.json|\.goodboy-validation-failed\.json)$/;
+const GUARDED = /^(?:edits\.jsonl|dispatch-log\.jsonl|skill-evidence\.jsonl|commit-issue-pins\.json|marker-evidence\.jsonl|project-mode-pin\.json|coverage-pin\.json|criteria-pin\.json|criteria-seen\.json|judged-weakened\.json|\.goodboy-last-(?:review|test)-[0-9a-f]+\.json|\.goodboy-validation-failed\.json)$/;
 const CURSOR = /^\.goodboy-last-(?:review|test)-[0-9a-f]+\.json$/;
 /** Evidence logs: a line added during a model Bash call would be forged evidence (a skill run,
  *  the user's non-project answer), so these keep only their old lines, and one the call
@@ -27,10 +27,10 @@ const CURSOR = /^\.goodboy-last-(?:review|test)-[0-9a-f]+\.json$/;
  *  model to record it through `cli.ts skill-gap` from Bash, and it is the model's own note
  *  (H1 review: dropping it kept the skill rule denying). */
 const EVIDENCE = /^(?:skill-evidence|marker-evidence)\.jsonl$/;
-/** Written only by SessionStart (the pins) and the Stop (the criteria it required): one a Bash
- *  call created would set the session's start or criteria (I2 security review round 2: a
- *  crafted seen list failed the gate open). */
-const HOOK_ONLY = /^(?:project-mode-pin|coverage-pin|criteria-pin|criteria-seen)\.json$/;
+/** Written only by SessionStart (the pins) and the Stop (the criteria it required, the weakened
+ *  tests a review judged): one a Bash call created would set the session's start or criteria
+ *  (I2 security review round 2: a crafted seen list failed the gate open). */
+const HOOK_ONLY = /^(?:project-mode-pin|coverage-pin|criteria-pin|criteria-seen|judged-weakened)\.json$/;
 
 function keptEvidenceLine(name: string, line: string): boolean {
   if (name !== 'skill-evidence.jsonl') return false;

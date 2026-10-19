@@ -11,7 +11,7 @@ import type { TestType } from './types';
 export const TEST_CATALOG_FILE = join('.goodboy', 'test-catalog.md');
 
 /** Test files by name: `*.test.*` / `*.spec.*` (JS, TS), `*_test.go`, `test_*.py` / `*_test.py`. */
-const TEST_FILE = /(?:\.(?:test|spec)\.[cm]?[jt]sx?|_test\.go|(?:^|\/)test_[^/]*\.py|_test\.py)$/;
+export const TEST_FILE = /(?:\.(?:test|spec)\.[cm]?[jt]sx?|_test\.go|(?:^|\/)test_[^/]*\.py|_test\.py)$/;
 const MAX_FILE_BYTES = 512 * 1024;
 const MAX_FEATURES = 6;
 

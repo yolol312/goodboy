@@ -54,7 +54,7 @@ const JS_IO_MODULES = new Set([
 ]);
 // `from '…'`, `require('…')`, `import('…')`, `import '…'`: the raw text, since stripping
 //   literals would empty the specifier.
-const JS_SPECIFIER = /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*|\bimport\s+)(['"`])([^'"`\n]{1,200})\1/g;
+export const JS_SPECIFIER = /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*|\bimport\s+)(['"`])([^'"`\n]{1,200})\1/g;
 /** More specifiers than this: boundary code (fails closed, keeps a Stop fast). */
 const MAX_SPECIFIERS = 5000;
 /** IO functions imported by name from `bun`. */

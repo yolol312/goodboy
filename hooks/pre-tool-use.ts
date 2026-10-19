@@ -175,7 +175,7 @@ const REASONING_DENY_ESCAPE = 3;
 
 /** (I4) A hand-off past the one-hour tier: the layer-1 result sufficed (user-visible, Korean). */
 const RELAXED_NOTE =
-  '[goodboy] 전체 회귀가 1시간을 넘는 프로젝트라 이번 push는 변경 테스트 결과만 확인했어요. 영향받는 테스트 선별은 I5에서 들어와요.';
+  '[goodboy] 전체 회귀가 1시간을 넘는 프로젝트라 이번 push는 전체 회귀 대신 이 트리의 층1 테스트 통과 결과로 확인했어요.';
 
 // v0.26.4 — 상태 파일을 에이전트 스코프로 분리(리뷰 지적): sessionId만으로 키잉하면
 //   서브에이전트의 지연 모드가 메인 게이트까지 무장해제하고, 메인의 섹션 인식이

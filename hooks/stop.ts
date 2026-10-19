@@ -17,6 +17,17 @@ import { projectMode } from '../lib/project-mode';
 import { knowledgeRoot, readDocMap } from '../lib/project-knowledge';
 import { staleDocs, staleDocsReason, type StaleDoc } from '../lib/doc-map';
 import { changedLineGaps, changedLineReason, diffCoverageMode, repoTop, sessionCoverageStart, sessionUserGlobs } from '../lib/changed-coverage';
+import {
+  affectedGaps,
+  affectedReason,
+  existingTestsMode,
+  judgedWeakened,
+  pinJudgedWeakened,
+  unjudgedWeakened,
+  weakenedReason,
+  weakenedTests,
+  weakenedWarning,
+} from '../lib/existing-tests';
 import { missingTestTypes, testerFor, testTypesMode, type TypeNeed, typeGapReason, typeGapWarning, typeNeedOf } from '../lib/test-types';
 import { needsTests } from '../lib/verification-scope';
 import { documentChangeNote, isDocumentChange } from '../lib/doc-verification';
@@ -151,6 +162,8 @@ function acceptReview(sessionId: string, cwd: string): void {
   resetRetryCount(sessionId);
   resetRetryCount(sessionId, REVIEW_VALIDATE_COUNT_FILE);
   writeReviewCursor(cwd, getCurrentTurn(sessionId), sessionId);
+  // (I5) The weakened tests this accept lets through count as judged in their state now.
+  if (existingTestsMode() !== 'off') pinJudgedWeakened(sessionId, weakenedNow(sessionId, cwd).list);
 }
 
 /** A blocking gate's output: the model is told that only the user can let it pass; after
@@ -739,6 +752,27 @@ function evaluateTestResults(
       habitWarnings.push(typeGapWarning(out.gaps));
     }
   }
+  // (I5, plan §15.8) The existing tests that load a changed code file ran with the change
+  //   (tracked at the session's start HEAD; lib/existing-tests.ts).
+  //   An error here is logged and skips this rule only, not the checks after it.
+  const existingMode = existingTestsMode();
+  let gaps: ReturnType<typeof affectedGaps> = [];
+  if (existingMode !== 'off') {
+    try {
+      const top = repoTop(cwd);
+      gaps = affectedGaps({ results, accepted: new Set(ran), edits: changedEdits, top, head: sessionCoverageStart(sessionId, cwd, top).head });
+    } catch (err) {
+      logGate(sessionId, 'test', 'warn', `existing-tests error: ${String(err).slice(0, 200)}`);
+    }
+    if (gaps.length > 0) {
+      if (existingMode === 'on') return block(affectedReason(gaps, agentName(ROUTE.test)));
+      logGate(sessionId, 'test', 'warn', `existing-tests: ${gaps.map((g) => g.rel).join(', ')}`);
+      habitWarnings.push(
+        `[goodboy] 기존 테스트(경고 모드): 바뀐 파일을 쓰는 기존 테스트가 함께 돌지 않았어요 — ` +
+          `${gaps.slice(0, 3).map((g) => `${g.rel}: ${g.tests.slice(0, 2).join(', ')}`).join('; ')}.`,
+      );
+    }
+  }
   // (I1, plan §15) Every changed code line ran in a test of the recorded tree; a file no run
   //   loaded counts as not run (lib/changed-coverage.ts). Only the records the checks above
   //   accepted (`ran`), and per file those made after its last edit. Exemptions: the user's
@@ -757,6 +791,33 @@ function evaluateTestResults(
     }
   }
   return { kind: 'accept' };
+}
+
+/** (I5) The start test files under the cwd that lost checks since the session's start HEAD,
+ *  and the repo top that finding paths may be relative to. */
+function weakenedNow(sessionId: string, cwd: string): { top: string; list: ReturnType<typeof weakenedTests> } {
+  // Once per Stop: the tree does not change while the hook runs, and the review gate and
+  //   acceptReview both ask (round-2 performance review).
+  const key = `${sessionId}\0${cwd}`;
+  const known = weakenedMemo.get(key);
+  if (known) return known;
+  let out: { top: string; list: ReturnType<typeof weakenedTests> };
+  try {
+    const top = repoTop(cwd);
+    out = { top, list: weakenedTests(top, sessionCoverageStart(sessionId, cwd, top).head, cwd) };
+  } catch {
+    out = { top: cwd, list: [] };
+  }
+  weakenedMemo.set(key, out);
+  return out;
+}
+const weakenedMemo = new Map<string, { top: string; list: ReturnType<typeof weakenedTests> }>();
+
+/** (I5) The weakened tests that neither these reviews (any of them, made after the test last
+ *  changed) nor an earlier accepted review judged. */
+function unjudgedWeakenedNow(sessionId: string, cwd: string, reviews: Parameters<typeof unjudgedWeakened>[1]): ReturnType<typeof weakenedTests> {
+  const w = weakenedNow(sessionId, cwd);
+  return w.list.length === 0 ? [] : unjudgedWeakened(w.list, reviews, [cwd, w.top], judgedWeakened(sessionId));
 }
 
 /** (I3b) The tester a gate names for these needs: test-ui and test-lead only once their
@@ -1171,6 +1232,10 @@ function tryAcceptPendingReview(
       effective.flatMap((r) => (Array.isArray(r.dimensions_checked) ? r.dimensions_checked : [])),
     );
     if (requiredDims.some((d) => !checkedDims.has(d))) return null;
+    // (I5) A weakened existing test needs a finding first (warn mode: the user is told).
+    const weakMode = existingTestsMode();
+    const weak = weakMode === 'off' ? [] : unjudgedWeakenedNow(sessionId, cwd, reviews);
+    if (weak.length > 0 && weakMode === 'on') return null;
     // 수락.
     acceptReview(sessionId, cwd);
     statusSnapshot.reviewPending = false;
@@ -1178,7 +1243,7 @@ function tryAcceptPendingReview(
     logGate(sessionId, 'review', 'warn', 'accept-on-stop-active');
     // (G 상당) medium/low finding은 조용히 소비하지 않고 표면화한다(v0.26.8). The same holds
     //   for findings from reviews of files this session did not edit (A3).
-    return passNote('리뷰 통과(수락).', own, foreign);
+    return [weak.length > 0 ? weakenedWarning(weak) : '', passNote('리뷰 통과(수락).', own, foreign)].filter(Boolean).join('\n');
   } catch {
     // fail-open — 수락 시도 실패가 조기 return 경로를 막지 않는다.
     return null;
@@ -1802,8 +1867,31 @@ function main(): void {
         return;
       }
 
+      // (I5, plan §15.8) Weakening an existing test is a review finding: each weakened test needs
+      //   one in the reviews of this change. Like a missing dimension, only the user passes it.
+      const weakMode = existingTestsMode();
+      //   Any recent review counts, also one that lists only the weakened (say, deleted) test: the
+      //   finding must be newer than the test's last change (lib/existing-tests.ts).
+      const unjudged = weakMode === 'off' ? [] : unjudgedWeakenedNow(sessionId, cwd, reviews);
+      if (unjudged.length > 0 && weakMode === 'on') {
+        if (!userPass(sessionId, cwd, 'review')) {
+          const count = readRetryCount(sessionId) + 1;
+          writeRetryCount(sessionId, count);
+          logGate(sessionId, 'review', 'deny', `weakened-tests: ${unjudged.map((w) => w.rel).join(', ')}`);
+          emit(blockOutput(sessionId, cwd, weakenedReason(unjudged, agentName(ROUTE.review)), 'review', '', count));
+          return;
+        }
+        acceptReview(sessionId, cwd);
+        statusSnapshot.reviewPending = false;
+        emit({ systemMessage: withForeignNote(weakenedWarning(unjudged), foreignFindings) });
+        return;
+      }
+      if (unjudged.length > 0) logGate(sessionId, 'review', 'warn', `weakened-tests: ${unjudged.map((w) => w.rel).join(', ')}`);
+
       // (G) medium/low only — 통과 + 알림 (plus findings about files this session did not edit, A3)
-      const systemMessage = passNote('리뷰 통과.', activeFindings, foreignFindings) || undefined;
+      const systemMessage =
+        [unjudged.length > 0 ? weakenedWarning(unjudged) : '', passNote('리뷰 통과.', activeFindings, foreignFindings)].filter(Boolean).join('\n') ||
+        undefined;
       // 리뷰 수락(blocking high-severity 없음) → 커서 전진.
       //   이후 Stop에서는 이 턴 이후 편집만 리뷰 필요 대상이 된다.
       acceptReview(sessionId, cwd);

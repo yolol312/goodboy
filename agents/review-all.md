@@ -43,7 +43,10 @@ When the prompt carries the Stop gate's `Document change (class: document; …)`
 2. By axis (the required dimensions per file: `bun "$GB/lib/cli.ts" review-axes <files>`):
    - `hallucination` (always runs): check-evidence; with a test record for the change, a
      suite typed `integration`, `ui` or `e2e` whose tests mock the boundary or never render
-     is a finding (the test-type rule trusts the label);
+     is a finding (the test-type rule trusts the label); an existing test with fewer assertions
+     or cases, or more skips, than at the session start, or one deleted or renamed away, gets a
+     finding on its file (high when it hides a regression, low with the reason when the behavior
+     changed on purpose);
    - `refactoring` and `performance`: check-code-quality;
    - `security`: check-security;
    - `ui`: check-ui-states and follow-design-tokens.

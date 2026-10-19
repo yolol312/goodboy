@@ -32,3 +32,8 @@ process.env.GOODBOY_TEST_TYPES = 'off';
 // which the older push test fixtures do not have. Off for the suite; tests/i4-regression.test.ts
 // turns it on.
 process.env.GOODBOY_PUSH_REGRESSION = 'off';
+
+// The existing-test rules (track I, I5) ask for the tests that load a changed file and judge
+// weakened tests, which the older fixtures do not set up. Off for the suite;
+// tests/i5-existing-tests.test.ts turns them on.
+process.env.GOODBOY_EXISTING_TESTS = 'off';
