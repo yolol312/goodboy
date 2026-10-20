@@ -1,0 +1,64 @@
+name: Field report
+description: A problem or an idea from using goodboy in a project (a gate that blocked wrongly, a hook error, a slow or confusing check).
+title: "[field-report] "
+labels: ["field-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This issue is public.** Describe goodboy's behavior only. Leave out project and company names, paths, hosts, URLs, people, emails, package names and secrets: say "a Java project", "a test file".
+
+        With goodboy installed, `/report-goodboy` writes this report for you, attaches goodboy's own evidence, and checks the public summary for private details before you file it.
+  - type: textarea
+    id: observed
+    attributes:
+      label: What happened (observed)
+      description: What goodboy did, step by step.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: user_words
+    attributes:
+      label: Your words about it (optional)
+      description: What you said or thought when it happened, in any language.
+  - type: input
+    id: versions
+    attributes:
+      label: goodboy and Claude Code versions
+      placeholder: goodboy 0.34.0, Claude Code 2.1.302
+    validations:
+      required: true
+  - type: textarea
+    id: involved
+    attributes:
+      label: Commands or files involved
+      description: The gate or hook (e.g. the push test check, the Stop review gate), the command it judged, the kind of file. Generic, no paths.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence (optional)
+      description: Gate decision counts and timings. `bun <goodboy>/lib/cli.ts report-evidence --public` prints only the part that may go here (versions and counts); never paste the full output, whose gate-log lines hold paths and commands.
+  - type: textarea
+    id: suspected_causes
+    attributes:
+      label: Suspected causes
+    validations:
+      required: true
+  - type: textarea
+    id: proposed_change
+    attributes:
+      label: Proposed change
+    validations:
+      required: true
+  - type: textarea
+    id: unknowns
+    attributes:
+      label: What is not known (optional)

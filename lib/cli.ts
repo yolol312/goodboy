@@ -40,7 +40,7 @@ import {
 import { AXIS_DIMENSIONS, axesFor, requiredDimensionsFor } from './review-dimensions';
 import { MAX_DOC_BYTES, readRegular } from './safe-read';
 import { appendSkillGapLog, recordSkillEvidence, validateSkillGapNote } from './skill-rule';
-import { collectEvidence, findSession, privateTerms, publicLeaks, REPORT_REPO, REPORT_TITLE_TAG, validateFieldReport, writeFieldReport } from './field-report';
+import { collectEvidence, findSession, inboxDir, listInbox, markFiled, markTriaged, privateTerms, publicLeaks, publishProblems, REPORT_REPO, REPORT_TITLE_TAG, validateFieldReport, writeFieldReport } from './field-report';
 
 // ---- 유틸 ----
 
@@ -819,10 +819,26 @@ function sessionOpt(args: string[]): { session?: string; rest: string[] } {
 
 /** Prints what goodboy recorded about the session (the newest one of this dir by default). */
 function cmdReportEvidence(cwd: string, args: string[]): void {
-  const { session } = sessionOpt(args);
+  const { session, rest } = sessionOpt(args);
   const s = findSession(cwd, session);
   if (session && !s) fail(`report-evidence: no session ${session} for this directory`);
-  process.stdout.write(JSON.stringify(collectEvidence(s, GOODBOY_ROOT), null, 2) + '\n');
+  const ev = collectEvidence(s, GOODBOY_ROOT);
+  // `--public`: only what may go into a public issue (versions and goodboy's counts), never the
+  //   gate-log lines, whose reasons hold paths and commands (J2 review: the issue form).
+  const out = rest.includes('--public')
+    ? { goodboy_version: ev.goodboy_version, claude_code_version: ev.claude_code_version, gate_counts: ev.gate_counts, retries: ev.retries }
+    : ev;
+  process.stdout.write(JSON.stringify(out, null, 2) + '\n');
+}
+
+/** Records the user's filing choice in a report: `report-filed <file> --issue <url>` or
+ *  `report-filed <file> --local`. */
+function cmdReportFiled(args: string[]): void {
+  const i = args.indexOf('--issue');
+  const file = args.find((a, k) => !a.startsWith('--') && (i < 0 || k !== i + 1));
+  const local = args.includes('--local');
+  if (!file || (i < 0) === !local) fail('report-filed: pass <report .json> and either --issue <https://github.com/yolol312/goodboy/issues/N> or --local');
+  process.stdout.write(JSON.stringify({ ok: true, path: markFiled(file, local ? { local: true } : { issue: args[i + 1] ?? '' }) }) + '\n');
 }
 
 /** Writes a field report to the inbox with the session's evidence, after checking the public
@@ -859,11 +875,25 @@ async function cmdReportWrite(cwd: string, args: string[]): Promise<void> {
   );
 }
 
+// ---- commands: report-list, report-done (track J2, #9; the triage-reports skill) ----
+
+/** Moves a triaged report to the inbox's `done/` with the decision: `report-done <file>
+ *  --decision "<where it went>"`. */
+async function cmdReportDone(args: string[]): Promise<void> {
+  const i = args.indexOf('--decision');
+  let decision = i >= 0 ? (args[i + 1] ?? '') : '';
+  const file = args.find((a, k) => !a.startsWith('--') && (i < 0 || k !== i + 1));
+  // `--decision -` reads it from stdin, so quoted issue text never meets the shell (J2 review).
+  if (decision === '-') decision = await readAllStdin();
+  if (!file || decision.trim() === '') fail("report-done: pass <report .json> --decision - <<'EOF' (where it went: a plan step, an issue URL, deferred or rejected with the reason) EOF");
+  process.stdout.write(JSON.stringify({ ok: true, path: markTriaged(file, decision) }) + '\n');
+}
+
 // ---- main ----
 
 const USAGE =
   '사용법: bun lib/cli.ts <command> [args...]\n' +
-  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | report-evidence [--session <id>] | report-write [--session <id>] [file]';
+  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text>';
 
 async function main(): Promise<void> {
   const cwd = process.cwd();
@@ -924,6 +954,19 @@ async function main(): Promise<void> {
         break;
       case 'report-write':
         await cmdReportWrite(cwd, args);
+        break;
+      case 'report-list': {
+        // With each report, why its public summary may not be filed now (empty: it may); one
+        //   names lookup per project dir.
+        const terms = new Map<string, string[]>();
+        process.stdout.write(JSON.stringify({ inbox: inboxDir(), reports: listInbox().map((r) => ({ ...r, publish_problems: publishProblems(r.path, process.env, terms) })) }, null, 2) + '\n');
+        break;
+      }
+      case 'report-filed':
+        cmdReportFiled(args);
+        break;
+      case 'report-done':
+        await cmdReportDone(args);
         break;
       default:
         fail(`알 수 없는 명령: ${command}\n${USAGE}`);

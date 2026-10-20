@@ -38,6 +38,8 @@ Turn trouble with goodboy into one report its maintainer can check and plan from
 6. Ask once with AskUserQuestion whether to file that exact text on goodboy's repo (public):
    options to file it, or keep it local only. Only on "file": `gh issue create --repo
    yolol312/goodboy --title "<issue_title>" --body-file "<public_path>"`, and give the URL.
+7. Record the choice: `bun "$GB/lib/cli.ts" report-filed "<path>" --issue <URL>`, or
+   `--local` (then it is never filed later).
 
 ## Output
 - `<inbox>/<time>-<slug>.json` (the full report and goodboy's evidence, kept local) and
@@ -46,7 +48,8 @@ Turn trouble with goodboy into one report its maintainer can check and plan from
 
 ## Done when
 - [ ] `report-write` printed `{"ok":true,…}` and the user got the Korean summary.
-- [ ] The user chose whether the public summary is filed; nothing was filed without that.
+- [ ] The user chose whether the public summary is filed, and `report-filed` recorded it;
+      nothing was filed without that choice.
 
 ## Never
 - Never file an issue, or send the report anywhere, without the user's explicit yes.

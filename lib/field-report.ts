@@ -7,7 +7,7 @@
 // confirms it (the report-goodboy skill).
 
 import { spawnSync } from 'node:child_process';
-import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, renameSync, unlinkSync, writeSync } from 'node:fs';
 import { homedir, hostname, tmpdir, userInfo } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
@@ -236,8 +236,8 @@ export function collectEvidence(session: { id: string; transcript: string | null
 /** The public summary as it goes into the issue, with goodboy's own numbers (versions, gate
  *  counts: goodboy's names only). */
 export function renderPublic(input: FieldReportInput, ev: Evidence): string {
-  const counts = Object.entries(ev.gate_counts)
-    .map(([g, d]) => `${g} ${Object.entries(d).map(([k, n]) => `${k} ${n}`).join(', ')}`)
+  const counts = Object.entries(ev.gate_counts ?? {})
+    .map(([g, d]) => `${g} ${Object.entries(d ?? {}).map(([k, n]) => `${k} ${n}`).join(', ')}`)
     .sort();
   return [
     input.public_summary.body,
@@ -393,36 +393,86 @@ export function writeFieldReport(
   const env = opts.env ?? process.env;
   const dir = inboxDir(env);
   // Never the versioned plugin cache (gone on the next update) or, by default, a temp dir.
-  const under = (a: string, b: string) => {
-    const r = relative(realDeep(b), realDeep(a));
-    return r === '' || (!r.startsWith('..') && !r.startsWith(sep) && r !== '..');
-  };
-  if (under(dir, opts.root)) throw new Error(`the inbox ${dir} is inside goodboy's own directory, which an update replaces`);
-  if ((env.GOODBOY_INBOX_DIR ?? '').trim() === '' && [tmpdir(), '/tmp', '/var/tmp'].some((t) => under(dir, t))) {
+  if (isUnder(dir, opts.root)) throw new Error(`the inbox ${dir} is inside goodboy's own directory, which an update replaces`);
+  if ((env.GOODBOY_INBOX_DIR ?? '').trim() === '' && [tmpdir(), '/tmp', '/var/tmp'].some((t) => isUnder(dir, t))) {
     throw new Error(`the inbox ${dir} is in a temp dir`);
   }
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const st = lstatSync(dir);
-  if (!st.isDirectory()) throw new Error(`the inbox ${dir} is not a directory (a link or a file is at its path)`);
-  if (typeof process.getuid === 'function' && st.uid !== process.getuid()) throw new Error(`the inbox ${dir} belongs to another user`);
-  if ((st.mode & 0o022) !== 0) throw new Error(`the inbox ${dir} is writable by others (chmod 700 it)`);
+  checkedInbox(env, true);
   const now = opts.now ?? new Date();
   const slug = input.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'report';
   const stamp = now.toISOString().replace(/[:.]/g, '-');
-  const publicText = `# ${REPORT_TITLE_TAG} ${input.public_summary.title}\n\n${renderPublic(input, ev)}`;
+  const publicText = publicFileText(input, ev);
   const record = { schema: 'goodboy-field-report/1', created: now.toISOString(), status: 'new', cwd: opts.cwd, report: input, evidence: ev };
-  for (let n = 1; n <= 20; n++) {
-    const base = join(dir, `${stamp}-${slug}${n === 1 ? '' : `-${n}`}`);
-    if (!createNew(`${base}.json`, JSON.stringify(record, null, 2) + '\n')) continue;
-    // Taken by something else: drop the report just made and try the next name.
-    if (createNew(`${base}.public.md`, publicText)) return { path: `${base}.json`, publicPath: `${base}.public.md`, publicText };
-    unlinkSync(`${base}.json`);
-  }
-  throw new Error(`no free report name in ${dir}`);
+  const base = createSet(dir, `${stamp}-${slug}`, [
+    ['.json', JSON.stringify(record, null, 2) + '\n'],
+    ['.public.md', publicText],
+  ]);
+  return { path: `${base}.json`, publicPath: `${base}.public.md`, publicText };
 }
 
-/** Creates `path` with `text` (mode 600), or false when anything is already at the path: the
- *  exclusive create never follows a link there. */
+/** The `.public.md` text: the issue body as goodboy wrote it. */
+function publicFileText(input: FieldReportInput, ev: Evidence): string {
+  return `# ${REPORT_TITLE_TAG} ${input.public_summary.title}\n\n${renderPublic(input, ev)}`;
+}
+
+/** Whether `a` is `b` or inside it, with every link resolved as far up as each exists. */
+function isUnder(a: string, b: string): boolean {
+  const r = relative(realDeep(b), realDeep(a));
+  return r === '' || (!r.startsWith('..') && !r.startsWith(sep));
+}
+
+/** A directory goodboy keeps reports in: a real directory (not a link), this user's, not
+ *  writable by others. */
+function checkDir(dir: string, what: string): void {
+  const st = lstatSync(dir);
+  if (!st.isDirectory()) throw new Error(`${what} ${dir} is not a directory (a link or a file is at its path)`);
+  if (typeof process.getuid === 'function' && st.uid !== process.getuid()) throw new Error(`${what} ${dir} belongs to another user`);
+  if ((st.mode & 0o022) !== 0) throw new Error(`${what} ${dir} is writable by others (chmod 700 it)`);
+}
+
+/** The inbox after checkDir, made 0700 when `create`; null when it is missing and not to be
+ *  made. Every inbox command goes through it (J2 review: listing and moving skipped the
+ *  checks the writer made). */
+function checkedInbox(env: NodeJS.ProcessEnv, create: boolean): string | null {
+  const dir = inboxDir(env);
+  if (create) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  else {
+    try {
+      lstatSync(dir);
+    } catch {
+      return null;
+    }
+  }
+  checkDir(dir, 'the inbox');
+  return dir;
+}
+
+/** Creates `<stem><-n><ext>` for every file at the first `n` where all the names are free (a
+ *  file or a link at any of them moves on to the next `n`; what was made for it is removed),
+ *  and returns `<dir>/<stem><-n>`. */
+function createSet(dir: string, stem: string, files: [ext: string, text: string][]): string {
+  for (let n = 1; n <= 20; n++) {
+    const base = join(dir, `${stem}${n === 1 ? '' : `-${n}`}`);
+    const made: string[] = [];
+    try {
+      for (const [ext, text] of files) {
+        if (!createNew(base + ext, text)) break;
+        made.push(base + ext);
+      }
+    } catch (err) {
+      for (const p of made) unlinkSync(p);
+      throw err;
+    }
+    if (made.length === files.length) return base;
+    for (const p of made) unlinkSync(p);
+  }
+  throw new Error(`no free name for ${stem} in ${dir}`);
+}
+
+/** Creates `path` with `text` (mode 600), written whole and synced to disk, or false when
+ *  anything is already at the path: the exclusive create never follows a link there. A write
+ *  that fails or stops short removes the file and throws (J2 review: a short write lost a
+ *  report whose original was then removed). */
 function createNew(path: string, text: string): boolean {
   let fd: number;
   try {
@@ -432,10 +482,23 @@ function createNew(path: string, text: string): boolean {
     throw err;
   }
   try {
-    writeSync(fd, text);
-  } finally {
+    const buf = Buffer.from(text, 'utf8');
+    for (let off = 0; off < buf.length; ) {
+      const k = writeSync(fd, buf, off, buf.length - off);
+      if (k <= 0) throw new Error(`${path}: the write stopped short`);
+      off += k;
+    }
+    fsyncSync(fd);
+  } catch (err) {
     closeSync(fd);
+    try {
+      unlinkSync(path);
+    } catch {
+      // already gone
+    }
+    throw err;
   }
+  closeSync(fd);
   return true;
 }
 
@@ -450,4 +513,297 @@ function realDeep(p: string): string {
       if (dirname(dir) === dir) return abs;
     }
   }
+}
+
+// ---- the inbox in goodboy's own repo (track J2, #9) ----
+
+export interface InboxEntry {
+  path: string;
+  created: string;
+  title: string;
+  public_title: string;
+  session: string | null;
+  /** The issue the public summary went to (report-filed), or null. */
+  filed: string | null;
+  /** The user chose to keep the report local (report-filed --local): it is never filed. */
+  keep_local: boolean;
+}
+
+const MAX_INBOX_ENTRIES = 200;
+const MAX_INBOX_READS = 1000;
+/** A report's file name: a word character first, so never `.`, `..` or a hidden name (J2
+ *  review: `...json` had the stem `..` and was copied out of the inbox). */
+const REPORT_NAME = /^\w[\w.-]{0,118}\.json$/;
+const ISSUE_URL = /^https:\/\/github\.com\/yolol312\/goodboy\/issues\/\d{1,7}$/;
+const MAX_REPORT_BYTES = 1024 * 1024;
+
+type ReportRecord = Record<string, unknown> & {
+  schema: 'goodboy-field-report/1';
+  created?: unknown;
+  cwd?: unknown;
+  report: FieldReportInput;
+  evidence?: Evidence;
+  filed?: { url?: unknown };
+  keep_local?: unknown;
+};
+
+/** A report record, or null when the text is not one. */
+function parseReport(text: string): ReportRecord | null {
+  try {
+    const rec = JSON.parse(text) as ReportRecord;
+    return rec?.schema === 'goodboy-field-report/1' && typeof rec.report?.title === 'string' ? rec : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The untriaged reports at the inbox's top level (triaged ones are in `done/`), oldest first:
+ *  up to 200 of the first 1000 report-like names (other JSON files cannot hide them all); a
+ *  link, a non-file or a file that is not a report is skipped. */
+export function listInbox(env: NodeJS.ProcessEnv = process.env): InboxEntry[] {
+  const dir = checkedInbox(env, false);
+  if (dir === null) return [];
+  recoverClaims(dir);
+  const names = readdirSync(dir).filter((n) => REPORT_NAME.test(n)).sort().slice(0, MAX_INBOX_READS);
+  const out: InboxEntry[] = [];
+  for (const n of names) {
+    if (out.length >= MAX_INBOX_ENTRIES) break;
+    const r = readRegular(join(dir, n), MAX_REPORT_BYTES, true);
+    const rec = typeof r === 'object' ? parseReport(r.text) : null;
+    if (!rec) continue;
+    out.push({
+      path: join(dir, n),
+      created: typeof rec.created === 'string' ? rec.created : '',
+      title: rec.report.title,
+      public_title: typeof rec.report.public_summary?.title === 'string' ? rec.report.public_summary.title : '',
+      session: typeof rec.evidence?.session === 'string' ? rec.evidence.session : null,
+      filed: typeof rec.filed?.url === 'string' ? rec.filed.url : null,
+      keep_local: rec.keep_local !== undefined && rec.keep_local !== false,
+    });
+  }
+  return out;
+}
+
+/** Why a report's public summary may not be filed now (empty when it may): the user kept it
+ *  local, it was filed already, its `.public.md` is not the text goodboy wrote (the file is
+ *  what `gh --body-file` posts), its title would break the `gh` command line, or its text
+ *  names private details, checked again against the report's project dir when it is still
+ *  there (J2 review: a summary kept local, or edited by hand, was filed from a table row). */
+export function publishProblems(file: string, env: NodeJS.ProcessEnv = process.env, terms = new Map<string, string[]>()): string[] {
+  try {
+    const { abs, rec } = topReport(file, env);
+    const out: string[] = [];
+    if (rec.keep_local !== undefined && rec.keep_local !== false) out.push('the user chose to keep it local');
+    if (typeof rec.filed?.url === 'string') out.push(`it was filed already: ${rec.filed.url}`);
+    const v = validateFieldReport(rec.report);
+    if (!v.ok || !v.value) return [...out, 'the report does not follow the template', ...v.errors];
+    // goodboy's footer is rendered from the evidence: it must still be goodboy's numbers and
+    //   names (J2 review: a path in an edited footer passed).
+    if (!evidenceIntact(rec.evidence)) return [...out, 'its evidence was changed (versions or gate counts)'];
+    const pub = readRegular(abs.replace(/\.json$/, '.public.md'), MAX_REPORT_BYTES, true);
+    if (typeof pub !== 'object') out.push('its .public.md is missing or not a regular file');
+    else if (pub.text !== publicFileText(v.value, rec.evidence)) out.push('its .public.md was changed after goodboy wrote it');
+    const cwd = typeof rec.cwd === 'string' && isDirectory(rec.cwd) ? rec.cwd : process.cwd();
+    // One git read per project dir, not per report (J2 review: 200 reports took 17 s).
+    if (!terms.has(cwd)) terms.set(cwd, privateTerms(cwd));
+    out.push(...publicLeaks(`${v.value.public_summary.title}\n${v.value.public_summary.body}`, terms.get(cwd)!));
+    return out;
+  } catch (err) {
+    // One broken report never breaks the list (J2 review).
+    return [`it could not be checked: ${(err as Error).message}`];
+  }
+}
+
+/** Whether `ev` still has goodboy's shape: versions as versions, gate names as goodboy's,
+ *  decisions and counts as numbers. */
+function evidenceIntact(ev: unknown): ev is Evidence {
+  if (typeof ev !== 'object' || ev === null) return false;
+  const e = ev as Record<string, unknown>;
+  const version = (v: unknown, re: RegExp) => v === null || (typeof v === 'string' && re.test(v));
+  if (!version(e.goodboy_version, /^[\w.+-]{1,40}$/) || !version(e.claude_code_version, /^\d+\.\d+\.\d+[\w.-]{0,20}$/)) return false;
+  if (typeof e.gate_counts !== 'object' || e.gate_counts === null || Array.isArray(e.gate_counts)) return false;
+  return Object.entries(e.gate_counts).every(
+    ([g, d]) =>
+      GATE_NAME.test(g) &&
+      typeof d === 'object' && d !== null && !Array.isArray(d) &&
+      Object.entries(d).every(([k, n]) => ['deny', 'warn', 'fail-open'].includes(k) && Number.isInteger(n) && (n as number) >= 0),
+  );
+}
+
+function isDirectory(p: string): boolean {
+  try {
+    return lstatSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** The report `file` at the inbox's top level (not a link, not in a subdir, a report record),
+ *  with the inbox's real path. */
+function topReport(file: string, env: NodeJS.ProcessEnv): { dir: string; abs: string; rec: ReportRecord } {
+  const inbox = checkedInbox(env, false);
+  if (inbox === null) throw new Error(`there is no inbox at ${inboxDir(env)}`);
+  const dir = realDeep(inbox);
+  const abs = join(realDeep(dirname(resolve(file))), basename(file));
+  if (dirname(abs) !== dir || !REPORT_NAME.test(basename(abs))) throw new Error(`${file} is not a report at the top of the inbox ${dir}`);
+  const r = readRegular(abs, MAX_REPORT_BYTES, true);
+  if (typeof r !== 'object') throw new Error(`${file} is not a regular file`);
+  const rec = parseReport(r.text);
+  if (!rec) throw new Error(`${file} is not a report`);
+  return { dir, abs, rec };
+}
+
+/** Records the user's filing choice in the report (report-goodboy, triage-reports): the issue
+ *  its public summary went to, or that it stays local. Under the same claim as report-done,
+ *  from the claimed text: two commands on one report at once never both pass or lose the
+ *  choice (J2 review). */
+export function markFiled(file: string, choice: { issue: string } | { local: true }, env: NodeJS.ProcessEnv = process.env, now = new Date()): string {
+  if ('issue' in choice && !ISSUE_URL.test(choice.issue)) throw new Error('the issue must be https://github.com/yolol312/goodboy/issues/<number>');
+  const { dir, abs } = topReport(file, env);
+  return underClaim(dir, [abs], 'filing', ([text]) => {
+    const rec = parseReport(text!);
+    if (!rec) throw new Error(`${file} is not a report`);
+    if (typeof rec.filed?.url === 'string' || (rec.keep_local !== undefined && rec.keep_local !== false)) {
+      throw new Error(`${file} already records the user's filing choice`);
+    }
+    const at = now.toISOString();
+    const out = { ...rec, ...('issue' in choice ? { filed: { url: choice.issue, at } } : { keep_local: { at } }) };
+    const tmp = join(dir, `.${basename(abs)}.${process.pid}.${Date.now()}.tmp`);
+    if (!createNew(tmp, JSON.stringify(out, null, 2) + '\n')) throw new Error(`${tmp} is taken`);
+    renameSync(tmp, abs);
+    return abs;
+  });
+}
+
+/** Claims `paths` (a report and maybe its `.public.md`) by atomic renames to hidden names
+ *  (`.<name>.<pid>.<verb>`), so a second command on the same report fails at once; runs `fn`
+ *  with the claimed files' texts; removes the claims after it, or puts them back when it
+ *  fails (never over a file that took the name meanwhile). A claim left by a killed process
+ *  is put back by listInbox. */
+function underClaim<T>(dir: string, paths: string[], verb: string, fn: (texts: string[]) => T): T {
+  const claimed: [claim: string, home: string][] = [];
+  const restore = () => {
+    for (const [c, home] of claimed) {
+      try {
+        if (!existsSync(home)) renameSync(c, home);
+      } catch {
+        // left under its hidden name; listInbox puts it back once this process is gone
+      }
+    }
+  };
+  try {
+    for (const p of paths) {
+      const c = join(dir, `.${basename(p)}.${process.pid}.${verb}`);
+      renameSync(p, c);
+      claimed.push([c, p]);
+    }
+  } catch (err) {
+    restore();
+    throw new Error(`${paths[0]} could not be claimed (moved meanwhile?): ${(err as Error).message}`);
+  }
+  try {
+    const texts = claimed.map(([c]) => {
+      const r = readRegular(c, MAX_REPORT_BYTES, true);
+      if (typeof r !== 'object') throw new Error(`${c} is not a regular file`);
+      return r.text;
+    });
+    const out = fn(texts);
+    for (const [c] of claimed) unlinkSync(c);
+    return out;
+  } catch (err) {
+    restore();
+    throw err;
+  }
+}
+
+const CLAIM = /^\.(\w[\w.-]{0,118}\.(?:json|public\.md))\.(\d{1,10})\.(?:triaging|filing)$/;
+
+/** Puts back the files a killed report-filed or report-done left under a claim's hidden name
+ *  (its process is gone) when their own name is free (J2 review: they vanished from the list). */
+function recoverClaims(dir: string): void {
+  for (const n of readdirSync(dir)) {
+    const m = n.match(CLAIM);
+    if (!m || processAlive(Number(m[2]))) continue;
+    try {
+      if (lstatSync(join(dir, n)).isFile() && !existsSync(join(dir, m[1]!))) renameSync(join(dir, n), join(dir, m[1]!));
+    } catch {
+      // gone meanwhile
+    }
+  }
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/** Whether `cwd` is in goodboy's own source repo: a git checkout whose root holds goodboy's
+ *  plugin manifest, outside Claude Code's plugins dir (an installed copy has no `.git`; the
+ *  marketplace clone there has one: J2 review). */
+export function inGoodboyRepo(cwd: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (isUnder(cwd, join((env.CLAUDE_CONFIG_DIR ?? '').trim() || join((env.HOME ?? '').trim() || homedir(), '.claude'), 'plugins'))) return false;
+  let dir = resolve(cwd);
+  for (let i = 0; i < 40; i++) {
+    const r = readRegular(join(dir, '.claude-plugin', 'plugin.json'), 64 * 1024, true);
+    if (typeof r === 'object') {
+      try {
+        return (JSON.parse(r.text) as { name?: unknown }).name === 'goodboy' && existsSync(join(dir, '.git'));
+      } catch {
+        return false;
+      }
+    }
+    if (dirname(dir) === dir) return false;
+    dir = dirname(dir);
+  }
+  return false;
+}
+
+/** The session-start notice in goodboy's repo when the inbox has untriaged reports: one line
+ *  for the user and one for the model; nothing runs by itself (GOODBOY_INBOX_NOTICE=off). */
+export function inboxNotice(cwd: string, env: NodeJS.ProcessEnv = process.env): { systemMessage: string; context: string } | null {
+  if ((env.GOODBOY_INBOX_NOTICE ?? 'on').trim().toLowerCase() === 'off' || !inGoodboyRepo(cwd, env)) return null;
+  let n: number;
+  try {
+    n = listInbox(env).length;
+  } catch {
+    // An unsafe inbox is refused by report-list with the reason; the notice stays silent.
+    return null;
+  }
+  if (n === 0) return null;
+  return {
+    systemMessage: `[goodboy] 아직 정리하지 않은 현장 리포트가 ${n}건 있어요(${inboxDir(env)}). /triage-reports로 정리할 수 있어요`,
+    context: `${n} untriaged goodboy field report(s) wait in ${inboxDir(env)}. The user may run the repo-local triage-reports skill; do not triage them unless asked.`,
+  };
+}
+
+/** Moves a triaged report (`<name>.json` and its `.public.md`) from the inbox's top level to
+ *  `done/`, with the triage decision written into the report; never over a file there (the
+ *  next free name), never a file outside the inbox or a link. The report is claimed first by
+ *  an atomic rename to a hidden name, copied whole and synced, and only then removed; on any
+ *  failure the claimed files go back (J2 review: two runs at once, or a short write, left two
+ *  records or none). */
+export function markTriaged(file: string, decision: string, env: NodeJS.ProcessEnv = process.env, now = new Date()): string {
+  const text = decision.trim();
+  if (text === '' || text.length > 1000) throw new Error('the decision must be 1–1000 characters');
+  const { dir, abs } = topReport(file, env);
+  const done = join(dir, 'done');
+  mkdirSync(done, { recursive: true, mode: 0o700 });
+  checkDir(done, 'the triaged dir');
+  const pub = abs.replace(/\.json$/, '.public.md');
+  const pubRead = readRegular(pub, MAX_REPORT_BYTES, true);
+  if (pubRead === 'refused') throw new Error(`${pub} is not a regular file; move it away first`);
+  // The record written to done/ comes from the claimed text, so a filing choice recorded just
+  //   before the claim is kept (J2 review).
+  return underClaim(dir, typeof pubRead === 'object' ? [abs, pub] : [abs], 'triaging', ([json, pubText]) => {
+    const rec = parseReport(json!);
+    if (!rec) throw new Error(`${file} is not a report`);
+    const out = { ...rec, status: 'triaged', triage: { at: now.toISOString(), decision: text } };
+    const files: [string, string][] = [['.json', JSON.stringify(out, null, 2) + '\n']];
+    if (pubText !== undefined) files.push(['.public.md', pubText]);
+    return `${createSet(done, basename(abs).replace(/\.json$/, ''), files)}.json`;
+  });
 }

@@ -1704,6 +1704,64 @@ in another session's temporary scratchpad and was relayed by hand, with no fixed
   - after the user approves, updates the plan and opens or comments on issues with public
     summaries only;
   - moves a triaged report to `inbox/done/`.
+- J2 as built (`lib/field-report.ts` listInbox / inboxNotice / markTriaged, `cli.ts
+  report-list` / `report-done`, `.claude/skills/triage-reports`, `.github/ISSUE_TEMPLATE/
+  field-report.yml`):
+  - The notice comes at a new, resumed or cleared session (not after a compaction) when the
+    cwd is in goodboy's own repo (a git checkout whose root has goodboy's plugin manifest,
+    outside Claude Code's plugins dir: an installed copy has no `.git`, the marketplace
+    clone there has one) and the inbox's top level holds reports: one Korean line for the
+    user, one English line for the model that says not to triage unasked; silent when the
+    inbox is unsafe. `GOODBOY_INBOX_NOTICE=off` turns it off.
+  - Every inbox command (write, list, file, triage) refuses an inbox that is a link, another
+    user's or writable by others. A report name starts with a word character (`...json`
+    had the stem `..`). The list reads up to 200 reports among the first 1000 report-like
+    names; a link, a non-file or a file that is not a `goodboy-field-report/1` record is
+    skipped.
+  - Every file goodboy makes there is created exclusively (mode 600), written whole (a short
+    write fails and removes it) and synced before anything is removed.
+  - `report-filed <file> --issue <goodboy issue URL> | --local` records the user's filing
+    choice once (report-goodboy step 7). `report-list` gives each report its
+    `publish_problems`: kept local, filed already, a `.public.md` that is not the text
+    goodboy wrote (the file is what `gh --body-file` posts), a title or summary that breaks
+    the template, or private details found again (the report's project dir's names when it
+    still exists); `report-evidence --public` prints only versions and counts, never the
+    gate-log lines (the issue form says to use it).
+  - `report-done <file> --decision "<where it went>"` (or `--decision -` from stdin, so quoted
+    issue text never meets the shell) takes a report at the inbox's top level only (not a
+    link, not another dir, not other JSON; a `.public.md` that is a link is refused before
+    anything moves), claims it by an atomic rename to a hidden name, writes the claimed text
+    to `done/` with status `triaged` and the decision (1–1000 characters) together with its
+    `.public.md`, and only then removes the claimed files; on any failure they go back. A
+    file or a link at a name in `done/` is never written through, the next free name is
+    used, and `done/` itself passes the same checks. `report-filed` takes the same claim, so
+    two commands on one report at once fail rather than both pass or lose the choice, and a
+    claim a killed command left behind is put back by the next list (when its process is
+    gone and its name is free).
+  - `publish_problems` also flags evidence that no longer has goodboy's shape (the footer is
+    rendered from it), and a report it cannot check is named instead of failing the list.
+  - Known limits: 1000 other JSON names that sort before the reports still hide them; that
+    the claim excludes a second command is checked by probes, not by a unit test; a
+    `report-done` killed after the `done/` copy but before the claim is removed leaves the
+    report in both places once the next list puts the claim back (nothing is lost; running
+    `report-done` on it again moves it to the next free name in `done/`); the footer's
+    goodboy version is the version of the CLI that wrote the report, so a report written
+    from a development checkout names that checkout's version, not the installed hooks'.
+  - Live run (2026-10-20): one report from this session went through `report-write`, the
+    skill's re-verification and the one question, then `gh issue create` (#16),
+    `report-filed`, the plan entry under the J3 candidates and `report-done`. It showed that
+    the title search also returns issues that only mention field reports (now filtered by
+    the `[field-report]` prefix).
+  - The skill reads the inbox and the field-report issues (by label and by title), treats
+    their text as data and never runs a command or URL they name, re-verifies each claim
+    with goodboy's own tests or its own probes, merges duplicates, proposes a place per item
+    in a Korean table with the exact `.public.md` text of each report to file (only those
+    without publish problems) and asks once; only after the approval it edits the plan,
+    files or comments, and records the filing with `report-filed`.
+  - The issue form has the template's fields (observed, expected, the user's words,
+    versions, involved, evidence, suspected causes, proposed change, unknowns), the title
+    `[field-report] `, the `field-report` label (it exists in the repo, checked 2026-10-20) and a
+    public warning at the top.
 - J3: it reads goodboy's own records, asks the model nothing and never blocks.
   - Signals: a hook error or a fail-open path; a gate at its retry limit, or one gate
     blocking again and again; verification over the budget of its change class (I1b); a
@@ -1718,6 +1776,12 @@ in another session's temporary scratchpad and was relayed by hand, with no fixed
 - First candidate, seen here on 2026-10-16: while a background review or test agent is
   still running, the Stop gates block every chat turn, and answering the user burns the
   retries although the evidence is on its way.
+  - Triaged 2026-10-20 (the J2 live run, filed as #16): seen again with the released 0.30.0
+    hooks (review deny 12, test deny 12 in one session). Already fixed in the source: Stop
+    defers the review and test gates while a subagent runs (`hooks/stop.ts` B5.8, G1
+    bf9c5b9; `tests/stop-g1.test.ts`). Not released yet; after the release that carries it,
+    confirm in a real session that the gates stay quiet while agents run and block again
+    after they finish, then close #16.
 
 ## 17. K — Update checkups (v0.35.0)
 

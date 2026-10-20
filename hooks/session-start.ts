@@ -5,7 +5,8 @@
 // file contents read or edited before it left the context. In a project it also sends the
 // knowledge files to read first (H2), the decision authority (H3), the user's CLAUDE.md
 // notice (H4) and the test tier advice (H6). It pins the coverage exemptions and the start
-// HEAD (I1). Never blocks.
+// HEAD (I1). In goodboy's own repo it says when field reports wait in the inbox (J2). Never
+// blocks.
 
 import { pinCommitIssueSettings } from '../lib/commit-issue';
 import { pinProjectMode, projectMode } from '../lib/project-mode';
@@ -16,6 +17,7 @@ import { decisionAuthorityContext } from '../lib/decision-authority';
 import { clearReadRecords } from '../lib/file-tracker';
 import { pinCoverageStart } from '../lib/changed-coverage';
 import { pinSessionCriteria } from '../lib/session-criteria';
+import { inboxNotice } from '../lib/field-report';
 
 interface SessionStartInput {
   session_id?: string;
@@ -120,13 +122,24 @@ if (import.meta.main) {
           // best-effort notices
         }
       }
+      // (J2) In goodboy's own repo, at a new or resumed session: untriaged field reports in the
+      //   inbox (lib/field-report.ts). Only a notice; nothing runs by itself.
+      let inbox: { systemMessage: string; context: string } | null = null;
+      if (source === 'startup' || source === 'resume' || source === 'clear') {
+        try {
+          inbox = inboxNotice(input.cwd ?? process.cwd());
+        } catch {
+          inbox = null;
+        }
+      }
       const messages = [
         ...warnings,
         ...(knowledge.systemMessage ? [knowledge.systemMessage] : []),
         ...(claudeMd ? [claudeMd] : []),
         ...(tier ? [tier.systemMessage] : []),
+        ...(inbox ? [inbox.systemMessage] : []),
       ];
-      const context = [knowledge.context, decisions, tier?.context].filter((c): c is string => !!c).join('\n\n');
+      const context = [knowledge.context, decisions, tier?.context, inbox?.context].filter((c): c is string => !!c).join('\n\n');
       const out: Record<string, unknown> = {};
       if (messages.length > 0) out.systemMessage = messages.join('\n');
       if (context !== '') out.hookSpecificOutput = { hookEventName: 'SessionStart', additionalContext: context };
