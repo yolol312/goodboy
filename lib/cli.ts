@@ -63,7 +63,9 @@ import {
   updateCheckupState,
   writeRunFile,
 } from './checkup';
+import { checkHealth, fitHealth, healthSummary } from './health';
 import { allIdentifiers, buildInventory, fitInventory, inventoryLists, inventorySummary } from './inventory';
+import { GOODBOY_CASES, readUserCases, runSmoke, smokeSummary } from './smoke';
 
 // ---- 유틸 ----
 
@@ -1029,6 +1031,28 @@ async function cmdCheckup(command: string, args: string[]): Promise<void> {
       out({ ...inventorySummary({ ...inv, problems: fit.problems }), ...(path ? { written: path } : {}), ...inventoryLists(inv) });
       return;
     }
+    case 'checkup-health': {
+      // Claude Code's own checks with zero model turns; the whole result goes to the run dir.
+      //   A wrong run id fails before anything runs (K1c review).
+      const name = optValue(args, '--name') ?? 'health.json';
+      if (run) runFileTarget(dir, run, name);
+      const t = Number(optValue(args, '--timeout-ms') ?? 60_000);
+      const h = await checkHealth(process.cwd(), { timeoutMs: Number.isInteger(t) && t >= 1000 ? t : 60_000, cli: readCheckupState(dir).pending?.cli ?? null });
+      const path = run ? writeRunFile(dir, run, name, JSON.stringify(fitHealth(h, MAX_RUN_FILE_BYTES - 1)) + '\n') : null;
+      out({ ...healthSummary(h), ...(path ? { written: path } : {}), problems: h.problems.slice(0, 30) });
+      return;
+    }
+    case 'checkup-smoke': {
+      // goodboy's own cases, then the user's from smoke.json in the checkup dir, each in a
+      //   sandbox of its own.
+      const name = optValue(args, '--name') ?? 'smoke-results.json';
+      if (run) runFileTarget(dir, run, name);
+      const user = readUserCases(dir);
+      const results = await runSmoke([...GOODBOY_CASES, ...user.cases], run ?? newRunId(), GOODBOY_ROOT);
+      const path = run ? writeRunFile(dir, run, name, JSON.stringify({ results, problems: user.problems }) + '\n') : null;
+      out({ ...smokeSummary(results, user.problems), ...(path ? { written: path } : {}) });
+      return;
+    }
     case 'checkup-complete':
       if (!run) fail('checkup-complete: pass --run <id>');
       out({ ok: true, state: updateCheckupState(dir, (st) => completeRun(st, run, new Date(), session)) });
@@ -1044,7 +1068,7 @@ async function cmdCheckup(command: string, args: string[]): Promise<void> {
 
 const USAGE =
   '사용법: bun lib/cli.ts <command> [args...]\n' +
-  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text> | checkup-state | checkup-begin [--cli <v>] [--replace] | checkup-changelog [--from <v>|none] [--to <v>] [--ids a,b] [--changelog <path>] [--max-matched N] [--max-unmapped N] | checkup-write --run <id> --name <file> | checkup-complete --run <id> | checkup-abort --run <id> | checkup-projects [--add <dir>|--remove <dir>] | checkup-inventory [--run <id>] (checkup-changelog --inventory adds its identifiers)';
+  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text> | checkup-state | checkup-begin [--cli <v>] [--replace] | checkup-changelog [--from <v>|none] [--to <v>] [--ids a,b] [--changelog <path>] [--max-matched N] [--max-unmapped N] | checkup-write --run <id> --name <file> | checkup-complete --run <id> | checkup-abort --run <id> | checkup-projects [--add <dir>|--remove <dir>] | checkup-inventory [--run <id>] (checkup-changelog --inventory adds its identifiers) | checkup-health [--run <id>] [--timeout-ms N] | checkup-smoke [--run <id>]';
 
 async function main(): Promise<void> {
   const cwd = process.cwd();
@@ -1127,6 +1151,8 @@ async function main(): Promise<void> {
       case 'checkup-abort':
       case 'checkup-projects':
       case 'checkup-inventory':
+      case 'checkup-health':
+      case 'checkup-smoke':
         await cmdCheckup(command, args);
         break;
       default:

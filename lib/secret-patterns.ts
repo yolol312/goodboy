@@ -17,7 +17,9 @@ export const SECRET_PATTERNS: readonly string[] = [
   '\\bBearer\\s+[\\w.~+/-]{16,}',
   // A user and password in a URL (`redis://:pw@host`), or for curl (`-u user:pw`; a password
   //   with a letter in it, so `-u 1000:1000` is no secret).
-  '\\b[a-z][\\w+.-]*://[^\\s:@/]*:[^\\s@/]+@',
+  // A scheme is short: an unbounded one made this pattern quadratic (K1b review: 64 KB of
+  //   `a.a.…` took seconds).
+  '\\b[a-z][\\w+.-]{0,30}://[^\\s:@/]*:[^\\s@/]+@',
   '(?<![\\w-])(?:-u|--user)[=\\s]+[^\\s:@]+:(?=[^\\s@]*[A-Za-z])[^\\s@]+',
   // A Slack incoming webhook is its own secret.
   '\\bhooks\\.slack\\.com/services/[\\w/]{10,}',

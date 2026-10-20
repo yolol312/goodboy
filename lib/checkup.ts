@@ -309,10 +309,19 @@ export function abortRun(s: CheckupState, run: string): CheckupState {
   return { ...s, pending: null };
 }
 
+/** The `claude` to run: an absolute `GOODBOY_CLAUDE_BIN` (tests point it at a fake), else the
+ *  one on PATH. */
+export function claudeBin(env: NodeJS.ProcessEnv = process.env): string {
+  const b = (env.GOODBOY_CLAUDE_BIN ?? '').trim();
+  if (b === '') return 'claude';
+  if (!isAbsolute(b)) throw new Error(`GOODBOY_CLAUDE_BIN must be an absolute path: ${b}`);
+  return b;
+}
+
 /** The running CLI's version from `claude --version`, or null. */
-export function runningCliVersion(): string | null {
+export function runningCliVersion(env: NodeJS.ProcessEnv = process.env): string | null {
   try {
-    const r = spawnSync('claude', ['--version'], { encoding: 'utf8', timeout: 10_000 });
+    const r = spawnSync(claudeBin(env), ['--version'], { encoding: 'utf8', timeout: 10_000 });
     const m = /(\d{1,4}\.\d{1,4}\.\d{1,6})/.exec(r.stdout ?? '');
     return m ? m[1] : null;
   } catch {

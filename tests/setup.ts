@@ -42,3 +42,7 @@ process.env.GOODBOY_EXISTING_TESTS = 'off';
 // older Stop tests that switch gates or block three times would see. Off for the suite;
 // tests/j3-friction.test.ts turns it on.
 process.env.GOODBOY_FRICTION_NOTICE = 'off';
+
+// The update checkup (track K1c) runs `claude`: no test may run the real one. A path that
+// does not exist makes a missed fake fail loudly; tests/k1c-health-smoke.test.ts sets a fake.
+process.env.GOODBOY_CLAUDE_BIN = '/nonexistent/goodboy-tests/claude';

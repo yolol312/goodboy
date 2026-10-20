@@ -2152,6 +2152,73 @@ reads files only.
   - "loaded" is not known yet: the inventory reads configuration. K1c reads what Claude Code
     actually loaded (plugin validate, the debug log).
 
+K1c as built (`lib/health.ts`, `lib/smoke.ts`, `lib/bounded.ts`, `cli.ts checkup-health`,
+`checkup-smoke`). Zero model turns; a failed step is named, never thrown. Kept text is masked
+on a window 200 characters past its cut, then cut (masking the whole text is slow).
+- Every command runs through `lib/bounded.ts`, shared with the full regression (I4): a
+  timeout (SIGTERM, then SIGKILL two seconds later), no stdin, 1 MB of output, and after the
+  command exits its pipes are read 2 seconds longer, so a background child that keeps them
+  open holds neither the run nor its time. A wrong `--run` fails before anything runs.
+- Health, from Claude Code's own commands (`claude`, or an absolute `GOODBOY_CLAUDE_BIN`;
+  `tests/setup.ts` points it at a missing path so no test runs the real one). The nested
+  `claude` gets the user's environment without the parent session's variables (session id,
+  messaging socket and token, child-session markers): it would otherwise run as that
+  session's child and could message it. Each command has its timeout (60 s, skill-doctor at
+  least 2 minutes) and all of them share one deadline of 5 minutes; steps past it are skipped
+  and named. `health.json` past the run-file cap keeps its counts and cuts its details:
+  - `claude plugin list --json`: installed plugins (up to 50) and their load errors;
+  - `claude plugin validate --json <install dir>` for each enabled plugin: errors and
+    warnings, 20 each. "No manifest found" alone is not an error: a plugin its marketplace
+    defines has no manifest in its dir and loads fine;
+  - `claude -p /skill-doctor --output-format json --debug-file <private temp dir>`: the skill
+    table, and the startup log, read and then removed. From the log: plugins "not loaded"
+    (a plugin the log does not name so counts as loaded: the log shows no other way one
+    fails to load), plugins whose hooks.json was read and whose hooks were loaded (a plugin
+    without a read hooks.json gets no hooks verdict), "Registered N hooks from M plugins",
+    other warnings (30, NON-FATAL left out); an MCP server's stderr lines are only counted,
+    by name, in a map without a prototype. A skill-doctor
+    that makes model turns or costs anything is a problem (it made none on 2.1.304). It is a
+    real session: the user's hooks run in it, as in any session;
+  - `claude doctor`: the installation check, which prints fixes and applies none (its
+    colors are dropped before parsing). A session's `/doctor` can repair; the checkup never
+    runs it.
+- Smoke: a hook is fed the JSON Claude Code would send and must reach the expected decision
+  with the expected text, and leave the expected file: trigger → decision → consequence,
+  never just exit 0. Decisions are read as Claude Code reads them: exit 2 denies on
+  PreToolUse and PermissionRequest, blocks on UserPromptSubmit, Stop, SubagentStop and
+  PostToolUse, and is only an error elsewhere; a PermissionRequest decides through
+  `hookSpecificOutput.decision.behavior`, and without one the user is asked.
+  - goodboy's own cases run its hooks through `bin/goodboy-run.sh` under default settings:
+    SessionStart in a project without a policy file; one session from UserPromptSubmit
+    through the skill rule's deny, the skill, read-before-edit's deny, the read, the allowed
+    edit and its record, to Stop's review block; a bare `cat` of a large file denied. The
+    tests run them against the repo's hooks, so a change in goodboy that breaks one fails
+    the suite;
+  - the user's cases for other tools' hooks come from `smoke.json` in the checkup dir: a
+    shell command, an event, the input, the expected decision, text or exit code, and one
+    file the hook must leave under the sandbox HOME. Its commands run, so the file must be
+    a regular file of this user that others cannot write; a bad case is named and does not
+    run (50 at most);
+  - every case runs in its own sandbox: a temp HOME that is also TMPDIR and holds the config
+    dir and a git project, a unique session id, the JSON `cwd` equal to the process cwd, and
+    an environment of PATH and the sandbox's variables only (a case may add its own and set
+    PATH, never HOME, TMPDIR, CLAUDE_CONFIG_DIR or CLAUDE_PROJECT_DIR). The sandbox is removed
+    afterwards. goodboy's cases touch no real state; a user's command reaches what it names
+    by an absolute path (`~` is the sandbox HOME, so a hook script is named absolutely).
+- `checkup-health --run <id>` writes `health.json`, `checkup-smoke --run <id>` writes
+  `smoke-results.json`; both print a summary.
+- On this machine (Claude Code 2.1.304): health 12 s, smoke 1 s (3 of 3 pass). Health
+  confirms K1b's finding: the playwright-e2e hooks.json fails validate. It also finds that
+  jira-done@local and playwright-e2e@local are not loaded at all (their marketplace "local"
+  is not known), and a leftover npm install of Claude Code (doctor).
+- Tests: `tests/k1c-health-smoke.test.ts`, 35 tests with a fake `claude` (18 of them for the
+  review's findings and the test records' gaps); 58 of 73 mutants caught before those, 38 of
+  49 after the first fixes, the rest of the meaningful survivors after the second. A case
+  that cannot get a sandbox fails alone, and the sandbox's `git init` ignores the user's git
+  config (an `init.templateDir` would copy their hooks in).
+- Secret masking: the URL-credential pattern bounds the scheme to 31 characters; unbounded,
+  it was quadratic (2.2 s on 64 KB of `a.a.…`).
+
 Proposals (later steps, not scheduled):
 - K2: quiet detection. A fail-open SessionStart reads the CLI version once, corroborated by
   the transcript. Model observations come from main-session transcript entries read

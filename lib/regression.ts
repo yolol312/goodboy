@@ -8,6 +8,7 @@
 
 import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { runBounded } from './bounded';
 import { OBJECT_ID } from './push-test';
 import { readRegular } from './safe-read';
 import { GRADLE_FILES } from './test-validator';
@@ -27,9 +28,6 @@ export const ONE_HOUR_MS = 60 * 60_000;
  *  and fires at once); it then fails. */
 export const DEFAULT_TIMEOUT_MS = 180 * 60_000;
 export const MAX_TIMEOUT_MS = 24 * 60 * 60_000;
-/** After a command exits, its output is read this much longer: a background child that keeps
- *  the pipes open must not hold the run (or stretch its time). */
-const PIPE_GRACE_MS = 2_000;
 
 export type RegressionMode = 'on' | 'warn' | 'off';
 
@@ -158,53 +156,19 @@ export function regressionCommands(top: string): { commands: string[]; source: s
   return commands.length > 0 ? { commands, source: sources.join(' + ') } : null;
 }
 
-/** A stream's last `max` characters, read in chunks so a huge output is never held; `stop`
- *  cancels the read (a background child may keep the pipe open). */
-function tailOf(stream: ReadableStream<Uint8Array>, max: number): { done: Promise<void>; text: () => string; stop: () => void } {
-  const reader = stream.getReader();
-  const dec = new TextDecoder();
-  let kept = '';
-  const done = (async () => {
-    try {
-      for (;;) {
-        const { value, done: end } = await reader.read();
-        if (end) break;
-        kept = (kept + dec.decode(value, { stream: true })).slice(-max);
-      }
-      kept = (kept + dec.decode()).slice(-max);
-    } catch {
-      // cancelled
-    }
-  })();
-  return { done, text: () => kept, stop: () => void reader.cancel().catch(() => undefined) };
-}
-
 /** Runs the commands one after another from `top` (all of them, so one failure does not hide
- *  another), each through `sh -c`. A command still running at `timeoutMs` is killed and fails
- *  (exit 124). Known limit: killing `sh` may leave its children running. */
+ *  another), each through `sh -c`, keeping the last characters of their output. A command
+ *  still running at `timeoutMs` is killed and fails (exit 124). Known limit: killing `sh` may
+ *  leave its children running. */
 export async function runCommands(top: string, commands: readonly string[], timeoutMs = DEFAULT_TIMEOUT_MS): Promise<RegressionRun[]> {
   const out: RegressionRun[] = [];
   for (const command of commands) {
     const word = command.split(/\s+/)[0] ?? '';
     const program = Bun.which(word, { PATH: process.env.PATH ?? '', cwd: top }) ?? null;
-    const t0 = Date.now();
-    const p = Bun.spawn(['sh', '-c', command], { cwd: top, stdout: 'pipe', stderr: 'pipe', stdin: 'ignore' });
-    const so = tailOf(p.stdout, STDOUT_TAIL);
-    const se = tailOf(p.stderr, STDERR_TAIL);
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      p.kill('SIGKILL');
-    }, timeoutMs);
-    const code = await p.exited;
-    const duration_ms = Date.now() - t0;
-    clearTimeout(timer);
-    await Promise.race([Promise.all([so.done, se.done]), Bun.sleep(PIPE_GRACE_MS)]);
-    so.stop();
-    se.stop();
-    const err = se.text();
-    const note = timedOut ? `\n[goodboy] stopped after ${Math.round(timeoutMs / 60_000)} min` : '';
-    out.push({ command, program, exit_code: timedOut ? 124 : code, duration_ms, output_tail: so.text() + (err ? `\n[stderr]\n${err}` : '') + note });
+    const r = await runBounded(['sh', '-c', command], { cwd: top, timeoutMs, max: { stdout: STDOUT_TAIL, stderr: STDERR_TAIL }, keep: 'tail', killSignal: 'SIGKILL' });
+    const note = r.timedOut ? `\n[goodboy] stopped after ${Math.round(timeoutMs / 60_000)} min` : r.error ? `\n[goodboy] could not start: ${r.error}` : '';
+    const exit_code = r.timedOut ? 124 : (r.code ?? 127);
+    out.push({ command, program, exit_code, duration_ms: r.ms, output_tail: r.stdout + (r.stderr ? `\n[stderr]\n${r.stderr}` : '') + note });
   }
   return out;
 }
