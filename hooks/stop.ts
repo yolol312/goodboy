@@ -31,6 +31,7 @@ import {
 import { missingTestTypes, testerFor, testTypesMode, type TypeNeed, typeGapReason, typeGapWarning, typeNeedOf } from '../lib/test-types';
 import { needsTests } from '../lib/verification-scope';
 import { documentChangeNote, isDocumentChange } from '../lib/doc-verification';
+import { frictionNotice } from '../lib/friction';
 import { productEvidenceProblems, sessionCriteria } from '../lib/session-criteria';
 import {
   citationBlockMessage,
@@ -80,6 +81,7 @@ import {
   getEditsWithLastTimestampSince,
   hasReasoningSection,
   incrementTurn,
+  hookError,
   logGate,
   parseReasoningSection,
   readGateLog,
@@ -230,6 +232,8 @@ const habitWarnings: string[] = [];
 // 세션 디렉터리 status.json에 기록한다(상태바/외부 도구 소비용). 이 hook은 1회성
 // 프로세스이므로 모듈 전역으로 충분하다. 기록 실패는 조용히 무시(fail-open).
 let snapshotSessionId: string | null = null;
+// (J3) The session's cwd for the friction notice in emit(); null until main() parsed the input.
+let frictionCwd: string | null = null;
 const statusSnapshot: Partial<Omit<StatusSnapshot, 'updatedAt'>> = {};
 
 async function readStdin(): Promise<string> {
@@ -387,6 +391,17 @@ function emit(out: HookOutput): void {
   if (out.decision === 'block' && typeof out.reason === 'string') {
     out.reason = gateMessage(out.reason);
   }
+  // (J3) Friction notice, once per session, on any output path: goodboy's records show it went
+  //   wrong or cost too much (lib/friction.ts). A notice only; never part of a block reason.
+  if (snapshotSessionId && frictionCwd !== null) {
+    try {
+      const s = scopeOf(snapshotSessionId, frictionCwd);
+      const notice = frictionNotice({ sessionId: snapshotSessionId, cwd: frictionCwd, root: s.top, previews: s.previews });
+      if (notice) habitWarnings.push(notice);
+    } catch {
+      // best-effort
+    }
+  }
   // 토큰-습관 경고들을 systemMessage에 덧붙인다(기존 systemMessage가 있으면 줄바꿈 append).
   // 리뷰 block/pass 어느 경로로 emit하든 사용자에게 보이도록 출력 단계에서 합친다.
   if (habitWarnings.length > 0) {
@@ -503,7 +518,7 @@ function checkCitations(
       wasRead: (abs) => wasFileReadRecently(sessionId, abs, turn, turn + 1),
     });
   } catch (err) {
-    process.stderr.write(`[goodboy stop] citation check error: ${String(err)}\n`);
+    hookError(sessionId, 'stop', 'citation check error', err);
     return [];
   }
 }
@@ -534,7 +549,7 @@ function claimGate(sessionId: string, cwd: string, citationCheck: () => Citation
     return blockOutput(sessionId, cwd, unreadBlockMessage(unread, count >= 2), 'claim', 'GOODBOY_CLAIM_GATE=off', count);
   } catch (err) {
     // fail-open — 게이트 자체의 오류가 턴을 막지 않는다.
-    process.stderr.write(`[goodboy stop] claim gate error: ${String(err)}\n`);
+    hookError(sessionId, 'stop', 'claim gate error', err);
     return null;
   }
 }
@@ -1018,7 +1033,7 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
     return null;
   } catch (err) {
     // fail-open — 게이트 자체의 오류가 턴을 막지 않는다.
-    process.stderr.write(`[goodboy stop] test gate error: ${String(err)}\n`);
+    hookError(sessionId, 'stop', 'test gate error', err);
     return null;
   }
 }
@@ -1057,7 +1072,7 @@ function docsGate(sessionId: string, cwd: string): HookOutput | null {
     logGate(sessionId, 'docs', 'deny', stale.map((s) => s.doc).join(', '));
     return blockOutput(sessionId, cwd, staleDocsReason(stale, resolvePath(import.meta.dir, '..', 'lib', 'cli.ts')), 'docs', 'GOODBOY_DOCS_GATE=off', count);
   } catch (err) {
-    process.stderr.write(`[goodboy stop] docs rule error: ${String(err)}\n`);
+    hookError(sessionId, 'stop', 'docs rule error', err);
     return null;
   }
 }
@@ -1266,6 +1281,7 @@ function main(): void {
       const cwd = input.cwd ?? process.cwd();
       const sessionId = input.session_id ?? 'unknown';
       snapshotSessionId = sessionId;
+      frictionCwd = cwd;
       // Layer 0 runs at most once per Stop. The stop_hook_active path checks it for a
       //   warning and, after accepting a test result, continues to the full gates; running
       //   it twice doubled the flush wait (past the 15 s hook timeout at the 8 s maximum)
@@ -1278,7 +1294,7 @@ function main(): void {
       try {
         incrementTurn(sessionId);
       } catch (err) {
-        process.stderr.write(`[goodboy stop] incrementTurn error: ${String(err)}\n`);
+        hookError(sessionId, 'stop', 'incrementTurn error', err);
       }
 
       // (A0.2) Track G: gate state that a model Bash call changed and never reported back on
@@ -1908,7 +1924,7 @@ function main(): void {
       emit(out);
     })
     .catch((err) => {
-      process.stderr.write(`[goodboy stop] fatal: ${String(err)}\n`);
+      hookError(snapshotSessionId, 'stop', 'fatal', err);
       emit({});
     });
 }

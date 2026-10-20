@@ -7,7 +7,7 @@
 //     wrote indirectly (afterBash), or `touch <marker>; false` would skip both.
 // Never blocks; any error is swallowed.
 
-import { afterBash, appendDispatchLog } from '../lib';
+import { afterBash, appendDispatchLog, hookError } from '../lib';
 
 interface PostToolUseFailureInput {
   session_id?: string;
@@ -26,8 +26,11 @@ async function readStdin(): Promise<string> {
 
 readStdin()
   .then((raw) => {
+    // (J3) The session for the hook-error record (lib/gate-log.ts hookError).
+    let sid: string | null = null;
     try {
       const input = (raw.trim() === '' ? {} : JSON.parse(raw)) as PostToolUseFailureInput;
+      sid = input?.session_id ?? null;
       if (input && input.tool_name === 'Bash') {
         const agentId = typeof input.agent_id === 'string' && input.agent_id !== '' ? input.agent_id : undefined;
         const after = afterBash(input.session_id ?? 'unknown', input.tool_use_id, input.cwd ?? process.cwd(), input.tool_input?.command, agentId);
@@ -51,7 +54,7 @@ readStdin()
         });
       }
     } catch (err) {
-      process.stderr.write(`[goodboy post-tool-use-failure] ${String(err)}\n`);
+      hookError(sid, 'post-tool-use-failure', '', err);
     }
     process.stdout.write('{}');
   })

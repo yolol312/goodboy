@@ -18,6 +18,7 @@ import { clearReadRecords } from '../lib/file-tracker';
 import { pinCoverageStart } from '../lib/changed-coverage';
 import { pinSessionCriteria } from '../lib/session-criteria';
 import { inboxNotice } from '../lib/field-report';
+import { hookError } from '../lib/gate-log';
 
 interface SessionStartInput {
   session_id?: string;
@@ -57,6 +58,8 @@ async function readStdin(): Promise<string> {
 }
 
 if (import.meta.main) {
+  // (J3) The session for the fatal path's hook-error record (lib/gate-log.ts hookError).
+  let errorSession: string | null = null;
   readStdin()
     .then((raw) => {
       let input: SessionStartInput = {};
@@ -67,6 +70,7 @@ if (import.meta.main) {
       }
       const source = input.source ?? 'startup';
       const sessionId = typeof input.session_id === 'string' && input.session_id !== '' ? input.session_id : null;
+      errorSession = sessionId;
       if (source === 'compact' && sessionId) clearReadRecords(sessionId);
       // A new, resumed or cleared session uses the commit issue settings on disk now
       //   (lib/commit-issue.ts; `/clear` starts a new session id).
@@ -145,7 +149,8 @@ if (import.meta.main) {
       if (context !== '') out.hookSpecificOutput = { hookEventName: 'SessionStart', additionalContext: context };
       process.stdout.write(JSON.stringify(out));
     })
-    .catch(() => {
+    .catch((err) => {
+      hookError(errorSession, 'session-start', 'fatal', err);
       process.stdout.write('{}');
     });
 }

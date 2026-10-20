@@ -7,6 +7,7 @@ import { dirname, resolve as resolvePath } from 'node:path';
 import {
   agentCallRecord,
   appendDispatchLog,
+  hookError,
   bareSkillName,
   bashOutputFloodMessage,
   isWorkflowSkill,
@@ -310,6 +311,8 @@ export function buildBashOutputWarning(
 }
 
 function main(): void {
+  // (J3) The session for the fatal path's hook-error record (lib/gate-log.ts hookError).
+  let errorSession: string | null = null;
   readStdin()
     .then((raw) => {
       let input: PostToolInput = {};
@@ -323,6 +326,7 @@ function main(): void {
 
       const cwd = input.cwd ?? process.cwd();
       const sessionId = input.session_id ?? 'unknown';
+      errorSession = sessionId;
       const toolName = input.tool_name ?? '';
       const toolInput = input.tool_input ?? {};
       const toolResponse = input.tool_response;
@@ -410,7 +414,7 @@ function main(): void {
           }
         }
       } catch (err) {
-        process.stderr.write(`[goodboy post-tool-use] track error: ${String(err)}\n`);
+        hookError(sessionId, 'post-tool-use', 'track error', err);
       }
 
       // (B) 자동 검증
@@ -438,7 +442,7 @@ function main(): void {
             if (root) recordValidationPass(root, results.filter((r) => r.ok).map((r) => r.cmd), startedAt);
           }
         } catch (err) {
-          process.stderr.write(`[goodboy post-tool-use] validation error: ${String(err)}\n`);
+          hookError(sessionId, 'post-tool-use', 'validation error', err);
         }
       }
 
@@ -480,7 +484,7 @@ function main(): void {
           }
         } catch (err) {
           // fail-open — 경고 실패해도 도구 흐름을 막지 않는다.
-          process.stderr.write(`[goodboy post-tool-use] bash-flood warn error: ${String(err)}\n`);
+          hookError(sessionId, 'post-tool-use', 'bash-flood warn error', err);
         }
       }
 
@@ -515,7 +519,7 @@ function main(): void {
           }
         } catch (err) {
           // fail-open
-          process.stderr.write(`[goodboy post-tool-use] web refetch warn error: ${String(err)}\n`);
+          hookError(sessionId, 'post-tool-use', 'web refetch warn error', err);
         }
       }
 
@@ -541,7 +545,7 @@ function main(): void {
       emit(out);
     })
     .catch((err) => {
-      process.stderr.write(`[goodboy post-tool-use] fatal: ${String(err)}\n`);
+      hookError(errorSession, 'post-tool-use', 'fatal', err);
       emit({});
     });
 }

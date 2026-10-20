@@ -5,7 +5,7 @@
 // completion (the main session also gets a <task-notification> prompt). It also finishes the
 // agent's open Bash calls (lib/write-sweep.ts). Never blocks; any error is swallowed.
 
-import { appendDispatchLog, finishOpenBashCalls, outcomeOf } from '../lib';
+import { appendDispatchLog, finishOpenBashCalls, hookError, outcomeOf } from '../lib';
 
 interface SubagentStopInput {
   session_id?: string;
@@ -22,8 +22,11 @@ async function readStdin(): Promise<string> {
 
 readStdin()
   .then((raw) => {
+    // (J3) The session for the hook-error record (lib/gate-log.ts hookError).
+    let sid: string | null = null;
     try {
       const input = (raw.trim() === '' ? {} : JSON.parse(raw)) as SubagentStopInput;
+      sid = input.session_id ?? null;
       if (typeof input.agent_id === 'string' && input.agent_id !== '') {
         const last = typeof input.last_assistant_message === 'string' ? input.last_assistant_message : '';
         appendDispatchLog(input.session_id ?? 'unknown', {
@@ -42,7 +45,7 @@ readStdin()
         }
       }
     } catch (err) {
-      process.stderr.write(`[goodboy subagent-stop] ${String(err)}\n`);
+      hookError(sid, 'subagent-stop', '', err);
     }
     process.stdout.write('{}');
   })

@@ -13,7 +13,7 @@ import { noteBashStart, openBashCalls, restoreProductionHosts, sweepNewMarkers, 
 import { bashChangedPaths } from './role-limits';
 import { restoreGateState, snapshotGateState } from './state-guard';
 import { getCurrentTurn, isGoodboyArtifact, recordEdit } from './file-tracker';
-import { logGate } from './gate-log';
+import { hookError, logGate } from './gate-log';
 import { filterOffArgs, HOOK_GIT_ARGS, HOOK_GIT_ENV } from './hook-git';
 import { commandSegments, gitSubcommandAt } from './outward-command';
 import { envStr } from './token-habits';
@@ -150,7 +150,7 @@ export function afterBash(
     }
   } catch (err) {
     swept = false;
-    process.stderr.write(`[goodboy] after-Bash sweep error: ${String(err)}\n`);
+    hookError(sessionId, 'after-bash', 'sweep error', err);
   }
   return { ...(notes.length > 0 ? { context: notes.join('\n') } : {}), ...(notices.length > 0 ? { notice: notices.join('\n') } : {}), ...(swept ? {} : { swept: false as const }) };
 }

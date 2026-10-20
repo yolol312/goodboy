@@ -51,6 +51,7 @@ import {
   readReviewCursor,
   searchScopeIsSmall,
   skillRuleMessage,
+  hookError,
   logGate,
   namedFiles,
   noteRiskApprovalPath,
@@ -1709,7 +1710,8 @@ function main(): void {
       emitPass(preWarnings);
     })
     .catch((err) => {
-      process.stderr.write(`[goodboy pre-tool-use] fatal: ${String(err)}\n`);
+      // `input` may be null (stdin `null`): the error path itself must not throw.
+      hookError(input?.session_id, 'pre-tool-use', 'fatal', err);
       emit({});
     });
 }

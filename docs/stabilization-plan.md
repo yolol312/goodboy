@@ -1773,6 +1773,73 @@ in another session's temporary scratchpad and was relayed by hand, with no fixed
     this repo; it has an env switch.
   - Free-form improvement ideas are out: they would be noise; the user runs the skill for
     them.
+- J3 as built (`lib/friction.ts`, called from the Stop hook's `emit()` on every output path):
+  - Hook errors are recorded now: every caught hook error with a known session goes through
+    `hookError` (`lib/gate-log.ts`). That covers every hook's error paths, session-start's
+    fatal path (silent before) and the after-Bash sweep (`lib/write-sweep.ts`). `hookError`
+    writes stderr as before and adds a `hook-error` fail-open to the gate log. Only stdin
+    parse errors stay stderr-only, since no session is known yet. A hook given `null` on
+    stdin still exits 0 with `{}`.
+  - Signals, read from the records only:
+    - a hook error;
+    - a fail-open, except the routine waits on Claude Code (`text-flush-lag`,
+      `limit-unconfident`, `subagent-transcript-not-found`). This repo's own session logged
+      over a hundred of those, so counting them would make the notice show every time;
+    - a Stop gate blocking 3 times in a row. The gates' block counters are read at the Stop
+      (`STOP_BLOCK_COUNTERS`; 3 was their retry limit before track G). PreToolUse denies do
+      not count: the review replayed real sessions turn by turn, and 3 denies of one gate in
+      a turn would have shown the notice in 3 of 4 sessions. They were the model's own
+      mistakes that the gates corrected (fix loops, read-before-edit, bash-write);
+    - a document change past its I1b budget. A review or test run is judged by the
+      session's edits: those after the previous run of the same team was dispatched, up to
+      this dispatch. This matches what the I1b note judges. A prompt can name only a spec
+      document for a code change, so the files a prompt names are not used. When all those
+      edits are documents, two things count:
+      - a review that ran longer than `DOC_REVIEW_BUDGET_MINUTES`, from dispatch to done,
+        matched by tool-use id or agent id;
+      - any test run;
+    - the user's one-use Stop marker letting a gate pass (`user-override`). PreToolUse
+      approvals of risky commands are normal approvals, not friction;
+    - a `GOODBOY_*` switch that is `off` now and was not at the session's first Stop. The
+      notice switches themselves do not count.
+  - At most one Korean `systemMessage` per session: the first signal, how many more, then
+    `/report-goodboy` and the switch. The notice is never part of a block reason or the
+    model's context.
+  - A gate or hook name from the records shows only when it is a plain short name; any other
+    name shows as `unknown`.
+  - The state is `friction-notice.json` in the session dir: the switches at the first Stop,
+    and whether the notice was shown. The notice shows only once that latch is written, so a
+    state dir that cannot be written shows nothing rather than a notice at every Stop.
+  - The state file and the block counters are read as regular files only (`readRegular`,
+    not through a link; `readRetryCount` too, for every gate). The state is written without
+    blocking and only into a regular file, so a FIFO placed at either never hangs the Stop
+    (refactoring/authz review).
+  - `GOODBOY_FRICTION_NOTICE=off` turns it off everywhere; `on` turns it on in goodboy's own
+    repo, where it is off by default (`inGoodboyRepo`). It is off for the test suite
+    (`tests/setup.ts`); `tests/j3-friction.test.ts` turns it on.
+  - Known limits:
+    - a run with no edit since the previous run of its team, or with both documents and code
+      in its change, is never judged against a budget;
+    - the duration counts from the dispatch, so time a background agent waited to start
+      counts too;
+    - the budget for code changes is not defined yet (I1b set only the document one), so
+      only document changes have this signal;
+    - a switch changed in the environment is seen only if Claude Code passes the new value to
+      the hooks;
+    - until the notice has shown, each Stop reads the session's logs again. The review
+      measured 15 ms at 1k gate events and 140 ms at 10k;
+    - whether `transcript-unparsed` and `usage-parse-failed` fire in healthy sessions is not
+      known: they never appeared in the 7 real gate logs the review read;
+    - the notice is advice, and anything that can write the session dir or the project can
+      silence it. A model can write `noticed: true` into the state. A project can set
+      `GOODBOY_FRICTION_NOTICE=off` in its settings, or add a fake goodboy
+      `.claude-plugin/plugin.json` with a `.git`. That is the same trust as every other
+      `GOODBOY_*` switch, and no gate gets weaker;
+    - the dispatch and edit logs are still read with plain reads. A FIFO there is the older
+      session-file gap of #12, which other hooks already read the same way;
+    - the effort advice's `hasRepeatedBlock` (2 denies of one gate since the last advice) and
+      this `repeated-block` (3 Stop blocks in a row) are separate definitions on purpose. The
+      advice suggests more effort early; the notice points at goodboy.
 - First candidate, seen here on 2026-10-16: while a background review or test agent is
   still running, the Stop gates block every chat turn, and answering the user burns the
   retries although the evidence is on its way.

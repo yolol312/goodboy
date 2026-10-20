@@ -1256,7 +1256,7 @@ v0.8.0까지의 환경변수는 `VCF_` 접두였고, v0.9.0부터 `GOODBOY_`로 
 - J1 (#8): 다른 프로젝트에서 goodboy를 쓰다 겪은 문제를 정해진 양식으로 남기는 `/report-goodboy` 스킬과 로컬 inbox(`~/.claude/goodboy/inbox/`). 버전·게이트 판정 횟수·재시도 횟수 같은 세션 증거는 goodboy가 직접 붙인다(`cli.ts report-evidence`, `report-write`)
 - 공개 요약은 경로·이메일·IP·다른 호스트·패키지명·비밀값과 이 컴퓨터·저장소의 이름(저장소 디렉터리, 리모트 소유자·이름, git 사용자, 로그인·호스트명)이 들어 있으면 거부되고, 사용자 확인을 거쳐서만 GitHub 이슈(`[field-report]`)로 올린다
 - J2 (#9): goodboy 저장소에서 세션을 시작하면 inbox에 정리하지 않은 리포트가 있을 때 한 줄 알림(`GOODBOY_INBOX_NOTICE=off`로 끔). 저장소 전용 `/triage-reports` 스킬은 리포트와 `field-report` 이슈를 현재 코드로 재검증하고 계획·이슈에 배치를 제안한 뒤, 사용자 승인 후에만 계획을 고치고 공개 요약으로 이슈를 올린다. 정리한 리포트는 `cli.ts report-done`으로 `inbox/done/`에 옮긴다. 다른 사용자를 위한 GitHub 이슈 양식(공개 경고 포함)
-- J3 (#11): 훅 오류, 같은 게이트의 반복 차단, 검증 예산 초과 같은 마찰 신호가 보이면 Stop에서 세션당 한 번 리포트를 권한다(차단하지 않음)
+- J3 (#11): goodboy 기록에 마찰 신호가 보이면 Stop에서 세션당 한 번 `/report-goodboy`를 권한다(차단하지 않음, 모델에는 전달하지 않음). 신호는 훅 오류(이제 게이트 로그에 남음), 정상 대기가 아닌 판단 불가 통과, Stop 게이트의 3회 연속 차단, 문서만 바꾼 변경의 검증 예산 초과(리뷰 10분 초과 또는 테스트 실행), Stop 승인 마커로 게이트를 넘김, 세션 중 `GOODBOY_*` 스위치 끄기다. goodboy 저장소에서는 기본으로 꺼져 있고, `GOODBOY_FRICTION_NOTICE=off|on`으로 끄고 켠다
 
 </details>
 

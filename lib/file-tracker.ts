@@ -517,6 +517,18 @@ export function getEditHistory(sessionId: string): { files: string[]; firstEditA
   return { files: Array.from(files), firstEditAt };
 }
 
+/** Every edit record of the session with its time (ms), main session and agents alike, in
+ *  file order. The friction notice uses it to find the change a review or test run checked
+ *  (track J3, lib/friction.ts). */
+export function getEditTimeline(sessionId: string): { file: string; t: number }[] {
+  const out: { file: string; t: number }[] = [];
+  for (const r of readRecords(ensureSessionDir(sessionId), 'edits.jsonl')) {
+    const t = Date.parse(r.timestamp);
+    if (Number.isFinite(t)) out.push({ file: r.file, t });
+  }
+  return out;
+}
+
 /** withinDir가 주어지면 파일이 그 디렉터리 하위인지 판정. 없으면 항상 true. */
 function isWithin(file: string, withinDir?: string): boolean {
   if (!withinDir) return true;

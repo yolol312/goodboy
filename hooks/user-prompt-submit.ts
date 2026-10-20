@@ -6,6 +6,7 @@ import { resolve as resolvePath } from 'node:path';
 import {
   appendDispatchLog,
   ASK_WHEN_UNCLEAR_INSTRUCTION,
+  hookError,
   buildRequiredInputsChecklist,
   CONCISE_INSTRUCTION,
   detectRiskOverride,
@@ -115,6 +116,8 @@ export function resolveSkillPath(cmd: string, cwd: string): string | null {
 }
 
 function main(): void {
+  // (J3) The session for the fatal path's hook-error record (lib/gate-log.ts hookError).
+  let errorSession: string | null = null;
   readStdin()
     .then((raw) => {
       let input: PromptInput = {};
@@ -128,6 +131,7 @@ function main(): void {
 
       const cwd = input.cwd ?? process.cwd();
       const sessionId = input.session_id ?? 'unknown';
+      errorSession = sessionId;
       const prompt = input.prompt ?? '';
 
       // (G1) A background-task completion is not a user prompt (G0 M10): no guidance, no
@@ -235,7 +239,7 @@ function main(): void {
         //   runs without a Skill tool call, so the typed command is the skill rule's evidence.
         recordSkillEvidence(sessionId, { k: 'skill', t: Date.now(), name: cmd, typed: true });
       } catch (err) {
-        process.stderr.write(`[goodboy user-prompt-submit] state write error: ${String(err)}\n`);
+        hookError(sessionId, 'user-prompt-submit', 'state write error', err);
       }
 
       // 체크리스트(있으면), R2와 H5-04 간결-우선 지시를 합쳐 additionalContext로 내보낸다.
@@ -253,7 +257,7 @@ function main(): void {
       emit(out);
     })
     .catch((err) => {
-      process.stderr.write(`[goodboy user-prompt-submit] fatal: ${String(err)}\n`);
+      hookError(errorSession, 'user-prompt-submit', 'fatal', err);
       emit({});
     });
 }

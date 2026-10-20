@@ -37,3 +37,8 @@ process.env.GOODBOY_PUSH_REGRESSION = 'off';
 // weakened tests, which the older fixtures do not set up. Off for the suite;
 // tests/i5-existing-tests.test.ts turns them on.
 process.env.GOODBOY_EXISTING_TESTS = 'off';
+
+// The friction notice (track J3) adds a line to a Stop's systemMessage once per session, which
+// older Stop tests that switch gates or block three times would see. Off for the suite;
+// tests/j3-friction.test.ts turns it on.
+process.env.GOODBOY_FRICTION_NOTICE = 'off';

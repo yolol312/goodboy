@@ -55,6 +55,19 @@ export function logGate(
   }
 }
 
+/** A hook's caught error: written to stderr as before (`[goodboy <hook>] <where>: <err>`) and,
+ *  when the session is known, to the gate log as a `hook-error` fail-open, so the friction
+ *  notice can see it (track J3, lib/friction.ts). Never throws. */
+export function hookError(sessionId: string | null | undefined, hook: string, where: string, err: unknown): void {
+  const text = where !== '' ? `${where}: ${String(err)}` : String(err);
+  try {
+    process.stderr.write(`[goodboy ${hook}] ${text}\n`);
+  } catch {
+    // best-effort
+  }
+  if (sessionId) logGate(sessionId, 'hook-error', 'fail-open', `${hook} ${text}`);
+}
+
 /** 세션의 게이트 로그 전체를 읽는다. 없거나 깨졌으면 빈 배열. */
 export function readGateLog(sessionId: string): GateEvent[] {
   try {
