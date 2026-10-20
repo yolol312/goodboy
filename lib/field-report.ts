@@ -7,11 +7,12 @@
 // confirms it (the report-goodboy skill).
 
 import { spawnSync } from 'node:child_process';
-import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, renameSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, renameSync, unlinkSync } from 'node:fs';
 import { homedir, hostname, tmpdir, userInfo } from 'node:os';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
 import { type GateDecision, type GateEvent, readGateLog } from './gate-log';
+import { checkDir, checkedPrivateDir, claudeConfigDir, createNew, isUnder, processAlive, realDeep } from './private-files';
 import { readRegular } from './safe-read';
 
 /** Where field reports go as issues: this plugin's repo. */
@@ -121,7 +122,7 @@ export function validateFieldReport(raw: unknown): { ok: boolean; errors: string
  *  (J1 review: the first dir with any transcript could hold an old session; another terminal
  *  in the same dir may still be newer, so `--session` is the sure way). */
 export function findSession(cwd: string, want: string | undefined, env: NodeJS.ProcessEnv = process.env): { id: string; transcript: string | null } | null {
-  const projects = join((env.CLAUDE_CONFIG_DIR ?? '').trim() || join(homedir(), '.claude'), 'projects');
+  const projects = join(claudeConfigDir(env), 'projects');
   const own = (env.CLAUDE_CODE_SESSION_ID ?? '').trim();
   const pick = want ?? (SESSION_ID.test(own) ? own : undefined);
   const all: { id: string; path: string; mtime: number }[] = [];
@@ -415,36 +416,11 @@ function publicFileText(input: FieldReportInput, ev: Evidence): string {
   return `# ${REPORT_TITLE_TAG} ${input.public_summary.title}\n\n${renderPublic(input, ev)}`;
 }
 
-/** Whether `a` is `b` or inside it, with every link resolved as far up as each exists. */
-function isUnder(a: string, b: string): boolean {
-  const r = relative(realDeep(b), realDeep(a));
-  return r === '' || (!r.startsWith('..') && !r.startsWith(sep));
-}
-
-/** A directory goodboy keeps reports in: a real directory (not a link), this user's, not
- *  writable by others. */
-function checkDir(dir: string, what: string): void {
-  const st = lstatSync(dir);
-  if (!st.isDirectory()) throw new Error(`${what} ${dir} is not a directory (a link or a file is at its path)`);
-  if (typeof process.getuid === 'function' && st.uid !== process.getuid()) throw new Error(`${what} ${dir} belongs to another user`);
-  if ((st.mode & 0o022) !== 0) throw new Error(`${what} ${dir} is writable by others (chmod 700 it)`);
-}
-
 /** The inbox after checkDir, made 0700 when `create`; null when it is missing and not to be
  *  made. Every inbox command goes through it (J2 review: listing and moving skipped the
  *  checks the writer made). */
 function checkedInbox(env: NodeJS.ProcessEnv, create: boolean): string | null {
-  const dir = inboxDir(env);
-  if (create) mkdirSync(dir, { recursive: true, mode: 0o700 });
-  else {
-    try {
-      lstatSync(dir);
-    } catch {
-      return null;
-    }
-  }
-  checkDir(dir, 'the inbox');
-  return dir;
+  return checkedPrivateDir(inboxDir(env), 'the inbox', create);
 }
 
 /** Creates `<stem><-n><ext>` for every file at the first `n` where all the names are free (a
@@ -467,52 +443,6 @@ function createSet(dir: string, stem: string, files: [ext: string, text: string]
     for (const p of made) unlinkSync(p);
   }
   throw new Error(`no free name for ${stem} in ${dir}`);
-}
-
-/** Creates `path` with `text` (mode 600), written whole and synced to disk, or false when
- *  anything is already at the path: the exclusive create never follows a link there. A write
- *  that fails or stops short removes the file and throws (J2 review: a short write lost a
- *  report whose original was then removed). */
-function createNew(path: string, text: string): boolean {
-  let fd: number;
-  try {
-    fd = openSync(path, 'wx', 0o600);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
-    throw err;
-  }
-  try {
-    const buf = Buffer.from(text, 'utf8');
-    for (let off = 0; off < buf.length; ) {
-      const k = writeSync(fd, buf, off, buf.length - off);
-      if (k <= 0) throw new Error(`${path}: the write stopped short`);
-      off += k;
-    }
-    fsyncSync(fd);
-  } catch (err) {
-    closeSync(fd);
-    try {
-      unlinkSync(path);
-    } catch {
-      // already gone
-    }
-    throw err;
-  }
-  closeSync(fd);
-  return true;
-}
-
-/** `p` with every link resolved, as far up as it exists: an inbox not made yet under a linked
- *  `~/.claude` still resolves to where it would be made (J1 review). */
-function realDeep(p: string): string {
-  const abs = resolve(p);
-  for (let dir = abs; ; dir = dirname(dir)) {
-    try {
-      return join(realpathSync(dir), relative(dir, abs));
-    } catch {
-      if (dirname(dir) === dir) return abs;
-    }
-  }
 }
 
 // ---- the inbox in goodboy's own repo (track J2, #9) ----
@@ -732,20 +662,11 @@ function recoverClaims(dir: string): void {
   }
 }
 
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
-
 /** Whether `cwd` is in goodboy's own source repo: a git checkout whose root holds goodboy's
  *  plugin manifest, outside Claude Code's plugins dir (an installed copy has no `.git`; the
  *  marketplace clone there has one: J2 review). */
 export function inGoodboyRepo(cwd: string, env: NodeJS.ProcessEnv = process.env): boolean {
-  if (isUnder(cwd, join((env.CLAUDE_CONFIG_DIR ?? '').trim() || join((env.HOME ?? '').trim() || homedir(), '.claude'), 'plugins'))) return false;
+  if (isUnder(cwd, join(claudeConfigDir(env), 'plugins'))) return false;
   let dir = resolve(cwd);
   for (let i = 0; i < 40; i++) {
     const r = readRegular(join(dir, '.claude-plugin', 'plugin.json'), 64 * 1024, true);

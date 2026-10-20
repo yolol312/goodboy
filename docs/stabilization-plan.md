@@ -1968,6 +1968,97 @@ exemptions.
   pin classification; hash dedupe and drift; project-registry isolation.
 - Reports keep problems that already existed apart from update regressions.
 
+K1 is built in four steps, all under #10. Each step is reviewed and committed before the next:
+- K1a: the state, the changelog range and triage, and the run writer;
+- K1b: the inventory, with the subagent definitions and their static checks;
+- K1c: health (plugin validate, plugin-load warnings, skill-doctor, a bounded doctor) and the
+  zero-turn smoke cases, including the user's own cases from local config;
+- K1d: the `cli-update-check` skill that ties them together, and a full check on this
+  machine. Integration sessions run only after the user approves an estimate.
+
+K1a as built (`lib/checkup.ts`, `lib/private-files.ts`, `cli.ts checkup-*`):
+- The safe file helpers of track J (`checkDir`, `createNew`, `isUnder`, `realDeep`,
+  `processAlive`) moved to `lib/private-files.ts` for both tracks, with `checkedPrivateDir`
+  (the inbox and the checkup dir) and `claudeConfigDir`. `claudeConfigDir` is one rule for
+  Claude Code's config dir: `CLAUDE_CONFIG_DIR` resolved, else `~/.claude` under HOME. It
+  replaces three variants that differed (field-report's session lookup ignored HOME).
+- The checkup dir is `~/.claude/goodboy/checkups/`, or an absolute `GOODBOY_CHECKUP_DIR`. It
+  is refused inside Claude Code's plugins dir and inside goodboy's own files. It must be a
+  real dir of this user that others cannot write.
+- State (`state.json`, schema 1):
+  - `observed` is the CLI of the last run that began.
+  - `pending` is the run begun. It records its Claude Code session (`CLAUDE_CODE_SESSION_ID`)
+    and the range its changelog step saw.
+  - `lastChecked` is the CLI of the last completed run, with that range: a run completed over
+    a gap tells the next one (`last_range`, `previous_range`).
+  - Only `checkup-complete` moves `lastChecked`; an abort leaves it.
+  - Only the session that began a run may complete it or note its range; any session may
+    abort it. Round 2 of the review found that another session could complete a run it never
+    checked, which moved `lastChecked`.
+  - Another session's pending run younger than 24 hours blocks a new one. It can be replaced
+    only with `--replace`, and the output names the replaced run. The same session may begin
+    again, and an older run counts as abandoned. The review found that the pid used before
+    was the begin command's own, which ends at once.
+  - Writes are atomic: an exclusive temp file, synced, renamed over the state. They run under
+    `state.lock`, which appears with its whole text at once (a complete temp file hard-linked
+    to the lock name).
+    - A live lock fails the command.
+    - A lock whose process is gone, or that is older than 10 minutes, is stale. It is moved
+      aside by an atomic rename and dropped only if what moved is the lock judged stale. A
+      fresh lock moved by mistake is linked back when its name is still free.
+    - If a third command took the name first, the moved lock's holder finds its lock gone
+      right before it writes, and writes nothing. Round 2 lost 26 of 900 updates in that
+      race with dead locks planted over and over. What is left is the instant between that
+      check and the rename.
+    - A lock is never removed unread, and a dir at the lock is named in the error.
+    - The review saw 561 of 600 updates kept with two writers under the first lock. A test
+      now runs 4 writers × 40 updates and checks that all 160 are kept.
+  - A state that is not goodboy's shape, a link or a FIFO is an error, never reset: a reset
+    would lose `lastChecked` and make the next range look complete.
+- Versions are `x.y.z`, with a leading `v` dropped. Anything else is refused. The review
+  found that `--from v2.1.301` gave "complete" with no versions.
+- Changelog (`~/.claude/cache/changelog.md`, read as a regular file up to 8 MB):
+  - The range is the versions after `lastChecked` up to the running CLI (`claude --version`,
+    or `--cli`). It is `incomplete` with the gap named when the cache has no entry for the
+    running version or starts after the last check. `empty` means the same version,
+    `downgrade` lists the versions rolled back, and `first-run` checks only the running
+    version.
+  - Triage puts every entry of the range in one bucket:
+    - matched: it names an identifier in use as a whole token (`Stop` is not in
+      `StopFailure` or `SubagentStop`). Confidence is high, and the first probe depends on
+      the kind: a hook event, a payload field, an env var, a flag, or another name;
+    - unmapped: it names a topic customizations depend on (hooks, plugins, skills, agents,
+      frontmatter, settings, CLAUDE.md, MCP, permissions, and so on). Confidence is low;
+    - other: counted only.
+    Identifiers come from the caller (`--ids`); K1b's inventory supplies them. The token
+    search is a plain search, not a regex for each pair: the review measured 7.5 s for the
+    whole cache with 300 identifiers.
+  - The output lists at most 200 matched and 50 unmapped findings (`--max-matched`,
+    `--max-unmapped`) and counts what it left out. Before, the whole cache came to about
+    1 MB of JSON.
+- Run writer (`checkup-write --run <id> --name <file>`, text on stdin):
+  - it writes one new file into `runs/<run-id>/` of the pending run only;
+  - the name is plain, with a `.md`, `.json` or `.txt` extension;
+  - the runs dir and the run dir must be real and private;
+  - the file is created exclusively, never through a link, up to 2 MB;
+  - every check runs before stdin is read, and stdin is read only up to the cap.
+- Tests: `tests/k1a-checkup.test.ts`, 25 tests. 34 mutants were tried and 33 caught. The one
+  left is equivalent: without the stdin cap, the writer still refuses an oversized report,
+  only after buffering it.
+- Known limits:
+  - on the real 4-version range (2.1.301–2.1.304) the unmapped bucket held 70 of 191 entries;
+    the skill triages it, and K1b's identifiers move entries into `matched`;
+  - `checkup-begin` makes the run dir after the state is written. If that fails, the run
+    stays pending until it is aborted or replaced, or its session begins again;
+  - `hooks/stop.ts` (`settingsJsonPath`) still reads `~/.claude/settings.json` without
+    `CLAUDE_CONFIG_DIR`. That is older than K1a, and its fix belongs with the next Stop
+    change;
+  - the writer checks the run dir, then opens the file by path. The same user could swap the
+    dir for a link in between. Another user cannot: the checkup dir and the runs dir are
+    0700. The review swapped it 4000 times and nothing landed outside;
+  - a pending run outside Claude Code has no session. Only `--replace` or the 24-hour age
+    replaces it.
+
 Proposals (later steps, not scheduled):
 - K2: quiet detection. A fail-open SessionStart reads the CLI version once, corroborated by
   the transcript. Model observations come from main-session transcript entries read

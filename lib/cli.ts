@@ -41,6 +41,27 @@ import { AXIS_DIMENSIONS, axesFor, requiredDimensionsFor } from './review-dimens
 import { MAX_DOC_BYTES, readRegular } from './safe-read';
 import { appendSkillGapLog, recordSkillEvidence, validateSkillGapNote } from './skill-rule';
 import { collectEvidence, findSession, inboxDir, listInbox, markFiled, markTriaged, privateTerms, publicLeaks, publishProblems, REPORT_REPO, REPORT_TITLE_TAG, validateFieldReport, writeFieldReport } from './field-report';
+import {
+  abortRun,
+  beginRun,
+  changelogRange,
+  checkedCheckupDir,
+  claudeConfigDir,
+  completeRun,
+  limitFindings,
+  makeRunDir,
+  MAX_RUN_FILE_BYTES,
+  newRunId,
+  noteRange,
+  parseChangelog,
+  readChangelogCache,
+  readCheckupState,
+  runFileTarget,
+  runningCliVersion,
+  triageChangelog,
+  updateCheckupState,
+  writeRunFile,
+} from './checkup';
 
 // ---- 유틸 ----
 
@@ -889,11 +910,120 @@ async function cmdReportDone(args: string[]): Promise<void> {
   process.stdout.write(JSON.stringify({ ok: true, path: markTriaged(file, decision) }) + '\n');
 }
 
+// ---- commands: checkup-* (track K1, #10; the cli-update-check skill) ----
+
+/** Stdin as text, failing as soon as it passes `max` bytes instead of buffering it all. */
+async function readStdinCapped(max: number): Promise<string> {
+  const chunks: Buffer[] = [];
+  let n = 0;
+  for await (const chunk of process.stdin) {
+    const b = Buffer.from(chunk as Uint8Array);
+    n += b.length;
+    if (n > max) fail(`the input is larger than ${max} bytes`);
+    chunks.push(b);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+/** The value after `--name`, or undefined. */
+function optValue(args: string[], name: string): string | undefined {
+  const i = args.indexOf(name);
+  return i >= 0 ? args[i + 1] : undefined;
+}
+
+/** The checkup commands: state, begin, changelog, write, complete, abort (lib/checkup.ts). */
+async function cmdCheckup(command: string, args: string[]): Promise<void> {
+  const out = (v: unknown) => process.stdout.write(JSON.stringify(v, null, 2) + '\n');
+  const dir = checkedCheckupDir();
+  if (dir === null) fail(`${command}: no checkup dir`);
+  const run = optValue(args, '--run');
+  // The Claude Code session that runs the checkup: a pending run of another session is not
+  //   replaced unless `--replace`, and only its own session completes it (K1a review: the
+  //   begin process's pid ends at once).
+  const session = (process.env.CLAUDE_CODE_SESSION_ID ?? '').trim() || null;
+  switch (command) {
+    case 'checkup-state':
+      out({ dir, state: readCheckupState(dir) });
+      return;
+    case 'checkup-begin': {
+      // `--cli <version>` for tests; else the running CLI's own `claude --version`.
+      const cli = optValue(args, '--cli') ?? runningCliVersion();
+      if (!cli) fail('checkup-begin: cannot read the CLI version (`claude --version`); pass --cli <version>');
+      const id = newRunId();
+      let replaced: string | null = null;
+      const s = updateCheckupState(dir, (st) => {
+        replaced = st.pending?.run ?? null;
+        return beginRun(st, cli, id, new Date(), session, args.includes('--replace'));
+      });
+      const runDir = makeRunDir(dir, id);
+      out({ run: id, run_dir: runDir, from: s.lastChecked?.cli ?? null, to: s.pending?.cli, replaced, last_range: s.lastChecked?.range ?? null });
+      return;
+    }
+    case 'checkup-changelog': {
+      const s = readCheckupState(dir);
+      const fromArg = optValue(args, '--from');
+      const from = fromArg === undefined ? (s.lastChecked?.cli ?? null) : fromArg === 'none' ? null : fromArg;
+      const to = optValue(args, '--to') ?? s.pending?.cli ?? s.observed?.cli;
+      if (!to) fail('checkup-changelog: pass --to <version> or begin a run first');
+      const path = optValue(args, '--changelog') ?? join(claudeConfigDir(), 'cache', 'changelog.md');
+      const text = readChangelogCache(path);
+      const range = changelogRange(text === null ? [] : parseChangelog(text), from, to);
+      const ids = (optValue(args, '--ids') ?? '').split(',').map((x) => x.trim()).filter((x) => x !== '');
+      const triage = triageChangelog(range.sections, ids);
+      const limit = (name: string, dflt: number) => {
+        const n = Number(optValue(args, name) ?? dflt);
+        return Number.isInteger(n) && n >= 0 ? n : dflt;
+      };
+      const { listed, left_out } = limitFindings(triage.findings, limit('--max-matched', 200), limit('--max-unmapped', 50));
+      // The pending run's own range is noted in the state: completing the run keeps it, so a
+      //   run completed over a gap says so to the next one (K1a review).
+      const p = s.pending;
+      if (p && range.to === p.cli && range.from === (s.lastChecked?.cli ?? null)) {
+        try {
+          updateCheckupState(dir, (st) => noteRange(st, p.run, range, session));
+        } catch (err) {
+          // Another session's run: its own changelog step notes its range.
+          if (!/another session/.test(String(err))) throw err;
+        }
+      }
+      out({
+        changelog: path,
+        status: range.status,
+        from: range.from,
+        to: range.to,
+        gaps: range.gaps,
+        previous_range: s.lastChecked?.range ?? null,
+        versions: range.sections.map((x) => x.version),
+        counts: triage.counts,
+        left_out,
+        findings: listed,
+      });
+      return;
+    }
+    case 'checkup-write': {
+      const name = optValue(args, '--name');
+      if (!run || !name) fail("checkup-write: pass --run <id> --name <file.md|.json|.txt> <<'EOF' … EOF");
+      // Every check before stdin is read, and stdin read only up to the cap (K1a review).
+      runFileTarget(dir, run, name);
+      out({ ok: true, path: writeRunFile(dir, run, name, await readStdinCapped(MAX_RUN_FILE_BYTES)) });
+      return;
+    }
+    case 'checkup-complete':
+      if (!run) fail('checkup-complete: pass --run <id>');
+      out({ ok: true, state: updateCheckupState(dir, (st) => completeRun(st, run, new Date(), session)) });
+      return;
+    case 'checkup-abort':
+      if (!run) fail('checkup-abort: pass --run <id>');
+      out({ ok: true, state: updateCheckupState(dir, (st) => abortRun(st, run)) });
+      return;
+  }
+}
+
 // ---- main ----
 
 const USAGE =
   '사용법: bun lib/cli.ts <command> [args...]\n' +
-  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text>';
+  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text> | checkup-state | checkup-begin [--cli <v>] [--replace] | checkup-changelog [--from <v>|none] [--to <v>] [--ids a,b] [--changelog <path>] [--max-matched N] [--max-unmapped N] | checkup-write --run <id> --name <file> | checkup-complete --run <id> | checkup-abort --run <id>';
 
 async function main(): Promise<void> {
   const cwd = process.cwd();
@@ -967,6 +1097,14 @@ async function main(): Promise<void> {
         break;
       case 'report-done':
         await cmdReportDone(args);
+        break;
+      case 'checkup-state':
+      case 'checkup-begin':
+      case 'checkup-changelog':
+      case 'checkup-write':
+      case 'checkup-complete':
+      case 'checkup-abort':
+        await cmdCheckup(command, args);
         break;
       default:
         fail(`알 수 없는 명령: ${command}\n${USAGE}`);
