@@ -14,7 +14,7 @@ import { spawnSync } from 'node:child_process';
 import { linkSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
-import { checkDir, checkedPrivateDir, claudeConfigDir, createNew, isUnder, processAlive } from './private-files';
+import { checkDir, checkedPrivateDir, claudeConfigDir, createNew, isDir, isUnder, processAlive } from './private-files';
 import { readRegular } from './safe-read';
 
 export { claudeConfigDir } from './private-files';
@@ -80,6 +80,21 @@ export interface CheckupState {
   /** The CLI version of the last completed run, and the range that run saw: a completed run
    *  with gaps says so to the next one (K1a review). */
   lastChecked: { cli: string; at: string; run: string; range: RangeNote | null } | null;
+  /** Projects the user registered for the inventory (K1b), besides the current one: absolute
+   *  paths. Discovered projects are only suggested, never scanned. */
+  projects?: string[];
+}
+
+/** Adds or removes a registered project (an absolute path of an existing dir to add). */
+export function setProject(s: CheckupState, path: string, add: boolean): CheckupState {
+  if (!isAbsolute(path)) throw new Error(`not an absolute path: ${path}`);
+  const p = resolve(path);
+  const cur = s.projects ?? [];
+  if (add) {
+    if (!isDir(p)) throw new Error(`not a directory: ${p}`);
+    return { ...s, projects: Array.from(new Set([...cur, p])).sort() };
+  }
+  return { ...s, projects: cur.filter((x) => x !== p) };
 }
 
 const STATE_FILE = 'state.json';
@@ -126,7 +141,8 @@ export function readCheckupState(dir: string): CheckupState {
         (s.pending.session === null || (typeof s.pending.session === 'string' && SESSION.test(s.pending.session))) &&
         isRangeNote(s.pending.range))) &&
     (s.lastChecked === null ||
-      (typeof s.lastChecked?.cli === 'string' && VERSION.test(s.lastChecked.cli) && RUN_ID.test(String(s.lastChecked.run)) && isRangeNote(s.lastChecked.range)));
+      (typeof s.lastChecked?.cli === 'string' && VERSION.test(s.lastChecked.cli) && RUN_ID.test(String(s.lastChecked.run)) && isRangeNote(s.lastChecked.range))) &&
+    (s.projects === undefined || (Array.isArray(s.projects) && s.projects.every((p) => typeof p === 'string' && isAbsolute(p))));
   if (!ok) throw new Error(`${join(dir, STATE_FILE)} is not a checkup state; move it away (the next check then starts as a first run)`);
   return s as CheckupState;
 }
@@ -397,6 +413,9 @@ const NAME_CHAR = /[\w-]/;
  *  `StopFailure` or `SubagentStop`). A plain search, no regex per pair (K1a review: 7.5 s for
  *  the whole cache with 300 identifiers). */
 function names(entry: string, id: string): boolean {
+  // A plain lowercase word (`prompt`, `model`, `hooks`) is an English word too: only its code
+  //   form counts (K1b: the inventory's keys matched 44 entries, most as prose).
+  if (/^[a-z]+$/.test(id)) return entry.includes(`\`${id}\``);
   for (let i = entry.indexOf(id); i >= 0; i = entry.indexOf(id, i + 1)) {
     const before = i > 0 ? entry[i - 1] : '';
     const after = entry[i + id.length] ?? '';

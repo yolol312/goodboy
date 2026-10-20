@@ -14,6 +14,7 @@ import { ensureSessionDir } from './file-tracker';
 import { type GateDecision, type GateEvent, readGateLog } from './gate-log';
 import { checkDir, checkedPrivateDir, claudeConfigDir, createNew, isUnder, processAlive, realDeep } from './private-files';
 import { readRegular } from './safe-read';
+import { secretRe } from './secret-patterns';
 
 /** Where field reports go as issues: this plugin's repo. */
 export const REPORT_REPO = 'yolol312/goodboy';
@@ -338,31 +339,7 @@ export function publicLeaks(text: string, terms: string[]): string[] {
   find('a domain or package name', new RegExp(`\\b(?:[a-z0-9-]+\\.)+(?:${TLDS})\\b(?![.-]?[a-z0-9])`, 'gi'), (d) => ALLOWED_HOSTS.test(d));
   // A Java or Kotlin package names its owner's domain backwards (`com.acme.billing`).
   find('a domain or package name', /\b(?:com|net|org|io|kr|jp|co|dev|de)\.[a-z0-9_]+(?:\.[a-z0-9_]+)+/gi, (p) => PUBLIC_PACKAGES.test(p));
-  find(
-    'a secret',
-    new RegExp(
-      [
-        '\\bAKIA[0-9A-Z]{16}',
-        '\\bgh[pousr]_[A-Za-z0-9]{20,}',
-        '\\bgithub_pat_\\w{20,}',
-        '\\bglpat-[\\w-]{16,}',
-        '\\bsk[-_](?:live_|test_)?[A-Za-z0-9_-]{16,}',
-        '\\bAIza[\\w-]{30,}',
-        '\\bnpm_[A-Za-z0-9]{30,}',
-        '\\bxox[abprs]-[A-Za-z0-9-]{10,}',
-        '-----BEGIN [A-Z ]*PRIVATE KEY',
-        '\\beyJ[\\w-]{10,}\\.[\\w-]{10,}',
-        '\\bBearer\\s+[\\w.~+/-]{16,}',
-        // A user and password in a URL (`redis://:pw@host`).
-        '\\b[a-z][\\w+.-]*://[^\\s:@/]*:[^\\s@/]+@',
-        // `password = x`, `"token": "x"`: a value with a letter in it (a token count is no
-        //   secret); `--password x` as a flag.
-        '(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)["\']?\\s*[:=]\\s*["\']?(?=[^\\s"\']*[A-Za-z])[^\\s"\',;]{6,}',
-        '--(?:password|passwd|token|secret|api-key)[=\\s]+\\S{4,}',
-      ].join('|'),
-      'gi',
-    ),
-  );
+  find('a secret', secretRe());
   // Names in any spelling: case, NFC/NFD, and `-`, `_`, `.`, a space or nothing between their
   //   parts (`Acme Billing`, `acme_billing`, `AcmeBilling` for `acme-billing`; `김 성모` for
   //   `김성모`); a whole word, not inside a longer one.

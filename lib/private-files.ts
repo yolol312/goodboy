@@ -3,7 +3,7 @@
 // A dir must be a real dir of this user that others cannot write; a file is created
 // exclusively, never through a link, written whole and synced, or removed again.
 
-import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, realpathSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, realpathSync, statSync, unlinkSync, writeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 
@@ -28,6 +28,15 @@ export function checkedPrivateDir(dir: string, what: string, create: boolean): s
   }
   checkDir(dir, what);
   return dir;
+}
+
+/** Whether `p` is a dir, through links. */
+export function isDir(p: string): boolean {
+  try {
+    return statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 /** Whether `a` is `b` or inside it, with every link resolved as far up as each exists. */

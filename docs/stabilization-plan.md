@@ -2056,8 +2056,101 @@ K1a as built (`lib/checkup.ts`, `lib/private-files.ts`, `cli.ts checkup-*`):
   - the writer checks the run dir, then opens the file by path. The same user could swap the
     dir for a link in between. Another user cannot: the checkup dir and the runs dir are
     0700. The review swapped it 4000 times and nothing landed outside;
+  - a plain lowercase identifier (`prompt`, `model`, `hooks`) matches only in its code form,
+    in backticks: the inventory's keys matched 44 entries of the real range as prose
+    (K1b). With the rule, 5 entries match, each a real use;
   - a pending run outside Claude Code has no session. Only `--replace` or the 24-hour age
     replaces it.
+
+K1b as built (`lib/inventory.ts`, `cli.ts checkup-inventory`, `checkup-projects`,
+`checkup-changelog --inventory`). It makes zero model turns and runs no hook or command; it
+reads files only.
+- Components, each with its scope (user, project, local, plugin), owner (`user`,
+  `project:<root>` or the plugin id) and canonical path (links resolved):
+  - plugins: configured against installed. Configured means enabled by the settings that
+    apply to the current project, last wins (user, then project, then local `enabledPlugins`);
+    a registered project's settings do not count. Installed means an entry in
+    `installed_plugins.json` for the current project, or one without a project, with an
+    existing install dir; another project's install never counts. The summary names plugins
+    that are enabled but not installed, and installed but disabled. Only an enabled plugin's
+    hooks, skills, agents and commands are listed;
+  - hooks from the user, project and local settings and from plugins' `hooks/hooks.json`,
+    each as `Event[matcher]` with its command: the first 2000 characters, secrets masked
+    after the cut (two patterns are slow on long text: 20 s on a 200 KB command in review).
+    A command past 64 KB is read in part and named. A `hooks` value that is not an
+    object of events, an event that is not a list and an entry that is not an object are named
+    as problems: on this machine, a local plugin's hooks.json is a list in another format,
+    which Claude Code likely does not load (K1c's validate confirms it). So is a settings,
+    `installed_plugins.json` or hooks.json file that is there but is not a readable JSON
+    object up to 1 MB: it is never skipped silently;
+  - skills, agents and commands, with their frontmatter keys and the whole-file, body and
+    frontmatter hashes. An agent also keeps the values the checks read (name, model, tools,
+    disallowedTools); nothing else of a definition is stored (an agent's `mcpServers` can hold
+    tokens). Frontmatter whose YAML aliases expand past 5000 values or 1 MB is a problem, not
+    parsed further (a 431-byte file ran out of memory in review). A file that is there but
+    not readable (over 1 MB, not a regular file) is named; a skill dir without SKILL.md is not
+    a skill. CLAUDE.md files of the user and of each project. One file is one component.
+- Projects: the current one (the nearest dir up with `.claude` or `.git`) and the ones the
+  user registered with `checkup-projects --add <absolute dir>`. A dir whose `.claude` is the
+  config dir (HOME) is never a project: its files are the user's, listed once. The walk up
+  stops there, so no dir above HOME becomes the project. The registry
+  is kept in the checkup state under its lock. No other project is scanned. The model can
+  call `--add` too, so the K1d skill asks the user before it registers a project.
+- Identifiers in use, for the changelog triage:
+  - hook events;
+  - the payload fields Claude Code documents (`PAYLOAD_FIELDS`), named as whole tokens in a
+    hook's command or in the scripts it runs. That covers the files a command names, with
+    `${CLAUDE_PLUGIN_ROOT}`, `${CLAUDE_PROJECT_DIR}` and `$HOME` expanded and quoted parts
+    joined (a path is text: a dir named `a$&b` is followed), and every script in a plugin's
+    `hooks/`. Only files under the root that owns the hook are read (the plugin root, the
+    project root, or HOME and the config dir; a link out of it is not followed), at most 600
+    files and 32 MB in all;
+  - env vars (shell basics left out), long flags, and the frontmatter and settings keys;
+  - each kind keeps at most 2000 identifiers of up to 100 characters, and a definition at
+    most 200 keys. Problems are kept once each, at most 200 and a note; a cap that was
+    reached is always named.
+- Agent checks; each finding is `confirmed` (read from the file) or `uncertain` (the running
+  CLI decides, K1c/K1d):
+  - a model that is not an alias is pinned, "intent unconfirmed" (uncertain);
+  - tools entries goodboy does not know (uncertain), and MCP entries that are not
+    `mcp__<server>` or `mcp__<server>__<tool>` (confirmed);
+  - frontmatter keys goodboy does not know (uncertain);
+  - duplicate names in one scope and owner, a project agent shadowing a user agent, and
+    copies by body hash, each reported apart;
+  - delegation: an agent that can call the Agent tool, because it lists it, or has no
+    `tools:` and no bare `Agent` in `disallowedTools` (which Claude Code ignores when
+    `tools:` is set; `Agent(x)` limits the tool, it does not remove it). goodboy's leads are
+    allowed;
+  - definitions that do not parse.
+
+  Values from the file are cut to 100 characters in a finding, and one agent gives at most
+  10 findings of a kind plus a count.
+- `checkup-inventory --run <id>` writes the inventory to the run dir as compact
+  `inventory.json`. Past the run-file cap the last components are left out, then agent
+  findings, then identifiers past 100 per kind, each named as a problem, so the step does
+  not fail on a large setup. It prints a summary (counts, plugin mismatches capped at 30
+  each, unreadable definitions, identifier counts, problems) and capped lists: the agent
+  findings (30) and the identifiers (200 per kind), with what was left out. Text from
+  definition files is printed on one line, at most 200 characters; it is data from files
+  any cloned repo can hold. `checkup-changelog --inventory` matches the range against all
+  the identifiers.
+- On this machine (Claude Code 2.1.304), 67 ms:
+  - 7 plugins, 8 hooks, 84 skills, 2 agents, 4 commands, 2 CLAUDE.md files;
+  - 115 identifiers;
+  - the range 2.1.300→2.1.304 has 5 matched entries.
+- Tests: `tests/k1b-inventory.test.ts`, 32 tests on fixtures in a temp HOME (21 of them for
+  the two review rounds); 18 mutants caught before the reviews and 34 after round 1.
+- Secret masking (`lib/secret-patterns.ts`, shared with field reports since K1b) also
+  covers `curl -u user:password` and Slack webhook URLs; a Bearer token under 16 characters
+  is not caught.
+- Known limits:
+  - the known tool names, agent keys and model aliases are goodboy's lists, checked against
+    the 2.1.304 binary. A newer CLI's additions show as uncertain findings until the lists
+    are updated;
+  - payload fields are found by name in scripts, so a field used through a variable is
+    missed;
+  - "loaded" is not known yet: the inventory reads configuration. K1c reads what Claude Code
+    actually loaded (plugin validate, the debug log).
 
 Proposals (later steps, not scheduled):
 - K2: quiet detection. A fail-open SessionStart reads the CLI version once, corroborated by

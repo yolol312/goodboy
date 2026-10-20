@@ -58,10 +58,12 @@ import {
   readCheckupState,
   runFileTarget,
   runningCliVersion,
+  setProject,
   triageChangelog,
   updateCheckupState,
   writeRunFile,
 } from './checkup';
+import { allIdentifiers, buildInventory, fitInventory, inventoryLists, inventorySummary } from './inventory';
 
 // ---- 유틸 ----
 
@@ -969,6 +971,8 @@ async function cmdCheckup(command: string, args: string[]): Promise<void> {
       const text = readChangelogCache(path);
       const range = changelogRange(text === null ? [] : parseChangelog(text), from, to);
       const ids = (optValue(args, '--ids') ?? '').split(',').map((x) => x.trim()).filter((x) => x !== '');
+      // `--inventory`: the identifiers the user's customizations use (K1b).
+      if (args.includes('--inventory')) ids.push(...allIdentifiers(buildInventory(process.cwd(), process.env, s.projects ?? []).identifiers));
       const triage = triageChangelog(range.sections, ids);
       const limit = (name: string, dflt: number) => {
         const n = Number(optValue(args, name) ?? dflt);
@@ -1008,6 +1012,23 @@ async function cmdCheckup(command: string, args: string[]): Promise<void> {
       out({ ok: true, path: writeRunFile(dir, run, name, await readStdinCapped(MAX_RUN_FILE_BYTES)) });
       return;
     }
+    case 'checkup-projects': {
+      // The registered projects the inventory scans besides the current one.
+      const addP = optValue(args, '--add');
+      const removeP = optValue(args, '--remove');
+      const s = addP || removeP ? updateCheckupState(dir, (st) => setProject(st, (addP ?? removeP)!, addP !== undefined)) : readCheckupState(dir);
+      out({ projects: s.projects ?? [] });
+      return;
+    }
+    case 'checkup-inventory': {
+      // The whole inventory goes to the run dir (`--run`); the model sees the summary and
+      //   capped lists only.
+      const inv = buildInventory(process.cwd(), process.env, readCheckupState(dir).projects ?? []);
+      const fit = run ? fitInventory(inv, MAX_RUN_FILE_BYTES - 1) : inv;
+      const path = run ? writeRunFile(dir, run, optValue(args, '--name') ?? 'inventory.json', JSON.stringify(fit) + '\n') : null;
+      out({ ...inventorySummary({ ...inv, problems: fit.problems }), ...(path ? { written: path } : {}), ...inventoryLists(inv) });
+      return;
+    }
     case 'checkup-complete':
       if (!run) fail('checkup-complete: pass --run <id>');
       out({ ok: true, state: updateCheckupState(dir, (st) => completeRun(st, run, new Date(), session)) });
@@ -1023,7 +1044,7 @@ async function cmdCheckup(command: string, args: string[]): Promise<void> {
 
 const USAGE =
   '사용법: bun lib/cli.ts <command> [args...]\n' +
-  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text> | checkup-state | checkup-begin [--cli <v>] [--replace] | checkup-changelog [--from <v>|none] [--to <v>] [--ids a,b] [--changelog <path>] [--max-matched N] [--max-unmapped N] | checkup-write --run <id> --name <file> | checkup-complete --run <id> | checkup-abort --run <id>';
+  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text> | checkup-state | checkup-begin [--cli <v>] [--replace] | checkup-changelog [--from <v>|none] [--to <v>] [--ids a,b] [--changelog <path>] [--max-matched N] [--max-unmapped N] | checkup-write --run <id> --name <file> | checkup-complete --run <id> | checkup-abort --run <id> | checkup-projects [--add <dir>|--remove <dir>] | checkup-inventory [--run <id>] (checkup-changelog --inventory adds its identifiers)';
 
 async function main(): Promise<void> {
   const cwd = process.cwd();
@@ -1104,6 +1125,8 @@ async function main(): Promise<void> {
       case 'checkup-write':
       case 'checkup-complete':
       case 'checkup-abort':
+      case 'checkup-projects':
+      case 'checkup-inventory':
         await cmdCheckup(command, args);
         break;
       default:
