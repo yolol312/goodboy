@@ -69,6 +69,9 @@ import { checkHealth, fitHealth, healthSummary } from './health';
 import { allIdentifiers, buildInventory, fitInventory, inventoryLists, inventorySummary, projectRoots, suggestProjects } from './inventory';
 import { fitProbes, probeEstimate, probesSummary, runProbes } from './probes';
 import { GOODBOY_CASES, readUserCases, runSmoke, smokeSummary } from './smoke';
+import { surveyProject } from './test-survey';
+import { BACKFILL_FILE, backfillSummary, DEFAULT_BATCH, markTarget, MAX_TARGETS, mergeSurvey, nextBatch, readBackfill, repoRel, type TargetStatus, withBackfillLock, writeBackfill } from './test-backfill';
+import { repoTop } from './changed-coverage';
 
 // ---- 유틸 ----
 
@@ -938,6 +941,80 @@ function optValue(args: string[], name: string): string | undefined {
   return i >= 0 ? args[i + 1] : undefined;
 }
 
+/** `--name N` as an integer from `min` to `max`, else `fallback`. */
+function intOpt(args: string[], name: string, fallback: number, min: number, max: number): number {
+  const v = optValue(args, name);
+  const n = v === undefined ? NaN : Number(v);
+  return Number.isInteger(n) && n >= min && n <= max ? n : fallback;
+}
+
+/** `test-survey [--all | --dir <dir>] [--max N]` (track L, L1): read-only. The project, a dir
+ *  (from the shell's dir, like every file argument), or with `--all` the project and the
+ *  checkup's registered projects (§17). */
+function cmdTestSurvey(cwd: string, shell: string, args: string[]): void {
+  const all = args.includes('--all');
+  const dir = optValue(args, '--dir');
+  const max = intOpt(args, '--max', all ? 10 : 30, 0, 1000);
+  if (all && dir !== undefined) fail('test-survey: pass --all or --dir, not both');
+  if (!all) {
+    if (dir !== undefined && (dir === '' || dir.startsWith('--'))) fail('test-survey: --dir needs a directory');
+    process.stdout.write(JSON.stringify(surveyProject(repoTop(dir === undefined ? cwd : resolve(shell, dir)), max), null, 2) + '\n');
+    return;
+  }
+  // Never made here: a missing checkup dir means nothing is registered.
+  const checkups = checkedCheckupDir(process.env, false);
+  const { roots, problems } = projectRoots(cwd, checkups ? (readCheckupState(checkups).projects ?? []) : []);
+  process.stdout.write(JSON.stringify({ projects: roots.map((r) => surveyProject(r, max)), problems }, null, 2) + '\n');
+}
+
+/** The backfill commands (track L, L3): `backfill-plan`, `backfill-next [--size N] [--pick
+ *  a,b]`, `backfill-mark <file> --status done|skipped|suspect [--tests a,b] [--note text]`,
+ *  `backfill-status`. The state is the repo's `.goodboy/test-backfill.json`, read and written
+ *  under its lock (never left held: errors return, `fail` exits after); the evidence is the
+ *  project dir's layer-1 records. */
+function cmdBackfill(command: string, cwd: string, args: string[]): void {
+  const root = repoTop(cwd);
+  const list = (v: string | undefined) => (v ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+  if (command === 'backfill-mark') {
+    const status = optValue(args, '--status');
+    if (!args[0] || args[0].startsWith('--') || (status !== 'done' && status !== 'skipped' && status !== 'suspect')) {
+      fail('backfill-mark: pass <file> --status done|skipped|suspect [--tests a,b] [--note text]');
+    }
+  }
+  if (command === 'backfill-next' && !existsSync(join(root, BACKFILL_FILE))) fail('backfill-next: no backfill state; run backfill-plan first');
+  // The survey reads the whole repo: before the lock, so that marks are not held up by it.
+  const survey = command === 'backfill-plan' ? surveyProject(root, MAX_TARGETS) : null;
+  if (survey?.problems.some((p) => p.startsWith('not a git repository') || p.startsWith('git cannot list'))) fail(`backfill-plan: ${survey.problems.join('; ')}`);
+  const result = withBackfillLock(root, (): { error: string } | { value: unknown } => {
+    const state = readBackfill(root);
+    if (state instanceof Error) return { error: state.message };
+    switch (command) {
+      case 'backfill-plan': {
+        const { state: next, added, dropped } = mergeSurvey(state, survey!.untested.targets);
+        const path = writeBackfill(root, next);
+        return { value: { path, added, dropped, survey: { ...survey!, untested: { count: survey!.untested.count, targets: survey!.untested.targets.slice(0, 10) } }, ...backfillSummary(next) } };
+      }
+      case 'backfill-next': {
+        const b = nextBatch(state, intOpt(args, '--size', DEFAULT_BATCH, 1, 20), list(optValue(args, '--pick')).map((f) => repoRel(root, f)));
+        if (b instanceof Error) return { error: b.message };
+        if (!b.resumed) writeBackfill(root, state);
+        return { value: b };
+      }
+      case 'backfill-mark': {
+        const m = { rel: args[0]!, status: optValue(args, '--status') as Exclude<TargetStatus, 'todo'>, tests: list(optValue(args, '--tests')), note: optValue(args, '--note') };
+        const err = markTarget(state, cwd, root, m);
+        if (err) return { error: err.message };
+        writeBackfill(root, state);
+        return { value: backfillSummary(state) };
+      }
+      default:
+        return { value: backfillSummary(state) };
+    }
+  });
+  if ('error' in result) fail(`${command}: ${result.error}`);
+  process.stdout.write(JSON.stringify(result.value, null, 2) + '\n');
+}
+
 /** The checkup commands: state, begin, changelog, write, complete, abort (lib/checkup.ts). */
 async function cmdCheckup(command: string, args: string[]): Promise<void> {
   const out = (v: unknown) => process.stdout.write(JSON.stringify(v, null, 2) + '\n');
@@ -1123,7 +1200,7 @@ async function cmdCheckup(command: string, args: string[]): Promise<void> {
 
 const USAGE =
   '사용법: bun lib/cli.ts <command> [args...]\n' +
-  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text> | checkup-state | checkup-begin [--cli <v>] [--replace] | checkup-changelog [--from <v>|none] [--to <v>] [--ids a,b] [--changelog <path>] [--max-matched N] [--max-unmapped N] [--run <id>] | checkup-write --run <id> --name <file> | checkup-complete --run <id> | checkup-abort --run <id> | checkup-projects [--add <dir>|--remove <dir>] [--suggest] | checkup-inventory [--run <id>] (checkup-changelog --inventory adds its identifiers) | checkup-health [--run <id>] [--timeout-ms N] | checkup-smoke [--run <id>] | checkup-compare --run <id> | checkup-probe --run <id> (--estimate | --estimate-id <id>)';
+  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | test-survey [--all | --dir <dir>] [--max N] | backfill-plan | backfill-next [--size N] [--pick a,b] | backfill-mark <file> --status done|skipped|suspect [--tests a,b] [--note text] | backfill-status | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text> | checkup-state | checkup-begin [--cli <v>] [--replace] | checkup-changelog [--from <v>|none] [--to <v>] [--ids a,b] [--changelog <path>] [--max-matched N] [--max-unmapped N] [--run <id>] | checkup-write --run <id> --name <file> | checkup-complete --run <id> | checkup-abort --run <id> | checkup-projects [--add <dir>|--remove <dir>] [--suggest] | checkup-inventory [--run <id>] (checkup-changelog --inventory adds its identifiers) | checkup-health [--run <id>] [--timeout-ms N] | checkup-smoke [--run <id>] | checkup-compare --run <id> | checkup-probe --run <id> (--estimate | --estimate-id <id>)';
 
 async function main(): Promise<void> {
   // The session's project dir, not the shell's dir after a `cd`: the records written here are
@@ -1183,6 +1260,15 @@ async function main(): Promise<void> {
         process.stdout.write(JSON.stringify({ ok: true, path: join(root, TEST_CATALOG_FILE), files: rows.length }) + '\n');
         break;
       }
+      case 'test-survey':
+        cmdTestSurvey(cwd, shell, args);
+        break;
+      case 'backfill-plan':
+      case 'backfill-next':
+      case 'backfill-mark':
+      case 'backfill-status':
+        cmdBackfill(command, cwd, args);
+        break;
       case 'report-evidence':
         cmdReportEvidence(cwd, args);
         break;

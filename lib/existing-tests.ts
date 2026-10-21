@@ -22,7 +22,7 @@ import { ensureSessionDir } from './file-tracker';
 import { filterOffArgs, HOOK_GIT_ARGS, HOOK_GIT_ENV } from './hook-git';
 import type { ChangedFileEdit } from './review-validator';
 import { MAX_STATE_BYTES, readRegular } from './safe-read';
-import { TEST_FILE } from './test-catalog';
+import { JVM_CASE, TEST_FILE } from './test-catalog';
 import { JS_SPECIFIER, recordStandsAlone } from './test-types';
 import { stripLiteralsAndComments } from './test-validator';
 import { isTrustedTimestamp } from './trusted-time';
@@ -261,7 +261,9 @@ export function affectedTests(top: string, head: string | null | undefined, chan
   if (stems.size > 0) {
     const g = git(top, ['grep', '-z', '-l', '-I', '-F', ...[...stems].flatMap((s) => ['-e', s]), head, '--'], 10_000);
     const prefix = `${head}:`;
-    candidates = g.code === 0 ? g.out.split('\0').filter((p) => p.startsWith(prefix)).map((p) => p.slice(prefix.length)).filter((p) => TEST_FILE.test(p)) : [];
+    // Only the tests parsed below (JS/TS, Python) are read: a JVM test's loads are not known.
+    const parsed = (p: string) => JS_EXT.includes(extname(p).toLowerCase()) || extname(p).toLowerCase() === '.py';
+    candidates = g.code === 0 ? g.out.split('\0').filter((p) => p.startsWith(prefix)).map((p) => p.slice(prefix.length)).filter((p) => TEST_FILE.test(p) && parsed(p)) : [];
   }
   // Each candidate read and parsed once: what it loads, or 'all' when too large to read.
   const texts = readBlobs(top, candidates.map((c) => `${head}:${c}`));
@@ -522,6 +524,18 @@ export function testStrength(text: string, ext: string): Strength | null {
       assertions: count(code, /\bt\s*\.\s*(?:Error|Errorf|Fatal|Fatalf|Fail|FailNow)\b|\b(?:assert|require)\s*\.\s*\w+\s*\(/g),
       cases: count(code, /^func[ \t]+Test\w*[ \t]*\(/gm),
       skips: count(code, /\bt\s*\.\s*Skip\w*\s*\(/g),
+    };
+  }
+  if (ext === '.java' || ext === '.kt') {
+    // JUnit, AssertJ, Hamcrest, Mockito, MockMvc and Kotest checks (track L, L2); text
+    //   blocks and raw strings blanked with the other literals.
+    const code = stripLiteralsAndComments(text, true);
+    return {
+      // A Kotest matcher in use (`x shouldBe 1`, `.shouldBe(1)`), not a test method named
+      //   `shouldFindUser` (JUnit tests are `void`, Kotlin's `fun`).
+      assertions: count(code, /\bassert\w*\s*\(|\bverify\s*\(|\bfail\s*\(|\.\s*andExpect\s*\(|(?<!\b(?:void|fun)\s+)\bshould[A-Z]\w*\b/g),
+      cases: count(code, JVM_CASE),
+      skips: count(code, /@(?:Disabled\w*|Ignore)\b/g),
     };
   }
   return null;

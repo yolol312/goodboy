@@ -12,7 +12,7 @@
 import { lstatSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, posix, relative, resolve as resolvePath, sep } from 'node:path';
 import { MAX_DOC_BYTES, readRegular } from './safe-read';
-import { isTestFile } from './test-validator';
+import { isTestFile, TEST_RUNNER_CONFIG } from './test-validator';
 
 export type VerificationScope = 'document' | 'preview' | 'code';
 
@@ -309,12 +309,14 @@ export function classifyFile(abs: string, root: string, previewGlobs: readonly s
   return scope;
 }
 
-/** Layer 1: does this changed file need a test? Code does; test files, documents and static
- *  previews do not. A test-named link into code is code. */
+/** Layer 1: does this changed file need a test? Code does; test files, test runner configs
+ *  (track L review), documents and static previews do not. A test-named link into code is
+ *  code. */
 export function needsTests(abs: string, root: string, previewGlobs: readonly string[] = []): boolean {
   // Seen below the root only: a repo under a tests/ dir would make every file a test file.
   const spelled = relativeInside(resolvePath(abs), resolvePath(root)) ?? slashes(abs);
-  if (isTestFile(spelled)) {
+  const testTool = (p: string) => isTestFile(p) || TEST_RUNNER_CONFIG.test(p);
+  if (testTool(spelled)) {
     const real = realRelative(abs, root);
     // A test name is trusted only for a file of its own: a symlink is judged by its target,
     //   and a hard link may share its content with code.
@@ -324,7 +326,7 @@ export function needsTests(abs: string, root: string, previewGlobs: readonly str
     } catch {
       // deleted: nothing to run
     }
-    if (!shared && (real === null || isTestFile(real))) return false;
+    if (!shared && (real === null || testTool(real))) return false;
   }
   return classifyFile(abs, root, previewGlobs) === 'code';
 }

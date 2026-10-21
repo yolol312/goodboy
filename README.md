@@ -59,7 +59,7 @@ LLM이 코드 작성 시 자주 발생하는 4가지 약점과 Good Boy의 해�
 
 | 기능 | 하는 일 | 자세히 |
 |---|---|---|
-| 카테고리 커맨드 | `/fix-bug`, `/add-feature` 등 7개 작업 카테고리를 필수 입력 점검과 함께 실행한다 | [카테고리 슬래시 커맨드](#카테고리-슬래시-커맨드) |
+| 카테고리 커맨드 | `/fix-bug`, `/add-feature` 등 8개 작업 카테고리를 필수 입력 점검과 함께 실행한다 | [카테고리 슬래시 커맨드](#카테고리-슬래시-커맨드) |
 | 층0 인용 검증 | 답변에 인용한 `파일:줄`이 실재하는지, 이 세션에서 읽은 파일인지 매 턴 확인한다 | [층0 인용 검증](#층0-인용-검증) |
 | 자동 검증 | Edit/Write 직후 타입체크를 돌리고, 실패가 남아 있으면 턴 종료를 막는다 | [검증 4층](#검증-4층) |
 | 층1 테스트 게이트 | 변경된 코드가 실제로 동작하고 요구사항을 만족하는지 실행으로 확인한다(red-green, 뮤테이션 프로브) | [층1 테스트 게이트](#층1-테스트-게이트) |
@@ -124,7 +124,7 @@ POSIX 셸을 전제하므로 **Git for Windows 설치가 필수**입니다. 이�
 
 ### 카테고리 슬래시 커맨드
 
-7개 카테고리:
+8개 카테고리:
 
 - `/fix-bug <설명>` — 버그 수정 (effort high)
 - `/add-feature <설명>` — 기능 추가 (effort high)
@@ -133,6 +133,7 @@ POSIX 셸을 전제하므로 **Git for Windows 설치가 필수**입니다. 이�
 - `/diagnose-failure <증상>` — 원인 진단, 수정은 `/fix-bug`로 (effort high, 구 `/debug`)
 - `/write-doc <주제>` — 문서 작성 (effort medium)
 - `/request-review <기준>` — 리뷰 요청 (effort low)
+- `/backfill-tests [이 프로젝트만 | 폴더]` — 기존 코드 테스트 보강: 등록된 프로젝트 조사, 테스트 도구 구성(승인 후), 현재 동작을 고정하는 테스트를 묶음 단위로 작성 (effort high, v0.36.0, [아래](#기존-코드-테스트-보강-v0360-트랙-l))
 
 각 스킬은 적힌 effort로 그 턴만 실행된다(끝나면 원래 설정). 각 카테고리에 위험도 override 가능: `/fix-bug --risk risky <설명>`
 
@@ -399,7 +400,7 @@ Agent 도구와 모든 서브에이전트의 `claude -p` 차단), 훅이 검사�
 없이 정해진 human 항목을 찾는다(프로젝트 항목은 high, 기본 항목은 medium). 사용자가 내린 결정은 정책 항목으로
 기록되어(`keep-project-knowledge` 갱신 모드) 다음부터 ai 항목이 된다.
 
-#### 에이전트 24개와 도구 스킬 24개
+#### 에이전트 24개와 도구 스킬 27개
 
 에이전트 이름은 `<팀>-<역할>`이고 리드는 `-lead`로 끝난다(전체 표: 계획서 §10.3). 리뷰 게이트는
 `goodboy:review-all`(구 review-changes), 테스트 게이트와 push 확인은 `goodboy:test-unit`(구 test-changes)을
@@ -421,7 +422,8 @@ probe-runtime, attack-sandbox, cite-sources, summarize-diff, follow-design-token
 check-ui-states, run-e2e, record-review, record-tests, run-long-command, run-codex-review,
 measure-coverage, follow-agent-rules, keep-project-knowledge(`/` 메뉴에도 보임, 트랙 H),
 report-goodboy(`/report-goodboy`, 트랙 J: goodboy 자체의 문제를 현장 리포트로 남김),
-cli-update-check(`/cli-update-check`, 트랙 K: CLI 업데이트 뒤 사용자 설정 점검).
+cli-update-check(`/cli-update-check`, 트랙 K: CLI 업데이트 뒤 사용자 설정 점검),
+setup-test-infra(트랙 L: `/backfill-tests`가 쓰는 테스트 도구 구성).
 
 ## 결정 근거 기록 (4분류)
 
@@ -638,7 +640,7 @@ goodboy/                                # 플러그인 루트
 │   ├── user-prompt-submit.ts
 │   ├── subagent-stop.ts
 │   └── stop.ts
-├── skills/                             # 작업 카테고리 7종 + 설치 스킬
+├── skills/                             # 작업 카테고리 8종 + 설치 스킬
 │   ├── fix-bug/SKILL.md
 │   ├── add-feature/SKILL.md
 │   ├── refactor-code/SKILL.md
@@ -646,8 +648,9 @@ goodboy/                                # 플러그인 루트
 │   ├── diagnose-failure/SKILL.md
 │   ├── write-doc/SKILL.md
 │   ├── request-review/SKILL.md
+│   ├── backfill-tests/SKILL.md         # 기존 코드 테스트 보강 (트랙 L)
 │   ├── setup-statusline/SKILL.md       # 상태바 설치/연동
-│   └── <도구 스킬 26개>/SKILL.md        # 에이전트가 쓰는 절차 (check-*, record-*, run-*, write-* …, keep-project-knowledge, report-goodboy, cli-update-check)
+│   └── <도구 스킬 27개>/SKILL.md        # 에이전트가 쓰는 절차 (check-*, record-*, run-*, write-* …, keep-project-knowledge, report-goodboy, cli-update-check, setup-test-infra)
 ├── agents/                             # 에이전트 24개 (research-*, build-*, review-*, test-*)
 │   ├── test-unit.md                    # 층1 — 테스트 작성/실행·red-green·커버리지 (구 test-changes)
 │   └── review-all.md                   # 층2 — 전 축 또는 축 하나 리뷰 (구 review-changes)
@@ -807,10 +810,49 @@ dev-cycle 문서가 있는데 수용 기준이 하나도 나오지 않으면(현
 | 패키지 스크립트 | `package.json` 의 `scripts.test` (npm 자리표시자는 제외) |
 | 파이썬 | `pyproject.toml` 에 `pytest` 언급 |
 | 언어 표준 러너 | `go.mod` `Cargo.toml` |
+| JVM 빌드 도구 | `build.gradle(.kts)` `settings.gradle(.kts)` `pom.xml` `src/test/` |
 | dev-cycle 산출물 | `docs/CYCLE.md` + `docs/versions/<VER>/` — 인프라가 없어도 켠다 |
 
 신호가 하나도 없으면 게이트는 조용히 꺼지고, 세션당 1회 안내만 남긴다. 그래도 강제하려면
-`GOODBOY_TEST_GATE=on`, 완전히 끄려면 `off`.
+`GOODBOY_TEST_GATE=on`, 완전히 끄려면 `off`. 테스트 도구와 기존 코드의 테스트를 갖추려면
+`/backfill-tests`를 쓴다(아래).
+
+### 기존 코드 테스트 보강 (v0.36.0, 트랙 L)
+
+테스트 게이트는 **이번에 바꾼 줄**만 본다. 손대지 않은 기존 코드는 테스트가 없어도 통과한다.
+테스트가 부족한 기존 프로젝트를 지금 상태에서 채우려면 `/backfill-tests`를 실행한다. 사용자가
+실행할 때만 동작하고, 새 게이트는 없다.
+
+1. **조사 (읽기만 함)**: `bun lib/cli.ts test-survey`가 프로젝트의 테스트 현황을 보고한다.
+   - 스택과 프레임워크, 종류별 테스트 도구(실행기·커버리지·통합·e2e·UI);
+   - 종류별 테스트 파일 수;
+   - 테스트가 없는 코드: 경계 코드(API·DB 등) → 화면 → 그 외 순서, 같은 순서 안에서는 큰 파일부터.
+
+   `/backfill-tests`는 기본으로 `--all`을 써서, `/cli-update-check`에 등록한 프로젝트까지
+   함께 조사한다. 이 프로젝트만 보거나(인자 없이) 특정 폴더만 볼 수도 있다(`--dir <폴더>`).
+   FE·BE 저장소가 나뉜 작업 폴더라면 그 아래 저장소를 각각 조사한다. 조사는 아무것도 쓰지 않고
+   프로젝트의 도구도 실행하지 않는다. "테스트 없음"은 추정이다: 테스트 파일이 그 코드의 이름을
+   부르면 테스트가 있는 것으로 본다.
+2. **테스트 도구 구성**: 없는 도구(커버리지, 통합 테스트용 컨테이너, e2e용 Playwright 등)는
+   추가할 패키지·파일·명령 목록을 보여 주고 **승인받은 것만** 설치한다. 도구마다 테스트 하나를
+   실제로 돌려 동작을 확인한다. 테스트 실행기 설정 파일(`vitest.config.ts` 등)은 테스트 파일처럼
+   테스트가 필요 없다.
+3. **묶음 단위 작성**: 5개씩(최대 20개) 테스트 에이전트가 테스트를 쓴다.
+   - 기대값은 **현재 동작**이다. 버그로 보이는 동작도 고치지 않고 테스트에 그대로 고정한 뒤,
+     `suspect`로 표시해 보고한다.
+   - 테스트는 로컬(코드, 컨테이너, 로컬 서버)에서만 돈다. 앱을 띄우기 전에 설정에서 로컬이 아닌
+     주소(DB·API·메일 등)를 찾아 로컬 컨테이너나 더미 값으로 바꾼다. 공유·운영 시스템과 실제
+     자격 증명은 쓰지 않는다.
+   - 대상이 `done`이 되려면 기록이 있어야 한다. 그 테스트를 실제로 돌려 통과한 기록, 그리고
+     대상 코드를 일부러 망가뜨렸을 때 테스트가 실패했다는 기록이다. 테스트만 바뀐 턴은 테스트
+     게이트가 보지 않으므로 이 확인은 `backfill-mark`가 직접 한다.
+   - 묶음이 끝날 때마다 계속할지 묻는다. 멈추면 커버리지 도구가 있을 때 전체 테스트를 한 번
+     돌려 커버리지를 보고한다.
+4. **진행 상태**: `.goodboy/test-backfill.json`에 남는다. 다시 실행하면 이어서 진행한다.
+
+만든 테스트를 커밋한 뒤에 약하게 고치거나 지우면, 기존 테스트 규칙(I5)이 리뷰를 요구한다.
+v0.36.0부터 Java·Kotlin 테스트(`src/test/` 등 테스트 소스 폴더의 `*Test.java`, `*IT.java`,
+`*Spec.kt` 등)도 이 규칙과 테스트 카탈로그에 포함된다.
 
 ## 층2 리뷰 — 크기에 맞춰 (v0.32.0, 트랙 H7)
 
@@ -1180,6 +1222,7 @@ v0.8.0까지의 환경변수는 `VCF_` 접두였고, v0.9.0부터 `GOODBOY_`로 
 
 | 버전 | 날짜 | 상태 | 한 줄 요약 |
 |---|---|---|---|
+| v0.36.0 | — | 개발 중 | 기존 코드 테스트 보강: 읽기 전용 조사, 승인 후 테스트 도구 구성, 현재 동작을 고정하는 테스트를 묶음 단위로 작성하는 `/backfill-tests` + Java·Kotlin 테스트 인식 (트랙 L) |
 | v0.35.0 | 2026-10-21 | 배포됨 | 업데이트 점검: CLI 업데이트 뒤 사용자 설정이 계속 동작하는지 점검하는 `/cli-update-check` (트랙 K) + 릴리스 전 실사용·Codex 리뷰 수정 (I9·I10) |
 | v0.34.0 | 2026-10-21 | 배포됨(v0.35.0과 함께) | 현장 리포트: 사용 중 겪은 문제를 정해진 양식으로 이 저장소에 전달 (트랙 J) |
 | v0.33.0 | 2026-10-17 | 배포됨(v0.35.0과 함께) | 테스트 자동화: 바뀐 줄 실행·수용 기준마다 테스트·문서 변경 검증 범위 제한·변경 종류별 테스트 유형·push 전 전체 회귀·기존 테스트 동반 실행·실사용 검증 반영 (트랙 I) |
@@ -1239,6 +1282,18 @@ v0.8.0까지의 환경변수는 `VCF_` 접두였고, v0.9.0부터 `GOODBOY_`로 
 | v0.3.0 | 2026-07-02 | 배포됨 | 컨텍스트 자동 compact 강제 + 재귀 기준 강화 |
 | v0.2.0 | 2026-07-02 | 배포됨 | 재귀 폭주 방어 + 토큰 낭비 방지 게이트 |
 | v0.1.0 (초기 버전) | 2026-06-24 | 배포됨 | 첫 커밋: vcf (Vibe Coding Framework) |
+
+<details>
+<summary><b>v0.36.0</b> — 개발 중 · 기존 코드 테스트 보강 (트랙 L)</summary>
+
+- `/backfill-tests`: 테스트가 부족한 기존 프로젝트에 지금 상태에서 테스트를 채운다. 사용자가 실행할 때만 동작하고 새 게이트는 없다
+- 조사(`test-survey`, `--all`이면 등록된 프로젝트까지, `--dir`이면 그 폴더)는 읽기만 한다: 스택, 종류별 테스트 도구와 테스트 수, 테스트가 없는 코드(경계 → 화면 → 그 외)
+- 없는 테스트 도구는 목록을 보여 주고 승인받은 것만 설치하고, 도구마다 테스트 하나로 동작을 확인한다. 테스트 실행기 설정 파일은 테스트가 필요 없고, Gradle Kotlin 빌드 스크립트는 바뀐 줄 실행 검사에서 빠진다
+- 테스트는 현재 동작을 기대값으로 삼는다. 버그로 보이는 동작은 고치지 않고 `suspect`로 보고한다. 대상은 테스트가 통과한 기록과 대상을 망가뜨렸을 때 실패한 기록이 있어야 `done`이 된다. 진행 상태는 `.goodboy/test-backfill.json`
+- Java·Kotlin 테스트 파일(테스트 소스 폴더 안)을 테스트 카탈로그와 기존 테스트 규칙(I5)이 인식한다
+- 테스트 게이트가 꺼졌다는 안내에 `/goodboy:backfill-tests`를 함께 알린다
+
+</details>
 
 <details>
 <summary><b>v0.35.0</b> — 2026-10-21 · 업데이트 점검 (트랙 K) + 릴리스 전 수정</summary>

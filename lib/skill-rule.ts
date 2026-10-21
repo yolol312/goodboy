@@ -28,6 +28,8 @@ export const WORKFLOW_SKILLS: readonly string[] = [
   'prepare-migration',
   'write-doc',
   'request-review',
+  // Track L (§18): the main session sets up test tools (build files, configs) in it.
+  'backfill-tests',
 ];
 
 /** The pre-G3 names a session started before an upgrade may still invoke. They count only

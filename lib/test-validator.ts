@@ -142,9 +142,22 @@ export function isTestFile(filePath: string): boolean {
   const f = filePath.split('\\').join('/').toLowerCase();
   if (/\.(test|spec)\.[cm]?[jt]sx?$/.test(f)) return true;
   if (/(^|\/)(tests?|__tests__|spec|e2e)\//.test(f)) return true;
+  // A Gradle test source set besides `src/test` (`src/integrationTest/java/`, `src/jvmTest/
+  //   kotlin/`, `src/testFixtures/java/`; track L review: the catalog knew them, the gates did
+  //   not). Matched in its own case and only with a JVM source dir below: `src/latest/` and a
+  //   JS feature dir `src/ABTest/` are none.
+  if (JVM_TEST_SOURCE_SET.test(filePath.split('\\').join('/'))) return true;
   if (/(^|\/)test_[^/]+\.py$/.test(f) || /_test\.(py|go|rb)$/.test(f)) return true;
   return false;
 }
+
+/** A Gradle test source set other than `src/test`, by its JVM source dir (isTestFile). */
+export const JVM_TEST_SOURCE_SET = /(^|\/)src\/(testFixtures|[A-Za-z0-9]+Test)\/(java|kotlin|groovy|scala|resources)\//;
+
+/** A test runner's config (`vitest.config.ts`, `jest.config.js`, `karma.conf.js`): part of the
+ *  test tools, so it needs no test of its own and its lines no coverage (track L review: a
+ *  tool setup ended in a Stop block only the user could clear). */
+export const TEST_RUNNER_CONFIG = /(^|\/)(?:(?:playwright|vitest|jest|cypress)\.config|karma\.conf)\.[cm]?[jt]s$/;
 
 
 /**

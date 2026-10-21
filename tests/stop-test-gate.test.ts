@@ -653,6 +653,8 @@ describe('Stop hook — 층1 테스트 게이트 활성 판정 (auto)', () => {
     const out = await runAuto(tmp, cwd, sessionId);
     expect(out.reason ?? '').not.toContain('No test result covers the changed code');
     expect(out.systemMessage ?? '').toContain('테스트 게이트가 이 저장소에서 비활성');
+    // Track L (L4): the notice names the backfill command.
+    expect(out.systemMessage ?? '').toContain('/goodboy:backfill-tests');
   });
 
   test('같은 세션에서 안내는 반복하지 않는다', async () => {

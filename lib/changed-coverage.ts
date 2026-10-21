@@ -139,8 +139,9 @@ export function coverageExemptions(cwd: string, top: string = repoTop(cwd)): str
   return policyGlobs(cwd, top, 'coverage-exempt');
 }
 
-/** A user glob key's globs in the policy file at the knowledge root, as the file says now. */
-function policyGlobs(cwd: string, top: string, key: UserGlobKey): string[] {
+/** A user glob key's globs in the policy file at the knowledge root, as the file says now
+ *  (also the test survey's, track L). */
+export function policyGlobs(cwd: string, top: string, key: UserGlobKey): string[] {
   const { root, policyExists } = knowledgeRoot(cwd);
   if (!policyExists || outside(relative(top, root))) return [];
   try {
@@ -255,7 +256,9 @@ export function sessionUserGlobs(sessionId: string, cwd: string, top: string, ke
  *  the Stop past its timeout). */
 function measurableCode(abs: string, until: number): boolean {
   const ext = extname(abs).toLowerCase();
-  if (!CODE_EXT.has(ext) || !existsSync(abs) || /\.d\.[mc]?ts$/i.test(abs)) return false;
+  // A Gradle Kotlin build script runs in the build, never in a test (track L review: a test
+  //   tool setup that adds JaCoCo could not pass).
+  if (!CODE_EXT.has(ext) || !existsSync(abs) || /\.d\.[mc]?ts$/i.test(abs) || /\.gradle\.kts$/i.test(abs)) return false;
   if (Date.now() > until) return true;
   if (ext === '.java') return !codeFreeJava(abs);
   if (!JS_EXT.has(ext)) return true;

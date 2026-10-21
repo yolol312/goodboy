@@ -59,6 +59,7 @@ const KNOWN_CATEGORIES = new Set([
   'diagnose-failure',
   'write-doc',
   'request-review',
+  'backfill-tests',
 ]);
 
 /** Prepended to the checklist of a category command typed without a description (track G:

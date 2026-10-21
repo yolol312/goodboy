@@ -993,6 +993,7 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
           habitWarnings.push(
             `층1 테스트 게이트가 이 저장소에서 비활성입니다 — 테스트를 돌릴 수단을 찾지 ` +
               `못했습니다(테스트 디렉터리/설정 파일/package.json scripts.test 등). ` +
+              `테스트 도구와 기존 코드의 테스트를 갖추려면 \`/goodboy:backfill-tests\`를 실행하세요. ` +
               `강제하려면 \`GOODBOY_TEST_GATE=on\` 으로 켜세요.`,
           );
         }

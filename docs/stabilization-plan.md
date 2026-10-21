@@ -24,7 +24,8 @@ core gates can switch off silently, false positives can deadlock a session, and
 
 1. **Feature freeze** — no new gates until v1.0. Exceptions: track G (§10) and track H
    (§14, project knowledge, v0.32.0), both approved by the user on 2026-10-14; track I (§15,
-   v0.33.0), track J (§16, v0.34.0) and track K (§17, v0.35.0), approved on 2026-10-16.
+   v0.33.0), track J (§16, v0.34.0) and track K (§17, v0.35.0), approved on 2026-10-16;
+   track L (§18, v0.36.0), requested by the user on 2026-10-21.
 2. **Test first** — every fix lands with a regression test that fails before the fix.
 3. **Measure before trading cost against detection.**
 4. **Proportional cost** — guardrail overhead scales with change size and risk.
@@ -45,6 +46,7 @@ so work is released in batches:
 | v0.33.0 | track I (test automation, §15; issues #1–#7, #13–#15, #17, and I10). Released with v0.35.0 |
 | v0.34.0 | track J (field reports, §16; issues #8, #9, #11). Released with v0.35.0 |
 | v0.35.0 | track K (update checkups, §17; issue #10 for K1, the later steps are proposals), with the fixes of the fourth real-use trial (§15.12, §15.13) and of a Codex review (§15.14). Released 2026-10-21 (d3df5f2): v0.31.0–v0.35.0 went out together in one push to `main` |
+| v0.36.0 | track L (test backfill for existing projects, §18) |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
 
 ## 4. A — Fix silent failures and deadlocks
@@ -2523,6 +2525,128 @@ Not prevented:
 - Headless smoke tests miss interactive approval, resume, compaction and long sessions.
 - A stable model ID can hide backend changes.
 - Usage counts prioritize; they do not justify a removal.
+
+## 18. L — Test backfill for existing projects (v0.36.0)
+
+The user's request (2026-10-21): most existing projects lack tests, and some have no e2e
+tests at all; goodboy should make tests appear in them from their current state. Until now
+goodboy never backfilled. The test rules check the changed lines only, and a repo with no
+test runner turns the test gate off with a notice.
+
+Decided by the user (2026-10-21):
+- A command does it, on request (`/goodboy:backfill-tests`). There is no new gate and no
+  session-start offer, and the changed-line rules stay as they are.
+- Expected values pin the current behavior (characterization tests). Behavior that looks
+  wrong stays as it is in the test, marked and reported. The backfill never fixes code.
+- Missing test tools (unit runner, coverage, integration, e2e) are added only after the user
+  approves the list of packages, files and commands.
+- First a read-only survey of all registered projects, then one project at a time.
+
+Steps:
+- L1 survey: `cli.ts test-survey [--all | --dir <dir>] [--max N]`. It is read-only: it never
+  writes and never runs a project's tools. Per project it reports:
+  - stacks and frameworks, from the manifests;
+  - the test tools found per kind (runner, coverage, integration, e2e, ui);
+  - test files per type;
+  - code files by the I3b rules (boundary, UI, other);
+  - untested targets, ranked boundary → UI → other, then by size;
+  - gap keys.
+
+  `--all` surveys the current project and the checkup's registered projects (§17); `--dir`
+  surveys one dir, such as a repo below a workspace dir that is none. "Untested" is an
+  estimate: a code file counts as tested when a test file names its stem (a JS/TS index
+  file when a test imports its dir).
+- L2 JVM tests: Java and Kotlin test files count as test files for the catalog, the survey
+  and the existing-test rules (I5): the surefire and failsafe names (and Kotest's
+  `*Spec.kt`) in a test source set (`src/test`, `src/integrationTest`, `src/jvmTest`,
+  `src/testFixtures`) or a `test` dir. Surefire's `Test*` is left out: there it names
+  helpers (`TestUtils`) far more often. That covers their types, feature names, case counts
+  and strength. Before this, a Gradle or Maven project's tests were invisible to all three.
+  Such a project's catalog turns stale once and the docs rule has it regenerated. Every
+  file in those source sets is a test file for the gates too (isTestFile): they need no
+  tests and the test agents may write them.
+- L3 backfill:
+  - State lives in `.goodboy/test-backfill.json`: the targets (`todo`, `done`, `skipped`,
+    `suspect`) and the batches.
+  - CLI commands:
+    - `backfill-plan` merges a fresh survey and keeps the statuses;
+    - `backfill-next [--size N] [--pick a,b]` hands out the next batch;
+    - `backfill-mark` records an outcome.
+  - `done` and `suspect` need evidence, checked by the mark itself: the Stop's test gate
+    skips a turn that changed only tests. The evidence is passing layer-1 records (one per
+    test-lead member is fine) that stand on their own and name the target:
+    - each test in one made after the test last changed (modification or status change
+      time), with a passing suite that ran it;
+    - one, made after every test last changed, with an acceptance entry whose mutation of
+      the target the tests detected.
+  - The skill `backfill-tests` runs the survey, then the tools setup (skill
+    `setup-test-infra`, with approval). It then hands batches of five to the test agents and
+    asks the user after each batch whether to go on. The review gate covers the new tests
+    and the setup's files.
+- L4: the notice for an inactive test gate names the command. Once the new tests are
+  committed, I5 catches one that is weakened or deleted (now for JVM too); the report offers
+  the commit. When the user stops, the skill runs the whole suite once with coverage and
+  reports it. There is no coverage ratchet: a partial run's total would block falsely.
+
+As built:
+- `backfill-tests` is the eighth workflow skill (§10.4): a category command, skill-rule
+  evidence and effort high, since the main session edits build files and configs in it.
+  `setup-test-infra` is a tool skill.
+- `lib/test-survey.ts`:
+  - Test files are the shared pattern, Cypress specs, and code in a test dir. A helper in a
+    test dir names code but is not counted as a test.
+  - Code files leave out dependencies, builds, generated code, docs, minified and config
+    files, and libraries copied under a static web root (`static/js/lib/`).
+  - Page templates (`.jsp`, `.html`, …) are UI targets.
+  - With any e2e test in the project, a UI file that some test names is not asked for a ui
+    or e2e test of its own: e2e reaches pages by URL.
+  - Test files in a skipped dir name nothing, links are no code files, and the user's
+    `coverage-exempt` and `test-type-exempt` globs apply as in the gates.
+  - Skipped dirs are dropped before the 50,000-file cap; scripts are checked per command
+    (no regex over a whole script). Build-output names (`build`, `out`, `target`, `docs`, …)
+    are skipped only outside `src/`, where they are package names; under a static web root
+    `dist` and `build` hold bundles and are skipped too.
+- `lib/test-backfill.ts`:
+  - The state is read without following a link and fully validated; one goodboy did not
+    write is refused, never overwritten.
+  - Every change runs under an exclusive lock file (parallel marks lost each other) and
+    is written through a temp file and a rename; a linked `.goodboy` dir is refused.
+  - Paths are repo-relative, whatever the shell's dir. An unfinished batch's open targets
+    come back before a new batch, and a re-plan keeps them.
+- A tool setup can finish (review of L, high): test runner configs (`vitest.config.ts`,
+  `jest.config.js`, …) need no test, like test files, and Gradle Kotlin build scripts need
+  no changed-line coverage. Other build files the setup changes are named in its smoke
+  record.
+- The tester brief has them check the app's config for non-local hosts before anything
+  starts it, and point each at a local container or a dummy value.
+
+Review of L, in four passes:
+- Two reviewers (code; skills, docs and tests): 3 high, 15 medium, 12 low. All fixed but
+  two lows (the first two limits below).
+- A narrow check of the fixes: 3 lows and one more gap (packages named like build outputs).
+  All fixed but the third limit.
+- A review of the docs: one medium (the gates did not know the Gradle test source sets the
+  catalog knew) and five lows. All fixed but the fourth limit.
+- A check of those fixes: two mediums (the source-set rule also took a JS dir `src/ABTest/`
+  as tests; `HTTPTest.java` was no test name). Both fixed: a source set needs a JVM source
+  dir below it (`src/integrationTest/java/`), and only `IT` needs a lower-case letter or
+  digit before it.
+
+Limits kept:
+- Kotest spec styles count no cases (their checks count).
+- The test catalog writer still follows a linked `.goodboy` dir (it predates L).
+- Taking over a stale backfill lock checks its age, then removes it: two waiters after a
+  crashed holder can both get it in a narrow window.
+- A JVM class in a test dir named like a test but abstract or a base (`BaseTest`,
+  `AbstractIT`) counts as a test file.
+
+Not prevented:
+- Nothing is backfilled without the command. No gate asks for tests of code nobody changes.
+- e2e tests need a local server. An app that cannot start locally (missing services,
+  external systems) is reported as blocked and is never pointed at a shared or production
+  system.
+- "Tested" in the survey means named by a test. A named file can still be poorly tested; the
+  whole suite's coverage is the real measure.
 
 ## Appendix — mutation set (2026-10-12 review)
 

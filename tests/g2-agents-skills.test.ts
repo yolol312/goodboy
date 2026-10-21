@@ -69,6 +69,8 @@ const TOOL_SKILLS: Record<string, string | null> = {
   'report-goodboy': 'medium',
   // Track K (§17, K1d): user-invocable, run by the user after a CLI update.
   'cli-update-check': 'high',
+  // Track L (§18): the backfill-tests workflow's tool setup.
+  'setup-test-infra': 'medium',
 };
 const USER_INVOCABLE_TOOL_SKILLS = new Set(['keep-project-knowledge', 'report-goodboy', 'cli-update-check']);
 
@@ -117,7 +119,7 @@ describe('the 24 agents', () => {
   }
 });
 
-describe('the 26 tool skills (23 from G2, keep-project-knowledge from H2, report-goodboy from J1, cli-update-check from K1d)', () => {
+describe('the 27 tool skills (23 from G2, keep-project-knowledge from H2, report-goodboy from J1, cli-update-check from K1d, setup-test-infra from L)', () => {
   for (const [name, effort] of Object.entries(TOOL_SKILLS)) {
     test(`${name}: format`, () => {
       const path = join(ROOT, 'skills', name, 'SKILL.md');

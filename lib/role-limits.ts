@@ -10,14 +10,13 @@ import { basename, relative, resolve as resolvePath, sep } from 'node:path';
 import { commandSegments, dropRedirects, gitSubcommandAt, plainWord, readCommand, xargsCommandAt } from './outward-command';
 import { namesOwnResultDir } from './result-dir';
 import { agentName, LEGACY_AGENTS, roleOf, ROUTE, type RoleSpec } from './routing-policy';
-import { isTestFile } from './test-validator';
+import { isTestFile, TEST_RUNNER_CONFIG } from './test-validator';
 import { classifyPath } from './verification-scope';
 
 // Beyond layer 1's isTestFile: more test dirs, JVM/.NET/Ruby names, test-runner configs.
 const TEST_DIR_EXTRA = /(^|\/)(__mocks__|specs|cypress|playwright|fixtures|testdata)\//;
 const TEST_FILE_EXTRA =
   /(\.e2e\.[cm]?[jt]sx?$)|(_test\.exs?$)|((^|\/)conftest\.py$)|(Tests?\.(java|kt|cs|swift)$)|(_spec\.rb$)/;
-const TEST_CONFIG = /(^|\/)(playwright|vitest|jest|cypress)\.config\.[cm]?[jt]s$/;
 
 /** Project-relative path with `/` separators, or null when the file is outside the project. */
 export function projectRelative(absPath: string, projectRoot: string): string | null {
@@ -27,7 +26,7 @@ export function projectRelative(absPath: string, projectRoot: string): string | 
 }
 
 export function isTestPath(rel: string): boolean {
-  return isTestFile(rel) || TEST_DIR_EXTRA.test(rel) || TEST_FILE_EXTRA.test(rel) || TEST_CONFIG.test(rel);
+  return isTestFile(rel) || TEST_DIR_EXTRA.test(rel) || TEST_FILE_EXTRA.test(rel) || TEST_RUNNER_CONFIG.test(rel);
 }
 
 /** Why the role may not write this file, or null when it may. */

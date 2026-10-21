@@ -18,6 +18,8 @@ const WORKFLOWS: Record<string, { effort: string; risk: string }> = {
   'prepare-migration': { effort: 'xhigh', risk: 'risky' },
   'write-doc': { effort: 'medium', risk: 'simple' },
   'request-review': { effort: 'low', risk: 'simple' },
+  // Track L (§18).
+  'backfill-tests': { effort: 'high', risk: 'medium' },
 };
 
 describe('workflow skills', () => {
@@ -26,7 +28,9 @@ describe('workflow skills', () => {
       const path = join(ROOT, 'skills', name, 'SKILL.md');
       const text = readFileSync(path, 'utf8');
       const lines = text.split('\n').length;
-      expect([name, lines >= 30 && lines <= 55]).toEqual([name, true]);
+      // backfill-tests runs four phases (survey, tools, batches, report) and briefs the
+      //   testers on the evidence its marks need (track L review).
+      expect([name, lines >= 30 && lines <= (name === 'backfill-tests' ? 75 : 55)]).toEqual([name, true]);
       const fm = parseSkillFrontmatter(path)!;
       expect([fm.name, fm.risk_default]).toEqual([name, want.risk as never]);
       expect(text).toMatch(new RegExp(`^effort: ${want.effort}$`, 'm'));

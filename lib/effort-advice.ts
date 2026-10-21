@@ -26,6 +26,8 @@ export const WORKFLOW_EFFORT: Record<string, Effort> = {
   'prepare-migration': 'xhigh',
   'write-doc': 'medium',
   'request-review': 'low',
+  // Track L (§18).
+  'backfill-tests': 'high',
 };
 
 const LADDER: Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
