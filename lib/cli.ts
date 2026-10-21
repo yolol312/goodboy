@@ -63,8 +63,10 @@ import {
   updateCheckupState,
   writeRunFile,
 } from './checkup';
+import { compareRuns, comparisonSummary } from './compare';
 import { checkHealth, fitHealth, healthSummary } from './health';
-import { allIdentifiers, buildInventory, fitInventory, inventoryLists, inventorySummary } from './inventory';
+import { allIdentifiers, buildInventory, fitInventory, inventoryLists, inventorySummary, projectRoots, suggestProjects } from './inventory';
+import { fitProbes, probeEstimate, probesSummary, runProbes } from './probes';
 import { GOODBOY_CASES, readUserCases, runSmoke, smokeSummary } from './smoke';
 
 // ---- 유틸 ----
@@ -981,6 +983,10 @@ async function cmdCheckup(command: string, args: string[]): Promise<void> {
         return Number.isInteger(n) && n >= 0 ? n : dflt;
       };
       const { listed, left_out } = limitFindings(triage.findings, limit('--max-matched', 200), limit('--max-unmapped', 50));
+      // `--run`: the listed findings also go to the run dir for the report (K1d); checked
+      //   before the state is touched.
+      const target = run ? optValue(args, '--name') ?? 'changelog.json' : null;
+      if (run && target) runFileTarget(dir, run, target);
       // The pending run's own range is noted in the state: completing the run keeps it, so a
       //   run completed over a gap says so to the next one (K1a review).
       const p = s.pending;
@@ -992,7 +998,7 @@ async function cmdCheckup(command: string, args: string[]): Promise<void> {
           if (!/another session/.test(String(err))) throw err;
         }
       }
-      out({
+      const result = {
         changelog: path,
         status: range.status,
         from: range.from,
@@ -1003,7 +1009,9 @@ async function cmdCheckup(command: string, args: string[]): Promise<void> {
         counts: triage.counts,
         left_out,
         findings: listed,
-      });
+      };
+      const written = run && target ? writeRunFile(dir, run, target, JSON.stringify(result) + '\n') : null;
+      out({ ...result, ...(written ? { written } : {}) });
       return;
     }
     case 'checkup-write': {
@@ -1019,7 +1027,10 @@ async function cmdCheckup(command: string, args: string[]): Promise<void> {
       const addP = optValue(args, '--add');
       const removeP = optValue(args, '--remove');
       const s = addP || removeP ? updateCheckupState(dir, (st) => setProject(st, (addP ?? removeP)!, addP !== undefined)) : readCheckupState(dir);
-      out({ projects: s.projects ?? [] });
+      // `--suggest`: projects Claude Code knows that have customizations, for the user to
+      //   choose from; never registered or scanned here (K1d).
+      const sug = args.includes('--suggest') ? suggestProjects(process.env, s.projects ?? [], projectRoots(process.cwd(), []).current) : null;
+      out({ projects: s.projects ?? [], ...(sug ? { suggested: sug.suggested, more_suggested: sug.more, problems: sug.problems } : {}) });
       return;
     }
     case 'checkup-inventory': {
@@ -1053,6 +1064,49 @@ async function cmdCheckup(command: string, args: string[]): Promise<void> {
       out({ ...smokeSummary(results, user.problems), ...(path ? { written: path } : {}) });
       return;
     }
+    case 'checkup-compare': {
+      // This run's problems against the last completed run's: new, persisting, resolved, or
+      //   baseline when there is nothing of the same step to compare with (K1d).
+      if (!run) fail('checkup-compare: pass --run <id>');
+      const name = optValue(args, '--name') ?? 'compare.json';
+      runFileTarget(dir, run, name);
+      const last = readCheckupState(dir).lastChecked?.run ?? null;
+      const c = compareRuns(dir, run, last === run ? null : last);
+      const path = writeRunFile(dir, run, name, JSON.stringify(c) + '\n');
+      out({ ...comparisonSummary(c), written: path });
+      return;
+    }
+    case 'checkup-probe': {
+      // Integration sessions make model turns: `--estimate` shows what they run and cost; they
+      //   run only with that estimate's id, after the user approved it (K1d).
+      if (!run) fail('checkup-probe: pass --run <id> (--estimate, or --estimate-id <id> after the user approved it)');
+      const name = optValue(args, '--name') ?? 'probes.json';
+      const target = runFileTarget(dir, run, name);
+      const inv = buildInventory(process.cwd(), process.env, readCheckupState(dir).projects ?? []);
+      const est = probeEstimate(run, inv);
+      if (args.includes('--estimate')) {
+        out(est);
+        return;
+      }
+      const given = optValue(args, '--estimate-id');
+      if (!given) fail('checkup-probe: run --estimate first, show it to the user, and pass --estimate-id <id> only after they approved it');
+      // The new id is never printed here: an id comes only from an estimate the user is shown
+      //   (K1d review: the refusal handed out the id that passes the gate).
+      if (given !== est.id) fail('checkup-probe: the estimate changed since the user approved it; run --estimate again and ask the user');
+      // The probes ran already for this run: running them again would pay for them twice and
+      //   then fail to write (K1d review). Two runs started at once both pass this check; the
+      //   skill starts one and waits for it.
+      if (existsSync(target)) fail(`checkup-probe: ${name} exists for this run; the probes ran already (a new checkup run probes again)`);
+      const p = fitProbes(await runProbes(inv, est), MAX_RUN_FILE_BYTES - 1);
+      try {
+        out({ ...probesSummary(p), written: writeRunFile(dir, run, name, JSON.stringify(p) + '\n') });
+      } catch (err) {
+        // The sessions were paid for: print what they found even when the file cannot be written.
+        out({ ...probesSummary(p), write_error: err instanceof Error ? err.message : String(err) });
+        process.exitCode = 1;
+      }
+      return;
+    }
     case 'checkup-complete':
       if (!run) fail('checkup-complete: pass --run <id>');
       out({ ok: true, state: updateCheckupState(dir, (st) => completeRun(st, run, new Date(), session)) });
@@ -1068,7 +1122,7 @@ async function cmdCheckup(command: string, args: string[]): Promise<void> {
 
 const USAGE =
   '사용법: bun lib/cli.ts <command> [args...]\n' +
-  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text> | checkup-state | checkup-begin [--cli <v>] [--replace] | checkup-changelog [--from <v>|none] [--to <v>] [--ids a,b] [--changelog <path>] [--max-matched N] [--max-unmapped N] | checkup-write --run <id> --name <file> | checkup-complete --run <id> | checkup-abort --run <id> | checkup-projects [--add <dir>|--remove <dir>] | checkup-inventory [--run <id>] (checkup-changelog --inventory adds its identifiers) | checkup-health [--run <id>] [--timeout-ms N] | checkup-smoke [--run <id>]';
+  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text> | checkup-state | checkup-begin [--cli <v>] [--replace] | checkup-changelog [--from <v>|none] [--to <v>] [--ids a,b] [--changelog <path>] [--max-matched N] [--max-unmapped N] [--run <id>] | checkup-write --run <id> --name <file> | checkup-complete --run <id> | checkup-abort --run <id> | checkup-projects [--add <dir>|--remove <dir>] [--suggest] | checkup-inventory [--run <id>] (checkup-changelog --inventory adds its identifiers) | checkup-health [--run <id>] [--timeout-ms N] | checkup-smoke [--run <id>] | checkup-compare --run <id> | checkup-probe --run <id> (--estimate | --estimate-id <id>)';
 
 async function main(): Promise<void> {
   const cwd = process.cwd();
@@ -1153,6 +1207,8 @@ async function main(): Promise<void> {
       case 'checkup-inventory':
       case 'checkup-health':
       case 'checkup-smoke':
+      case 'checkup-compare':
+      case 'checkup-probe':
         await cmdCheckup(command, args);
         break;
       default:

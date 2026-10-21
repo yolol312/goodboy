@@ -12,19 +12,17 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
-import { type Bounded, runBounded } from './bounded';
+import { type Bounded, onInterrupt, runBounded } from './bounded';
 import { claudeBin } from './checkup';
 import { readRegular } from './safe-read';
-import { maskSecrets } from './secret-patterns';
+import { maskedClip } from './secret-patterns';
 
 const MAX_LOG = 16 * 1024 * 1024;
 const MAX_PLUGINS = 50;
 /** All four steps together; past it the rest are skipped and named. */
 const TOTAL_MS = 5 * 60_000;
 
-/** Command text to keep: masked on a window a little past the cut, so a secret that spans
- *  the cut is still caught, and never on the whole text (masking long text is slow). */
-const clip = (s: string, n: number): string => maskSecrets(s.slice(0, n + 200)).slice(0, n);
+const clip = maskedClip;
 
 /** ANSI colors (`claude doctor` colors its warning line). */
 const plain = (s: string): string => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
@@ -166,10 +164,12 @@ export async function checkHealth(cwd: string, opts: { env?: NodeJS.ProcessEnv; 
   const deadline = Date.now() + (opts.totalMs ?? TOTAL_MS);
   const problems: HealthProblem[] = [];
   const failed = (step: string, why: string) => problems.push({ kind: 'step-failed', subject: step, message: why });
+  // The running command, killed on an interrupting signal.
+  let kill: ((s: 'SIGTERM' | 'SIGKILL') => void) | null = null;
   const run = async (argv: string[], ms: number): Promise<Bounded> => {
     const left = deadline - Date.now();
     if (left < 1000) return { code: null, stdout: '', stderr: '', timedOut: false, ms: 0, error: "skipped: the checkup's time ran out" };
-    return runBounded([bin, ...argv], { cwd, env, timeoutMs: Math.min(ms, left) });
+    return runBounded([bin, ...argv], { cwd, env, timeoutMs: Math.min(ms, left), onSpawn: (k) => (kill = k) });
   };
 
   // 1. The installed plugins.
@@ -222,7 +222,14 @@ export async function checkHealth(cwd: string, opts: { env?: NodeJS.ProcessEnv; 
   const logDir = mkdtempSync(join(tmpdir(), 'goodboy-checkup-log-'));
   try {
     const logFile = join(logDir, 'debug.log');
-    const r = await run(['-p', '/skill-doctor', '--output-format', 'json', '--debug-file', logFile], Math.max(t, 120_000));
+    // A signal kills the nested session and removes its log (it holds hook commands).
+    const r = await onInterrupt(
+      () => {
+        kill?.('SIGTERM');
+        rmSync(logDir, { recursive: true, force: true });
+      },
+      () => run(['-p', '/skill-doctor', '--output-format', 'json', '--debug-file', logFile], Math.max(t, 120_000)),
+    );
     try {
       const j = JSON.parse(r.stdout);
       skillDoctor.turns = typeof j.num_turns === 'number' ? j.num_turns : null;

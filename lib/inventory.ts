@@ -14,7 +14,7 @@
 //   checkup dir). Other projects are never scanned.
 
 import { createHash } from 'node:crypto';
-import { lstatSync, readdirSync, realpathSync } from 'node:fs';
+import { lstatSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { claudeConfigDir, isDir, isUnder } from './private-files';
 import { readRegular } from './safe-read';
@@ -531,6 +531,45 @@ export function projectRoots(cwd: string, registered: readonly string[], config:
   return { current, roots: uniqueSorted(roots), problems };
 }
 
+/** Projects to suggest for the registry (K1d): the dirs Claude Code's global config knows
+ *  (its `projects` keys) that have customizations of their own, are not registered and are
+ *  not the current project or HOME. Only suggested to the user, never scanned. The global
+ *  config is `.claude.json` in CLAUDE_CONFIG_DIR when set, else in HOME. */
+export function suggestProjects(env: NodeJS.ProcessEnv, registered: readonly string[], current: string, max = 30): { suggested: string[]; more: number; problems: string[] } {
+  const c = (env.CLAUDE_CONFIG_DIR ?? '').trim();
+  const file = c !== '' ? join(resolve(c), '.claude.json') : join((env.HOME ?? '').trim() || dirname(claudeConfigDir(env)), '.claude.json');
+  const r = readRegular(file, 16 * 1024 * 1024, true);
+  if (r === 'absent') return { suggested: [], more: 0, problems: [] };
+  let keys: string[] = [];
+  try {
+    if (typeof r !== 'object') throw new Error();
+    const j = JSON.parse(r.text);
+    keys = j && typeof j.projects === 'object' && j.projects ? Object.keys(j.projects) : [];
+  } catch {
+    return { suggested: [], more: 0, problems: [`${file} is not a readable JSON object of up to 16 MB`] };
+  }
+  const cfg = canonical(claudeConfigDir(env));
+  const skip = new Set([...registered.map(canonical), canonical(current)]);
+  const has = (d: string) => ['agents', 'skills', 'commands'].some((x) => isDir(join(d, '.claude', x))) || ['settings.json', 'settings.local.json'].some((x) => fileThere(join(d, '.claude', x)));
+  const found = uniqueSorted(
+    keys
+      .slice(0, 5000)
+      .filter((k) => k.length <= 1000 && isAbsolute(k) && isDir(k))
+      .map(canonical)
+      .filter((d) => !skip.has(d) && canonical(join(d, '.claude')) !== cfg && has(d)),
+  );
+  return { suggested: found.slice(0, max), more: Math.max(0, found.length - max), problems: [] };
+}
+
+/** Whether `p` is a file, through links (a linked settings file is a real setup). */
+function fileThere(p: string): boolean {
+  try {
+    return statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
 /** The installation of a plugin that applies here: the current project's, else one without a
  *  project (user or managed); another project's never. */
 function applicableInstall(list: unknown, current: string): { installPath?: unknown } | undefined {
@@ -627,6 +666,19 @@ export function buildInventory(cwd: string, env: NodeJS.ProcessEnv = process.env
 /** Every identifier, for `checkup-changelog --ids`. */
 export function allIdentifiers(ids: Identifiers): string[] {
   return uniqueSorted([...ids.events, ...ids.fields, ...ids.keys, ...ids.flags, ...ids.env]);
+}
+
+/** The pinned models of the agents (not an alias), for K1d's model probes: unique, in a plain
+ *  model-id form only (a value from a file any cloned repo can hold becomes a CLI argument). */
+export function pinnedModels(inv: Inventory): { models: string[]; skipped: string[] } {
+  const models = new Set<string>();
+  const skipped = new Set<string>();
+  for (const c of inv.components) {
+    const m = c.kind === 'agent' ? c.frontmatter?.model : undefined;
+    if (typeof m !== 'string' || m.trim() === '' || MODEL_ALIASES.has(m.trim())) continue;
+    (/^[A-Za-z0-9][\w.:@\[\]-]{0,99}$/.test(m.trim()) ? models : skipped).add(m.trim().slice(0, 100));
+  }
+  return { models: [...models].sort(), skipped: [...skipped].sort() };
 }
 
 /** Text from definition files on its way to the model: one line, bounded. It is data from

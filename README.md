@@ -420,7 +420,8 @@ check-spec-coverage, check-security, check-infra-config, check-evidence, write-r
 probe-runtime, attack-sandbox, cite-sources, summarize-diff, follow-design-tokens, check-code-quality,
 check-ui-states, run-e2e, record-review, record-tests, run-long-command, run-codex-review,
 measure-coverage, follow-agent-rules, keep-project-knowledge(`/` 메뉴에도 보임, 트랙 H),
-report-goodboy(`/report-goodboy`, 트랙 J: goodboy 자체의 문제를 현장 리포트로 남김).
+report-goodboy(`/report-goodboy`, 트랙 J: goodboy 자체의 문제를 현장 리포트로 남김),
+cli-update-check(`/cli-update-check`, 트랙 K: CLI 업데이트 뒤 사용자 설정 점검).
 
 ## 결정 근거 기록 (4분류)
 
@@ -646,7 +647,7 @@ goodboy/                                # 플러그인 루트
 │   ├── write-doc/SKILL.md
 │   ├── request-review/SKILL.md
 │   ├── setup-statusline/SKILL.md       # 상태바 설치/연동
-│   └── <도구 스킬 25개>/SKILL.md        # 에이전트가 쓰는 절차 (check-*, record-*, run-*, write-* …, keep-project-knowledge, report-goodboy)
+│   └── <도구 스킬 26개>/SKILL.md        # 에이전트가 쓰는 절차 (check-*, record-*, run-*, write-* …, keep-project-knowledge, report-goodboy, cli-update-check)
 ├── agents/                             # 에이전트 24개 (research-*, build-*, review-*, test-*)
 │   ├── test-unit.md                    # 층1 — 테스트 작성/실행·red-green·커버리지 (구 test-changes)
 │   └── review-all.md                   # 층2 — 전 축 또는 축 하나 리뷰 (구 review-changes)
@@ -1242,9 +1243,12 @@ v0.8.0까지의 환경변수는 `VCF_` 접두였고, v0.9.0부터 `GOODBOY_`로 
 <details>
 <summary><b>v0.35.0</b> — 미정 · 업데이트 점검 (계획, 트랙 K)</summary>
 
-- (계획) K1 (#10): Claude Code CLI 업데이트 뒤 사용자가 직접 실행하는 `cli-update-check` 스킬. 새 훅 등록이나 게이트 면제는 없다
-- 점검 내용: 설정된 구성요소와 실제로 로드된 구성요소 비교, 지난 점검 이후 CLI 변경 이력 대조, `claude plugin validate`·`/skill-doctor` 상태 확인, goodboy 훅 스모크 테스트
+- K1 (#10): Claude Code CLI 업데이트 뒤 사용자가 직접 실행하는 `/cli-update-check` 스킬. 새 훅 등록이나 게이트 면제는 없다. 상태와 보고서는 `~/.claude/goodboy/checkups/`에 남고, 보고서는 정해진 CLI(`checkup-write`)로만 쓴다
+- 점검 내용: 지난 점검 이후 CLI 변경 이력을 사용 중인 식별자(훅 이벤트·필드·키·플래그·환경변수)와 대조, 설정된 구성요소와 실제로 로드된 구성요소 비교(`claude plugin validate`, 디버그 로그, `/skill-doctor`, `claude doctor`), 모델 호출 없는 훅 스모크 테스트(goodboy 훅과 사용자가 `smoke.json`에 정의한 훅)
 - 서브에이전트 정의도 점검: 고정된 모델 ID, 아무것도 가리키지 않는 `tools:`, CLI가 무시하는 frontmatter 키, 이름 중복·가림, 위임 정책 위반을 정적으로 검사
+- 보고서는 지난 점검 이후 새로 생긴 문제(업데이트 회귀 후보)와 원래 있던 문제, 해결된 문제를 나눈다
+- 통합 세션(실제 설정으로 도는 Haiku 세션 하나로 훅 실행·서브에이전트 호출·깊이 제한을 보고, 고정 모델마다 그 모델로 짧은 요청 두 번)은 비용 견적을 사용자가 승인한 뒤에만 돈다
+- 다른 프로젝트는 사용자가 고른 것만 등록해 점검한다
 - 유료 실행과 사용자 설정 수정은 모두 사용자 승인 뒤에만 한다
 - 이후 단계(K2 조용한 감지, K3 모델 업데이트 점검, K4 goodboy 자체 평가)는 제안 상태이고 일정은 없다
 

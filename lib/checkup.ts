@@ -11,7 +11,7 @@
 // - Reports go only into `runs/<run-id>/` through writeRunFile, never a general write path.
 
 import { spawnSync } from 'node:child_process';
-import { linkSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
+import { linkSync, lstatSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { checkDir, checkedPrivateDir, claudeConfigDir, createNew, isDir, isUnder, processAlive } from './private-files';
@@ -507,6 +507,33 @@ export function runFileTarget(dir: string, run: string, name: string): string {
   checkDir(rd, 'the run dir');
   if (!isUnder(rd, dir)) throw new Error(`the run dir ${rd} is outside the checkup dir`);
   return join(rd, name);
+}
+
+/** Reads one file of a run, the pending one or an earlier one (K1d compares a run with the
+ *  last completed one), under the writer's rules: a run id, a plain name, real private dirs
+ *  inside the checkup dir, and a regular file up to the cap, never through a link. */
+export function readRunFile(dir: string, run: string, name: string): string | 'absent' | 'refused' {
+  if (!RUN_ID.test(run) || !RUN_FILE.test(name) || name.includes('..')) return 'refused';
+  const runs = join(dir, 'runs');
+  const rd = join(runs, run);
+  for (const [d, what] of [
+    [runs, 'the runs dir'],
+    [rd, 'the run dir'],
+  ] as const) {
+    try {
+      lstatSync(d);
+    } catch {
+      return 'absent';
+    }
+    try {
+      checkDir(d, what);
+    } catch {
+      return 'refused';
+    }
+  }
+  if (!isUnder(rd, dir)) return 'refused';
+  const r = readRegular(join(rd, name), MAX_RUN_FILE_BYTES, true);
+  return typeof r === 'object' ? r.text : r;
 }
 
 /** Writes one new report file into `runs/<run>/`, and nowhere else: the run must be the

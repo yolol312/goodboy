@@ -2219,6 +2219,130 @@ on a window 200 characters past its cut, then cut (masking the whole text is slo
 - Secret masking: the URL-credential pattern bounds the scheme to 31 characters; unbounded,
   it was quadratic (2.2 s on 64 KB of `a.a.…`).
 
+K1d as built (`skills/cli-update-check/SKILL.md`, `lib/compare.ts`, `lib/probes.ts`,
+`cli.ts checkup-compare`, `checkup-probe`, `checkup-projects --suggest`,
+`checkup-changelog --run`):
+- The skill (user-invocable, `/cli-update-check`) runs the steps in order: state and begin;
+  project suggestions, registered only as the user picks them; inventory, changelog, health
+  and smoke; the probe estimate, and the probes only on the user's yes; the comparison; the
+  changelog triage; an English report through `checkup-write`; a short Korean summary; then
+  complete, or abort with the reason. It changes no customization: fixes are proposed with
+  their owner and evidence, and applied only in a later step the user approves.
+- Comparison (`checkup-compare --run`, `compare.json`): the run's problems (health problems,
+  failed smoke cases and case problems, inventory problems, agent findings, probe problems)
+  against those of the last completed run (`lastChecked.run`), check by check. Each problem
+  belongs to the check that finds it: a health step (validate per plugin), a smoke case, the
+  inventory, the agent checks, or a probe. A check counts as run when it did not fail or get
+  skipped. `new`: the last run ran the same check without the problem (an update-regression
+  candidate); `persisting`: both runs have it; `resolved`: this run ran the check without it;
+  `baseline`: the last run did not run the check (the first check, a failed step, probes it
+  skipped), so new and old cannot be told apart; `unchecked`: the last run had it and this
+  run did not run the check. Round 1 of the review found that a skipped or failed check
+  showed its old problems as resolved, and that a key with every number dropped merged two
+  pinned models (`claude-opus-4-1`, `claude-opus-4-5`) into one. Now a key keeps its numbers
+  and drops only what changes between runs: versions (`x.y.z`), durations, long hex hashes,
+  times and costs. A failed step or session is keyed without its message: failing again
+  differently is the same problem. Run files are read like the writer writes them
+  (`readRunFile`: a run id, a plain name, real private dirs, a regular file up to the cap,
+  never through a link); one that cannot be read is named.
+- Project suggestions (`checkup-projects --suggest`): the dirs in Claude Code's global config
+  (`projects` in `.claude.json`, in CLAUDE_CONFIG_DIR when set, else in HOME) that exist and
+  have their own `.claude/` agents, skills, commands or settings (a linked file counts),
+  minus the registered ones, the current project and HOME when its `.claude` is the config
+  dir (the rule `projectRoots` uses); 30 at most. Only project paths are read from that
+  file. Nothing is registered or scanned.
+- Integration probes (`checkup-probe --run`, `probes.json`). They make model turns, so
+  `--estimate` comes first: the sessions, a cost range, minutes, notes, and an id over the
+  sessions and the run. The probes run only with `--estimate-id` equal to it, which the
+  skill passes after the user's yes; a changed setup changes the id, and the refusal does
+  not print the new one (round 1 found that it handed out the id that passes). The id is a
+  procedural gate: nothing proves that the user saw the estimate. Probes that ran already
+  for the run (`probes.json` exists) are refused before they run again: a second run paid
+  for every session and then failed to write. Two runs started at the same moment both pass
+  that check (round 2); the skill starts one and waits for it. All probes together get the
+  estimate's minutes (5, plus 4 per pinned model); past them the rest are skipped and named.
+  Each session runs in a private temp project
+  (a git repo without the user's git config, a README, its own TMPDIR) with the user's real
+  setup and without the parent session's variables, and is removed afterwards (Claude Code
+  keeps its transcript as for any session). SIGINT, SIGTERM or SIGHUP kills the running
+  session and removes its project before the CLI exits; a probe dir left older than an hour
+  is removed at the next start; the health step's skill-doctor session and its debug log get
+  the same cleanup (`onInterrupt` in `lib/bounded.ts`). The skill runs the probes in the
+  background, since they can outlast the Bash tool's limit, and gives the health step a
+  10-minute timeout. Project hooks and plugins do not run there; the zero-turn smoke covers
+  those.
+  - `session` (Haiku, JSON output, at most 8 turns, `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=2`):
+    it reads a file and dispatches a subagent that dispatches one more, which tries a third.
+    The debug log (its first 16 MB) gives the hook runs. 2.1.305 logs one line per run,
+    `Hooks: <Event>[:<Tool>] [<command>] (plugin <id>) <outcome> (<ms>ms)` (no plugin part
+    for a settings hook), where the outcome is `finished with status <n>`, `timed out after
+    <n>ms`, `moved to the background`, `not run`, `failed to start` or `cancelled` (read from
+    the CLI's text; round 1 found that only the first was parsed). The line is parsed from
+    its end, so a long command cannot make the parse slow. The runs are checked against the
+    hooks that should fire: the user's settings hooks (matched by command; the CLI appends a
+    hook's args) and the hooks of plugins the log says it loaded (matched by plugin and
+    command with `${CLAUDE_PLUGIN_ROOT}` expanded, or by plugin alone when it has one hook
+    for that event and tool), on UserPromptSubmit, PreToolUse and PostToolUse for Read or
+    Agent, and Stop. SessionStart runs in a built-in module and is not logged so. A hook
+    without a command (prompt, agent, http and other types) is counted, not matched. A
+    configured hook with no run is `not-run` (uncertain). A non-zero status other than 2, a
+    timeout or a failed start is `hook-error`. An exit 2 is a block, and not run or
+    cancelled is info; a run moved to the background counts as run. Lines that do not parse
+    are counted.
+  - Depth, from the result's `subagent_stats` (spawned, completed, failed, `max_depth`,
+    `refused.depth_limit`): more layers than the limit is `violated` (a problem); two layers
+    and a refused third is `confirmed`; anything else is `inconclusive`, naming a hook that
+    blocked a dispatch. A depth the user's settings set overrides the probe's 2 and is named.
+    The CLI's own schema says `depth_limit` "stays near zero in practice: a subagent at the
+    nesting limit is normally not offered the tool at all", and the probe cannot see a
+    subagent's tool schema. So `confirmed` is rare, and the skill proposes depth 2 only on
+    it (round 1 found that the first design could practically never confirm, without saying
+    so). A subagent's own account of its tools is never used.
+  - `model:<id>` for each pinned agent model (a plain id form; up to 10): a one-word reply in
+    text mode, where the CLI prints its model warnings to stderr, then one in JSON, whose
+    `modelUsage` names the model that answered. Rejected: a non-zero exit whose output names
+    the model (an "Invalid API key" names none and is a failed session). Substituted: the
+    model is not in `modelUsage`, both compared without a `[1m]`-style suffix (the CLI drops
+    it before the request and may put it back on the key; round 2, read from 2.1.305's
+    text), a dated id and its short form being the same. Retirement announced: stderr says
+    so. Else "answers as itself; pinned, intent unconfirmed".
+  - Problems are compared with the last run like the others; info goes to the report only.
+    `probes.json` is fitted to the run-file cap (hook runs, then info findings, are cut), and
+    when it cannot be written the summary is still printed.
+- Not built, from §17: the effective-tools probe and a tool-schema check of depth (the probe
+  has no way to read a subagent's tool schema), and the fork check. The matcher rules
+  (`|` or comma lists, `Task` as `Agent`, regexes matched anywhere) were read from the
+  CLI's text in review, not measured; a hook they get wrong is only expected or not, an
+  uncertain finding.
+- A problem that is gone from a list cut to the run-file cap (health, inventory, probes) or
+  from a debug log read in part is `unchecked`, not `resolved`: it may only be past the cut
+  (round 2).
+- `checkup-changelog --run` writes the listed findings to `changelog.json`; a wrong run fails
+  before the range is noted in the state.
+- Measured on 2.1.304 for the probe design: one Haiku session that read a file and
+  dispatched a subagent cost about $0.01 and showed 13 hook runs of 3 owners;
+  `subagent_stats` had `max_depth` 1 and `refused.depth_limit` 0.
+- Tests: `tests/k1d-update-check.test.ts` with a fake `claude`, 49 tests after two rounds of
+  test records (198 mutants, 194 caught; the 4 left change nothing for files goodboy
+  writes); `tests/g2-agents-skills.test.ts` checks the skill's format.
+- The full check on this machine (Claude Code 2.1.305, which had updated itself overnight;
+  2026-10-21; the user approved the probes and registered all 14 suggested projects).
+  - It took 14 s for health and 3 s for smoke. The probes cost about $0.02: one Haiku
+    session, and two one-word requests to a pinned `claude-opus-4-5`.
+  - Registering the projects added a pinned model, which changed the estimate. The changed
+    estimate was shown and approved again.
+  - Inventory: 7 plugins, 12 hooks, 93 skills, 41 agents, 11 commands and 13 CLAUDE.md files.
+    The changelog had 2 matched entries, both for managed settings that this machine does
+    not have.
+  - The session ran 13 hooks of 3 owners, all expected, all with status 0. Depth stayed
+    `inconclusive`: the child did not dispatch again. The pinned model answers as itself.
+  - As a first check, all 68 problems are baseline:
+    - the two `@local` plugins are not loaded, and one hooks.json has the wrong shape;
+    - validate warnings, and a leftover npm install;
+    - 39 project agents that inherit the Agent tool, three pins and 14 copied bodies.
+  - The report (`runs/<run>/report.md`) proposes six fixes with their owners and applies
+    none. `lastChecked` is now 2.1.305.
+
 Proposals (later steps, not scheduled):
 - K2: quiet detection. A fail-open SessionStart reads the CLI version once, corroborated by
   the transcript. Model observations come from main-session transcript entries read

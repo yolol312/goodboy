@@ -38,3 +38,10 @@ export function secretRe(): RegExp {
 export function maskSecrets(text: string): string {
   return text.replace(secretRe(), '[secret]');
 }
+
+/** The first `n` characters of text to keep, masked on a window a little past the cut, so a
+ *  secret that spans the cut is still caught, and never on the whole text (masking long text
+ *  is slow; K1b review). */
+export function maskedClip(s: string, n: number): string {
+  return maskSecrets(s.slice(0, n + 200)).slice(0, n);
+}

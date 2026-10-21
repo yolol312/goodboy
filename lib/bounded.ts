@@ -41,6 +41,29 @@ function capture(stream: ReadableStream<Uint8Array>, max: number, keep: 'head' |
   return { done, text: () => kept, stop: () => void reader.cancel().catch(() => undefined) };
 }
 
+const SIGNALS = { SIGHUP: 1, SIGINT: 2, SIGTERM: 15 } as const;
+
+/** Runs `fn` with SIGINT, SIGTERM and SIGHUP handled: `cleanup` runs first (kill a child,
+ *  remove a temp dir), then the process exits as the signal would have ended it. A cleanup in
+ *  `finally` alone never runs on a signal (K1d review: a killed checkup left its paid session
+ *  running and its debug log behind). */
+export async function onInterrupt<T>(cleanup: () => void, fn: () => Promise<T>): Promise<T> {
+  const handler = (sig: NodeJS.Signals) => {
+    try {
+      cleanup();
+    } finally {
+      process.exit(128 + SIGNALS[sig as keyof typeof SIGNALS]);
+    }
+  };
+  const names = Object.keys(SIGNALS) as NodeJS.Signals[];
+  for (const s of names) process.on(s, handler);
+  try {
+    return await fn();
+  } finally {
+    for (const s of names) process.off(s, handler);
+  }
+}
+
 /** Runs `argv` with a timeout, killing it with `killSignal` (a SIGTERM is followed by a
  *  SIGKILL two seconds later), with no stdin unless `stdin` is given. Never throws. */
 export async function runBounded(
@@ -53,6 +76,8 @@ export async function runBounded(
     max?: { stdout: number; stderr: number };
     keep?: 'head' | 'tail';
     killSignal?: 'SIGTERM' | 'SIGKILL';
+    /** Gets the child once it runs, so a caller interrupted by a signal can kill it (K1d). */
+    onSpawn?: (kill: (signal: 'SIGTERM' | 'SIGKILL') => void) => void;
   },
 ): Promise<Bounded> {
   const t0 = Date.now();
@@ -68,6 +93,7 @@ export async function runBounded(
   } catch (e) {
     return { code: null, stdout: '', stderr: '', timedOut: false, ms: 0, error: String((e as Error)?.message ?? e).slice(0, 300) };
   }
+  opts.onSpawn?.((s) => p.kill(s));
   const max = opts.max ?? { stdout: 1024 * 1024, stderr: 64 * 1024 };
   const keep = opts.keep ?? 'head';
   const so = capture(p.stdout as ReadableStream<Uint8Array>, max.stdout, keep);
