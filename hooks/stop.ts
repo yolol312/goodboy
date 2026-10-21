@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 // Stop hook — 턴 증가, 리뷰 강제/검증, 재시도 카운터, 커서/차원 검사
 
-import { relative, resolve as resolvePath } from 'node:path';
+import { existsSync } from 'node:fs';
+import { join, relative, resolve as resolvePath } from 'node:path';
 import type {
   AcceptanceProblem,
   AcceptanceReading,
@@ -45,6 +46,7 @@ import {
   envStr,
   excludeUserOriginated,
   extractCitations,
+  mayCite,
   extractRecentAssistantTexts,
   extractRecentUserTexts,
   assistantTextFreshness,
@@ -495,7 +497,7 @@ function checkCitations(
       if (!fresh) return [];
     }
     const last = extractRecentAssistantTexts(transcriptPath, 1)[0] ?? '';
-    if (last === '') return [];
+    if (last === '' || !mayCite(last)) return [];
     // 사용자가 프롬프트에 먼저 쓴 인용은 모델의 주장이 아니다 — 존재하지 않는 경로를
     //   사용자가 대고 모델이 "그런 파일 없습니다"라고 답하는 정직한 경우를 벌하지 않는다.
     //   단, **훅 자신의 차단 메시지는 제외한다.** 하니스가 Stop 훅 피드백을 user 엔트리로
@@ -503,12 +505,20 @@ function checkCitations(
     //   둔갑했다 — 첫 차단 이후 같은 환각이 영구 면역되던 실측 결함(P9).
     //   One cache for both sides (and main() runs this at most once per Stop), so the repo
     //   is walked for bare names at most once per Stop.
+    //   Paths resolve from the repo root, as the message says, and from the shell's current
+    //   dir as well: the hook's `cwd` follows a model's `cd` inside the repo, and a corrected
+    //   repo-relative citation was reported as "no such file" from a subdir (I9 #17, trial 4).
+    //   A top that is no repo (a symlinked cwd can make it `/`, which turned the gate off: I9
+    //   review) falls back to the cwd.
     const names: CitationCache = {};
+    const top = repoTop(cwd);
+    const root = existsSync(join(top, '.git')) ? top : cwd;
     const citations = excludeUserOriginated(
-      extractCitations(last, cwd, names),
+      extractCitations(last, root, names, cwd),
       extractRecentUserTexts(transcriptPath, 3).filter((t) => !isGateMessage(t)),
-      cwd,
+      root,
       names,
+      cwd,
     );
     if (citations.length === 0) return [];
     const turn = getCurrentTurn(sessionId);

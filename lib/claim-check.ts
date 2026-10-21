@@ -31,6 +31,9 @@ export interface Citation {
   spec?: string;
   /** A bare file name that matched several repo files (or could not be resolved). */
   candidates?: string[];
+  /** The other reading of a relative path that exists both from the repo root and from the
+   *  shell's current dir (I9): the citation holds when either one checks out. */
+  alt?: string;
 }
 
 export type CitationProblemKind = 'missing-file' | 'line-out-of-range' | 'unread' | 'ambiguous';
@@ -160,18 +163,20 @@ function buildBasenameIndex(root: string, timeBudgetMs: number): BasenameIndex {
  * - URL(`https://…:443`)은 스킴 뒤 `//` 때문에 경로 패턴과 맞지 않아 걸리지 않는다
  * - 절대경로는 cwd 밖일 수 있으므로 cwd 안의 것만 남긴다(게이트가 보는 범위)
  * - Pass the same `cache` to several calls to walk the repo for bare names only once.
+ * - `alsoFrom`: the shell's current dir when `root` is the repo root (see below).
  */
-export function extractCitations(text: string, cwd: string, cache: CitationCache = {}): Citation[] {
+export function extractCitations(text: string, root: string, cache: CitationCache = {}, alsoFrom?: string): Citation[] {
   const out: Citation[] = [];
   if (typeof text !== 'string' || text === '') return out;
   const cwdAbs = (() => {
     try {
-      return resolvePath(cwd);
+      return resolvePath(root);
     } catch {
       return '';
     }
   })();
   if (cwdAbs === '') return out;
+  const inside = (p: string) => p === cwdAbs || p.startsWith(cwdAbs + sep);
 
   const seen = new Set<string>();
   PATHY.lastIndex = 0;
@@ -182,12 +187,28 @@ export function extractCitations(text: string, cwd: string, cache: CitationCache
     const lines = parseLineSpec(spec);
     if (raw === '' || lines === null) continue;
     let abs: string;
+    let alt: string | undefined;
     try {
-      abs = isAbsolute(raw) ? resolvePath(raw) : resolvePath(cwdAbs, raw);
+      if (isAbsolute(raw)) abs = resolvePath(raw);
+      else {
+        // I9 (#17): `root` is the repo root and `alsoFrom` the shell's current dir, which a
+        //   model's `cd` inside the repo moves. A path that exists from one of them is read
+        //   from there; one that exists from both is held if either reading checks out (a
+        //   monorepo package's `src/`; I9 review). `./` and `../` name the current dir first.
+        const fromRoot = resolvePath(cwdAbs, raw);
+        const fromHere = alsoFrom === undefined ? undefined : resolvePath(alsoFrom, raw);
+        const [first, second] = fromHere !== undefined && /^\.\.?\//.test(raw) ? [fromHere, fromRoot] : [fromRoot, fromHere];
+        abs = first;
+        if (second !== undefined && second !== first && existsSync(second)) {
+          if (existsSync(first)) alt = second;
+          else abs = second;
+        }
+      }
     } catch {
       continue;
     }
-    if (abs !== cwdAbs && !abs.startsWith(cwdAbs + sep)) continue;
+    if (!inside(abs)) continue;
+    if (alt !== undefined && !inside(alt)) alt = undefined;
     // A8: a bare file name ("stop.ts:916") resolves against the repo when it names exactly
     //   one file there. It used to be checked at the repo root and reported as "no such
     //   file" even when hooks/stop.ts existed.
@@ -198,7 +219,14 @@ export function extractCitations(text: string, cwd: string, cache: CitationCache
     let candidates: string[] | undefined;
     if (!raw.includes('/') && !existsSync(abs)) {
       const index = basenameIndexFor(cwdAbs, cache); // built only when a bare name needs it
-      const matches = index.byName.get(raw) ?? [];
+      let matches = index.byName.get(raw) ?? [];
+      // Several matches with one under the current dir: that one, as the model sees it there
+      //   (I9 review: a name unique below the cwd became "ambiguous" from the repo root).
+      if (matches.length > 1 && alsoFrom !== undefined) {
+        const here = resolvePath(alsoFrom);
+        const under = matches.filter((p) => p.startsWith(here + sep));
+        if (under.length === 1) matches = under;
+      }
       const definite = index.complete && !index.skippedDirs;
       if (matches.length === 1 && index.complete) abs = matches[0]!;
       else if (matches.length > 1 || !(matches.length === 0 && definite)) {
@@ -209,6 +237,7 @@ export function extractCitations(text: string, cwd: string, cache: CitationCache
     if (lines.last !== lines.first) c.lastLine = lines.last;
     if (spec !== String(lines.first)) c.spec = spec;
     if (candidates) c.candidates = candidates;
+    if (alt !== undefined) c.alt = alt;
     const key = citationKey(c);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -259,47 +288,44 @@ export function verifyCitations(
 ): CitationProblem[] {
   const problems: CitationProblem[] = [];
   for (const c of citations) {
-    const label = citationLabel(c);
-    if (c.candidates !== undefined) {
-      const shown = c.candidates.slice(0, 3);
-      problems.push({
-        kind: 'ambiguous',
-        citation: c,
-        detail:
-          c.candidates.length > 1
-            ? `${label} — ambiguous file name (${shown.join(', ')}${c.candidates.length > 3 ? ', …' : ''}); cite the repo-relative path.`
-            : `${label} — could not resolve this file name; cite the repo-relative path.`,
-      });
-      continue;
-    }
-    const n = lineCount(c.abs);
-    if (n === null) {
-      problems.push({
-        kind: 'missing-file',
-        citation: c,
-        detail: `${label} — no such file (paths are resolved from the repo root).`,
-      });
-      continue;
-    }
-    if ((c.lastLine ?? c.line) > n) {
-      problems.push({
-        kind: 'line-out-of-range',
-        citation: c,
-        detail: `${label} — the file has only ${n} lines.`,
-      });
-      continue;
-    }
-    if (opts.readTrackingAvailable === true && typeof opts.wasRead === 'function') {
-      if (!opts.wasRead(c.abs)) {
-        problems.push({
-          kind: 'unread',
-          citation: c,
-          detail: `${label} — no record of reading this file in this session.`,
-        });
-      }
-    }
+    const p = problemOf(c, opts);
+    // A path that exists from both the repo root and the current dir holds when either reading
+    //   checks out (I9 review).
+    if (p && c.alt !== undefined && problemOf({ ...c, abs: c.alt, alt: undefined }, opts) === null) continue;
+    if (p) problems.push(p);
   }
   return problems;
+}
+
+function problemOf(c: Citation, opts: VerifyOptions): CitationProblem | null {
+  const label = citationLabel(c);
+  if (c.candidates !== undefined) {
+    const shown = c.candidates.slice(0, 3);
+    return {
+      kind: 'ambiguous',
+      citation: c,
+      detail:
+        c.candidates.length > 1
+          ? `${label} — ambiguous file name (${shown.join(', ')}${c.candidates.length > 3 ? ', …' : ''}); cite the repo-relative path.`
+          : `${label} — could not resolve this file name; cite the repo-relative path.`,
+    };
+  }
+  const n = lineCount(c.abs);
+  if (n === null) return { kind: 'missing-file', citation: c, detail: `${label} — no such file (paths are resolved from the repo root).` };
+  if ((c.lastLine ?? c.line) > n) return { kind: 'line-out-of-range', citation: c, detail: `${label} — the file has only ${n} lines.` };
+  if (opts.readTrackingAvailable === true && typeof opts.wasRead === 'function' && !opts.wasRead(c.abs)) {
+    return { kind: 'unread', citation: c, detail: `${label} — no record of reading this file in this session.` };
+  }
+  return null;
+}
+
+/** Whether `text` holds anything shaped like a `file:line` citation (no file system access):
+ *  the Stop hook finds the repo root only then (I9 review: a git call on every Stop). */
+export function mayCite(text: string): boolean {
+  PATHY.lastIndex = 0;
+  const hit = PATHY.test(text);
+  PATHY.lastIndex = 0;
+  return hit;
 }
 
 /**
@@ -313,13 +339,14 @@ export function verifyCitations(
 export function excludeUserOriginated(
   citations: Citation[],
   userTexts: string[],
-  cwd: string,
+  root: string,
   cache: CitationCache = {},
+  alsoFrom?: string,
 ): Citation[] {
   if (citations.length === 0 || !Array.isArray(userTexts) || userTexts.length === 0) return citations;
   const fromUser = new Set<string>();
   for (const t of userTexts) {
-    for (const c of extractCitations(t, cwd, cache)) fromUser.add(citationKey(c));
+    for (const c of extractCitations(t, root, cache, alsoFrom)) fromUser.add(citationKey(c));
   }
   if (fromUser.size === 0) return citations;
   return citations.filter((c) => !fromUser.has(citationKey(c)));

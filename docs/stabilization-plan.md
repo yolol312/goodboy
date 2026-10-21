@@ -1629,6 +1629,59 @@ off by an account switch and ran again.) Two problems:
   (a HOME or XDG_CONFIG_HOME set for it), a redirect that writes into `.git`, and a fetch
   refspec from the remote's config that writes local branches.
 
+### 15.12 I9 (#17): fixes from the fourth real-use trial
+
+The fourth trial ran on 2026-10-21, before the v0.31–v0.35 release, after I8, J and K. It
+used the same four tasks on a fresh copy, plus `/report-goodboy` (local only) and
+`/cli-update-check`, on Claude Code 2.1.306, for $5.45.
+- I8's two fixes held. The mapper-interface change finished with no coverage deny, and the
+  commit and the push ran as separate commands.
+- `/report-goodboy` wrote a clean report from the previous session's records, kept it local and
+  never called `gh`.
+- `/cli-update-check`, which cannot ask in `-p`, asked in chat, registered no project and ran
+  no paid probe.
+
+One fix:
+- The claim gate resolved citations from the hook's `cwd`. Claude Code keeps a model's `cd`
+  inside the project and hands that dir to the hooks. After `cd src/main/resources`, the
+  corrected repo-relative citations were reported as "no such file (paths are resolved from
+  the repo root)". That was only a warning there (`stop_hook_active`); elsewhere it denies.
+- Citations now resolve from the repo top (`repoTop`), as the message says. If the computed
+  top has no `.git`, the cwd is used: a symlinked cwd can make it `/`, which dropped every
+  citation (review).
+- A relative path that exists from only one of the two dirs (the repo top, or the shell's
+  current dir) is read from there. One that exists from both holds when either reading checks
+  out. The review found that a monorepo package's `src/index.ts` was checked against the
+  root's copy only.
+- `./` and `../` name the current dir first. A bare file name with several matches, one of
+  them below the current dir, resolves to that one.
+- The user-originated exclusion uses the same two dirs.
+- The repo top is computed only when the answer holds something shaped like a citation:
+  `repoTop` is a git call.
+- Tests: `tests/i9-claim-root.test.ts`, 11 tests. 9 mutants were caught, and one is
+  equivalent: an absolute path resolves the same from either dir.
+- Other gates still read session paths from the hook's `cwd` and follow a `cd` the same way.
+  The review listed them; they are not changed here (backlog):
+  - the `.claude/tests` and `.claude/reviews` dirs at Stop;
+  - the edit log's scope (`getEditsSince` drops edits outside the current dir);
+  - a few pre-tool checks.
+
+Backlog from the trial (low, not scheduled):
+- A short resource-relative path that is the unique suffix of a real file
+  (`static/js/common.js:9` for `src/main/resources/static/js/common.js`) is denied as
+  hallucinated. A unique suffix could resolve, or the message could say "cite the
+  repo-relative path", as for an ambiguous name.
+- The push regression for Gradle can report every task UP-TO-DATE and run no test, and is
+  recorded as fresh. That is sound for Gradle (same inputs). The cost is the extra agent run,
+  because the model's own `./gradlew test` on the same tree does not count. goodboy could
+  record "cached", or the denial could run `cli.ts regression` directly.
+- A push to a filesystem-path remote is warned as an unlisted outward push.
+- The result guard denies a read-only `python3 -I -c` that reads result JSON (since trial 3;
+  its hint works).
+- `/cli-update-check`, when it cannot ask the user, leaves its run pending. Another session's
+  checkup within 24 hours then needs `--replace`. It could complete with the optional steps
+  named as skipped.
+
 ## 16. J — Field reports (v0.34.0)
 
 Asked by the user on 2026-10-16: improvements and bugs found while using goodboy elsewhere
