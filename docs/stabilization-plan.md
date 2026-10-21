@@ -40,11 +40,11 @@ so work is released in batches:
 | Version | Contents |
 |---|---|
 | v0.30.0 | A (fixes) + F1–F4 (language-policy prerequisites), released 2026-10-13 |
-| v0.31.0 | G (routing: rules, roles, tools), which also covers B2, B3 and F7. Prepared 2026-10-15 on `feat/g-routing` (G0 1312639, G1 bf9c5b9, G2 8e46b84, G3 891c2ef, version bump); the merge and the push to `main` (the release) wait for the user |
-| v0.32.0 | the rest of B (cost) + C (measurement) + F5, F8, and track H (knowledge; branch `feat/h-knowledge`, stacked on `feat/g-routing`). G and H were merged into the local `main` on 2026-10-16 (not pushed) |
-| v0.33.0 | track I (test automation, §15; branch `feat/i-test-automation`, issues #1–#7) |
-| v0.34.0 | track J (field reports, §16; issues #8, #9, #11) |
-| v0.35.0 | track K (update checkups, §17; issue #10 for K1, the later steps are proposals) |
+| v0.31.0 | G (routing: rules, roles, tools), which also covers B2, B3 and F7 (G0 1312639, G1 bf9c5b9, G2 8e46b84, G3 891c2ef). Released with v0.35.0 |
+| v0.32.0 | the rest of B (cost) + C (measurement) + F5, F8, and track H (knowledge). Released with v0.35.0 |
+| v0.33.0 | track I (test automation, §15; issues #1–#7, #13–#15, #17, and I10). Released with v0.35.0 |
+| v0.34.0 | track J (field reports, §16; issues #8, #9, #11). Released with v0.35.0 |
+| v0.35.0 | track K (update checkups, §17; issue #10 for K1, the later steps are proposals), with the fixes of the fourth real-use trial (§15.12, §15.13) and of a Codex review (§15.14). Released 2026-10-21 (d3df5f2): v0.31.0–v0.35.0 went out together in one push to `main` |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
 
 ## 4. A — Fix silent failures and deadlocks
