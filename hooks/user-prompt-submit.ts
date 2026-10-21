@@ -3,6 +3,7 @@
 
 import { existsSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
+import { noteProjectDir, projectDir } from '../lib/project-dir';
 import {
   appendDispatchLog,
   ASK_WHEN_UNCLEAR_INSTRUCTION,
@@ -129,8 +130,12 @@ function main(): void {
         return;
       }
 
-      const cwd = input.cwd ?? process.cwd();
+      // The project dir, not the shell's current dir after a model's `cd`: the session state
+      //   and risk approvals it writes are read by PreToolUse from there (I10).
+      const cwd = projectDir(input.cwd ?? process.cwd());
       const sessionId = input.session_id ?? 'unknown';
+      // For the goodboy CLI that agents run through Bash, which has no CLAUDE_PROJECT_DIR.
+      if (sessionId !== 'unknown') noteProjectDir(sessionId);
       errorSession = sessionId;
       const prompt = input.prompt ?? '';
 

@@ -46,3 +46,7 @@ process.env.GOODBOY_FRICTION_NOTICE = 'off';
 // The update checkup (track K1c) runs `claude`: no test may run the real one. A path that
 // does not exist makes a missed fake fail loudly; tests/k1c-health-smoke.test.ts sets a fake.
 process.env.GOODBOY_CLAUDE_BIN = '/nonexistent/goodboy-tests/claude';
+
+// The hooks read the project dir from CLAUDE_PROJECT_DIR (I10). A suite run inside a Claude Code
+// session inherits that session's; tests set it themselves (tests/i10-project-dir.test.ts).
+delete process.env.CLAUDE_PROJECT_DIR;

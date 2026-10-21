@@ -5,13 +5,14 @@ import { existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSy
 import { join, resolve as resolvePath, sep } from 'node:path';
 import { addedUserGlobs, diffCoverageMode, isPolicyFile, type UserGlobKey } from '../lib/changed-coverage';
 import { checkRegression, readRegressionRecords, type RegressionOutcome, regressionMessage, regressionMode } from '../lib/regression';
+import { projectDir } from '../lib/project-dir';
 import { agentName, ROUTE } from '../lib/routing-policy';
 import { testTypesMode } from '../lib/test-types';
 import { classifyPath } from '../lib/verification-scope';
 import {
   appendDispatchLog,
   approvalMarkerPath,
-  approvalMarkerRelPath,
+  approvalMarkerShown,
   assistantEntriesAfterLastText,
   bareCatDumpMessage,
   agentTranscriptPath,
@@ -360,7 +361,7 @@ function emitPass(warnings: string[]): void {
  *  create the approval marker itself — Bash/Write are exactly what this gate blocks — so
  *  the old "create the marker and retry" instruction was a deadlock. The marker name is
  *  this session's (A3), so the message prints it in full. */
-function riskDenyMessage(state: SessionState, sessionId: string): string {
+function riskDenyMessage(state: SessionState, sessionId: string, projectCwd: string, shellCwd: string): string {
   const category = state.category ?? 'unknown';
   const reason = state.riskReason ?? '';
   const why = reason.startsWith('keyword:')
@@ -372,7 +373,7 @@ function riskDenyMessage(state: SessionState, sessionId: string): string {
         : `task /${category}`;
   return (
     `This task is classified as risky (${why}); changes are blocked until the user approves. ` +
-    `Ask the user to approve, then have the user run \`! touch ${approvalMarkerRelPath('risk', sessionId)}\` ` +
+    `Ask the user to approve, then have the user run \`! touch ${approvalMarkerShown(projectCwd, 'risk', sessionId, shellCwd)}\` ` +
     '(you cannot create this file yourself: Bash/Write are blocked in a risky session; the ' +
     'approval applies to this session only). ' +
     'If the classification is wrong, the user can re-run the command with `--risk simple`. ' +
@@ -392,7 +393,11 @@ function main(): void {
         return;
       }
 
+      // `cwd` is the shell's current dir, where a Bash command's relative paths resolve. It
+      //   follows a model's `cd`, so the project's records, state and approval markers come
+      //   from the project dir instead (I10).
       const cwd = input.cwd ?? process.cwd();
+      const projectCwd = projectDir(cwd);
       const sessionId = input.session_id ?? 'unknown';
       const toolName = input.tool_name ?? '';
       const toolInput = input.tool_input ?? {};
@@ -610,7 +615,7 @@ function main(): void {
       // (A0.796) Project mode (track H §14.2): only the user marks a directory non-project
       //   (lib/project-mode.ts), in the main session and in agents.
       if (toolName === 'Write' || toolName === 'Edit' || toolName === 'MultiEdit' || toolName === 'Bash') {
-        const why = markerWriteDenial(sessionId, toolName, toolInput, cwd);
+        const why = markerWriteDenial(sessionId, toolName, toolInput, projectCwd);
         if (why !== null) {
           logGate(sessionId, 'project-mode', 'deny', 'marker without user evidence');
           emit(deny(why));
@@ -790,7 +795,7 @@ function main(): void {
                 ? [{ kind: 'push' as const, what: `/${toolInput.skill}`, cwd, revs: ['HEAD'] }]
                 : [];
           if (handoffs.length > 0) {
-            const results = findRecentTestFiles(resolvePath(cwd, '.claude', 'tests'), envInt('GOODBOY_TEST_WINDOW_MIN', 1440));
+            const results = findRecentTestFiles(resolvePath(projectCwd, '.claude', 'tests'), envInt('GOODBOY_TEST_WINDOW_MIN', 1440));
             // One tree hash per revision for both checks: a deploy hashes the whole working tree,
             //   and two hashes could overrun the hook timeout (I4 review).
             const trees = new Map<string, string | null>();
@@ -805,7 +810,7 @@ function main(): void {
               //   from this session's records only (another checkout's are not guarded).
               let reg: Extract<RegressionOutcome, { ok: false }> | null = null;
               if (o.ok && regMode !== 'off') {
-                const records = readRegressionRecords(cwd);
+                const records = readRegressionRecords(projectCwd);
                 let relaxed = false;
                 for (const rev of h.revs) {
                   const tree = treeOf(h.cwd, rev);
@@ -828,14 +833,14 @@ function main(): void {
                 preWarnings.push(`${regressionMessage(h.what, reg, CLI_PATH, agentName(ROUTE.test))} (push regression check, warn mode)`);
                 continue;
               }
-              const marker = approvalMarkerPath(cwd, 'push-test', sessionId);
+              const marker = approvalMarkerPath(projectCwd,'push-test', sessionId);
               if (!inSubagent && userMarkerPresent(sessionId, marker, input.tool_use_id)) {
                 pendingPushTestApproval = { markerPath: marker, what: h.what };
                 break;
               }
               const failed = o.ok ? null : o;
               // (#13) The model sees the user's marker path too: it guessed the session tag.
-              const markerRel = inSubagent ? undefined : approvalMarkerRelPath('push-test', sessionId);
+              const markerRel = inSubagent ? undefined : approvalMarkerShown(projectCwd, 'push-test', sessionId, cwd);
               const msg =
                 reg !== null
                   ? regressionMessage(h.what, reg, CLI_PATH, agentName(ROUTE.test)) + (markerRel ? handoffApprovalAsk(markerRel) : '')
@@ -847,7 +852,7 @@ function main(): void {
                 break;
               }
               logGate(sessionId, 'push-test', 'deny', `${why} ${h.what}`);
-              ensureApprovalDir(cwd);
+              ensureApprovalDir(projectCwd);
               emit({
                 ...deny(inSubagent ? `${msg} Agents never hand off untested work: return BLOCKED.` : msg),
                 ...(inSubagent
@@ -858,7 +863,7 @@ function main(): void {
                           ? `[goodboy] 한 명령 안에서 \`${failed.runFirst}\` 뒤에 ${h.what}을(를) 하려는 걸 막았어요(push는 명령 실행 전에 검사해서 나눠서 해야 해요)`
                           : `[goodboy] ${reg !== null ? '통과한 전체 회귀 기록' : '통과한 테스트 결과'} 없이 ${h.what}을(를) 하려는 걸 막았어요`) +
                         (failed?.why === 'blocked' ? `(테스트를 실행하지 못함: ${failed.blocked?.blocked?.reason ?? ''})` : '') +
-                        `. 테스트 없이 보내려면 \`! touch ${approvalMarkerRelPath('push-test', sessionId)}\`(이번 한 번)을 실행하거나 ${reg !== null ? 'GOODBOY_PUSH_REGRESSION' : 'GOODBOY_PUSH_TEST_GATE'}=off로 끄세요.`,
+                        `. 테스트 없이 보내려면 \`! touch ${approvalMarkerShown(projectCwd, 'push-test', sessionId, cwd)}\`(이번 한 번)을 실행하거나 ${reg !== null ? 'GOODBOY_PUSH_REGRESSION' : 'GOODBOY_PUSH_TEST_GATE'}=off로 끄세요.`,
                     }),
               });
               return;
@@ -897,7 +902,7 @@ function main(): void {
             const what = target ? `${target.kind} → ${target.host}${brokenNote ? ` (${brokenNote})` : ''}` : '';
             const listedAs = brokenNote ? 'treated as production' : 'listed as production in .goodboy/hosts';
             if (action === 'deny-production') {
-              const marker = approvalMarkerPath(cwd, 'outward', sessionId);
+              const marker = approvalMarkerPath(projectCwd,'outward', sessionId);
               if (!inSubagent && userMarkerPresent(sessionId, marker, input.tool_use_id)) {
                 // Used only once every later gate has passed (see the end of this hook), so a
                 //   later denial keeps the approval for the retry.
@@ -906,12 +911,12 @@ function main(): void {
                 preWarnings.push(`[R2] ${what} is ${listedAs}. (outward gate, warn mode)`);
               } else {
                 logGate(sessionId, 'outward', 'deny', `production ${what}`);
-                ensureApprovalDir(cwd);
+                ensureApprovalDir(projectCwd);
                 emit({
                   ...deny(
                     inSubagent
                       ? `This command changes ${what}, ${listedAs} (stop rule R2). Agents never act on production: return BLOCKED with the exact command for the user to run.`
-                      : `This command changes ${what}, ${listedAs} (stop rule R2). Ask the user first. If they approve this exact command, have them run \`! touch ${approvalMarkerRelPath('outward', sessionId)}\`, then run it again; the approval covers one command.`,
+                      : `This command changes ${what}, ${listedAs} (stop rule R2). Ask the user first. If they approve this exact command, have them run \`! touch ${approvalMarkerShown(projectCwd, 'outward', sessionId, cwd)}\`, then run it again; the approval covers one command.`,
                   ),
                   systemMessage: `[goodboy] 운영(production) 대상 명령을 막았어요: ${what}`,
                 });
@@ -968,7 +973,7 @@ function main(): void {
         const role = roleOf(input.agent_type);
         if (role) {
           let denial: string | null = null;
-          const projectRoot = resolvePath(cwd);
+          const projectRoot = resolvePath(projectCwd);
           if (['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(toolName)) {
             const p = strOrNull(toolInput.file_path) ?? strOrNull(toolInput.notebook_path);
             if (p) denial = writeDenial(role, resolvePath(cwd, p), projectRoot);
@@ -1005,9 +1010,9 @@ function main(): void {
         const p = strOrNull(toolInput.file_path) ?? strOrNull(toolInput.notebook_path);
         if (p) {
           const abs = resolvePath(cwd, p);
-          const rel = projectRelative(abs, resolvePath(cwd));
+          const rel = projectRelative(abs, resolvePath(projectCwd));
           if (rel !== null && classifyPath(rel) === 'code' && !isGoodboyArtifact(abs)) {
-            const cursor = readReviewCursor(cwd, sessionId);
+            const cursor = readReviewCursor(projectCwd, sessionId);
             const since = cursor ? Date.parse(cursor.timestamp) : 0;
             if (!hasSkillEvidenceSince(sessionId, Number.isFinite(since) ? since : 0)) {
               const msg = skillRuleMessage(CLI_PATH, sessionId);
@@ -1114,7 +1119,7 @@ function main(): void {
             //   통과한 뒤에 수행한다(v0.27.1 리뷰 지적: D가 deny하면 마커만 소비되고
             //   실행되지 않은 쓰기가 유령 편집으로 기록되는 문제).
             // This session's marker only (A3): another session's approval is not consumed here.
-            const approvalPath = approvalMarkerPath(cwd, 'bash-write', sessionId);
+            const approvalPath = approvalMarkerPath(projectCwd,'bash-write', sessionId);
             // 원자적 소비 — renameSync로 고유 경로에 이동한다. rename은 어떤 경합에서도
             //   정확히 한 프로세스만 성공한다(패자는 ENOENT). ⚠️ unlink로 구현하면 안
             //   된다: macOS에서 동시 unlink(2)가 같은 경로에 둘 다 성공해 병렬 이중
@@ -1134,8 +1139,8 @@ function main(): void {
             if (approved) {
               pendingBashWriteApproval = { markerPath: approvalPath, consumedPath, writes };
             } else {
-              const msg = bashWriteMessage(writes, approvalMarkerRelPath('bash-write', sessionId));
-              ensureApprovalDir(cwd); // so the printed `touch` works in a repo without .claude/
+              const msg = bashWriteMessage(writes, approvalMarkerShown(projectCwd, 'bash-write', sessionId, cwd));
+              ensureApprovalDir(projectCwd); // so the printed `touch` works in a repo without .claude/
               if (gate === 'warn') {
                 logGate(sessionId, 'bash-write', 'warn', `${writes.length}개`);
                 preWarnings.push(msg);
@@ -1167,7 +1172,7 @@ function main(): void {
         // 부분 읽기(offset/limit)는 정당한 재-Read → 예외. A7: PDF `pages` too — without it a
         //   PDF over 20 pages could never be read past the first range.
         // The project's knowledge files may always be read again (the policy read gate asks for them).
-        if (gate !== 'off' && filePath && !isPartialRead(toolInput) && !isRequiredKnowledgeFile(cwd, resolvePath(cwd, filePath))) {
+        if (gate !== 'off' && filePath && !isPartialRead(toolInput) && !isRequiredKnowledgeFile(projectCwd, resolvePath(cwd, filePath))) {
           const rereadMsg =
             'Already read recently and unchanged since; use the content you already have. ' +
             'If it is no longer in your context, re-read only the part you need with offset/limit ' +
@@ -1598,17 +1603,17 @@ function main(): void {
       //   before, every Bash call was denied, so the agent could not even inspect the repo.
       //   Checked only once the session is known to be risky: it scans the whole command.
       if (RISK_GATED_TOOLS.has(toolName)) {
-        const state = readSessionState(cwd, sessionId);
+        const state = readSessionState(projectCwd, sessionId);
         if (
           state &&
           state.risk === 'risky' &&
           !(toolName === 'Bash' && typeof toolInput.command === 'string' && isReadOnlyBash(toolInput.command as string))
         ) {
-          const approvedPath = approvalMarkerPath(cwd, 'risk', sessionId); // this session's (A3)
+          const approvedPath = approvalMarkerPath(projectCwd,'risk', sessionId); // this session's (A3)
           // Remembered so the next category command withdraws it, wherever the cwd is then.
           noteRiskApprovalPath(sessionId, approvedPath);
           if (!userMarkerPresent(sessionId, approvedPath, input.tool_use_id)) {
-            ensureApprovalDir(cwd); // so the user's `! touch` works in a repo without .claude/
+            ensureApprovalDir(projectCwd); // so the user's `! touch` works in a repo without .claude/
             // 위험 게이트가 deny하면, A1.7에서 원자 소비한 Bash 쓰기 승인 마커를 복원한다
             //   (v0.27.1/2: deny로 승인만 소진되는 문제와 병렬 이중 승인 TOCTOU를 함께 해소).
             if (pendingBashWriteApproval !== null) {
@@ -1619,7 +1624,7 @@ function main(): void {
               }
             }
             logGate(sessionId, 'risk', 'deny', state.category ?? 'unknown');
-            emit(deny(riskDenyMessage(state, sessionId)));
+            emit(deny(riskDenyMessage(state, sessionId, projectCwd, cwd)));
             return;
           }
         }

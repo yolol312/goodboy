@@ -44,7 +44,7 @@ function recordScope(r: TrackRecord): string {
   return r.agent ?? MAIN_SCOPE;
 }
 
-function sessionDir(sessionId: string): string {
+export function sessionDir(sessionId: string): string {
   // sessionId에 path traversal 위험 문자가 있을 수 있으니 소독
   const safe = (sessionId ?? 'unknown').replace(/[^a-zA-Z0-9_\-]/g, '_');
   return join(tmpdir(), `goodboy-session-${safe}`);

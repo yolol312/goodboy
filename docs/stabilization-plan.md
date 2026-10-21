@@ -1666,7 +1666,74 @@ One fix:
   - the edit log's scope (`getEditsSince` drops edits outside the current dir);
   - a few pre-tool checks.
 
-Backlog from the trial (low, not scheduled):
+### 15.13 I10: the hooks read the project from CLAUDE_PROJECT_DIR
+
+Found while checking I9's open item, before the release. A Stop run from a subdir counted
+only the edits below it. A probe recorded an edit to `src/a.ts` with no test or review
+record:
+- with the hook's `cwd` at the repo root, Stop blocked (no test covers the change);
+- with the `cwd` at `docs/sub`, where a model's `cd` leaves it, Stop passed.
+
+`getEditsSince` keeps the edits inside the Stop's `cwd` (its review scope). The test and
+review records were also read from `<cwd>/.claude/`.
+
+Measured on 2.1.306, one Haiku session with a logging plugin:
+- after `cd sub`, the next PreToolUse and the Stop get `cwd` and a process cwd of
+  `<project>/sub`;
+- CLAUDE_PROJECT_DIR stays `<project>`.
+
+Fix: `lib/project-dir.ts` `projectDir(cwd)`.
+- It returns CLAUDE_PROJECT_DIR when the hook's `cwd` is that dir or inside it (by path, or
+  through links). Otherwise it returns the `cwd`: a dir elsewhere, a test, or a CLI without the
+  variable. An agent's worktree is the exception (see the review fixes below).
+- Stop, UserPromptSubmit and SessionStart take every project path from it (records, edit
+  scope, state, approval markers, knowledge files).
+- PreToolUse uses it for the project's records, session state, review cursor, approval
+  markers, the role write check's project root and the required-knowledge check. It keeps
+  the shell's `cwd` for the relative paths of a Bash command, where the shell runs it.
+- The claim gate resolves citations from the repo top of the project dir, with the shell's
+  `cwd` as the second base (I9).
+
+Tests: `tests/i10-project-dir.test.ts` (5 mutants caught). `tests/setup.ts` clears
+CLAUDE_PROJECT_DIR, so a suite run inside a Claude Code session does not inherit it.
+
+Review round 1 (2 high, 2 medium) fixes:
+- The deny messages printed the approval marker as a relative path (`! touch .claude/...`). The
+  user's `!` runs in the shell's current dir, so after a `cd` the marker missed the gates. From
+  a dir other than the project dir, the path is now absolute and quoted
+  (`approvalMarkerShown`).
+- An agent's worktree lies inside the project (`.claude/worktrees/agent-x`), and is now its own
+  project.
+  - Review round 2 found the first rule too broad. Any nested dir with a `.git` counted, so a
+    model could run `mkdir -p docs/sub/.git && cd docs/sub` and have the Stop pass edits
+    outside it.
+  - Now only `<project>/.claude/worktrees/<name>` counts, and only when git takes it as a
+    work tree's top with the project's common git dir. An empty `.git` makes git find the
+    project's repo above it.
+  - A submodule or a nested clone stays part of the project. A project dir of `/` is never
+    used.
+- PostToolUse's automatic checks start from the shell's dir again. Their search walks up to the
+  nearest package; from the project dir, a monorepo without a root package.json went
+  unchecked.
+- The goodboy CLI (`test-write`, `review-write`, `regression`) wrote its records under its own
+  cwd. The Bash tool's environment has CLAUDE_CODE_SESSION_ID but no CLAUDE_PROJECT_DIR.
+  UserPromptSubmit now notes the project dir in the session dir (`noteProjectDir`), and the CLI
+  takes it from there (`cliProjectDir`).
+
+- Review round 2 also found that the CLI resolved file arguments from the project dir. A file
+  named on the command line (`diff-coverage <report>`, `review-axes <files>`,
+  `report-write [file]`) now resolves from the shell's dir again; records still go to the
+  project dir.
+- Tests: `tests/i10-project-dir.test.ts`, 8 tests; 12 mutants caught.
+
+Known limits:
+- The policy read gate (`policyReadDenial`) still takes the shell's `cwd`.
+- `markerWriteDenial` resolves a Bash redirect target from the project dir, so after a `cd`
+  only the file name in its message is off.
+- The marker sweep after a Bash call does not look at the project root. A marker forged there
+  is still refused at Stop.
+
+(I9's backlog from the trial, low, not scheduled:)
 - A short resource-relative path that is the unique suffix of a real file
   (`static/js/common.js:9` for `src/main/resources/static/js/common.js`) is denied as
   hallucinated. A unique suffix could resolve, or the message could say "cite the

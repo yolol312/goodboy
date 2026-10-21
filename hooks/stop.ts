@@ -18,6 +18,7 @@ import { projectMode } from '../lib/project-mode';
 import { knowledgeRoot, readDocMap } from '../lib/project-knowledge';
 import { staleDocs, staleDocsReason, type StaleDoc } from '../lib/doc-map';
 import { changedLineGaps, changedLineReason, diffCoverageMode, repoTop, sessionCoverageStart, sessionUserGlobs } from '../lib/changed-coverage';
+import { projectDir } from '../lib/project-dir';
 import {
   affectedGaps,
   affectedReason,
@@ -105,7 +106,7 @@ import {
   recommendEffort,
   writeLastAdvice,
   approvalMarkerPath,
-  approvalMarkerRelPath,
+  approvalMarkerShown,
   useUserMarker,
   ensureApprovalDir,
   restoreOrphanGateState,
@@ -149,6 +150,10 @@ const NOTICE_AFTER_BLOCKS = 2;
  *  the same run passes too, so one approval ends one Stop. */
 let userPassUsed = false;
 
+/** The shell's current dir of this Stop (the hook's `cwd`), where the user's `! touch` runs; the
+ *  gates' `cwd` is the project dir (I10). Set in main. */
+let stopShellCwd: string | undefined;
+
 /** The user's override for a blocking gate: uses `.claude/.goodboy-stop-approved-<tag>.txt`
  *  once. The caller passes the gate as its old escape did (cursor moves, counter resets). */
 function userPass(sessionId: string, cwd: string, gate: string): boolean {
@@ -184,7 +189,7 @@ function blockOutput(sessionId: string, cwd: string, reason: string, gate: strin
     ensureApprovalDir(cwd);
     out.systemMessage =
       `[goodboy] ${gate} 게이트가 ${count}번 연속 막았어요. 근거 없이 넘어가려면 ` +
-      `\`! touch ${approvalMarkerRelPath('stop', sessionId)}\`(이번 한 번)을 실행하세요` +
+      `\`! touch ${approvalMarkerShown(cwd, 'stop', sessionId, stopShellCwd)}\`(이번 한 번)을 실행하세요` +
       (envSwitch !== '' ? `. 계속 끄려면 ${envSwitch}로 설정하세요.` : '.');
   }
   return out;
@@ -461,6 +466,7 @@ function checkCitations(
   sessionId: string,
   cwd: string,
   transcriptPath: string | undefined,
+  shellCwd: string = cwd,
 ): CitationProblem[] {
   if (envStr('GOODBOY_CLAIM_GATE', 'on') === 'off') return [];
   if (!transcriptPath) return [];
@@ -514,11 +520,11 @@ function checkCitations(
     const top = repoTop(cwd);
     const root = existsSync(join(top, '.git')) ? top : cwd;
     const citations = excludeUserOriginated(
-      extractCitations(last, root, names, cwd),
+      extractCitations(last, root, names, shellCwd),
       extractRecentUserTexts(transcriptPath, 3).filter((t) => !isGateMessage(t)),
       root,
       names,
-      cwd,
+      shellCwd,
     );
     if (citations.length === 0) return [];
     const turn = getCurrentTurn(sessionId);
@@ -1288,7 +1294,12 @@ function main(): void {
         return;
       }
 
-      const cwd = input.cwd ?? process.cwd();
+      // I10: every gate reads the project's records and edit scope from the project dir, not
+      //   from the shell's current dir, which follows a model's `cd` (a Stop from a subdir
+      //   passed a change outside it with no test or review). Citations also resolve from it.
+      const shellCwd = input.cwd ?? process.cwd();
+      const cwd = projectDir(shellCwd);
+      stopShellCwd = shellCwd;
       const sessionId = input.session_id ?? 'unknown';
       snapshotSessionId = sessionId;
       frictionCwd = cwd;
@@ -1298,7 +1309,7 @@ function main(): void {
       //   and the bare-name walk (performance review, layer-1 test run).
       let citationProblems: CitationProblem[] | undefined;
       const citationCheck = (): CitationProblem[] =>
-        (citationProblems ??= checkCitations(sessionId, cwd, input.transcript_path));
+        (citationProblems ??= checkCitations(sessionId, cwd, input.transcript_path, shellCwd));
 
       // (A) 턴 증가
       try {

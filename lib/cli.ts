@@ -22,6 +22,7 @@ import type {
   Verdict,
 } from './types';
 import { topOf, treeDiff, workTreeState } from './push-test';
+import { cliProjectDir } from './project-dir';
 import { DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, outputSummary, type RegressionRecord, regressionCommands, runCommands, writeRegressionRecord } from './regression';
 import { diffCoverageOf } from './diff-coverage';
 import { criteriaNow } from './session-criteria';
@@ -870,12 +871,12 @@ function cmdReportFiled(args: string[]): void {
 
 /** Writes a field report to the inbox with the session's evidence, after checking the public
  *  summary for the user's paths, names, hosts and secrets. */
-async function cmdReportWrite(cwd: string, args: string[]): Promise<void> {
+async function cmdReportWrite(cwd: string, args: string[], shell: string = cwd): Promise<void> {
   const { session, rest } = sessionOpt(args);
   let raw: string;
   if (rest[0]) {
     // A FIFO or a device as the file is refused, never waited on (J1 review).
-    const r = readRegular(resolve(cwd, rest[0]), 1024 * 1024);
+    const r = readRegular(resolve(shell, rest[0]), 1024 * 1024);
     if (typeof r !== 'object') fail(`report-write: ${rest[0]} is missing, not a regular file, or over 1 MB`);
     raw = r.text;
   } else raw = await readAllStdin();
@@ -1125,7 +1126,11 @@ const USAGE =
   '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text> | checkup-state | checkup-begin [--cli <v>] [--replace] | checkup-changelog [--from <v>|none] [--to <v>] [--ids a,b] [--changelog <path>] [--max-matched N] [--max-unmapped N] [--run <id>] | checkup-write --run <id> --name <file> | checkup-complete --run <id> | checkup-abort --run <id> | checkup-projects [--add <dir>|--remove <dir>] [--suggest] | checkup-inventory [--run <id>] (checkup-changelog --inventory adds its identifiers) | checkup-health [--run <id>] [--timeout-ms N] | checkup-smoke [--run <id>] | checkup-compare --run <id> | checkup-probe --run <id> (--estimate | --estimate-id <id>)';
 
 async function main(): Promise<void> {
-  const cwd = process.cwd();
+  // The session's project dir, not the shell's dir after a `cd`: the records written here are
+  //   read by the hooks from there (I10). A file named on the command line still resolves
+  //   from the shell's dir (I10 review 2).
+  const shell = process.cwd();
+  const cwd = cliProjectDir(shell);
   const command = process.argv[2];
   const args = process.argv.slice(3);
 
@@ -1148,13 +1153,13 @@ async function main(): Promise<void> {
         cmdAcceptanceList(cwd);
         break;
       case 'review-axes':
-        cmdReviewAxes(cwd, args);
+        cmdReviewAxes(shell, args);
         break;
       case 'skill-gap':
         await cmdSkillGap(cwd, args);
         break;
       case 'diff-coverage':
-        cmdDiffCoverage(cwd, args);
+        cmdDiffCoverage(shell, args);
         break;
       case 'knowledge-check': {
         // The keep-project-knowledge skill's done criteria (track H §14.3).
@@ -1182,7 +1187,7 @@ async function main(): Promise<void> {
         cmdReportEvidence(cwd, args);
         break;
       case 'report-write':
-        await cmdReportWrite(cwd, args);
+        await cmdReportWrite(cwd, args, shell);
         break;
       case 'report-list': {
         // With each report, why its public summary may not be filed now (empty: it may); one

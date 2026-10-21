@@ -425,6 +425,8 @@ function main(): void {
         try {
           // Taken before the checks read the tree: a pass vouches only for edits made before it started.
           const startedAt = new Date().toISOString();
+          // From the shell's dir: the search walks up to the nearest package, which in a
+          //   monorepo is below the project dir (I10 review).
           const results = autoValidate(cwd);
           const { context, blocked, failedCmds, confirmedPass } = buildValidationContext(results);
           additionalContext = context;

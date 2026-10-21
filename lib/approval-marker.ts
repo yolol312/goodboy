@@ -429,6 +429,15 @@ export function approvalMarkerPath(cwd: string, kind: ApprovalKind, sessionId: s
   return resolvePath(cwd, approvalMarkerRelPath(kind, sessionId));
 }
 
+/** The marker path as the deny messages print it for the user's `! touch`. The user's `!` runs
+ *  in the shell's current dir, which a model's `cd` moves, while the gates look in the project
+ *  dir: from another dir the path is absolute and quoted (I10 review: the relative one then
+ *  missed the marker). */
+export function approvalMarkerShown(projectCwd: string, kind: ApprovalKind, sessionId: string, shellCwd: string = projectCwd): string {
+  if (resolvePath(shellCwd) === resolvePath(projectCwd)) return approvalMarkerRelPath(kind, sessionId);
+  return `'${approvalMarkerPath(projectCwd, kind, sessionId).replaceAll("'", `'\\''`)}'`;
+}
+
 /** Creates `<cwd>/.claude/` so the `touch` a deny message prints works. The Stop hook no
  *  longer creates that folder, and in a repo without it the printed command failed
  *  (round-2 layer-1 F6). Best-effort. */
