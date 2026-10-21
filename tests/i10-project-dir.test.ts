@@ -159,6 +159,22 @@ describe('I10 review: worktrees, approval paths, the CLI', () => {
     expect(echoed.startsWith(`${p}/.claude/.goodboy-stop-approved-`)).toBe(true);
   });
 
+  test("the marker-write check resolves the tool's relative target from the shell's dir (Codex review)", async () => {
+    const p = dir('goodboy-i10-p-');
+    const t = dir('goodboy-i10-t-');
+    mkdirSync(join(p, 'sub'));
+    // The root CLAUDE.md is already marked; the sub dir's is not, so adding the marker there needs the user.
+    writeFileSync(join(p, 'CLAUDE.md'), 'goodboy: non-project\n');
+    writeFileSync(join(p, 'sub', 'CLAUDE.md'), '# sub\n');
+    const pre = resolve(import.meta.dir, '..', 'hooks', 'pre-tool-use.ts');
+    const input = { session_id: 'sess-mark', cwd: join(p, 'sub'), hook_event_name: 'PreToolUse', tool_name: 'Write', tool_input: { file_path: 'CLAUDE.md', content: '# sub\ngoodboy: non-project\n' } };
+    const proc = Bun.spawn(['bun', pre], { cwd: join(p, 'sub'), env: { ...process.env, TMPDIR: t, HOME: t, CLAUDE_PROJECT_DIR: p }, stdin: new TextEncoder().encode(JSON.stringify(input)), stdout: 'pipe', stderr: 'pipe' });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    expect(out).toContain('Only the user can mark a directory as non-project');
+    expect(out).toContain(join(p, 'sub', 'CLAUDE.md'));
+  }, 30_000);
+
   test("the CLI resolves a file named on the command line from the shell's dir (review 2)", () => {
     const p = dir('goodboy-i10-p-');
     mkdirSync(join(p, 'pkg'));

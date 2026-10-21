@@ -8,6 +8,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve as resolvePath } from 'node:path';
 import { lastKnownVersion, readRangesSince } from './file-tracker';
+import { readRegular } from './safe-read';
 import { projectMode } from './project-mode';
 
 export const POLICY_FILE = join('.goodboy', 'policy.md');
@@ -43,10 +44,13 @@ export function knowledgeRoot(cwd: string): { root: string; policyExists: boolea
 /** The doc map's entries; a missing map is empty, an unreadable or invalid one says why. */
 export function readDocMap(root: string): { docs: DocEntry[]; problem?: string } {
   const p = join(root, DOC_MAP_FILE);
-  if (!existsSync(p)) return { docs: [] };
+  // Read without blocking and bounded through one descriptor: a FIFO hung the hook, and a link
+  //   to /dev/zero passed a size check (Codex review).
+  const r = readRegular(p, MAX_KNOWLEDGE_BYTES);
+  if (r === 'absent') return { docs: [] };
+  if (r === 'refused') return { docs: [], problem: `${DOC_MAP_FILE} is not a regular file of up to ${MAX_KNOWLEDGE_BYTES} bytes` };
   try {
-    if (statSync(p).size > MAX_KNOWLEDGE_BYTES) return { docs: [], problem: `${DOC_MAP_FILE} is over ${MAX_KNOWLEDGE_BYTES} bytes` };
-    const parsed = JSON.parse(readFileSync(p, 'utf8')) as { docs?: unknown };
+    const parsed = JSON.parse(r.text) as { docs?: unknown };
     if (!Array.isArray(parsed.docs)) return { docs: [], problem: `${DOC_MAP_FILE} has no "docs" list` };
     const docs: DocEntry[] = [];
     for (const d of parsed.docs as Record<string, unknown>[]) {
@@ -129,12 +133,10 @@ export function knowsCurrentContent(sessionId: string, file: string, turn: numbe
   if (known.via === 'edit') return true;
   const reads = readRangesSince(sessionId, file, st.mtimeMs, 'main');
   if (reads.full) return true;
-  let lines: number;
-  try {
-    lines = lineCount(readFileSync(file, 'utf8'));
-  } catch {
-    return true; // unreadable: fail open (the notice warns)
-  }
+  // Bounded and without blocking, like the doc map (Codex review).
+  const text = readRegular(file, MAX_KNOWLEDGE_BYTES);
+  if (typeof text !== 'object') return true; // unreadable: fail open (the notice warns)
+  const lines = lineCount(text.text);
   const covered = new Array<boolean>(lines + 1).fill(false);
   for (const [a, b] of reads.ranges) for (let n = Math.max(1, a); n <= Math.min(lines, b); n++) covered[n] = true;
   for (let n = 1; n <= lines; n++) if (!covered[n]) return false;
@@ -185,7 +187,9 @@ export function knowledgeSessionNotice(cwd: string, sessionId: string): { contex
   const files = requiredKnowledgeFiles(root).map((f) => relative(cwd, f) || f);
   const notes: string[] = [`Read these project knowledge files in full before anything else: ${files.join(', ')}. (policy read gate)`];
   try {
-    const n = lineCount(readFileSync(join(root, POLICY_FILE), 'utf8'));
+    const policy = readRegular(join(root, POLICY_FILE), MAX_KNOWLEDGE_BYTES);
+    if (typeof policy !== 'object') throw new Error('not a regular file');
+    const n = lineCount(policy.text);
     if (n > POLICY_LINE_BUDGET) notes.push(`${POLICY_FILE} has ${n} lines, over its budget of ${POLICY_LINE_BUDGET}: tighten it in the skill's update mode.`);
   } catch {
     notes.push(`${POLICY_FILE} cannot be read; the read gate lets the session go on.`);

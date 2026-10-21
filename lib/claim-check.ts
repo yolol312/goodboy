@@ -290,9 +290,11 @@ export function verifyCitations(
   for (const c of citations) {
     const p = problemOf(c, opts);
     // A path that exists from both the repo root and the current dir holds when either reading
-    //   checks out (I9 review).
-    if (p && c.alt !== undefined && problemOf({ ...c, abs: c.alt, alt: undefined }, opts) === null) continue;
-    if (p) problems.push(p);
+    //   checks out (I9 review). When neither does but the other reading only lacks a read, that
+    //   is the problem to report: asking for a read, not claiming a hallucination (Codex review).
+    const q = p && c.alt !== undefined ? problemOf({ ...c, abs: c.alt, alt: undefined }, opts) : p;
+    if (p && q === null) continue;
+    if (p) problems.push(q?.kind === 'unread' ? q : p);
   }
   return problems;
 }
@@ -344,12 +346,15 @@ export function excludeUserOriginated(
   alsoFrom?: string,
 ): Citation[] {
   if (citations.length === 0 || !Array.isArray(userTexts) || userTexts.length === 0) return citations;
+  // Both readings of a path count on both sides: the user's `./src/a.ts:9` and the model's
+  //   `src/a.ts:9` name the same two files when both exist (Codex review).
+  const keys = (c: Citation) => [citationKey(c), ...(c.alt !== undefined ? [citationKey({ ...c, abs: c.alt })] : [])];
   const fromUser = new Set<string>();
   for (const t of userTexts) {
-    for (const c of extractCitations(t, root, cache, alsoFrom)) fromUser.add(citationKey(c));
+    for (const c of extractCitations(t, root, cache, alsoFrom)) for (const k of keys(c)) fromUser.add(k);
   }
   if (fromUser.size === 0) return citations;
-  return citations.filter((c) => !fromUser.has(citationKey(c)));
+  return citations.filter((c) => !keys(c).some((k) => fromUser.has(k)));
 }
 
 /** 확정 환각(파일 없음/줄 범위 밖)만 추린다. */

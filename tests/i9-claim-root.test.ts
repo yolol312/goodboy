@@ -7,7 +7,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { extractCitations, mayCite } from '../lib/claim-check';
+import { excludeUserOriginated, extractCitations, mayCite, verifyCitations } from '../lib/claim-check';
 
 const STOP_HOOK = resolve(import.meta.dir, '..', 'hooks', 'stop.ts');
 const RES = 'src/main/resources';
@@ -144,6 +144,17 @@ describe('I9 review: two readings, a symlinked cwd, bare names', () => {
     expect(out.decision).toBe('block');
     expect(out.reason).toContain('src/index.ts:30 — the file has only 3 lines');
   }, 30_000);
+
+  test('Codex review: an unread other reading asks for a read; the user\'s spelling of either reading is excluded', () => {
+    const s = monorepo();
+    const cites = extractCitations('See `src/index.ts:10`.', s.root, {}, s.pkg);
+    // Neither copy read: past the root copy's end, inside the package's, so read it first.
+    const problems = verifyCitations(cites, { readTrackingAvailable: true, wasRead: () => false });
+    expect(problems.map((p) => p.kind)).toEqual(['unread']);
+    // The user wrote `./src/index.ts:999`, the model repeats `src/index.ts:999`: the user's claim.
+    const mine = extractCitations('There is no `src/index.ts:999`.', s.root, {}, s.pkg);
+    expect(excludeUserOriginated(mine, ['Is the bug at ./src/index.ts:999?'], s.root, {}, s.pkg)).toEqual([]);
+  });
 
   test('`./` names the current dir first', () => {
     const s = monorepo();

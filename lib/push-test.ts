@@ -342,12 +342,17 @@ function gitHandoff(words: string[], cwd: string, depth: number, budget: ReadBud
   const args = words.slice(i + 1);
   const pos: string[] = [];
   let all = false;
+  // `--repo <remote>` names the remote whose push refspecs git uses; the config lookup below
+  //   reads the default remote's, so with it git config decides (Codex review: an untested
+  //   branch in remote.<name>.push went through).
+  let repoOpt = false;
   for (let j = 0; j < args.length; j++) {
     const a = args[j]!;
     if (a === '--') {
       pos.push(...args.slice(j + 1));
       break;
     }
+    if (a === '--repo' || a.startsWith('--repo=')) repoOpt = true;
     if (a === '--dry-run' || a === '--delete') return [];
     // --follow-tags also sends annotated tags reachable from the pushed commits.
     if (a === '--all' || a === '--mirror' || a === '--tags' || a === '--branches' || a === '--follow-tags') all = true;
@@ -369,7 +374,7 @@ function gitHandoff(words: string[], cwd: string, depth: number, budget: ReadBud
     return [{ kind: 'push', what, cwd: dir, revs: [], unclear: 'it pushes every branch or tag' }];
   }
   const decided: Handoff[] = [{ kind: 'push', what, cwd: dir, revs: [], unclear: 'git config decides which refs it pushes' }];
-  if (configDecides) return decided;
+  if (configDecides || repoOpt) return decided;
   // The repo's config is not the one git will read, so it is not looked up.
   if (elsewhere) return fromElsewhere(what);
   // With no refspec, config decides what goes out: a push refspec, mirror mode or

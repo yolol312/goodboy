@@ -615,7 +615,8 @@ function main(): void {
       // (A0.796) Project mode (track H §14.2): only the user marks a directory non-project
       //   (lib/project-mode.ts), in the main session and in agents.
       if (toolName === 'Write' || toolName === 'Edit' || toolName === 'MultiEdit' || toolName === 'Bash') {
-        const why = markerWriteDenial(sessionId, toolName, toolInput, projectCwd);
+        // The shell's dir: it resolves the tool's own write target (Codex review).
+        const why = markerWriteDenial(sessionId, toolName, toolInput, cwd);
         if (why !== null) {
           logGate(sessionId, 'project-mode', 'deny', 'marker without user evidence');
           emit(deny(why));

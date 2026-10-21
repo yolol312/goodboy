@@ -1728,10 +1728,32 @@ Review round 1 (2 high, 2 medium) fixes:
 
 Known limits:
 - The policy read gate (`policyReadDenial`) still takes the shell's `cwd`.
-- `markerWriteDenial` resolves a Bash redirect target from the project dir, so after a `cd`
-  only the file name in its message is off.
+- (Fixed after a Codex review: `markerWriteDenial` resolves the tool's write target from the
+  shell's dir again; from the project dir it checked another CLAUDE.md after a `cd`.)
 - The marker sweep after a Bash call does not look at the project root. A marker forged there
   is still refused at Stop.
+
+### 15.14 Codex review before the release
+
+The user asked for a last Codex review before the v0.35.0 release. It ran read-only on
+codex-cli 0.162.1, on the whole unreleased range (`--base origin/main`) and on the I9 and
+I10 commits. The configured default model (`gpt-5.3-codex`) is refused for a ChatGPT login;
+`gpt-6.1-sol` ran (passed as `model` and `review_model`). `--base` takes no custom prompt.
+Findings, each checked in the code and fixed with a red-checked test:
+- P1, the push gate: `git push --repo <remote>` dropped the remote, so the refspec check read
+  the default remote's config. A push with `--repo` now leaves the refs to git config, as an
+  unclear push.
+- P2, changed lines: a `textconv` diff driver numbered the converted text; the diff now runs
+  with `--no-textconv`.
+- P2, knowledge files: `.goodboy/docs.json` as a FIFO hung the hooks, and a link to /dev/zero
+  passed the size check. The doc map, the policy line count and the required-file line count
+  now go through `readRegular`.
+- P2 ×2, I9: when both readings of a path fail and the other one only lacks a read, the gate
+  now asks for the read instead of reporting a hallucination. The user-originated exclusion
+  now matches either reading.
+- P2, I10: `markerWriteDenial` resolves the tool's write target from the shell's dir again.
+Tests: `tests/codex-review-fixes.test.ts`, plus new cases in `tests/i9-claim-root.test.ts` and
+`tests/i10-project-dir.test.ts`.
 
 (I9's backlog from the trial, low, not scheduled:)
 - A short resource-relative path that is the unique suffix of a real file

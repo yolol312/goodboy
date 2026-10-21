@@ -60,7 +60,9 @@ export function changedLines(cwd: string, base = 'HEAD'): { top: string; files: 
   // Fixed prefixes, no quoting and rename detection without copies, whatever the user's config
   //   says (diff.mnemonicPrefix, diff.noprefix, core.quotePath; diff.renames=copies would show a
   //   staged near-copy as a few changed lines, I1 security review round 6).
-  const diff = git(top, ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '-M', '--src-prefix=a/', '--dst-prefix=b/', '--unified=0', '--end-of-options', base, '--']);
+  //   No textconv: a diff driver's conversion would number the converted text, not the source
+  //   lines the coverage report uses (Codex review).
+  const diff = git(top, ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '-M', '--src-prefix=a/', '--dst-prefix=b/', '--unified=0', '--end-of-options', base, '--']);
   if (diff === null) return { error: `git diff against ${base} failed (is it a commit?)` };
   let file: string | null = null;
   for (const line of diff.split('\n')) {
