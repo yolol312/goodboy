@@ -225,6 +225,9 @@ export interface ChangedFileEdit {
   file: string;
   /** 이 파일의 마지막 편집 ISO 시각. 없으면 staleness 검사 생략. */
   lastEditTimestamp: string | null;
+  /** (#23) The record trees (`TestResult.tree`, set by test-write) that hold this file's current
+   *  content: a record made on one tested what is there now, whenever it was made. */
+  sameContentTrees?: ReadonlySet<string>;
 }
 
 export interface CoverageResult extends ValidationResult {

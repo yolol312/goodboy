@@ -51,21 +51,41 @@ function headerPath(raw: string): string {
 
 /** Changed lines of the working tree against `base` (default HEAD), per repo-relative file:
  *  the new side of each hunk, and every line of an untracked file. Null outside a repo; an
- *  error when the diff fails (a base that does not exist). */
-export function changedLines(cwd: string, base = 'HEAD'): { top: string; files: Map<string, Set<number>> } | { error: string } | null {
+ *  error when the diff fails (a base that does not exist). `paths` (repo-relative) limits both to
+ *  those files, taken literally. */
+export function changedLines(cwd: string, base = 'HEAD', paths?: readonly string[]): { top: string; files: Map<string, Set<number>> } | { error: string } | null {
   const cdup = git(cwd, ['rev-parse', '--show-cdup']);
   if (cdup === null) return null;
   const top = resolvePath(cwd, cdup.trim() || '.');
   const files = new Map<string, Set<number>>();
+  if (paths !== undefined && paths.length === 0) return { top, files };
+  const spec = (paths ?? []).map((p) => `:(literal)${p}`);
   // Fixed prefixes, no quoting and rename detection without copies, whatever the user's config
   //   says (diff.mnemonicPrefix, diff.noprefix, core.quotePath; diff.renames=copies would show a
   //   staged near-copy as a few changed lines, I1 security review round 6).
   //   No textconv: a diff driver's conversion would number the converted text, not the source
   //   lines the coverage report uses (Codex review).
-  const diff = git(top, ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '-M', '--src-prefix=a/', '--dst-prefix=b/', '--unified=0', '--end-of-options', base, '--']);
+  const diff = git(top, ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '-M', '--src-prefix=a/', '--dst-prefix=b/', '--unified=0', '--end-of-options', base, '--', ...spec]);
   if (diff === null) return { error: `git diff against ${base} failed (is it a commit?)` };
   let file: string | null = null;
+  // (#23 security review) The body lines a hunk header announced: a header is read only outside
+  //   them, so an added line that reads `++ b/other` (shown as `+++ b/other`) cannot switch the
+  //   file the next hunks are counted for.
+  let oldLeft = 0;
+  let newLeft = 0;
   for (const line of diff.split('\n')) {
+    if (oldLeft > 0 || newLeft > 0) {
+      if (line.startsWith('-') && oldLeft > 0) {
+        oldLeft--;
+        continue;
+      }
+      if (line.startsWith('+') && newLeft > 0) {
+        newLeft--;
+        continue;
+      }
+      if (line.startsWith('\\')) continue;
+      oldLeft = newLeft = 0; // not a body line: read it as a header
+    }
     // A pure rename or copy has no hunk: the file is in the diff with no added line.
     const moved = line.match(/^(?:rename|copy) to (.+)$/);
     if (moved) {
@@ -78,16 +98,20 @@ export function changedLines(cwd: string, base = 'HEAD'): { top: string; files: 
       file = p === '/dev/null' ? null : p.replace(/^b\//, '');
       continue;
     }
-    const h = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
+    const h = line.match(/^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+    if (h) {
+      oldLeft = h[1] === undefined ? 1 : Number(h[1]);
+      newLeft = h[3] === undefined ? 1 : Number(h[3]);
+    }
     if (h && file !== null) {
-      const start = Number(h[1]);
-      const count = h[2] === undefined ? 1 : Number(h[2]);
+      const start = Number(h[2]);
+      const count = h[3] === undefined ? 1 : Number(h[3]);
       const set = files.get(file) ?? new Set<number>();
       for (let n = start; n < start + count; n++) set.add(n);
       files.set(file, set);
     }
   }
-  const untracked = git(top, ['ls-files', '--others', '--exclude-standard', '-z']) ?? '';
+  const untracked = git(top, ['ls-files', '--others', '--exclude-standard', '-z', '--', ...spec]) ?? '';
   for (const f of untracked.split('\0').filter(Boolean)) {
     try {
       const text = readFileSync(join(top, f), 'utf8');

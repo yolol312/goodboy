@@ -12,6 +12,7 @@
 
 import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { MAX_STATE_BYTES, readRegular } from './safe-read';
 import { canonicalTimestamp, isTrustedTimestamp } from './trusted-time';
 import type { AcceptanceCoverage, TestResult, TestVerdict } from './types';
 import type { AcceptanceCriterion } from './acceptance';
@@ -254,6 +255,15 @@ function hasTrustedTimestamp(r: TestResult, nowMs: number): boolean {
   return isTrustedTimestamp(r.timestamp, nowMs);
 }
 
+/** (#23) A record counts for an edited file when it was made after the file's last edit, or when
+ *  its tree holds the file's current content (an edit since then was undone, or the file came
+ *  back with a branch switch). The one freshness rule of every layer-1 check. */
+export function freshFor(r: TestResult, edit: ChangedFileEdit): boolean {
+  const last = edit.lastEditTimestamp;
+  if (typeof last !== 'string' || last === '' || r.timestamp > last) return true;
+  return typeof r.tree === 'string' && edit.sameContentTrees?.has(r.tree) === true;
+}
+
 /**
  * 파일별 커버리지 + staleness. 의미론은 validateReviewCoverage와 동일하다
  * (각 변경 파일은 "그 파일의 마지막 편집보다 나중이고 그 파일을 커버하는" 결과가 있으면 통과).
@@ -295,11 +305,7 @@ export function validateTestCoverage(
     let chosen: TestResult | null = null;
     for (const r of sorted) {
       if (!(r.tested_files ?? []).some((f) => normalizePath(f) === key)) continue;
-      const isFresh =
-        typeof edit.lastEditTimestamp !== 'string' ||
-        edit.lastEditTimestamp === '' ||
-        r.timestamp > edit.lastEditTimestamp;
-      if (isFresh) {
+      if (freshFor(r, edit)) {
         chosen = r;
         break;
       }
@@ -514,6 +520,8 @@ export interface ForbiddenHit {
   file: string;
   key: string;
   message: string;
+  /** The first line of the match (1-based). */
+  line?: number;
 }
 
 /** What ends a `//` comment: LF, CR, and U+2028 and U+2029 (JS line terminators). */
@@ -521,6 +529,7 @@ const LINE_END = new Set(['\n', '\r', String.fromCharCode(0x2028), String.fromCh
 
 /**
  * 문자열·템플릿 리터럴·주석의 **내용**을 공백으로 지운다(길이·줄바꿈은 보존).
+ * `keepLiterals`: comments only; string contents stay (#23: a path a test names).
  *
  * 금지 패턴은 "실행되는 코드"에서만 의미가 있다. 그런데 정적 스캐너를 검증하는 메타
  * 테스트는 금지 패턴을 **픽스처 문자열로 반드시 포함**한다 — 그걸 위반으로 세면
@@ -538,7 +547,7 @@ const LINE_END = new Set(['\n', '\r', String.fromCharCode(0x2028), String.fromCh
  * `javaTextBlocks` (#15, lib/changed-coverage.ts): a Java text block (`"""` … `"""`, a backslash
  * escapes the next character) is one literal across lines.
  */
-export function stripLiteralsAndComments(source: string, javaTextBlocks = false): string {
+export function stripLiteralsAndComments(source: string, javaTextBlocks = false, keepLiterals = false): string {
   if (typeof source !== 'string' || source === '') return '';
   const out = source.split('');
   const blank = (from: number, to: number): void => {
@@ -574,7 +583,7 @@ export function stripLiteralsAndComments(source: string, javaTextBlocks = false)
     if (javaTextBlocks && source.startsWith('"""', i)) {
       let j = i + 3;
       while (j < n && !source.startsWith('"""', j)) j += source[j] === '\\' ? 2 : 1;
-      blank(i + 3, Math.min(j, n));
+      if (!keepLiterals) blank(i + 3, Math.min(j, n));
       i = Math.min(j + 3, n);
       continue;
     }
@@ -593,7 +602,7 @@ export function stripLiteralsAndComments(source: string, javaTextBlocks = false)
         if ((d === '\n' || d === '\r') && quote !== '`') break;
         j++;
       }
-      blank(i + 1, Math.min(j, n));
+      if (!keepLiterals) blank(i + 1, Math.min(j, n));
       i = Math.min(j + 1, n);
       continue;
     }
@@ -602,24 +611,65 @@ export function stripLiteralsAndComments(source: string, javaTextBlocks = false)
   return out.join('');
 }
 
-/** 테스트 파일들에서 가짜 테스트 패턴을 찾는다. 읽기 실패한 파일은 건너뛴다(fail-open). */
-export function scanForbiddenPatterns(testFiles: string[]): ForbiddenHit[] {
+/** 테스트 파일들에서 가짜 테스트 패턴을 찾는다. 읽기 실패한 파일은 건너뛴다(fail-open).
+ *  (#23) With `linesOf`, a match counts only when it touches a line it returns for the file (the
+ *  lines added since the session's start): a pattern that was there before the session is not
+ *  this change's, and the existing-tests rule may need that file listed. `null` from it means
+ *  every line counts. */
+export function scanForbiddenPatterns(testFiles: string[], linesOf?: (file: string) => ReadonlySet<number> | null): ForbiddenHit[] {
   const hits: ForbiddenHit[] = [];
   for (const f of testFiles ?? []) {
     if (typeof f !== 'string' || f.trim() === '') continue;
-    let content: string;
-    try {
-      content = readFileSync(f, 'utf8');
-    } catch {
-      continue;
-    }
+    const lines = linesOf ? linesOf(f) : null;
+    if (lines !== null && lines.size === 0) continue;
+    // A FIFO or a device would hang the hook (#23 security review): only a regular file is read.
+    const read = readRegular(f, MAX_STATE_BYTES);
+    if (typeof read === 'string') continue;
+    const content = read.text;
     // 문자열·주석은 실행되지 않는다 — 픽스처를 위반으로 세지 않는다.
     const code = stripLiteralsAndComments(content);
-    for (const p of FORBIDDEN_TEST_PATTERNS) {
-      if (p.re.test(code)) {
-        hits.push({ file: f, key: p.key, message: p.message });
+    let starts: number[] | undefined;
+    for (const [p, all] of FORBIDDEN_GLOBAL) {
+      for (const m of code.matchAll(all)) {
+        // Lines are kept by the stripping, so offsets map to the file's lines.
+        starts ??= lineStarts(code);
+        const first = lineAt(starts, m.index);
+        const last = lineAt(starts, m.index + Math.max(0, m[0].length - 1));
+        if (lines !== null && !rangeTouches(lines, first, last)) continue;
+        hits.push({ file: f, key: p.key, message: p.message, line: first });
+        break;
       }
     }
   }
   return hits;
+}
+
+/** The patterns as global regexes, for every match's line (matchAll copies the regex). */
+const FORBIDDEN_GLOBAL: readonly (readonly [ForbiddenPattern, RegExp])[] = FORBIDDEN_TEST_PATTERNS.map(
+  (p) => [p, new RegExp(p.re.source, p.re.flags.includes('g') ? p.re.flags : `${p.re.flags}g`)] as const,
+);
+
+/** The offset where each line starts (line n at index n - 1). */
+function lineStarts(text: string): number[] {
+  const out = [0];
+  for (let i = text.indexOf('\n'); i !== -1; i = text.indexOf('\n', i + 1)) out.push(i + 1);
+  return out;
+}
+
+/** The 1-based line of an offset, by binary search (performance review: a scan per match was
+ *  quadratic). */
+function lineAt(starts: readonly number[], offset: number): number {
+  let lo = 0;
+  let hi = starts.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (starts[mid]! <= offset) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo + 1;
+}
+
+function rangeTouches(lines: ReadonlySet<number>, first: number, last: number): boolean {
+  for (let n = first; n <= last; n++) if (lines.has(n)) return true;
+  return false;
 }

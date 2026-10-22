@@ -627,6 +627,19 @@ function validateCoverageInput(raw: unknown, errors: string[]): void {
       errors.push('coverage.changed.base must be the object id diff-coverage prints.');
     }
   }
+  // (#23) Changed files the tests run only as a subprocess, which the coverage tool cannot see.
+  if (c.subprocess !== undefined) {
+    const s = c.subprocess as unknown[];
+    if (
+      !Array.isArray(s) ||
+      s.some((e) => {
+        const v = e as Record<string, unknown> | null;
+        return typeof v !== 'object' || v === null || typeof v.file !== 'string' || v.file.trim() === '' || typeof v.test !== 'string' || v.test.trim() === '';
+      })
+    ) {
+      errors.push('coverage.subprocess must be a list of {file, test}: a changed file (repo-relative) and the test file that runs it as a process.');
+    }
+  }
 }
 
 async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {

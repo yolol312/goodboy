@@ -10,7 +10,7 @@ import { extname, isAbsolute, relative, resolve as resolvePath, sep } from 'node
 import { isFrontendFile } from './review-dimensions';
 import type { ChangedFileEdit } from './review-validator';
 import { readRegular } from './safe-read';
-import { failingSuites, missingTestFiles, scanForbiddenPatterns, stripLiteralsAndComments, validateEvidence } from './test-validator';
+import { failingSuites, freshFor, missingTestFiles, scanForbiddenPatterns, stripLiteralsAndComments, validateEvidence } from './test-validator';
 import { isTrustedTimestamp } from './trusted-time';
 import type { TestResult, TestType } from './types';
 
@@ -225,18 +225,19 @@ export interface TypeGap {
 
 /** A record that the other layer-1 checks would accept on its own: no failing suite, its test
  *  files exist, its evidence holds, no do-nothing test pattern. Used for records outside the
- *  accepted set (a test-lead run leaves one record per member). */
-export function recordStandsAlone(r: TestResult): boolean {
+ *  accepted set (a test-lead run leaves one record per member). `linesOf`: the lines the
+ *  pattern scan looks at (#23, the session's added lines). */
+export function recordStandsAlone(r: TestResult, linesOf?: (file: string) => ReadonlySet<number> | null): boolean {
   return (
     failingSuites([r]) === null &&
     missingTestFiles([r]) === null &&
     validateEvidence([r]) === null &&
-    scanForbiddenPatterns(r.test_files ?? []).length === 0
+    scanForbiddenPatterns(r.test_files ?? [], linesOf).length === 0
   );
 }
 
 /** Per changed code file, the extra types no record meets. A type is met by a passing record
- *  with a trusted timestamp after the file's last edit that lists the file in `tested_files`
+ *  with a trusted timestamp, fresh for the file (`freshFor`), that lists the file in `tested_files`
  *  and has a passing suite of a satisfying type; the record is one the other checks accepted,
  *  or one that stands alone. */
 export function missingTestTypes(args: {
@@ -263,10 +264,7 @@ export function missingTestTypes(args: {
     if (!need || seen.has(need.abs)) continue;
     seen.add(need.abs);
     needs.push(need);
-    const last = typeof edit.lastEditTimestamp === 'string' ? edit.lastEditTimestamp : '';
-    const fresh = passing.filter(
-      (r) => (last === '' || r.timestamp > last) && (r.tested_files ?? []).some((f) => resolvePath(f) === need.abs),
-    );
+    const fresh = passing.filter((r) => freshFor(r, edit) && (r.tested_files ?? []).some((f) => resolvePath(f) === need.abs));
     const missing = need.types.filter(
       (t) =>
         !fresh.some(
@@ -290,7 +288,7 @@ export function typeGapReason(gaps: readonly TypeGap[], tester: string): string 
     .join('; ');
   return (
     `Test types missing: ${list}${gaps.length > 5 ? ` (${gaps.length - 5} more)` : ''}. A type counts from a passing ` +
-    "result made after the file's last edit that lists the file in tested_files and has a passing suite of that " +
+    "result made after the file's last edit (or on its current content) that lists the file in tested_files and has a passing suite of that " +
     `type; label a suite by what its tests really run. Run ${tester}. Only the user exempts files from this rule ` +
     '(a `test-type-exempt:` glob in a `decide: human` policy entry).'
   );

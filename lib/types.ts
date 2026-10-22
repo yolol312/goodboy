@@ -121,6 +121,13 @@ export interface CoverageRecord {
   };
   /** Why coverage is unavailable (no tool, no report). */
   reason?: string;
+  /** (#23) Changed files that tests run only as a subprocess (a hook or CLI entry point), which
+   *  the coverage tool of the test process cannot see: the file (repo-relative) and the test
+   *  file that runs it. The test gate counts such a file as run at file level only when the
+   *  record passed, has a passing integration or e2e suite, lists that test in `test_files`, and
+   *  the test's text names the file and starts a process (suites name no test files, so which
+   *  suite ran the test is not checked). */
+  subprocess?: { file: string; test: string }[];
 }
 
 export interface PrototypeMismatch {

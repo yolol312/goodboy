@@ -24,7 +24,7 @@ import type { ChangedFileEdit } from './review-validator';
 import { MAX_STATE_BYTES, readRegular } from './safe-read';
 import { JVM_CASE, TEST_FILE } from './test-catalog';
 import { JS_SPECIFIER, recordStandsAlone } from './test-types';
-import { stripLiteralsAndComments } from './test-validator';
+import { freshFor, stripLiteralsAndComments } from './test-validator';
 import { isTrustedTimestamp } from './trusted-time';
 import type { ReviewResult, TestResult } from './types';
 
@@ -429,7 +429,7 @@ export interface AffectedGap {
 }
 
 /** Per changed code file, the affected start tests no record ran: a passing record with a
- *  trusted timestamp after the file's last edit that lists the test in `test_files` and has a
+ *  trusted timestamp, fresh for the file (`freshFor`), that lists the test in `test_files` and has a
  *  passing suite that ran it; the record is one the other checks accepted, or one that stands
  *  alone. */
 export function affectedGaps(args: {
@@ -455,8 +455,7 @@ export function affectedGaps(args: {
     const rel = toRel(args.top, edit.file);
     const tests = rel === null ? undefined : affected.get(rel);
     if (!tests || gaps.some((g) => g.rel === rel)) continue;
-    const last = typeof edit.lastEditTimestamp === 'string' ? edit.lastEditTimestamp : '';
-    const fresh = passing.filter((r) => last === '' || r.timestamp > last);
+    const fresh = passing.filter((r) => freshFor(r, edit));
     const missing = tests.filter(
       (t) =>
         !fresh.some(

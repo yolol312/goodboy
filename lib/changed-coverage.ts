@@ -2,7 +2,8 @@
 // test of the recorded tree. The test records carry `coverage.changed` from `cli.ts
 // diff-coverage` (per file, the files the report saw at all, the files the diff has with their
 // added lines, and the base); the layer-1 gate reads them here. For each changed file only the
-// passing records the other layer-1 checks accepted and made after its last edit count. A
+// passing records the other layer-1 checks accepted and made after its last edit (or on its
+// current content, #23) count. A
 // changed code file with added lines that the report lacks ran in no test (M24: code started
 // in a child process is not measured; M25), so it counts as not covered; so does an edited
 // file the diff does not have unless it equals the base (reverted): git can be told to hide a
@@ -20,12 +21,13 @@
 // outside a repo, accepts only the empty tree. A same-user limit stays: a glob written in one
 // session counts in the next. GOODBOY_DIFF_COVERAGE=on (default) | warn | off.
 
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
 import { filterOffArgs, HOOK_GIT_ARGS, HOOK_GIT_ENV, NO_GRAFTS } from './hook-git';
 import { knowledgeRoot, parsePolicyEntries, POLICY_FILE } from './project-knowledge';
-import { stripLiteralsAndComments } from './test-validator';
+import { readRegular } from './safe-read';
+import { freshFor, stripLiteralsAndComments } from './test-validator';
 import type { ChangedFileEdit } from './review-validator';
 import { isTrustedTimestamp } from './trusted-time';
 import type { TestResult } from './types';
@@ -370,26 +372,121 @@ function withoutAnnotations(text: string): string | null {
 /** The files of `rels` (repo-relative) that are not the base's blob, i.e. not an edit that was
  *  undone. Hashed as git would store them (line-ending attributes apply) with every filter
  *  driver emptied, so no program from the repo's config runs. Three git calls for all files. */
-function differFromBase(top: string, base: string, rels: string[]): Set<string> {
+export function differFromBase(top: string, base: string, rels: string[]): Set<string> {
   const out = new Set(rels);
   if (rels.length === 0) return out;
-  const tree = git(top, ['ls-tree', '-z', '--end-of-options', base, '--', ...rels]);
-  if (tree.code !== 0) return out;
-  const want = new Map<string, string>();
-  for (const e of tree.out.split('\0')) {
+  const want = treeBlobs(top, base, rels);
+  const have = blobsNow(top, rels.filter((r) => want.has(r)));
+  for (const [r, id] of have) if (id === want.get(r)) out.delete(r);
+  return out;
+}
+
+/** The blob ids a commit or tree has for `rels`, by repo-relative path; none when git fails. */
+function treeBlobs(top: string, tree: string, rels: string[]): Map<string, string> {
+  const out = new Map<string, string>();
+  const listed = git(top, ['ls-tree', '-z', '--end-of-options', tree, '--', ...rels]);
+  if (listed.code !== 0) return out;
+  for (const e of listed.out.split('\0')) {
     const m = e.match(/^\d+ blob ([0-9a-f]+)\t([^]+)$/);
-    if (m) want.set(m[2]!, m[1]!);
+    if (m) out.set(m[2]!, m[1]!);
   }
-  const asked = rels.filter((r) => want.has(r));
-  if (asked.length === 0) return out;
+  return out;
+}
+
+/** The repo-relative path of an edited file inside `top`, or null. */
+function relInside(top: string, file: string): string | null {
+  const r = relative(top, resolvePath(file));
+  return r === '' || outside(r) ? null : r.split(sep).join('/');
+}
+
+/** The largest file whose blob id is computed; a larger one counts as changed. */
+const MAX_HASH_BYTES = 16 * 1024 * 1024;
+
+/** Git blob ids of the files' content now, hashed as differFromBase does (filters emptied).
+ *  Only regular files (not a symlink, a FIFO or a device, which `hash-object` would follow or
+ *  wait on: #23 security review) of at most MAX_HASH_BYTES; the others get no id, so they
+ *  count as changed. */
+function blobsNow(top: string, rels: string[]): Map<string, string> {
+  const out = new Map<string, string>();
+  rels = rels.filter((r) => {
+    try {
+      const st = lstatSync(join(top, r));
+      return st.isFile() && st.size <= MAX_HASH_BYTES;
+    } catch {
+      return false;
+    }
+  });
+  if (rels.length === 0) return out;
   const filters = filterOffArgs(git(top, ['config', '--name-only', '--get-regexp', '^filter\\.']).out);
-  const have = git(top, [...filters, 'hash-object', '--', ...asked]);
+  const have = git(top, [...filters, 'hash-object', '--', ...rels]);
   if (have.code !== 0) return out;
   const ids = have.out.trim().split('\n');
-  asked.forEach((r, i) => {
-    if (ids[i] === want.get(r)) out.delete(r);
+  rels.forEach((r, i) => {
+    if (ids[i]) out.set(r, ids[i]!);
   });
   return out;
+}
+
+/** (#23) The edits that are a change of this session: a file whose content is its blob at the
+ *  session-start HEAD (an edit undone, or brought back by a branch switch) is dropped. All kept
+ *  when the start is unknown or had no commit, or git fails. */
+export function netChangedEdits<T extends { file: string }>(edits: T[], top: string, startHead: string | null | undefined): T[] {
+  if (typeof startHead !== 'string' || edits.length === 0) return edits;
+  const rels = new Map<string, string>();
+  for (const e of edits) {
+    const r = relInside(top, e.file);
+    if (r !== null && existsSync(resolvePath(e.file))) rels.set(e.file, r);
+  }
+  if (rels.size === 0) return edits;
+  const differ = differFromBase(top, startHead, [...new Set(rels.values())]);
+  return edits.filter((e) => !rels.has(e.file) || differ.has(rels.get(e.file)!));
+}
+
+const TREE_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+/** At most this many record trees are read per Stop (one `git ls-tree` each), within this time. */
+const MAX_TREES = 30;
+const TREE_BUDGET_MS = 2_000;
+
+/** (#23) Each edit with the record trees that hold its current content (`sameContentTrees`).
+ *  Only the trees of records that list the file and are older than its last edit are read:
+ *  for the rest the time already decides. */
+export function withSameContent<T extends ChangedFileEdit>(edits: T[], results: readonly TestResult[], top: string): T[] {
+  const want = new Map<string, Set<string>>(); // tree → rels to look up
+  const relOf = new Map<string, string>();
+  // Newest first, each with its tested files resolved once (performance review).
+  const newest = results
+    .filter((t) => typeof t.tree === 'string' && TREE_ID.test(t.tree))
+    .sort((a, b) => (a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0))
+    .map((t) => ({ t, tested: new Set((t.tested_files ?? []).filter((f) => typeof f === 'string').map((f) => resolvePath(f))) }));
+  for (const e of edits) {
+    const last = e.lastEditTimestamp;
+    if (typeof last !== 'string' || last === '') continue;
+    const abs = resolvePath(e.file);
+    const r = relInside(top, abs);
+    if (r === null || !existsSync(abs)) continue;
+    for (const { t, tested } of newest) {
+      if (t.timestamp > last || !tested.has(abs)) continue;
+      if (!want.has(t.tree!) && want.size >= MAX_TREES) continue;
+      relOf.set(e.file, r);
+      want.set(t.tree!, (want.get(t.tree!) ?? new Set()).add(r));
+    }
+  }
+  if (want.size === 0) return edits;
+  const now = blobsNow(top, [...new Set(relOf.values())]);
+  const same = new Map<string, Set<string>>(); // rel → trees
+  // A time budget over the tree reads: a tree not read leaves its files to the time rule.
+  const until = Date.now() + TREE_BUDGET_MS;
+  for (const [tree, rels] of want) {
+    if (Date.now() > until) break;
+    for (const [r, id] of treeBlobs(top, tree, [...rels])) {
+      if (now.get(r) === id) same.set(r, (same.get(r) ?? new Set()).add(tree));
+    }
+  }
+  if (same.size === 0) return edits;
+  return edits.map((e) => {
+    const trees = relOf.has(e.file) ? same.get(relOf.get(e.file)!) : undefined;
+    return trees ? { ...e, sameContentTrees: trees } : e;
+  });
 }
 
 export interface GapsOut {
@@ -399,6 +496,8 @@ export interface GapsOut {
   /** The record's base when the only measured runs diffed against a base after the start
    *  (`head` null: the session started with no commit, so only the empty tree counts). */
   lateBase?: { base: string; head: string | null };
+  /** (#23) Files counted as run on a record's subprocess evidence (file level, not lines). */
+  subprocess?: string[];
 }
 
 /** The changed code files whose changed lines no recorded run executed. `results` are the
@@ -423,7 +522,7 @@ export function changedLineGaps(args: { results: TestResult[]; edits: ChangedFil
   // The files that need their lines run: inside the repo, not exempt, existing code (or a
   //   file a report measured).
   const globs = args.exempt.map((g) => new Bun.Glob(g));
-  const need: { abs: string; file: string; last: string | null }[] = [];
+  const need: { abs: string; file: string; edit: ChangedFileEdit }[] = [];
   const seen = new Set<string>();
   const readUntil = Date.now() + READ_BUDGET_MS;
   for (const edit of [...args.edits].sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0))) {
@@ -436,7 +535,7 @@ export function changedLineGaps(args: { results: TestResult[]; edits: ChangedFil
     if (globs.some((g) => g.match(file))) continue;
     const reported = existsSync(abs) && whole.some((t) => Object.hasOwn(t.coverage!.changed!.files!, file));
     if (!reported && !measurableCode(abs, readUntil)) continue;
-    need.push({ abs, file, last: typeof edit.lastEditTimestamp === 'string' && edit.lastEditTimestamp !== '' ? edit.lastEditTimestamp : null });
+    need.push({ abs, file, edit });
   }
   if (need.length === 0) return { measured: true, gaps: [] };
 
@@ -461,9 +560,18 @@ export function changedLineGaps(args: { results: TestResult[]; edits: ChangedFil
   const tested = new Map(usable.map((t) => [t, new Set((t.tested_files ?? []).map((f) => resolvePath(f)))]));
 
   const gaps: CoverageGap[] = [];
+  const subprocess: string[] = [];
   const notInDiff = new Map<string, string[]>();
-  for (const { abs, file, last } of need) {
-    const fresh = usable.filter((t) => tested.get(t)!.has(abs) && (last === null || t.timestamp > last));
+  // (#23) A changed line that did not run in the test process may have run in a process a test
+  //   started: file-level evidence, listed apart.
+  const read: SubprocessCache = { entry: new Map(), tests: new Map() };
+  const acceptAsProcess = (fresh: TestResult[], file: string): boolean => {
+    if (!fresh.some((t) => subprocessEvidence(t, file, args.top, read))) return false;
+    subprocess.push(file);
+    return true;
+  };
+  for (const { abs, file, edit } of need) {
+    const fresh = usable.filter((t) => tested.get(t)!.has(abs) && freshFor(t, edit));
     if (fresh.length === 0) {
       gaps.push({ file, unmeasured: true });
       continue;
@@ -474,7 +582,7 @@ export function changedLineGaps(args: { results: TestResult[]; edits: ChangedFil
       if (c && (!best || c.covered / Math.max(1, c.total) > best.covered / Math.max(1, best.total))) best = c;
     }
     if (best) {
-      if (best.covered < best.total) gaps.push({ file, covered: best.covered, total: best.total });
+      if (best.covered < best.total && !acceptAsProcess(fresh, file)) gaps.push({ file, covered: best.covered, total: best.total });
       continue;
     }
     if (fresh.some((t) => t.coverage!.changed!.in_report!.includes(file))) continue;
@@ -482,7 +590,7 @@ export function changedLineGaps(args: { results: TestResult[]; edits: ChangedFil
     if (added.length === 0) {
       const base = fresh[0]!.coverage!.changed!.base!;
       notInDiff.set(base, [...(notInDiff.get(base) ?? []), file]);
-    } else if (Math.max(...added) > 0) {
+    } else if (Math.max(...added) > 0 && !acceptAsProcess(fresh, file)) {
       gaps.push({ file, absent: true });
     }
   }
@@ -491,8 +599,75 @@ export function changedLineGaps(args: { results: TestResult[]; edits: ChangedFil
     for (const file of differFromBase(args.top, base, files)) gaps.push({ file, hidden: true });
   }
   gaps.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
-  return { measured: true, gaps };
+  return { measured: true, gaps, ...(subprocess.length > 0 ? { subprocess: subprocess.sort() } : {}) };
 }
+
+/** A call that starts a process, in the common test runners' languages. */
+const SPAWN_CALL = /\b(?:spawnSync|spawn|execFileSync|execFile|execSync|execa|fork|ProcessBuilder|subprocess\.(?:run|Popen|call|check_call|check_output)|exec\.Command)\s*\(/;
+
+/** (#23) The record shows that a test ran `file` (repo-relative) as a process: it names the pair
+ *  in `coverage.subprocess`, the test is in its `test_files`, a passing integration or e2e suite
+ *  ran, and the test's text names the file (its path or base name, or its stem as a quoted string
+ *  next to its directory's name) and starts a process. */
+export function subprocessEvidence(t: TestResult, file: string, top: string, cache: SubprocessCache = { entry: new Map(), tests: new Map() }): boolean {
+  const pairs = (Array.isArray(t.coverage?.subprocess) ? t.coverage.subprocess.slice(0, MAX_SUBPROCESS_PAIRS) : []).filter(
+    (p) => !!p && p.file === file && typeof p.test === 'string',
+  );
+  if (pairs.length === 0 || t.verdict !== 'pass') return false;
+  const typed = (t.suites ?? []).some((s) => !!s && (s.type === 'integration' || s.type === 'e2e') && s.passed > 0 && s.failed === 0);
+  if (!typed) return false;
+  // Only a file that runs as a program can run as a subprocess (security review: a library
+  //   file named in a comment next to any spawn passed). Read once per file and per test file
+  //   (performance review).
+  let entry = cache.entry.get(file);
+  if (entry === undefined) {
+    const source = readRegular(join(top, file), MAX_SOURCE_BYTES);
+    // The guard in code, not in a string (security review round 2); Python's needs its literal.
+    entry = typeof source !== 'string' && (ENTRY_POINT.test(stripLiteralsAndComments(source.text)) || PY_MAIN.test(stripLiteralsAndComments(source.text, false, true)));
+    cache.entry.set(file, entry);
+  }
+  if (!entry) return false;
+  const testFiles = new Set((t.test_files ?? []).filter((f) => typeof f === 'string').map((f) => resolvePath(top, f)));
+  const name = basename(file);
+  const stem = name.slice(0, name.length - extname(name).length);
+  const dir = basename(dirname(file));
+  for (const p of pairs) {
+    const test = resolvePath(top, p.test);
+    if (!testFiles.has(test)) continue;
+    let read = cache.tests.get(test);
+    if (read === undefined) {
+      const raw = readRegular(test, MAX_SOURCE_BYTES);
+      read = typeof raw === 'string' ? null : { code: stripLiteralsAndComments(raw.text, false, true), spawns: SPAWN_CALL.test(stripLiteralsAndComments(raw.text)) };
+      cache.tests.set(test, read);
+    }
+    if (read === null || !read.spawns) continue;
+    // Named in the code, not in a comment, as a whole path part (`a.ts` is not `data.ts`); the
+    //   base name also matches the whole path.
+    const named =
+      new RegExp(`(?<![\\w.-])${escapeRegExp(name)}(?![\\w.-])`).test(read.code) ||
+      (dir !== '.' && dir !== '' && read.code.includes(dir) && new RegExp(`['"\`]${escapeRegExp(stem)}['"\`]`).test(read.code));
+    if (named) return true;
+  }
+  return false;
+}
+
+/** What subprocessEvidence read, kept for one evaluation: per changed file whether it runs as a
+ *  program, per test file its comment-free text and whether it starts a process (null when
+ *  it cannot be read). */
+export interface SubprocessCache {
+  entry: Map<string, boolean>;
+  tests: Map<string, { code: string; spawns: boolean } | null>;
+}
+
+/** At most this many `coverage.subprocess` pairs of a record are read. */
+const MAX_SUBPROCESS_PAIRS = 50;
+
+/** A file that runs as a program: a JS/TS main guard or a top-level `main()` call, a Go or JVM
+ *  main, or a shebang (on literal-free text); Python's guard (on comment-free text). */
+const ENTRY_POINT = /import\.meta\.main|require\.main\s*===?\s*module|\bfunc\s+main\s*\(\s*\)|\bstatic\s+void\s+main\s*\(|^\s*(?:void\s+|await\s+)?main\s*\(\s*\)|^#!/m;
+const PY_MAIN = /^\s*if\s+__name__\s*==\s*['"]__main__['"]/m;
+
+const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /** The model-facing reason (English): what did not run, and the only ways forward. */
 export function changedLineReason(out: GapsOut, cliPath: string): string {

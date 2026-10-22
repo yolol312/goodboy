@@ -47,6 +47,7 @@ so work is released in batches:
 | v0.34.0 | track J (field reports, §16; issues #8, #9, #11). Released with v0.35.0 |
 | v0.35.0 | track K (update checkups, §17; issue #10 for K1, the later steps are proposals), with the fixes of the fourth real-use trial (§15.12, §15.13) and of a Codex review (§15.14). Released 2026-10-21 (d3df5f2): v0.31.0–v0.35.0 went out together in one push to `main` |
 | v0.36.0 | track L (test backfill for existing projects, §18; #18), with the fixes of the fifth real-use trial (§18 "Trial 5") and of the field reports #20–#22 (§15.15, §15.16). Released 2026-10-22; track M moved to v0.37.0 |
+| v0.36.1 | the test-gate fixes of #23 (§15.17). Released 2026-10-22 |
 | v0.37.0 | track M (full tests in an isolated container sandbox: a real database copy, dummy external services, no egress; 100% line and branch coverage, every screen and action in e2e), §19 |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
 
@@ -1921,6 +1922,46 @@ not block, so the earlier edits are accepted once their own tests pass. Known li
 turn that ends still blocked leaves the cursor where it was, so the next turn judges the same
 edits again; that is intended (the change is still untested), and the user's approval moves
 the cursor.
+
+### 15.17 #23: the test gate re-asked for verified code, one rule per block
+
+Observed in goodboy's own session after the v0.36.0 release (blocks 4 to 8): the test cursor
+had not moved since early in the session, so the edits of several commits and a branch switch
+were judged together, and each Stop named only the first failing rule. In turn: a file edited
+on another branch and restored by the switch (no net change) was untested; files whose
+records were older than their last edit were stale although the regression of that exact tree
+passed; a re-verification record then lacked a red-green entry it could not honestly have; the
+existing-tests rule asked for a test file whose pre-existing `test.todo` made the
+forbidden-pattern scan reject any record listing it; and changed lines that tests run only in a
+spawned hook or CLI process never showed in the coverage report.
+
+Fixed:
+- Net change: an edited file whose content is its blob at the session-start HEAD is no change
+  of the session (`netChangedEdits`, the test gate's edit lists).
+- Content freshness: a record counts for a file when it was made after the file's last edit
+  or when its `tree` (written by test-write) holds the file's current content (`freshFor`,
+  `withSameContent`), in all four layer-1 checks. The older records' red-green evidence then
+  still counts for unchanged files.
+- One block names every gap: `evaluateTestResults` runs all rules and joins their reasons.
+- Forbidden test patterns count only on lines added since the session start
+  (`scanForbiddenPatterns` with the added lines), also for records judged on their own.
+- Subprocess evidence: `coverage.subprocess` pairs a changed file with the test that runs it
+  as a process; a file the coverage report misses or covers in part counts as run when the
+  record passed, has a passing integration or e2e suite, lists the test, and the test's text
+  names the file and starts a process. File level, not lines, and the Stop says so.
+
+Security review fixes: the forbidden-pattern scan reads every line of a test file the diff
+does not show unless it is its start blob (assume-unchanged, binary, ignored, symlinked or
+otherwise spelled paths); the diff parser reads headers only outside a hunk body, so an added
+line that reads like `+++ b/other` cannot move later hunks to another file (this also closed
+the same hole in changed-line coverage); only regular files are hashed and test files are read
+without blocking, so a FIFO cannot hold the Stop past its timeout; subprocess evidence needs a
+file that runs as a program (an entry-point guard, a top-level `main()` or a shebang), named
+in the test outside comments, and reads at most 50 pairs.
+
+Known limits: the push check still scans whole test files; subprocess evidence is declared by
+the tester and checked by text, not by measurement; a file that differs only by what git's
+attributes normalise (line endings, `ident`) counts as unchanged.
 
 ## 16. J — Field reports (v0.34.0)
 

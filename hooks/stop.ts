@@ -2,7 +2,7 @@
 // Stop hook — 턴 증가, 리뷰 강제/검증, 재시도 카운터, 커서/차원 검사
 
 import { existsSync } from 'node:fs';
-import { join, relative, resolve as resolvePath } from 'node:path';
+import { isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
 import type {
   AcceptanceProblem,
   AcceptanceReading,
@@ -17,7 +17,18 @@ import { agentName, CHECKED_ROLES, ROUTE } from '../lib/routing-policy';
 import { projectMode } from '../lib/project-mode';
 import { knowledgeRoot, readDocMap } from '../lib/project-knowledge';
 import { staleDocs, staleDocsReason, type StaleDoc } from '../lib/doc-map';
-import { changedLineGaps, changedLineReason, diffCoverageMode, repoTop, sessionCoverageStart, sessionUserGlobs } from '../lib/changed-coverage';
+import {
+  changedLineGaps,
+  changedLineReason,
+  diffCoverageMode,
+  differFromBase,
+  netChangedEdits,
+  repoTop,
+  sessionCoverageStart,
+  sessionUserGlobs,
+  withSameContent,
+} from '../lib/changed-coverage';
+import { changedLines } from '../lib/diff-coverage';
 import { projectDir } from '../lib/project-dir';
 import {
   affectedGaps,
@@ -30,7 +41,7 @@ import {
   weakenedTests,
   weakenedWarning,
 } from '../lib/existing-tests';
-import { missingTestTypes, testerFor, testTypesMode, type TypeNeed, typeGapReason, typeGapWarning, typeNeedOf } from '../lib/test-types';
+import { missingTestTypes, recordStandsAlone, testerFor, testTypesMode, type TypeNeed, typeGapReason, typeGapWarning, typeNeedOf } from '../lib/test-types';
 import { needsTests } from '../lib/verification-scope';
 import { documentChangeNote, isDocumentChange } from '../lib/doc-verification';
 import { frictionNotice } from '../lib/friction';
@@ -698,13 +709,44 @@ function evaluateTestResults(
   cwd: string,
   sessionId: string,
 ): TestEvaluation {
-  const block = (reason: string): TestEvaluation => ({ kind: 'block', reason });
+  // (#23) Every rule runs and the block names all their gaps at once: stopping at the first one
+  //   made each fix uncover the next, one Stop each. A rule that throws ends the evaluation:
+  //   the reasons found before it still block; with none, the gate fails open as before.
+  const reasons: string[] = [];
+  let unverified: TestResult | null = null;
+  try {
+    unverified = runTestRules(results, changedEdits, acceptance, cwd, sessionId, reasons);
+  } catch (err) {
+    if (reasons.length === 0) throw err;
+    logGate(sessionId, 'test', 'warn', `rule error after ${reasons.length} reason(s): ${String(err).slice(0, 200)}`);
+  }
+  if (reasons.length > 0) {
+    return { kind: 'block', reason: reasons.length === 1 ? reasons[0]! : reasons.map((r, i) => `(${i + 1}/${reasons.length}) ${r}`).join(' ') };
+  }
+  return unverified ? { kind: 'accept-unverified', blocked: unverified } : { kind: 'accept' };
+}
+
+/** The layer-1 rules in order. `block` records a gap's reason in `reasons` and the rules go on.
+ *  Returns the evidence-backed BLOCKED record when the turn may end unverified. */
+function runTestRules(
+  results: TestResult[],
+  changedEdits: ReturnType<typeof getEditsWithLastTimestampSince>,
+  acceptance: AcceptanceReading,
+  cwd: string,
+  sessionId: string,
+  reasons: string[],
+): TestResult | null {
+  const block = (reason: string): void => {
+    reasons.push(reason);
+  };
   const cov = validateTestCoverage(results, changedEdits);
-  if (!cov.ok) return block(`테스트 검증 실패: ${cov.reason ?? '알 수 없는 이유'}.`);
+  if (!cov.ok) block(`테스트 검증 실패: ${cov.reason ?? '알 수 없는 이유'}.`);
+  // No record covers any changed file: the rules below would only judge an unrelated record.
+  if (!cov.ok && cov.effective.length === 0) return null;
   const effective = cov.effective.length > 0 ? cov.effective : results.slice(0, 1);
   const blocked = effective.filter((r) => r.verdict === 'blocked');
   if (!blocked.every(isEvidencedBlocked)) {
-    return block(
+    block(
       'A `blocked` test result needs blocked.reason (at least 15 characters) and blocked.evidence: ' +
         'the commands you ran and their output that show why the tests cannot run.',
     );
@@ -712,23 +754,25 @@ function evaluateTestResults(
   const ran = effective.filter((r) => r.verdict !== 'blocked');
 
   const suiteFail = failingSuites(ran);
-  if (suiteFail) return block(`${suiteFail}. 원인을 수정하고 다시 테스트하세요.`);
+  if (suiteFail) block(`${suiteFail}. 원인을 수정하고 다시 테스트하세요.`);
   const missingFiles = missingTestFiles(ran);
-  if (missingFiles) return block(missingFiles);
+  if (missingFiles) block(missingFiles);
   const evidenceIssue = validateEvidence(ran);
   if (evidenceIssue) {
-    return block(
+    block(
       `테스트 증거가 불충분합니다: ${evidenceIssue} ` +
         `되돌린 상태에서 실패(red)하고 지금은 통과(green)함을 실행으로 보여야 합니다.`,
     );
   }
-  const forbidden = scanForbiddenPatterns(ran.flatMap((r) => r.test_files ?? []));
+  const top = repoTop(cwd);
+  const linesOf = addedTestLines(sessionId, cwd, top, results.flatMap((r) => r.test_files ?? []));
+  const forbidden = scanForbiddenPatterns(ran.flatMap((r) => r.test_files ?? []), linesOf);
   if (forbidden.length > 0) {
     const list = forbidden
       .slice(0, 3)
-      .map((h) => `${h.file}: ${h.message}`)
+      .map((h) => `${h.file}${h.line ? `:${h.line}` : ''}: ${h.message}`)
       .join(' / ');
-    return block(
+    block(
       `통과하지만 아무것도 검증하지 않는 테스트 패턴이 있습니다: ${list}` +
         `${forbidden.length > 3 ? ` 외 ${forbidden.length - 3}건` : ''}`,
     );
@@ -736,7 +780,7 @@ function evaluateTestResults(
   // (I2) A product criterion's evidence is a test of the product, never a document check.
   const productIssues = productEvidenceProblems(ran, resolvePath(cwd));
   if (productIssues.length > 0) {
-    return block(
+    block(
       `${productIssues.slice(0, 3).join(' ')}${productIssues.length > 3 ? ` (${productIssues.length - 3} more)` : ''}` +
         (productIssues.some((p) => p.includes('is a document') || p.includes('broke a document'))
           ? ' Checking the requirements or the prototype proves the document, not that the product meets it.'
@@ -744,14 +788,17 @@ function evaluateTestResults(
     );
   }
   // Criteria the blocked runs were for stay uncovered: that is what "unverified" means.
-  if (blocked.length > 0) return { kind: 'accept-unverified', blocked: blocked[0]! };
+  if (blocked.length > 0) return blocked[0]!;
+  // The type and existing-test rules also count records outside `ran` that stand alone, judged
+  //   on the session's added lines too.
+  const standsAlone = (r: TestResult): boolean => recordStandsAlone(r, linesOf);
   // (I2) Besides the dev-cycle UIUX and prototype criteria: the requirements and the policy
   //   entries this session works on (lib/session-criteria.ts). Criteria that cannot be read
   //   are not covered.
   const session = sessionCriteria(sessionId, cwd);
   if (session.problem) {
     logGate(sessionId, 'test', 'deny', 'criteria-unreadable');
-    return block(`${session.problem} Fix the file (or ask the user); until then its criteria count as untested.`);
+    block(`${session.problem} Fix the file (or ask the user); until then its criteria count as untested.`);
   }
   // (I11, #20) Before the verification stage the UI criteria are pending: their screens may
   //   have no product code yet, and only a test of product code proves one. They are listed,
@@ -774,7 +821,7 @@ function evaluateTestResults(
       .slice(0, 20)
       .map((c) => `${c.id}(${c.description})`)
       .join('; ');
-    return block(
+    block(
       `확정된 요구사항/프로토타입이 요구하는 수용 기준이 테스트로 커버되지 않았습니다: ` +
         `${list}${uncovered.length > 20 ? ` 외 ${uncovered.length - 20}건` : ''}. ` +
         `This list is the gate's: it counts from the session's start, so it can hold criteria that ` +
@@ -786,15 +833,16 @@ function evaluateTestResults(
   //   they stand alone: a test-lead run leaves one record per member.
   const typesMode = testTypesMode();
   if (typesMode !== 'off') {
-    const top = repoTop(cwd);
     const exempt = sessionUserGlobs(sessionId, cwd, top, 'test-type-exempt');
-    const out = missingTestTypes({ results, accepted: new Set(ran), edits: changedEdits, top, exempt });
+    const out = missingTestTypes({ results, accepted: new Set(ran), edits: changedEdits, top, exempt, standsAlone });
     if (out.gaps.length > 0) {
       // The tester for what is missing, not for the whole change.
       const left = out.gaps.map((g) => ({ abs: '', rel: g.rel, types: g.missing, why: g.why }));
-      if (typesMode === 'on') return block(typeGapReason(out.gaps, routedTester(left)));
-      logGate(sessionId, 'test', 'warn', `test-types: ${out.gaps.map((g) => g.rel).join(', ')}`);
-      habitWarnings.push(typeGapWarning(out.gaps));
+      if (typesMode === 'on') block(typeGapReason(out.gaps, routedTester(left)));
+      else {
+        logGate(sessionId, 'test', 'warn', `test-types: ${out.gaps.map((g) => g.rel).join(', ')}`);
+        habitWarnings.push(typeGapWarning(out.gaps));
+      }
     }
   }
   // (I5, plan §15.8) The existing tests that load a changed code file ran with the change
@@ -804,18 +852,19 @@ function evaluateTestResults(
   let gaps: ReturnType<typeof affectedGaps> = [];
   if (existingMode !== 'off') {
     try {
-      const top = repoTop(cwd);
-      gaps = affectedGaps({ results, accepted: new Set(ran), edits: changedEdits, top, head: sessionCoverageStart(sessionId, cwd, top).head });
+      gaps = affectedGaps({ results, accepted: new Set(ran), edits: changedEdits, top, head: sessionCoverageStart(sessionId, cwd, top).head, standsAlone });
     } catch (err) {
       logGate(sessionId, 'test', 'warn', `existing-tests error: ${String(err).slice(0, 200)}`);
     }
     if (gaps.length > 0) {
-      if (existingMode === 'on') return block(affectedReason(gaps, agentName(ROUTE.test)));
-      logGate(sessionId, 'test', 'warn', `existing-tests: ${gaps.map((g) => g.rel).join(', ')}`);
-      habitWarnings.push(
-        `[goodboy] 기존 테스트(경고 모드): 바뀐 파일을 쓰는 기존 테스트가 함께 돌지 않았어요 — ` +
-          `${gaps.slice(0, 3).map((g) => `${g.rel}: ${g.tests.slice(0, 2).join(', ')}`).join('; ')}.`,
-      );
+      if (existingMode === 'on') block(affectedReason(gaps, agentName(ROUTE.test)));
+      else {
+        logGate(sessionId, 'test', 'warn', `existing-tests: ${gaps.map((g) => g.rel).join(', ')}`);
+        habitWarnings.push(
+          `[goodboy] 기존 테스트(경고 모드): 바뀐 파일을 쓰는 기존 테스트가 함께 돌지 않았어요 — ` +
+            `${gaps.slice(0, 3).map((g) => `${g.rel}: ${g.tests.slice(0, 2).join(', ')}`).join('; ')}.`,
+        );
+      }
     }
   }
   // (I1, plan §15) Every changed code line ran in a test of the recorded tree; a file no run
@@ -825,17 +874,52 @@ function evaluateTestResults(
   //   be after.
   const mode = diffCoverageMode();
   if (mode !== 'off') {
-    const top = repoTop(cwd);
     const start = sessionCoverageStart(sessionId, cwd, top);
     const out = changedLineGaps({ results: ran, edits: changedEdits, top, exempt: start.exempt, startHead: start.head });
     if (!out.measured || out.gaps.length > 0) {
-      if (mode === 'on') return block(changedLineReason(out, CLI_PATH));
+      if (mode === 'on') block(changedLineReason(out, CLI_PATH));
+      else {
+        habitWarnings.push(
+          `[goodboy] 바뀐 줄 커버리지(경고 모드): ${out.measured ? `테스트가 실행하지 않은 파일 ${out.gaps.map((g) => g.file).slice(0, 3).join(', ')}` : '측정되지 않았어요'}.`,
+        );
+      }
+    }
+    // (#23) What counted on a test's subprocess evidence: run as a file, not line by line.
+    if (reasons.length === 0 && out.subprocess && out.subprocess.length > 0) {
       habitWarnings.push(
-        `[goodboy] 바뀐 줄 커버리지(경고 모드): ${out.measured ? `테스트가 실행하지 않은 파일 ${out.gaps.map((g) => g.file).slice(0, 3).join(', ')}` : '측정되지 않았어요'}.`,
+        `[goodboy] 하위 프로세스로 실행된 파일 ${out.subprocess.length}개는 줄 단위가 아니라 파일 단위로 인정했어요: ` +
+          `${out.subprocess.slice(0, 3).join(', ')}${out.subprocess.length > 3 ? ` 외 ${out.subprocess.length - 3}개` : ''}.`,
       );
     }
   }
-  return { kind: 'accept' };
+  return null;
+}
+
+/** (#23) The forbidden-pattern scan's lines: per test file of the records, the lines added since
+ *  the session's start HEAD; none for a file that is its start blob. Every line counts for a
+ *  file the diff does not show but that is not its start blob (assume-unchanged, a binary or
+ *  ignored file, a symlink, a path spelled otherwise: security review), for a file outside the
+ *  repo, and for all when the start is unknown, had no commit, or git fails. One diff and one
+ *  blob comparison per evaluation. */
+function addedTestLines(sessionId: string, cwd: string, top: string, testFiles: string[]): ((file: string) => ReadonlySet<number> | null) | undefined {
+  const head = sessionCoverageStart(sessionId, cwd, top).head;
+  if (typeof head !== 'string') return undefined;
+  const relOf = (file: string): string | null => {
+    const r = relative(top, resolvePath(cwd, file));
+    return r === '' || r === '..' || r.startsWith(`..${sep}`) || isAbsolute(r) ? null : r.split(sep).join('/');
+  };
+  const rels = [...new Set(testFiles.filter((f) => typeof f === 'string').map(relOf).filter((r): r is string => r !== null))];
+  // Only the test files (performance review: the whole diff read every untracked file).
+  const changed = changedLines(top, head, rels);
+  if (changed === null || 'error' in changed) return undefined;
+  const unseen = new Set(rels.filter((r) => !changed.files.has(r)));
+  const differ = differFromBase(top, head, [...unseen]);
+  const none: ReadonlySet<number> = new Set();
+  return (file) => {
+    const r = relOf(file);
+    if (r === null) return null;
+    return changed.files.get(r) ?? (unseen.has(r) && !differ.has(r) ? none : null);
+  };
 }
 
 /** (I5) The start test files under the cwd that lost checks since the session's start HEAD,
@@ -931,20 +1015,46 @@ function acceptBlockedTests(sessionId: string, cwd: string, r: TestResult, logRe
  * @returns 이번 호출에서 실제로 수락(커서 전진)했으면 true. 호출부는 이 신호로
  *          "직전 차단이 해소됐다"를 알고 다음 층(리뷰)까지 이어서 판정한다.
  */
+/** (#23) The code files edited since the cursor that layer 1 asks about: a file whose content is
+ *  its blob at the session's start HEAD is no change of this session (an edit undone, or
+ *  brought back by a branch switch). */
+function testEditsSince(sessionId: string, cwd: string, cursorTurn: number): string[] {
+  const key = `${sessionId}\0${cwd}\0${cursorTurn}`;
+  const known = testEditsMemo.get(key);
+  if (known) return known;
+  const s = scopeOf(sessionId, cwd);
+  const files = getEditsSince(sessionId, cursorTurn, cwd).filter((f) => needsTestCoverage(f, cwd, sessionId));
+  const out = netChangedEdits(
+    files.map((file) => ({ file })),
+    s.top,
+    sessionCoverageStart(sessionId, cwd, s.top).head,
+  ).map((e) => e.file);
+  testEditsMemo.set(key, out);
+  return out;
+}
+/** Once per Stop: the edit log and the tree do not change while the hook runs, and both
+ *  layer-1 paths ask (refactoring review). */
+const testEditsMemo = new Map<string, string[]>();
+
+/** The same files with their last edit times, and (#23) the record trees that hold their content. */
+function testChangedEdits(sessionId: string, cwd: string, cursorTurn: number, results: readonly TestResult[]): ReturnType<typeof getEditsWithLastTimestampSince> {
+  const keep = new Set(testEditsSince(sessionId, cwd, cursorTurn));
+  const edits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd).filter((e) => keep.has(e.file));
+  return withSameContent(edits, results, scopeOf(sessionId, cwd).top);
+}
+
 function tryAcceptPendingTest(sessionId: string, cwd: string): boolean {
   if (testGateMode() === 'off') return false;
   try {
     const cursor = readTestCursor(cwd, sessionId);
     const cursorTurn = cursor ? cursor.turn : 0;
-    const recentEdits = getEditsSince(sessionId, cursorTurn, cwd).filter((f) => needsTestCoverage(f, cwd, sessionId));
+    const recentEdits = testEditsSince(sessionId, cwd, cursorTurn);
     if (recentEdits.length === 0) return false;
     const acceptance = acceptanceFor(cwd);
     if (!testGateActive(cwd, acceptance, sessionId).active) return false;
     const results = findRecentTestFiles(resolvePath(cwd, '.claude', 'tests'), testWindowMinutes());
     if (results.length === 0) return false;
-    const changedEdits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd).filter((e) =>
-      needsTestCoverage(e.file, cwd, sessionId),
-    );
+    const changedEdits = testChangedEdits(sessionId, cwd, cursorTurn, results);
     const ev = evaluateTestResults(results, changedEdits, acceptance, cwd, sessionId);
     if (ev.kind === 'block') return false;
     if (ev.kind === 'accept-unverified') {
@@ -983,7 +1093,7 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
     const cursor = readTestCursor(cwd, sessionId);
     const cursorTurn = cursor ? cursor.turn : 0;
     // 문서·테스트 파일만 바뀐 턴은 층1의 관심사가 아니다 — 요구해도 해소할 방법이 없다.
-    const recentEdits = getEditsSince(sessionId, cursorTurn, cwd).filter((f) => needsTestCoverage(f, cwd, sessionId));
+    const recentEdits = testEditsSince(sessionId, cwd, cursorTurn);
     if (recentEdits.length === 0) {
       statusSnapshot.testPending = false;
       return null;
@@ -1049,9 +1159,7 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
     // 테스트 파일 자체는 커버리지 요구 대상에서 뺀다 — 테스트를 테스트하라는 무한 후퇴가
     //   된다(라이브 실측: `tests/hello.test.ts` 가 "테스트되지 않은 변경 파일"로 잡혔다).
     //   문서도 같은 이유로 뺀다(라이브 실측: README.md 등 5개를 요구했다).
-    const changedEdits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd).filter((e) =>
-      needsTestCoverage(e.file, cwd, sessionId),
-    );
+    const changedEdits = testChangedEdits(sessionId, cwd, cursorTurn, results);
     const ev = evaluateTestResults(results, changedEdits, acceptance, cwd, sessionId);
     if (ev.kind === 'block') return block(ev.reason);
     if (ev.kind === 'accept-unverified') {
