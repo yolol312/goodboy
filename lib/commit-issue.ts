@@ -459,6 +459,9 @@ function checkGit(words: string[], dir: string, ctx: Ctx, depth: number, from: G
   let moved = from.moved;
   // `--git-dir` and `--work-tree` are relative to the dir after every `-C`.
   const repo: Array<[string, string]> = [];
+  // A repo that cannot be told matters only to a command that may commit (trial 5: `git -C
+  //   "$P" status` was denied).
+  let unknownRepo: string | null = null;
   let i = 1;
   while (i < words.length && words[i]!.startsWith('-')) {
     const w = words[i]!;
@@ -467,22 +470,26 @@ function checkGit(words: string[], dir: string, ctx: Ctx, depth: number, from: G
     const value = eq > 0 ? w.slice(eq + 1) : words[i + 1];
     if (w === '-C' && value !== undefined) {
       const to = cdTarget(['cd', value], here);
-      if (to === null) return `goodboy cannot tell which repo \`git -C ${value}\` commits in (commit issue rule). Use a literal path.`;
-      here = to;
+      if (to === null) unknownRepo ??= `goodboy cannot tell which repo \`git -C ${value}\` commits in (commit issue rule). Use a literal path.`;
+      else here = to;
     } else if (w === '-c' && value !== undefined) cfg.push(value);
     else if ((name === '--git-dir' || name === '--work-tree') && value !== undefined) {
-      if (/[$`*?[]/.test(value)) return `goodboy cannot tell which repo \`git ${name} ${value}\` commits in (commit issue rule). Use a literal path.`;
-      repo.push([name, value]);
+      if (/[$`*?[]/.test(value)) unknownRepo ??= `goodboy cannot tell which repo \`git ${name} ${value}\` commits in (commit issue rule). Use a literal path.`;
+      else repo.push([name, value]);
     } else if (name === '--config-env') moved = true;
     i += GIT_VALUE_OPTS.has(w) ? 2 : 1;
   }
   const scope: GitScope = { cfg, repo: [...from.repo, ...repo.map(([n, v]) => `${n}=${resolvePath(here, v)}`)], moved };
   const sub = words[i];
   if (sub === undefined) return null;
+  // git never lets an alias hide a built-in, so only `commit` or another word may commit.
+  const builtin = GIT_BUILTINS.has(sub) || sub === 'push' || !/^[\w.-]+$/.test(sub);
+  // In an unknown repo only a named built-in passes: a subcommand built at run time (`$S`)
+  //   may be `commit`.
+  if (unknownRepo !== null) return sub !== 'commit' && (GIT_BUILTINS.has(sub) || sub === 'push') ? null : unknownRepo;
   const rest = words.slice(i + 1);
   if (sub === 'commit') return checkCommit(rest, here, ctx, scope, src, stdin);
-  // git never lets an alias hide a built-in, so only another word may commit.
-  if (GIT_BUILTINS.has(sub) || sub === 'push' || !/^[\w.-]+$/.test(sub)) return null;
+  if (builtin) return null;
   if (scope.moved) return envConfig(sub);
   const expansion = aliasOf(ctx, sub, here, scope);
   if (expansion === null) return null;

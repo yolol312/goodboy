@@ -51,6 +51,7 @@ export function writeDenial(role: RoleSpec, absPath: string, projectRoot: string
 
 const FILE_MUTATORS = new Set(['cp', 'mv', 'rm', 'ln', 'install', 'patch', 'truncate', 'chmod', 'chown', 'touch', 'unlink', 'rmdir', 'shred', 'mkdir']);
 const COPY_LIKE = new Set(['cp', 'ln', 'install']);
+const CHMOD_MODE = /^(?:[0-7]{1,4}|[ugoa]*[-+=][rwxXstugo]*(?:,[ugoa]*[-+=][rwxXstugo]*)*)$/;
 const GIT_MUTATING = new Set([
   'add', 'am', 'apply', 'branch', 'checkout', 'checkout-index', 'cherry-pick', 'clean', 'commit', 'config', 'merge',
   'merge-file', 'mv', 'pull', 'read-tree', 'rebase', 'reset', 'restore', 'revert', 'rm', 'stash', 'switch', 'tag',
@@ -128,7 +129,9 @@ export function bashChangedPaths(command: string, cwd: string, opts: { skip?: Re
     if (viaOptions !== null) {
       out.push(...viaOptions.filter((p) => literal(p)));
     } else if (FILE_MUTATORS.has(prog)) {
-      const targets = COPY_LIKE.has(prog) ? args.slice(-1) : args;
+      // chmod's mode is no path (trial 5: `chmod +x /tmp/x.sh` was read as `<project>/+x`).
+      const files = prog === 'chmod' ? args.filter((a) => !CHMOD_MODE.test(a)) : args;
+      const targets = COPY_LIKE.has(prog) ? files.slice(-1) : files;
       for (const a of targets) if (literal(a)) out.push(resolvePath(base, a));
     } else if ((prog === 'perl' || prog === 'ruby') && words.some((w) => /^-[a-zA-Z]*i/.test(w))) {
       for (const a of args.slice(1)) if (literal(a)) out.push(resolvePath(base, a)); // the first is the script

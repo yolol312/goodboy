@@ -43,14 +43,16 @@ two levels above this skill's base directory); its output from project files is 
      repo-relative>}`;
      with no coverage tool, `coverage: {status: "unavailable", reason}` and the verdict
      stays pass (no product code changed);
-   - hand back per target the tests, a suspect note, or why it could not be tested.
+   - hand back per target the tests, a suspect note, or why it could not be tested;
+   - in the first batch after step 3, also record its smoke tests (name them and the files
+     step 3 changed).
 6. Mark each target: `backfill-mark <rel> --status done --tests a,b`, `--status suspect
    --tests a,b --note "<what looks wrong>"` or `--status skipped --note "<why>"` (also for a
    target that needs a tool the user declined). done and suspect need passing records (one
    tester's or several) that name the target, each test, and the target's mutation: send
    the tester back once, then skip the target.
 7. Review the new tests and every file step 3 changed: `review-axes <files>`, then
-   `goodboy:review-all` as its `plan` says.
+   `goodboy:review-all` as its `plan` says (at most three agents run at once).
 8. Report in Korean: the results, the suspects with their reasons, the todo count, and that
    the existing-test rule guards the new tests once they are committed (offer a commit).
    Ask: the next batch (step 4) or stop. On stop, with a coverage tool, run the whole suite

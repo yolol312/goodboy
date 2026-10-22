@@ -46,7 +46,8 @@ so work is released in batches:
 | v0.33.0 | track I (test automation, §15; issues #1–#7, #13–#15, #17, and I10). Released with v0.35.0 |
 | v0.34.0 | track J (field reports, §16; issues #8, #9, #11). Released with v0.35.0 |
 | v0.35.0 | track K (update checkups, §17; issue #10 for K1, the later steps are proposals), with the fixes of the fourth real-use trial (§15.12, §15.13) and of a Codex review (§15.14). Released 2026-10-21 (d3df5f2): v0.31.0–v0.35.0 went out together in one push to `main` |
-| v0.36.0 | track L (test backfill for existing projects, §18) |
+| v0.36.0 | track L (test backfill for existing projects, §18), with the fixes of the fifth real-use trial (§18 "Trial 5"). To be released with v0.37.0 |
+| v0.37.0 | track M (full tests in an isolated container sandbox: a real database copy, dummy external services, no egress; 100% line and branch coverage, every screen and action in e2e), §19 |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
 
 ## 4. A — Fix silent failures and deadlocks
@@ -2647,6 +2648,36 @@ Not prevented:
   system.
 - "Tested" in the survey means named by a test. A named file can still be poorly tested; the
   whole suite's coverage is the real measure.
+
+### Trial 5 (2026-10-22)
+
+`/goodboy:backfill-tests` ran end to end in a sandboxed copy of a Spring Boot work project.
+The copy had no git history, dummy credentials and dead local endpoints, and docker, ssh and
+gh were shimmed off. The trial used three `claude -p` sessions, about 18 minutes and $4.30:
+- Session 1 surveyed the project and wrote the plan. It asked one question: which tools to
+  add (JaCoCo; Playwright, which needs a database to start the app) and which batch comes
+  first.
+- Session 2 added JaCoCo and wrote 176 MockMvc tests for 5 controllers, one record per
+  target. Each target had a red, a green and a mutation run. One target was marked done and
+  four suspect, each with a real finding: a role that is never validated, an admin who can
+  delete another admin, an unhandled exception on a negative index, and a success reply for
+  a failed move. No product file changed, and the four review axes passed.
+- Session 3 reported whole-suite line coverage: 9.5% → 38.1%. It committed the tests with
+  the issue key and did not push.
+
+Fixed from the trial:
+- The commit issue rule judged an unknown `git -C <var>` repo before the subcommand, so a
+  read-only `git -C "$P" status` was denied. Now a named built-in other than `commit`
+  passes; `commit`, an alias or a subcommand built at run time (`$S`) is still denied.
+- Role limits read chmod's mode as a path, so `chmod +x /tmp/x.sh` became `<project>/+x`
+  and test-unit was denied.
+- setup-test-infra told the main session to record the smoke tests, which the result guard
+  forbids. Now the first batch's tester records them.
+- backfill-tests step 7 asked for four reviewers, one more than the spawn cap allows. The
+  step now says at most three run at once.
+
+Seen, not changed: the result guard denies a reviewer's `python3` read of a test record, as in
+trial 4.
 
 ## Appendix — mutation set (2026-10-12 review)
 
