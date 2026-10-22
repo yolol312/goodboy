@@ -1312,7 +1312,7 @@ function main(): void {
       //   from the shell's current dir, which follows a model's `cd` (a Stop from a subdir
       //   passed a change outside it with no test or review). Citations also resolve from it.
       const shellCwd = input.cwd ?? process.cwd();
-      const cwd = projectDir(shellCwd);
+      const cwd = projectDir(shellCwd, process.env, input.session_id);
       stopShellCwd = shellCwd;
       const sessionId = input.session_id ?? 'unknown';
       snapshotSessionId = sessionId;

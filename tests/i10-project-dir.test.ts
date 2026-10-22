@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { approvalMarkerShown } from '../lib/approval-marker';
-import { cliProjectDir, noteProjectDir, projectDir } from '../lib/project-dir';
+import { cliProjectDir, noteProjectDir, pinWorktrees, projectDir } from '../lib/project-dir';
 
 const PRE_HOOK = resolve(import.meta.dir, '..', 'hooks', 'pre-tool-use.ts');
 const STOP_HOOK = resolve(import.meta.dir, '..', 'hooks', 'stop.ts');
@@ -147,6 +147,63 @@ describe('I10 review: worktrees, approval paths, the CLI', () => {
     expect(projectDir(join(p, '.claude', 'worktrees', 'fake'), { CLAUDE_PROJECT_DIR: p })).toBe(p);
     // A project dir of `/` is never used.
     expect(projectDir(p, { CLAUDE_PROJECT_DIR: '/' })).toBe(p);
+  });
+
+  // (#21) A worktree of the project's repository nested anywhere is its own project when it
+  //   existed at the session's start (SessionStart notes them); one added later, a nested clone
+  //   or a `.git` file pointing at the project's git dir is not (#21 security review).
+  test('a worktree in any nested folder that existed at the start is its own project', () => {
+    const p = dir('goodboy-21-p-');
+    const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+    const git = (cwd: string, ...a: string[]) => Bun.spawnSync(['git', '-c', 'user.email=p@x', '-c', 'user.name=p', ...a], { cwd, env });
+    writeFileSync(join(p, 'a.txt'), 'a\n');
+    git(p, 'init', '-q');
+    git(p, 'add', '.');
+    git(p, 'commit', '-qm', 'init');
+    git(p, 'worktree', 'add', '-q', '.worktrees/v2');
+    const sid = `t21-${Math.random().toString(36).slice(2)}`;
+    pinWorktrees(sid, { CLAUDE_PROJECT_DIR: p });
+    const wt = join(p, '.worktrees', 'v2');
+    mkdirSync(join(wt, 'src', 'main'), { recursive: true });
+    expect(projectDir(join(wt, 'src', 'main'), { CLAUDE_PROJECT_DIR: p }, sid)).toBe(wt);
+    expect(projectDir(join(p, '.worktrees'), { CLAUDE_PROJECT_DIR: p }, sid)).toBe(p);
+    // No session: only .claude/worktrees counts, as before.
+    expect(projectDir(join(wt, 'src', 'main'), { CLAUDE_PROJECT_DIR: p })).toBe(p);
+    // Added after the start: the main checkout's edits stay in scope.
+    git(p, 'worktree', 'add', '-q', '--detach', 'docs/.late', 'HEAD');
+    expect(projectDir(join(p, 'docs', '.late'), { CLAUDE_PROJECT_DIR: p }, sid)).toBe(p);
+    git(p, 'clone', '-q', p, 'vendor/clone');
+    expect(projectDir(join(p, 'vendor', 'clone'), { CLAUDE_PROJECT_DIR: p }, sid)).toBe(p);
+    mkdirSync(join(p, 'mods', 'x'), { recursive: true });
+    writeFileSync(join(p, 'mods', 'x', '.git'), 'gitdir: ../../.git\n');
+    expect(projectDir(join(p, 'mods', 'x'), { CLAUDE_PROJECT_DIR: p }, sid)).toBe(p);
+  });
+
+  // With no git on PATH spawnSync throws; the worktree is then not one, and the hook goes on.
+  test('no git on PATH: a pinned worktree is not recognized, and nothing throws', () => {
+    const p = dir('goodboy-21-p-');
+    const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+    const git = (cwd: string, ...a: string[]) => Bun.spawnSync(['git', '-c', 'user.email=p@x', '-c', 'user.name=p', ...a], { cwd, env });
+    writeFileSync(join(p, 'a.txt'), 'a\n');
+    git(p, 'init', '-q');
+    git(p, 'add', '.');
+    git(p, 'commit', '-qm', 'init');
+    git(p, 'worktree', 'add', '-q', '.worktrees/v2');
+    const sid = `t21-${Math.random().toString(36).slice(2)}`;
+    pinWorktrees(sid, { CLAUDE_PROJECT_DIR: p });
+    const wt = join(p, '.worktrees', 'v2');
+    expect(projectDir(wt, { CLAUDE_PROJECT_DIR: p }, sid)).toBe(wt); // control: with git it is one
+    // Bun resolves `git` before the test can change PATH: make the spawn throw as a missing
+    //   executable does (ENOENT).
+    const real = Bun.spawnSync;
+    (Bun as { spawnSync: unknown }).spawnSync = () => {
+      throw Object.assign(new Error('Executable not found in $PATH: "git"'), { code: 'ENOENT' });
+    };
+    try {
+      expect(projectDir(wt, { CLAUDE_PROJECT_DIR: p }, sid)).toBe(p);
+    } finally {
+      (Bun as { spawnSync: unknown }).spawnSync = real;
+    }
   });
 
   test("the approval path is relative from the project dir, absolute and quoted from elsewhere (the user's `!` runs there)", () => {

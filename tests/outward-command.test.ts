@@ -82,7 +82,7 @@ describe('hostOf', () => {
 
 describe('curl, wget, httpie', () => {
   test('GET is a read; data or a non-GET method is mutating', () => {
-    expect(one('curl https://api.stripe.com/v1/charges')).toEqual({ kind: 'curl', host: 'api.stripe.com', mutating: false });
+    expect(one('curl https://api.stripe.com/v1/charges')).toEqual({ kind: 'curl', host: 'api.stripe.com', mutating: false, port: 443 });
     expect(one('curl -X POST https://api.stripe.com/v1/charges').mutating).toBe(true);
     expect(one('curl -XDELETE https://api.x.io/a').mutating).toBe(true);
     expect(one('curl -d amount=1 https://api.x.io/a').mutating).toBe(true);

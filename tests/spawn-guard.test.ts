@@ -6,6 +6,7 @@ import {
   decideSpawn,
   type DispatchRecord,
   namedFiles,
+  nearKey,
   outcomeOf,
   policyRewrite,
   runningDispatches,
@@ -141,6 +142,110 @@ describe('main-session caps', () => {
     const after = Array.from({ length: 8 }, () => dispatch({ t: NOW - 100_000 }));
     log.push(...after.flatMap((d) => [d, done(d)]));
     expect(decideSpawn(req(), log, CAPS, NOW, NO_CHANGE).code).toBe('task-cap');
+  });
+
+  // (#21) A runaway is told by repetition: the third near-identical brief to one agent in a
+  //   task, with nothing edited since the last, is denied; an edit in between (a fix, then a
+  //   re-test) lets it run, and other agents or briefs are not counted.
+  test('runaway: near-identical briefs repeated without a change', () => {
+    // Briefs that differ only in their middle (past the first and before the last 200
+    //   characters); one that ends differently is other work (one brief per review axis).
+    const head = `Run the unit tests for lib/a.ts and record the result. ${'Keep the same scope and the same rules. '.repeat(5)}`;
+    const tail = ` ${'Hand back the record path and the results. '.repeat(5)}`;
+    const brief = (v: string) => `${head} attempt ${v}.${tail}`;
+    const near = nearKey(brief('1'));
+    expect(nearKey(brief('2'))).toBe(near);
+    expect(nearKey(`${head}${tail} axis: security`)).not.toBe(nearKey(`${head}${tail} axis: performance`));
+    const prev = [
+      dispatch({ callee: 'goodboy:test-unit', hash: hashPrompt(brief('1')), near }),
+      dispatch({ callee: 'goodboy:test-unit', hash: hashPrompt(brief('2')), near }),
+    ];
+    const log: DispatchRecord[] = [{ k: 'prompt', t: NOW - 600_000 }, ...prev.flatMap((d) => [d, done(d)])];
+    const third = req({ callee: 'goodboy:test-unit', prompt: brief('3') });
+    expect(decideSpawn(third, log, CAPS, NOW, NO_CHANGE).code).toBe('runaway');
+    expect(decideSpawn(third, log, CAPS, NOW, { ...NO_CHANGE, editsSince: () => true }).allow).toBe(true);
+    expect(decideSpawn({ ...third, callee: 'goodboy:review-all' }, log, CAPS, NOW, NO_CHANGE).allow).toBe(true);
+    expect(decideSpawn({ ...third, prompt: 'A different brief entirely.' }, log, CAPS, NOW, NO_CHANGE).allow).toBe(true);
+    expect(decideSpawn(third, log.slice(0, 3), CAPS, NOW, NO_CHANGE).allow).toBe(true);
+    // A new user prompt starts a new task.
+    expect(decideSpawn(third, [...log, { k: 'prompt', t: NOW - 1000 }], CAPS, NOW, NO_CHANGE).allow).toBe(true);
+  });
+
+  // (#21) AC-1: at the shipped caps the agents a gate asks for are not starved.
+  test('at the default caps the 9th to 29th agent of a task is allowed; the 30th is not', () => {
+    const caps = spawnCaps();
+    const ran = (k: number) => Array.from({ length: k }, () => dispatch()).flatMap((x) => [x, done(x)]);
+    expect(decideSpawn(req({ callee: 'goodboy:test-unit' }), ran(8), caps, NOW, NO_CHANGE).allow).toBe(true);
+    expect(decideSpawn(req({ callee: 'goodboy:test-unit' }), ran(29), caps, NOW, NO_CHANGE).allow).toBe(true);
+    expect(decideSpawn(req({ callee: 'goodboy:test-unit' }), ran(30), caps, NOW, NO_CHANGE).code).toBe('task-cap');
+  });
+
+  test('runaway: a brief that names files is judged by those files, not by any edit', () => {
+    const brief = `Review lib/a.ts for races. ${'Be thorough and cite lines. '.repeat(10)}`;
+    const near = nearKey(brief, ['/p/lib/a.ts']);
+    const prev = [dispatch({ callee: 'goodboy:review-all', near, files: ['/p/lib/a.ts'] }), dispatch({ callee: 'goodboy:review-all', near, files: ['/p/lib/a.ts'] })];
+    const log: DispatchRecord[] = [{ k: 'prompt', t: NOW - 600_000 }, ...prev.flatMap((d) => [d, done(d)])];
+    const third = req({ callee: 'goodboy:review-all', prompt: brief, files: ['/p/lib/a.ts'] });
+    // An edit elsewhere does not count; the named file changing does.
+    expect(decideSpawn(third, log, CAPS, NOW, { ...NO_CHANGE, editsSince: () => true }).code).toBe('runaway');
+    expect(decideSpawn(third, log, CAPS, NOW, { ...NO_CHANGE, fileChangedSince: () => true }).allow).toBe(true);
+  });
+
+  // (#21 review) The exact-repeat rule keeps its one retry and one escalation; a rephrased
+  //   retry of a blocked run is no loop either.
+  test('runaway leaves retries and escalations to the duplicate rule', () => {
+    const p = `Check the deploy config. ${'Same scope, same rules, cite the lines. '.repeat(12)}`;
+    const near = nearKey(p);
+    const first = dispatch({ callee: 'goodboy:review-all', hash: hashPrompt(p), near });
+    const retry = dispatch({ callee: 'goodboy:review-all', hash: hashPrompt(p), near, why: 'retry' });
+    const log: DispatchRecord[] = [{ k: 'prompt', t: NOW - 600_000 }, first, done(first, 'blocked'), retry, done(retry, 'blocked')];
+    expect(decideSpawn(req({ callee: 'goodboy:review-all', prompt: p, model: 'opus' }), log, CAPS, NOW, NO_CHANGE).allow).toBe(true);
+    const rephrased = `${p.slice(0, 220)} (again, more carefully) ${p.slice(220)}`;
+    expect(nearKey(rephrased)).toBe(near);
+    expect(decideSpawn(req({ callee: 'goodboy:review-all', prompt: rephrased }), log, CAPS, NOW, NO_CHANGE).allow).toBe(true);
+  });
+
+  // Each exemption of the runaway rule on its own (the test above passes through the
+  //   blocked-run exemption for both of its requests).
+  test('runaway: an exact repeat that the duplicate rule allows as a retry is not a loop', () => {
+    const p = `Check the deploy config. ${'Same scope, same rules, cite the lines. '.repeat(12)}`;
+    const near = nearKey(p);
+    const mid = (v: string) => `${p.slice(0, 250)} [${v}] ${p.slice(250)}`; // same first and last 200 characters
+    expect(nearKey(mid('b'))).toBe(near);
+    const first = dispatch({ callee: 'goodboy:review-all', hash: hashPrompt(p), near });
+    const b = dispatch({ callee: 'goodboy:review-all', hash: hashPrompt(mid('b')), near });
+    const c = dispatch({ callee: 'goodboy:review-all', hash: hashPrompt(mid('c')), near });
+    // The exact brief was BLOCKED once, then two rephrasings ran ok: the last near run is ok.
+    const log: DispatchRecord[] = [{ k: 'prompt', t: NOW - 600_000 }, first, done(first, 'blocked'), b, done(b), c, done(c)];
+    const again = decideSpawn(req({ callee: 'goodboy:review-all', prompt: p }), log, CAPS, NOW, NO_CHANGE);
+    expect(again.allow).toBe(true);
+    expect(again.why).toBe('retry');
+    // A new rephrasing in the same state is the loop.
+    expect(decideSpawn(req({ callee: 'goodboy:review-all', prompt: mid('d') }), log, CAPS, NOW, NO_CHANGE).code).toBe('runaway');
+  });
+
+  test('runaway: a stronger model or effort than the last near run is not a loop', () => {
+    const p = `Check the deploy config. ${'Same scope, same rules, cite the lines. '.repeat(12)}`;
+    const near = nearKey(p);
+    const mid = (v: string) => `${p.slice(0, 250)} [${v}] ${p.slice(250)}`; // same first and last 200 characters
+    expect(nearKey(mid('a'))).toBe(near);
+    const mk = (v: string, o: Partial<Extract<DispatchRecord, { k: 'dispatch' }>> = {}) =>
+      dispatch({ callee: 'goodboy:review-all', hash: hashPrompt(mid(v)), near, model: 'sonnet', effort: 'medium', ...o });
+    const a = mk('a');
+    const b = mk('b');
+    const log: DispatchRecord[] = [{ k: 'prompt', t: NOW - 600_000 }, a, done(a), b, done(b)];
+    const call = (over: Partial<SpawnRequest>) => decideSpawn(req({ callee: 'goodboy:review-all', prompt: mid('c'), model: 'sonnet', effort: 'medium', ...over }), log, CAPS, NOW, NO_CHANGE);
+    expect(call({}).code).toBe('runaway');
+    expect(call({ model: 'haiku' }).code).toBe('runaway'); // weaker is no escalation
+    expect(call({ model: 'opus' }).allow).toBe(true);
+    expect(call({ effort: 'high' }).allow).toBe(true);
+  });
+
+  test('the task fuse names the user, not "incomplete"', () => {
+    const many = Array.from({ length: 30 }, () => dispatch());
+    const d = decideSpawn(req(), many.flatMap((x) => [x, done(x)]), { ...CAPS, perTask: 30 }, NOW, NO_CHANGE);
+    expect(d.code).toBe('task-cap');
+    expect(d.reason).toContain('ask whether to continue');
   });
 
   test('concurrency cap counts running main dispatches only', () => {
@@ -343,7 +448,8 @@ describe('helpers', () => {
     const saved = keys.map((k) => [k, process.env[k]] as const);
     try {
       for (const k of keys) delete process.env[k];
-      expect(spawnCaps()).toEqual({ perTask: 8, perLeadCall: 6, concurrent: 3, perSession: 40 });
+      // (#21) The task and session counts are fuses, not budgets.
+      expect(spawnCaps()).toEqual({ perTask: 30, perLeadCall: 6, concurrent: 3, perSession: 150 });
       process.env.GOODBOY_SPAWN_LIMIT = '2';
       process.env.GOODBOY_SPAWN_CONCURRENCY = 'x';
       expect(spawnCaps().perTask).toBe(2);

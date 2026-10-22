@@ -25,6 +25,7 @@ import {
   shellSegments,
   WHOLE_SUBSTITUTION,
   stripPrefix,
+  targetLabel,
   xargsCommandAt,
   type HostRules,
 } from './outward-command';
@@ -492,9 +493,9 @@ function handoffsOfAt(command: string, cwd: string, depth: number, rules?: HostR
     if (rules && DEPLOY_PROGS.test(prog)) {
       const quoted = words.map((w) => `'${w.replace(/'/g, `'\\''`)}'`).join(' ');
       const t = classifyOutward(quoted, here ?? cwd).find(
-        (x) => x.mutating && DEPLOY_KIND.test(x.kind) && !['local', 'allow'].includes(classifyHost(x.host, rules)),
+        (x) => x.mutating && DEPLOY_KIND.test(x.kind) && !['local', 'allow'].includes(classifyHost(x.host, rules, x.port)),
       );
-      if (t) deploys.push({ what: `${t.kind} → ${t.host}`, dir: here });
+      if (t) deploys.push({ what: `${t.kind} → ${targetLabel(t)}`, dir: here });
     }
     // Per segment, not on the text (final G1 review: a commit message or a grep pattern with
     //   "push" and "xargs" is no push):

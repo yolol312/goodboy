@@ -4,7 +4,20 @@
 // R2: never act on live external or production systems; retarget to a sandbox, otherwise ask
 // (main session) or return BLOCKED with the command (subagent). The hook backstop:
 //   - `.goodboy/hosts` lists `allow <pattern>` (dev, staging, sandbox: mutating calls pass,
-//     also from subagents) and `production <pattern>` (always blocked until the user approves);
+//     also from subagents) and `production <pattern>` (always blocked until the user approves).
+//     A pattern may carry a port (`db.dev:5433`, `[::1]:5432`, `*.corp.com:5432`) to tell
+//     databases on one host apart; without a port it matches every port. A production entry
+//     with a port blocks that port, and a target whose port the command does not name (an
+//     `ssh`, a `psql -h` without `-p`): fail closed. An allow entry with a port allows only
+//     that port, so an unnamed port is not allowed by it. A production entry always beats an
+//     allow entry that matches the same target, whatever the ports: the model may add `allow`
+//     lines, so one must never lift a production one (R2). Ports are read for curl, wget,
+//     httpie, psql/pg_*, mysql/mariadb, redis-cli, mongo/mongosh and the other DB clients;
+//     other tools name no port. The target is the connection the tool really makes: libpq URI
+//     query parameters win over the authority, hosts are percent-decoded and lose a trailing
+//     dot, PGHOST/PGPORT/PGHOSTADDR in the command fill what it leaves unnamed, a pg service
+//     name is the unlisted target `pg-service:<name>`, and a host that cannot be decoded counts
+//     as production (plan §15.16);
 //   - built-in allow: loopback, localhost, the reserved names (.test, .invalid, .example,
 //     .localhost, example.com/net/org) and local Kubernetes contexts. Private IP ranges are
 //     not allowed by default: a LAN host may be a real server;
@@ -26,6 +39,8 @@ export interface OutwardTarget {
   host: string;
   /** True when the command changes the target; false for reads. */
   mutating: boolean;
+  /** The port the command names (or the URL scheme's default); absent when it names none. */
+  port?: number;
 }
 
 export type HostClass = 'local' | 'allow' | 'production' | 'unlisted';
@@ -362,6 +377,9 @@ interface SegmentMeta {
    *  and the scope what that program runs is read in (`env -C dir sh -c '…'`). */
   chdir?: string | null;
   child?: string;
+  /** The `[name, value]` pairs it assigns before its program (`PGHOST=x psql`, `env PGHOST=x
+   *  psql`; a bare `PGHOST=x` segment too): the outward classifier reads libpq's env from them. */
+  assigns?: [string, string][];
 }
 
 /** One segment of a command with the directory it runs in. */
@@ -502,11 +520,11 @@ function expandSegment(seg: string[], opts: ReadOpts, depth: number, out: string
     return;
   }
   budget.left--;
-  const { rest: raw, names, chdir } = readPrefix(seg, budget);
+  const { rest: raw, names, chdir, assigns } = readPrefix(seg, budget);
   // `env -C dir` / `sudo -D dir` runs the program, and what it runs, elsewhere: also reported
   //   as the name `:chdir`.
   const child = chdir === undefined ? undefined : `${opts.scope ?? '0'}.c${++budget.nested}`;
-  opts.meta?.push({ env: chdir === undefined ? names : [...names, ':chdir'], scope: opts.scope ?? '0', chdir, child });
+  opts.meta?.push({ env: chdir === undefined ? names : [...names, ':chdir'], scope: opts.scope ?? '0', chdir, child, assigns });
   const inner = child === undefined ? opts : { ...opts, scope: child };
   const read = dropRedirects(raw);
   const plain = programWords(read);
@@ -686,9 +704,13 @@ const MAX_SPLIT_STRINGS = 16;
  *  args'` runs its split string (layer-1 round: it hid the program). A word that is a whole
  *  command substitution names the program at run time (`$(which env) git push`): it is
  *  skipped like a prefix word, so the command after it is read (closing G1 review). */
-export function readPrefix(words: string[], budget?: { truncated: boolean }): { rest: string[]; names: string[]; chdir?: string | null } {
+export function readPrefix(
+  words: string[],
+  budget?: { truncated: boolean },
+): { rest: string[]; names: string[]; assigns: [string, string][]; chdir?: string | null } {
   let ws = words;
   const names: string[] = [];
+  const assigns: [string, string][] = [];
   let chdir: string | null | undefined;
   let splits = 0;
   let i = 0;
@@ -702,6 +724,7 @@ export function readPrefix(words: string[], budget?: { truncated: boolean }): { 
     else if (/^\$\([^]*\)$|^`[^]*`$/.test(w)) i++;
     else if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) {
       names.push(w.slice(0, w.indexOf('=')));
+      assigns.push([w.slice(0, w.indexOf('=')), w.slice(w.indexOf('=') + 1)]);
       i++;
     }
     // `command -v sh` looks a name up and runs nothing (layer-1 round: it read as a shell).
@@ -732,18 +755,71 @@ export function readPrefix(words: string[], budget?: { truncated: boolean }): { 
       if (p === 'timeout' && /^\d+(?:\.\d+)?[smhd]?$/.test(ws[i] ?? '')) i++;
     } else break;
   }
-  return chdir === undefined ? { rest: ws.slice(i), names } : { rest: ws.slice(i), names, chdir };
+  return chdir === undefined ? { rest: ws.slice(i), names, assigns } : { rest: ws.slice(i), names, assigns, chdir };
+}
+
+/** Default ports of URL schemes curl, wget and httpie speak. */
+const SCHEME_PORTS: Readonly<Record<string, number>> = { http: 80, https: 443, ftp: 21, ftps: 990, sftp: 22, ws: 80, wss: 443 };
+
+/** `digits` as a TCP port, or undefined when it is not 1..65535. */
+function toPort(digits: string | undefined): number | undefined {
+  if (digits === undefined) return undefined;
+  const n = Number(digits);
+  return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : undefined;
+}
+
+/** A host as the tool that connects reads it: lower case, percent-decoded (curl and libpq decode
+ *  a URL's host: `pro%64.db`), without a trailing dot (`prod.db.` is the name `prod.db`). A `%`
+ *  that does not decode away stays in the name, and classifyHost counts such a host as production
+ *  (fail closed). An IPv6 literal is only lower-cased (its zone id is written `%eth0`). */
+export function normalizeHost(raw: string): string {
+  const h = raw.toLowerCase();
+  if (h.includes(':')) return h;
+  let d = h;
+  if (h.includes('%')) {
+    try {
+      d = decodeURIComponent(h).toLowerCase();
+    } catch {
+      d = h;
+    }
+  }
+  return d.replace(/\.+$/, '');
+}
+
+/** Host and named port of a URL or `[user@]host[:port][/path]` (host '' when none). `scheme` is
+ *  the URL's scheme, lower-cased, when it has one. A port that is not 1..65535 reads as none.
+ *  The authority ends at `/`, `?` or `#` before the credentials are cut, as curl reads it
+ *  (`http://prod.db?x=@dev.db` connects to prod.db). */
+export function hostPortOf(raw: string): { host: string; port?: number; scheme?: string } {
+  let s = raw.trim();
+  const sm = s.match(/^([a-z][a-z0-9+.-]*):\/\//i);
+  if (sm) s = s.slice(sm[0].length);
+  const end = s.search(/[/?#]/);
+  s = end < 0 ? s : s.slice(0, end);
+  s = s.slice(s.lastIndexOf('@') + 1); // credentials or ssh user
+  const m = s.startsWith('[') ? s.match(/^\[([^\]]+)\](?::(\d+))?/) : s.match(/^([^:]*)(?::(\d+))?/);
+  const port = toPort(m?.[2]);
+  return { host: normalizeHost(m?.[1] ?? ''), ...(port === undefined ? {} : { port }), ...(sm ? { scheme: sm[1]!.toLowerCase() } : {}) };
 }
 
 /** Host of a URL or `[user@]host[:port][/path]`; '' when none. */
 export function hostOf(raw: string): string {
-  let s = raw.trim();
-  const scheme = s.match(/^[a-z][a-z0-9+.-]*:\/\//i);
-  if (scheme) s = s.slice(scheme[0].length);
-  s = s.replace(/^[^@/]*@/, ''); // credentials or ssh user
-  if (s.startsWith('[')) return (s.match(/^\[([^\]]+)\]/)?.[1] ?? '').toLowerCase(); // IPv6
-  const host = s.split(/[/:?#]/)[0] ?? '';
-  return host.toLowerCase();
+  return hostPortOf(raw).host;
+}
+
+/** A web URL's host and port: the named one, else the scheme's default, else `schemeless` (curl
+ *  and wget read a bare host as http). */
+function webHostPort(raw: string, schemeless = 80): { host: string; port?: number } {
+  const { host, port, scheme } = hostPortOf(raw);
+  const def = scheme === undefined ? schemeless : SCHEME_PORTS[scheme];
+  const p = port ?? def;
+  return { host, ...(p === undefined ? {} : { port: p }) };
+}
+
+/** `host` or `host:port` of a target, brackets around an IPv6 host. */
+export function targetLabel(t: { host: string; port?: number }): string {
+  if (t.port === undefined) return t.host;
+  return `${t.host.includes(':') ? `[${t.host}]` : t.host}:${t.port}`;
 }
 
 function isUrlLike(w: string): boolean {
@@ -825,7 +901,51 @@ function curlTargets(args: string[]): OutwardTarget[] {
   const getMode = args.includes('-G') || args.includes('--get') || args.includes('-I') || args.includes('--head');
   const mutating = method !== '' ? !['GET', 'HEAD', 'OPTIONS'].includes(method) : sendsBody && !getMode;
   const urls = [...positionals(args, CURL_VALUE_FLAGS), ...(flagValue(args, ['--url']) ? [flagValue(args, ['--url'])!] : [])];
-  return urls.filter(isUrlLike).map((u) => ({ kind: 'curl', host: hostOf(u), mutating }));
+  const named = urls.filter(isUrlLike).map((u) => ({ kind: 'curl', ...webHostPort(u), mutating }));
+  return [...named, ...curlRedirects(args, named).map((t) => ({ kind: 'curl', ...t, mutating }))];
+}
+
+const BRACKETED_OR_PLAIN = String.raw`(\[[^\]]*\]|[^:]*)`;
+// PORT2 is optional: curl takes `HOST1:PORT1:HOST2` too (round-2 review: `--connect-to ::web.prod`).
+const CONNECT_TO = new RegExp(`^${BRACKETED_OR_PLAIN}:([^:]*):${BRACKETED_OR_PLAIN}(?::([^:]*))?$`);
+const RESOLVE = /^\+?(\[[^\]]*\]|[^:]+):(\d+):(.+)$/;
+/** URL and `--connect-to` pairs curlRedirects reads when only the port moves. */
+const MAX_REDIRECT_PAIRS = 1024;
+
+/** Where `--connect-to HOST1:PORT1:HOST2:PORT2` and `--resolve HOST:PORT:ADDR[,ADDR…]` really send
+ *  the request: the URL names the decoy (`https://localhost/x --connect-to localhost:443:web.prod:443`
+ *  connects to web.prod). Every destination counts, whichever URL it was meant for (fail closed);
+ *  an empty HOST2 or PORT2 keeps the URL's own. */
+function curlRedirects(args: string[], urls: { host: string; port?: number }[]): { host: string; port?: number }[] {
+  const out: { host: string; port?: number }[] = [];
+  let pairs = 0;
+  const bare = (h: string) => h.replace(/^\[|\]$/g, '');
+  for (const v of flagValues(args, ['--connect-to'])) {
+    const m = v.match(CONNECT_TO);
+    if (!m) {
+      // A form goodboy cannot read: its destination is unknown, so it counts as an unlisted host.
+      out.push({ host: v });
+      continue;
+    }
+    const host2 = bare(m[3]!);
+    const port2 = toPort(m[4]);
+    if (host2 !== '') out.push({ host: host2, ...(port2 === undefined ? {} : { port: port2 }) });
+    else if (port2 !== undefined) {
+      // Only the port moves: the host is the one the URL (or the entry's own HOST1) names. URLs
+      //   times entries is bounded, so a long command cannot blow up the reading.
+      const h1 = bare(m[1]!);
+      for (const u of h1 !== '' ? [{ host: h1 }] : urls) {
+        if (pairs++ >= MAX_REDIRECT_PAIRS) break;
+        out.push({ host: u.host, port: port2 });
+      }
+    }
+  }
+  for (const v of flagValues(args, ['--resolve'])) {
+    const m = v.match(RESOLVE);
+    if (!m || v.startsWith('-')) continue;
+    for (const addr of m[3]!.split(',')) if (addr !== '') out.push({ host: bare(addr), ...(toPort(m[2]) === undefined ? {} : { port: toPort(m[2])! }) });
+  }
+  return out.map((t) => ({ ...t, host: normalizeHost(t.host) }));
 }
 
 function wgetTargets(args: string[]): OutwardTarget[] {
@@ -833,10 +953,11 @@ function wgetTargets(args: string[]): OutwardTarget[] {
   const posts = args.some((a) => /^--(post-data|post-file|body-data|body-file)(=|$)/.test(a));
   const mutating = method !== '' ? !['GET', 'HEAD'].includes(method) : posts;
   const vf = new Set(['-O', '--output-document', '-o', '--output-file', '-P', '--directory-prefix', '-U', '--user-agent', '--header', '--post-data', '--post-file', '--method', '--body-data', '--body-file']);
-  return positionals(args, vf).filter(isUrlLike).map((u) => ({ kind: 'wget', host: hostOf(u), mutating }));
+  return positionals(args, vf).filter(isUrlLike).map((u) => ({ kind: 'wget', ...webHostPort(u), mutating }));
 }
 
-function httpieTargets(args: string[]): OutwardTarget[] {
+/** `http` and `xh` read a bare host as http, `https` and `xhs` as https. */
+function httpieTargets(prog: string, args: string[]): OutwardTarget[] {
   const pos = positionals(args, new Set(['-a', '--auth', '-o', '--output', '--session', '--verify', '--cert', '--cert-key']));
   let i = 0;
   let method = '';
@@ -846,8 +967,10 @@ function httpieTargets(args: string[]): OutwardTarget[] {
   const items = pos.slice(i + 1);
   const hasData = items.some((it) => /^[^=:@]+(:?=|=@|@)/.test(it) && !/^[^:]+:[^=]/.test(it));
   const mutating = method !== '' ? !['GET', 'HEAD', 'OPTIONS'].includes(method) : hasData;
-  const host = url.startsWith(':') || url.startsWith('/') ? 'localhost' : hostOf(url);
-  return [{ kind: 'httpie', host, mutating }];
+  const schemeless = prog === 'https' || prog === 'xhs' ? 443 : 80;
+  // `:8080/x` and `/x` name localhost (the port after the colon, else the default)
+  const hp = url.startsWith(':') || url.startsWith('/') ? { host: 'localhost', port: toPort(url.match(/^:(\d+)/)?.[1]) ?? schemeless } : webHostPort(url, schemeless);
+  return [{ kind: 'httpie', ...hp, mutating }];
 }
 
 const SSH_VALUE_FLAGS = new Set(['-p', '-i', '-l', '-o', '-F', '-J', '-L', '-R', '-D', '-W', '-b', '-c', '-E', '-e', '-m', '-O', '-Q', '-S', '-w', '-B', '-P']);
@@ -1017,26 +1140,278 @@ function cloudTargets(prog: string, args: string[]): OutwardTarget[] {
 
 const DB_READ_ONLY = new Set(['pg_dump', 'pg_dumpall', 'mysqldump', 'mongodump', 'mongoexport']);
 
-function dbTargets(prog: string, args: string[]): OutwardTarget[] {
-  const uri = args.find((a) => /^(postgres(ql)?|mysql|mariadb|mongodb(\+srv)?|redis|rediss|clickhouse):\/\//i.test(a));
-  const given = uri ? [hostOf(uri)] : flagValues(args, ['-h', '--host', '-H', '--hostname', '-S', '--server']);
-  // Every host the call may reach: each flag (the last `-h` wins, and mysql takes `-S` as its
-  //   socket next to an `-h` host) and each entry of a libpq host list (`-h /tmp,db`).
-  const hosts = given.flatMap((h) => (prog === 'sqlcmd' ? [h.replace(/^tcp:/i, '').split(/[,\\]/)[0] ?? h] : h.split(',')));
+const DB_URL = /^(postgres(ql)?|mysql|mariadb|mongodb(\+srv)?|redis|rediss|clickhouse):\/\//i;
+
+/** Flags that name the port, by tool (mysql's `-p` is the password). */
+function dbPortFlags(prog: string): string[] {
+  if (/^(psql|pg_)/.test(prog) || prog === 'redis-cli') return ['-p', '--port'];
+  if (/^(mysql|mariadb)/.test(prog)) return ['-P', '--port'];
+  return ['--port'];
+}
+
+/** The options of one tool that take a value: `short` letters (`-h host`, `-hhost`, last in a
+ *  cluster: `-tAh host`) and `long` names (`--host host`, `--host=host`). One tool's list is
+ *  not another's: `-t`, `-n`, `-E` and `-l` take a value in pg_dump, `-l` takes one in
+ *  pg_dumpall, and none does in psql (a shared list let `psql -t "host=prod.db"` swallow the
+ *  connection string, security review). */
+interface OptSpec {
+  short: string;
+  long: ReadonlySet<string>;
+}
+
+const optSpec = (short: string, long: string): OptSpec => ({ short, long: new Set(long.split(' ').map((l) => `--${l}`)) });
+
+/** From each tool's `--help` (PostgreSQL 16). */
+const PG_SPECS: Readonly<Record<string, OptSpec>> = {
+  psql: optSpec('cdfLopPRTUvFh', 'command dbname file log-file output port pset record-separator table-attr username set variable field-separator host'),
+  pg_dump: optSpec(
+    'fFjZeEnNStTdhpU',
+    'file format jobs compress extension encoding schema exclude-schema superuser table exclude-table dbname host port username role section snapshot lock-wait-timeout exclude-table-data exclude-table-and-children exclude-table-data-and-children table-and-children include-foreign-data extra-float-digits rows-per-insert restrict-key filter exclude-extension',
+  ),
+  pg_restore: optSpec(
+    'dfFIjLnNPStThpU',
+    'dbname file format index jobs use-list schema exclude-schema function superuser table trigger host port username role section restrict-key filter',
+  ),
+  pg_dumpall: optSpec(
+    'fESdhlpU',
+    'file encoding superuser dbname host database port username role exclude-database lock-wait-timeout extra-float-digits rows-per-insert restrict-key',
+  ),
+};
+
+/** A long option as getopt_long reads it: an exact name, or an abbreviation that starts exactly
+ *  one value-taking option (round-2 review: `psql --ho prod.db` connects to prod.db). Reading an
+ *  abbreviation getopt would call ambiguous as a value option only reads more words as targets. */
+function longName(given: string, long: ReadonlySet<string>): string {
+  // `--d` is psql's `--dbname` (closing review): any prefix past the dashes counts when unique.
+  if (long.has(given) || given.length < 3) return given;
+  let found: string | null = null;
+  for (const l of long) {
+    if (!l.startsWith(given)) continue;
+    if (found !== null) return given;
+    found = l;
+  }
+  return found ?? given;
+}
+
+/** `args` split into the options `spec` knows to take a value (name and value, in order) and the
+ *  positional words. Other options take none, and their next word stays positional. */
+function parseOpts(args: string[], spec: OptSpec): { opts: { name: string; value: string }[]; pos: string[] } {
+  const opts: { name: string; value: string }[] = [];
+  const pos: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--') {
+      pos.push(...args.slice(i + 1));
+      break;
+    }
+    if (a.startsWith('--')) {
+      const eq = a.indexOf('=');
+      const name = longName(eq > 0 ? a.slice(0, eq) : a, spec.long);
+      if (eq > 0) opts.push({ name, value: a.slice(eq + 1) });
+      else if (spec.long.has(name) && i + 1 < args.length) opts.push({ name, value: args[++i]! });
+      continue;
+    }
+    if (a.startsWith('-') && a.length > 1) {
+      // The first letter that takes a value takes the rest of the cluster, else the next word.
+      for (let k = 1; k < a.length; k++) {
+        if (!spec.short.includes(a[k]!)) continue;
+        if (k + 1 < a.length) opts.push({ name: `-${a[k]}`, value: a.slice(k + 1) });
+        else if (i + 1 < args.length) opts.push({ name: `-${a[k]}`, value: args[++i]! });
+        break;
+      }
+      continue;
+    }
+    pos.push(a);
+  }
+  return { opts, pos };
+}
+
+/** Options whose value is free text (SQL, a file, a variable), never a connection string. */
+const PG_FREE_TEXT: ReadonlySet<string> = new Set(['-c', '--command', '-f', '--file', '-v', '--set', '--variable', '-P', '--pset', '-F', '-R', '-T', '-o', '-L', '--output', '--log-file']);
+
+/** A word that starts like a libpq connection string (`host=…`, `service=…`). */
+const CONNINFO_START = /^\s*[A-Za-z_]\w*\s*=/;
+
+/** mongosh and mongo: options that take a value, so a value is not read as the db address. */
+const MONGO_VALUE_FLAGS: ReadonlySet<string> = new Set([
+  '-u', '--username', '-p', '--password', '--host', '--port', '--authenticationDatabase', '--authenticationMechanism', '--eval', '-f', '--file',
+  '--tlsCAFile', '--tlsCertificateKeyFile', '--tlsCertificateKeyFilePassword', '--tlsCRLFile', '--sslCAFile', '--sslPEMKeyFile', '--sslPEMKeyPassword',
+  '--gssapiServiceName', '--gssapiHostName', '--sspiHostnameCanonicalization', '--sspiRealmOverride', '--awsAccessKeyId', '--awsSecretAccessKey',
+  '--awsIamSessionToken', '--keyVaultNamespace', '--kmsURL', '--apiVersion', '--oidcFlows', '--oidcRedirectUrl',
+]);
+
+/** `host`, `host:port`, `[v6]` or `[v6]:port` as a host and the port it carries (a single colon
+ *  only: a bare IPv6 address has several). */
+function splitHostPort(h: string): { host: string; port?: number } {
+  const m = h.match(/^\[([^\]]+)\](?::(\d+))?$/) ?? h.match(/^([^:[\]]+):(\d+)$/);
+  const port = toPort(m?.[2]);
+  return m && (m[2] === undefined || port !== undefined) ? { host: m[1]!, ...(port === undefined ? {} : { port }) } : { host: h };
+}
+
+/** The port that goes with host `i` of `n` when a flag lists ports: one for all, or one per host. */
+function portAt(ports: string[], i: number, n: number): number | undefined {
+  return toPort(ports.length === n ? ports[i] : ports.length === 1 ? ports[0] : undefined);
+}
+
+type HostPort = { host: string; port?: number | undefined };
+
+/** What one connection string names: hosts with their ports, and a `service` (a pg_service.conf
+ *  entry: its host cannot be read from the command). */
+interface PgConn {
+  hosts: HostPort[];
+  service?: string | undefined;
+}
+
+/** The hosts of a connection URL's authority (`mongodb://h1:1,h2:2/db` names two). */
+function urlHostPorts(uri: string): HostPort[] {
+  const s = uri.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '');
+  const authority = s.split(/[/?#]/)[0] ?? '';
+  return authority.slice(authority.lastIndexOf('@') + 1).split(',').map((x) => hostPortOf(x));
+}
+
+/** `text` percent-decoded; a malformed escape leaves it as written (its `%` then fails closed in
+ *  classifyHost). */
+function unescapeUri(text: string): string {
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text;
+  }
+}
+
+/** Splits a comma list, dropping empty entries. */
+const listOf = (text: string | undefined): string[] => (text ?? '').split(',').filter(Boolean);
+
+/** The hosts of a libpq URI (`postgresql://u@h1:1,h2:2/db?host=…&port=…`). The query parameters
+ *  `host`, `port` and `hostaddr` win over the authority (libpq stores them later), values are
+ *  percent-decoded, `service` names a pg_service.conf entry. */
+function pgUriConn(uri: string): PgConn {
+  // libpq cuts the credentials at the first `@` before a `/` (like urlHostPorts did before), then
+  //   the authority at `/` or `?`.
+  const s = uri.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').replace(/^[^@/]*@/, '');
+  const q = s.indexOf('?');
+  const authority = s.split(/[/?]/)[0] ?? '';
+  const params = new Map<string, string>();
+  if (q >= 0) {
+    for (const kv of s.slice(q + 1).split('&')) {
+      const eq = kv.indexOf('=');
+      if (eq > 0) params.set(unescapeUri(kv.slice(0, eq)), unescapeUri(kv.slice(eq + 1)));
+    }
+  }
+  const authHosts = listOf(authority).map((x) => hostPortOf(x)).filter((h) => h.host !== '');
+  const authPorts = authHosts.flatMap((h) => (h.port === undefined ? [] : [String(h.port)]));
+  const qPorts = params.has('port') ? listOf(params.get('port')) : undefined;
+  // Ports for hosts that come from the query: its `port`, else the authority's.
+  const withPorts = (hosts: HostPort[]): HostPort[] =>
+    hosts.map((h, i) => ({ host: h.host, port: qPorts !== undefined ? portAt(qPorts, i, hosts.length) : (h.port ?? portAt(authPorts, i, hosts.length)) }));
+  const named = params.has('host') ? withPorts(listOf(params.get('host')).map(splitHostPort)) : qPorts !== undefined ? withPorts(authHosts) : authHosts;
+  const addrs = withPorts(listOf(params.get('hostaddr')).map(splitHostPort));
+  return { hosts: [...named, ...addrs], service: params.get('service') || undefined };
+}
+
+/** The hosts of a libpq connection string (`host=db port=5433 dbname=x`, `hostaddr=` too) and its
+ *  `service=`. */
+function conninfoConn(text: string): PgConn {
+  const kv: Record<string, string> = {};
+  for (const m of text.matchAll(/(?:^|\s)(host|hostaddr|port|service)\s*=\s*(?:'((?:[^'\\]|\\.)*)'|(\S+))/g)) kv[m[1]!] = m[2] ?? m[3] ?? '';
+  const ports = listOf(kv.port);
+  const portsFor = (hosts: string[]): HostPort[] => hosts.map((host, i) => ({ host, port: portAt(ports, i, hosts.length) }));
+  return { hosts: [...portsFor(listOf(kv.host)), ...portsFor(listOf(kv.hostaddr))], service: kv.service || undefined };
+}
+
+/** mongosh's and mongo's db address: `host:port/db`, `host/db`, `host:port` or a dotted `host`
+ *  (a bare word is a database on localhost; a script file is no address). */
+function mongoAddress(word: string): HostPort[] {
+  if (DB_URL.test(word) || /\.(?:js|mjs|mongodb|json)$/i.test(word)) return [];
+  const slash = word.indexOf('/');
+  const authority = slash >= 0 ? word.slice(0, slash) : word;
+  if (authority === '' || (slash < 0 && !/:\d+$/.test(authority) && !authority.includes('.'))) return [];
+  return [splitHostPort(authority)];
+}
+
+/** `redis-cli --cluster <command> host:port …`: the nodes it names are words, not `-h` flags. */
+function redisClusterNodes(args: string[]): HostPort[] {
+  const at = args.indexOf('--cluster');
+  if (at < 0) return [];
+  return args
+    .slice(at + 2)
+    .filter((w) => /^(?:\[[^\]]+\]|[^\s:/[\]]+):\d+$/.test(w))
+    .map(splitHostPort);
+}
+
+function dbTargets(prog: string, args: string[], env: Readonly<Record<string, string>> = {}): OutwardTarget[] {
+  const pg = /^(psql|pg_)/.test(prog);
+  const parsed = PG_SPECS[prog] ? parseOpts(args, PG_SPECS[prog]!) : undefined;
+  // The flags of a pg tool are read by its own option list (`-tAh host`); the others by name.
+  const optValues = (names: string[]) => (parsed ? parsed.opts.filter((o) => names.includes(o.name)).map((o) => o.value) : flagValues(args, names));
+  const flagPorts = (optValues(dbPortFlags(prog)).pop() ?? '').split(',').filter(Boolean);
+  // sqlcmd's `-S tcp:host\instance,port`; the others take `host`, or a libpq host list `a,b`.
+  const hostFlags = pg ? ['-h', '--host'] : ['-h', '--host', '-H', '--hostname', '-S', '--server'];
+  const flagged = optValues(hostFlags).flatMap((h) => {
+    if (prog !== 'sqlcmd') return h.split(',').map(splitHostPort);
+    const bare = h.replace(/^tcp:/i, '');
+    return [{ host: bare.split(/[,\\]/)[0] ?? bare, port: toPort(bare.split(',')[1]) }];
+  });
+  const fromFlags = flagged.map((h, i) => (h.port !== undefined ? h : { host: h.host, port: portAt(flagPorts, i, flagged.length) }));
+  // A URL or connection string with no port of its own takes the `-p` flag's when it is the only one.
+  const own = (hp: HostPort) => (hp.port !== undefined ? hp : { host: hp.host, port: portAt(flagPorts, 0, 1) });
+  const dbnames = pg ? optValues(['-d', '--dbname']) : [];
+  const urls = [...new Set([...args.map((a) => a.replace(/^--(?:dbname|uri)=/, '')), ...dbnames])].filter((a) => DB_URL.test(a));
+  // Connection strings: the positional words, `-d`'s value, and (when unsure which option took
+  //   a word) any word outside a free-text option that starts like `host=…` (fail closed).
+  const conninfos = pg
+    ? [...new Set([...parsed!.pos, ...dbnames, ...args.filter((a, i) => CONNINFO_START.test(a) && !PG_FREE_TEXT.has(args[i - 1] ?? ''))])].filter((a) => !DB_URL.test(a))
+    : [];
+  const conns: PgConn[] = pg ? [...urls.map(pgUriConn), ...conninfos.map(conninfoConn)] : [{ hosts: urls.flatMap(urlHostPorts) }];
+  const explicit = [...conns.flatMap((c) => c.hosts).map(own), ...fromFlags];
+  let hosts: HostPort[] = [
+    ...explicit,
+    ...(prog === 'mongosh' || prog === 'mongo' ? positionals(args, MONGO_VALUE_FLAGS).flatMap(mongoAddress) : []),
+    ...(prog === 'redis-cli' ? redisClusterNodes(args) : []),
+  ];
+  if (pg) {
+    // The libpq environment fills what the command leaves unnamed (PGHOST=db psql …, also from a
+    //   `export` before): a host when it names none, the port of any host without one.
+    const envHosts = explicit.length > 0 ? [] : [...listOf(env.PGHOST), ...listOf(env.PGHOSTADDR)].map(splitHostPort);
+    const envPorts = listOf(env.PGPORT);
+    const all = [...explicit, ...envHosts];
+    hosts = all.map((h, i) => (h.port !== undefined ? h : { host: h.host, port: portAt(envPorts, i, all.length) }));
+    // A service name stands for a host that only pg_service.conf knows: an unknown target (fail
+    //   closed for a change, host name `pg-service:<name>`), unless a host is named.
+    const service = conns.map((c) => c.service).find(Boolean) ?? (env.PGSERVICE || undefined);
+    if (service !== undefined && explicit.length === 0) hosts.push({ host: `pg-service:${service}` });
+  }
   // None is a local socket. A unix socket dir is local too (#13: a test agent's temporary
   //   Postgres was denied as an unlisted host), only as a literal path: a variable's value
   //   cannot be read reliably from the command text (I6 review), so `-h $D` stays a host.
   const mutating = !DB_READ_ONLY.has(prog);
-  return hosts.filter((h) => h !== '' && !h.startsWith('/')).map((h) => ({ kind: prog, host: h.toLowerCase(), mutating }));
+  return hosts
+    .map((h) => ({ host: normalizeHost(h.host), port: h.port }))
+    .filter((h) => h.host !== '' && !h.host.startsWith('/'))
+    .map((h) => ({ kind: prog, host: h.host, mutating, ...(h.port === undefined ? {} : { port: h.port }) }));
 }
 
 /** Every outward target a shell command names. */
 export function classifyOutward(command: string, cwd: string): OutwardTarget[] {
   const out: OutwardTarget[] = [];
-  for (const words of commandSegments(command)) {
-    if (words.length === 0) continue;
+  const meta: SegmentMeta[] = [];
+  // Variables set so far for the programs that follow (`export PGHOST=db; psql`, `PGHOST=db;
+  //   psql`): read whatever the scope, which can only add targets (fail closed).
+  const sticky: Record<string, string> = {};
+  commandSegments(command, { meta }).forEach((words, idx) => {
+    const assigns = meta[idx]?.assigns ?? [];
+    if (words.length === 0) {
+      for (const [k, v] of assigns) sticky[k] = v;
+      return;
+    }
     const prog = basename(words[0]!);
     const args = words.slice(1);
+    if (EXPORTERS.has(prog)) {
+      for (const a of args) {
+        const m = a.match(/^([A-Za-z_][A-Za-z0-9_]*)=([^]*)$/);
+        if (m) sticky[m[1]!] = m[2]!;
+      }
+    }
     switch (prog) {
       case 'curl':
         out.push(...curlTargets(args));
@@ -1048,7 +1423,7 @@ export function classifyOutward(command: string, cwd: string): OutwardTarget[] {
       case 'https':
       case 'xh':
       case 'xhs':
-        out.push(...httpieTargets(args));
+        out.push(...httpieTargets(prog, args));
         break;
       case 'ssh':
       case 'scp':
@@ -1107,14 +1482,17 @@ export function classifyOutward(command: string, cwd: string): OutwardTarget[] {
       case 'sqlcmd':
       case 'clickhouse-client':
       case 'cqlsh':
-        out.push(...dbTargets(prog, args));
+        out.push(...dbTargets(prog, args, assigns.length > 0 ? { ...sticky, ...Object.fromEntries(assigns) } : sticky));
         break;
       default:
         break;
     }
-  }
+  });
   return out.filter((t) => t.host !== '');
 }
+
+/** Shell built-ins that set variables for the commands after them. */
+const EXPORTERS: ReadonlySet<string> = new Set(['export', 'declare', 'typeset', 'local', 'readonly']);
 
 // ---- host classes ---------------------------------------------------------------------
 
@@ -1122,7 +1500,7 @@ const LOCAL_KUBE = [/^kube:(kind-.*|k3d-.*|minikube|docker-desktop|rancher-deskt
 
 /** Built-in local or reserved targets (never a real external system). */
 export function isLocalHost(host: string): boolean {
-  const h = host.toLowerCase();
+  const h = host.toLowerCase().replace(/\.+$/, '');
   if (h === 'localhost' || h.endsWith('.localhost') || h === '::1' || h === '0.0.0.0' || h === 'host.docker.internal') return true;
   if (/^127\.\d+\.\d+\.\d+$/.test(h)) return true;
   if (/\.(test|invalid|example|localhost)$/.test(h) || /^example\.(com|net|org)$/.test(h)) return true;
@@ -1222,12 +1600,42 @@ export function removedProduction(before: string, after: string): string[] {
     .filter((h) => !kept.has(h));
 }
 
-/** Production wins over allow, so a broad `allow *.corp.com` cannot unlock a listed production host. */
-export function classifyHost(host: string, rules: HostRules): HostClass {
-  if (rules.production.some((p) => globMatch(p, host))) return 'production';
+/** A hosts-file entry as a host pattern and the port it names: `db.corp:5432`, `[::1]:5432`,
+ *  `*.corp.com:5432`; a bare IPv6 address (several colons, no brackets) has no port. `bad`: the
+ *  port is not 1..65535. */
+export function parseHostEntry(raw: string): { host: string; port?: number; bad?: boolean } {
+  const m = raw.match(/^\[([^\]]+)\](?::(\d+))?$/) ?? raw.match(/^([^:[\]]+):(\d+)$/);
+  if (!m) return { host: raw };
+  if (m[2] === undefined) return { host: m[1]! };
+  const port = toPort(m[2]);
+  return port === undefined ? { host: m[1]!, bad: true } : { host: m[1]!, port };
+}
+
+/** Whether an entry covers a target. An entry without a port covers every port. One with a
+ *  port covers that port; a production one also covers a target whose port is not known (fail
+ *  closed), an allow one does not. An entry with a bad port is production for every port and
+ *  allows nothing. */
+function entryMatches(raw: string, host: string, port: number | undefined, kind: 'allow' | 'production'): boolean {
+  const e = parseHostEntry(raw);
+  if (!globMatch(e.host, host)) return false;
+  if (e.bad) return kind === 'production';
+  if (e.port === undefined) return true;
+  return port === undefined ? kind === 'production' : e.port === port;
+}
+
+/** Production wins over allow, so a broad `allow *.corp.com` cannot unlock a listed production
+ *  host, and an `allow db:5433` cannot unlock `production db` (the model may add allow lines;
+ *  to keep one port of a production host open, the user lists the other ports as production).
+ *  `port`: the port the command names, when it names one. */
+export function classifyHost(rawHost: string, rules: HostRules, port?: number): HostClass {
+  const host = rawHost.replace(/\.+$/, '');
+  // A `%` that normalizeHost could not decode away: the real host is unknown, so it counts as
+  //   production (fail closed). An IPv6 zone id (`fe80::1%eth0`) has colons and is no such name.
+  if (host.includes('%') && !host.includes(':')) return 'production';
+  if (rules.production.some((p) => entryMatches(p, host, port, 'production'))) return 'production';
   if (isLocalHost(host)) return 'local';
   if ((rules.broken ?? []).length > 0) return 'production';
-  if (rules.allow.some((p) => globMatch(p, host))) return 'allow';
+  if (rules.allow.some((p) => entryMatches(p, host, port, 'allow'))) return 'allow';
   return 'unlisted';
 }
 
@@ -1240,9 +1648,9 @@ export function decideOutward(
   inSubagent: boolean,
 ): { action: OutwardAction; target?: OutwardTarget } {
   const mutating = targets.filter((t) => t.mutating);
-  const prod = mutating.find((t) => classifyHost(t.host, rules) === 'production');
+  const prod = mutating.find((t) => classifyHost(t.host, rules, t.port) === 'production');
   if (prod) return { action: 'deny-production', target: prod };
-  const unlisted = mutating.find((t) => classifyHost(t.host, rules) === 'unlisted');
+  const unlisted = mutating.find((t) => classifyHost(t.host, rules, t.port) === 'unlisted');
   if (unlisted) return { action: inSubagent ? 'deny-unlisted' : 'advise', target: unlisted };
   return { action: 'pass' };
 }

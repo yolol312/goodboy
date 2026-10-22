@@ -267,7 +267,7 @@ describe('caps and gate modes through the hook', () => {
     expect(denied(await s.run('pre-tool-use', agentCall({ prompt: 'job a' }), env))).toBe(false);
     const over = await s.run('pre-tool-use', agentCall({ prompt: 'job b' }), env);
     expect(denied(over)).toBe(true);
-    expect(String(hso(over).permissionDecisionReason)).toContain('cap 1');
+    expect(String(hso(over).permissionDecisionReason)).toContain('fuse 1');
     expect(String(over.systemMessage)).toContain('작업당 에이전트 호출 상한');
 
     const warn = await s.run('pre-tool-use', agentCall({ prompt: 'job b' }), { ...env, GOODBOY_SPAWN_GATE: 'warn' });
@@ -277,6 +277,67 @@ describe('caps and gate modes through the hook', () => {
     await s.run('user-prompt-submit', { prompt: 'now do the next part' });
     expect(denied(await s.run('pre-tool-use', agentCall({ prompt: 'job c' }), env))).toBe(false);
   });
+});
+
+describe('runaway and the fuse through the hook (#21)', () => {
+  const finish = (s: Session, call: Record<string, unknown>, agentId: string) =>
+    s.run('post-tool-use', {
+      tool_name: 'Agent',
+      tool_use_id: call.tool_use_id,
+      tool_input: call.tool_input,
+      tool_response: { status: 'completed', agentId, content: [{ type: 'text', text: 'ok' }] },
+    });
+
+  test('the third near-identical brief with nothing changed is denied; a changed file named in it lets it run', async () => {
+    const fs = require('node:fs') as typeof import('node:fs');
+    const s = session();
+    fs.mkdirSync(join(s.cwd, 'src'));
+    const file = join(s.cwd, 'src', 'auth.ts');
+    fs.writeFileSync(file, 'export const a = 1;\n');
+    const past = Date.now() / 1000 - 3600;
+    fs.utimesSync(file, past, past);
+    // The briefs differ only in their middle (past the first and before the last 200
+    // characters), so the exact-repeat rule (a hash of the whole prompt) does not fire; only
+    // the near key does.
+    const head = `Run the unit tests for src/auth.ts and record the result. ${'Keep the same scope and the same rules. '.repeat(6)}`;
+    const end = ` ${'Hand back the record path and the results. '.repeat(6)}`;
+    const brief = (tail: string) => agentCall({ subagent_type: 'goodboy:test-unit', prompt: `${head}${tail}${end}` });
+    for (const tail of ['attempt 1', 'attempt 2']) {
+      const c = brief(tail);
+      expect(denied(await s.run('pre-tool-use', c))).toBe(false);
+      await finish(s, c, `r-${tail}`);
+    }
+    const third = await s.run('pre-tool-use', brief('attempt 3'));
+    expect(denied(third)).toBe(true);
+    expect(String(hso(third).permissionDecisionReason)).toContain('near-identical');
+
+    // Another agent with the same brief is a different job.
+    expect(denied(await s.run('pre-tool-use', agentCall({ subagent_type: 'goodboy:review-all', prompt: `${head}attempt 3${end}` })))).toBe(false);
+
+    // The file the briefs name changed since the last near run: the work moved.
+    const later = Date.now() / 1000 + 5;
+    fs.utimesSync(file, later, later);
+    expect(denied(await s.run('pre-tool-use', brief('attempt 3')))).toBe(false);
+
+    const log = fs
+      .readFileSync(join(s.dir, 'dispatch-log.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((l: string) => JSON.parse(l) as { k: string; near?: string })
+      .filter((r) => r.k === 'dispatch');
+    expect(log[0]!.near).toMatch(/^[0-9a-f]+$/);
+    expect(log[1]!.near).toBe(log[0]!.near);
+  });
+
+  test('at the default caps the 9th through 12th agents of a task are allowed (gate-needed agents are not starved)', async () => {
+    const s = session();
+    for (let i = 1; i <= 12; i++) {
+      const c = agentCall({ prompt: `distinct job number ${i}: ${'x'.repeat(i)} unique topic ${i * 7919}` });
+      const out = await s.run('pre-tool-use', c);
+      expect(denied(out)).toBe(false);
+      await finish(s, c, `a${i}`);
+    }
+  }, 60_000);
 });
 
 describe('headless Claude runs', () => {

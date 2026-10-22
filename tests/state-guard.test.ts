@@ -94,6 +94,24 @@ describe('through the hooks', () => {
     expect(String(stop.raw.systemMessage)).toContain('게이트 상태를 되돌렸어요');
   });
 
+  // (#21 round-2 review) The worktree pin is SessionStart's: a line a call adds is taken back,
+  //   and a pin a call creates is removed, so a worktree made mid-session never becomes its own
+  //   project.
+  test('the worktree pin is put back after a call, and one a call creates is removed', async () => {
+    const s = sandbox();
+    const pin = join(s.dir, 'worktrees.txt');
+    writeFileSync(pin, `${s.cwd}\n`);
+    await s.run('pre-tool-use', { tool_name: 'Bash', tool_use_id: 'toolu_s5', tool_input: { command: 'sh ./x.sh' } });
+    writeFileSync(pin, `${s.cwd}\n${join(s.cwd, 'docs', '.v2')}\n`);
+    await s.run('post-tool-use', { tool_name: 'Bash', tool_use_id: 'toolu_s5', tool_input: { command: 'sh ./x.sh' }, tool_response: {} });
+    expect(readFileSync(pin, 'utf8')).toBe(`${s.cwd}\n`);
+    rmSync(pin);
+    await s.run('pre-tool-use', { tool_name: 'Bash', tool_use_id: 'toolu_s6', tool_input: { command: 'sh ./y.sh' } });
+    writeFileSync(pin, `${join(s.cwd, 'docs', '.v2')}\n`);
+    await s.run('post-tool-use', { tool_name: 'Bash', tool_use_id: 'toolu_s6', tool_input: { command: 'sh ./y.sh' }, tool_response: {} });
+    expect(existsSync(pin)).toBe(false);
+  });
+
   test('lines appended during the call by other hooks are kept', async () => {
     const s = sandbox();
     await s.run('pre-tool-use', { tool_name: 'Bash', tool_use_id: 'toolu_s4', tool_input: { command: 'ls' } });

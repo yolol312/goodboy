@@ -81,7 +81,9 @@ export function agentName(role: string): string {
  *  called, and join when their check passes. */
 export const CHECKED_ROLES: ReadonlySet<string> = new Set([ROUTE.review, ROUTE.test]);
 
-/** Delegation caps (§10.7), each tunable by env. */
+/** Delegation caps (§10.7), each tunable by env. The task and session counts are fuses (#21):
+ *  at 8 per task they starved the test and review agents the gates ask for; runaways are told
+ *  by repetition (lib/spawn-guard.ts), depth and concurrency. */
 export interface SpawnCaps {
   perTask: number;
   perLeadCall: number;
@@ -89,7 +91,7 @@ export interface SpawnCaps {
   perSession: number;
 }
 
-export const DEFAULT_CAPS: SpawnCaps = { perTask: 8, perLeadCall: 6, concurrent: 3, perSession: 40 };
+export const DEFAULT_CAPS: SpawnCaps = { perTask: 30, perLeadCall: 6, concurrent: 3, perSession: 150 };
 
 function envPositiveInt(name: string, fallback: number): number {
   const n = parseInt((process.env[name] ?? '').trim(), 10);

@@ -46,7 +46,7 @@ so work is released in batches:
 | v0.33.0 | track I (test automation, §15; issues #1–#7, #13–#15, #17, and I10). Released with v0.35.0 |
 | v0.34.0 | track J (field reports, §16; issues #8, #9, #11). Released with v0.35.0 |
 | v0.35.0 | track K (update checkups, §17; issue #10 for K1, the later steps are proposals), with the fixes of the fourth real-use trial (§15.12, §15.13) and of a Codex review (§15.14). Released 2026-10-21 (d3df5f2): v0.31.0–v0.35.0 went out together in one push to `main` |
-| v0.36.0 | track L (test backfill for existing projects, §18), with the fixes of the fifth real-use trial (§18 "Trial 5"). To be released with v0.37.0 |
+| v0.36.0 | track L (test backfill for existing projects, §18; #18), with the fixes of the fifth real-use trial (§18 "Trial 5") and of the field reports #20–#22 (§15.15, §15.16). Released 2026-10-22; track M moved to v0.37.0 |
 | v0.37.0 | track M (full tests in an isolated container sandbox: a real database copy, dummy external services, no egress; 100% line and branch coverage, every screen and action in e2e), §19 |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
 
@@ -398,6 +398,8 @@ Tool skills (hidden from the menu; main session and agents):
     session gets advice.
   - Built in: loopback, `localhost`, `.test`, `.invalid`, `.example` are allowed. Private
     IP ranges are not. Reads (GET) always pass.
+  - An entry may name a port (`allow db.dev:5433`, `production db.corp:5432`, `[::1]:5432`);
+    without one it matches every port (§15.16).
 - Subagents get R1 and R2 from the `follow-agent-rules` preload, since per-prompt text does
   not reach them.
 
@@ -407,8 +409,11 @@ Tool skills (hidden from the menu; main session and agents):
   rewritten to run in the foreground so it can merge the results (M15); members and other
   agents cannot delegate; `claude -p` from Bash is blocked; inside a subagent the guard
   fails closed.
-- Caps in the policy table, tunable: 8 agents per task, 6 per lead call, 3 at once, 40 per
-  session. A spent budget ends the work as incomplete, never as passed.
+- Caps in the policy table, tunable: 6 per lead call and 3 at once; since #21 the per-task
+  (30) and per-session (150) counts are fuses, not budgets (at 8 per task they starved the
+  agents the gates ask for). At the task fuse the model reports and asks the user, whose next
+  message starts a new count. A runaway is told by repetition (§15.16). A spent budget ends
+  the work as incomplete, never as passed.
 - The same role on the same scope runs again only with evidence: a scope file changed since
   the last run; the last result was `BLOCKED` for an environment reason, or is missing (one
   retry each); an escalation to a stronger model or effort (once); or a new user request
@@ -1797,6 +1802,125 @@ I11). `acceptance-list` warns that the UI criteria are pending.
 Triage habit (the user, 2026-10-22): in goodboy's repo, the SessionStart notice also counts
 open field-report issues with no comment yet. It asks gh (`GOODBOY_GH_BIN`, at most 3 s) and
 says nothing of issues when gh fails.
+
+### 15.16 Field reports #21 and #22
+
+#### #21 host:port: `.goodboy/hosts` entries can name a port
+
+A field report (#21, generalized): the outward-command gate blocked a subagent's call to a
+user-approved local development database because it shares a host with another database.
+Host-level entries cannot tell the two apart.
+
+Verified: `classifyHost` compared the host only, and the targets carried no port.
+
+Fix (`lib/outward-command.ts`):
+
+- Entries: `allow <host>:<port>` and `production <host>:<port>`, also a glob host
+  (`*.corp.com:5432`) and IPv6 in brackets (`[::1]:5432`). An entry without a port matches every
+  port, so old files read as before (a bare `[::1]` entry now matches `::1`; it matched nothing
+  before). A port outside 1..65535 makes a production entry match every port and an allow
+  entry match nothing.
+- Targets get `port` where the command names one: psql/pg_dump/pg_restore (`-h/-p`,
+  `--host/--port`, `postgres(ql)://user@H:P/db`, `host=H port=P` connection strings, also as `-d`),
+  mysql/mysqldump/mariadb (`-h/-P`, `--host/--port`, `mysql://`), redis-cli (`-h/-p`, `redis://`),
+  mongosh/mongo (URLs, several hosts in one URL, `--host/--port`, `--host H:P`),
+  sqlcmd (`-S tcp:H,P`), curl/wget/httpie (`:port` or the scheme's default: 80, 443, 21, ...;
+  a bare host reads as http). A libpq host list pairs with a port list. ssh, scp, git, cloud and
+  registry targets name no port.
+- Matching: a production entry with a port blocks that port and a target whose port the
+  command does not name (fail closed). An allow entry with a port allows only that port. A
+  host-only entry covers every port, so `production db:5432` + `allow db` blocks 5432 and
+  allows the rest of the host.
+- Which connection is read (security review of this change: each was a bypass). The target is
+  the one the tool really connects to, and an unknown one fails closed:
+  - Value flags are per tool (psql, pg_dump, pg_restore and pg_dumpall differ: `-t`, `-n`, `-E`
+    and `-l` take no value in psql; a short cluster such as `-tAh host` is read letter by
+    letter). A word that starts like a connection string (`host=`, `service=`) is read even
+    after an option that takes a value, except behind a free-text one (`-c`, `-f`, `-v`, ...).
+  - libpq URI query parameters win over the authority: `postgresql://dev.db:5433/x?host=prod.db&port=5432`
+    is `prod.db:5432`; `hostaddr` is a target too; parameter names and values are
+    percent-decoded.
+  - Host spelling: a URL host is percent-decoded (`pro%64.db`, as psql and curl do), a trailing
+    dot is dropped (`prod.db.`) everywhere (also in `classifyHost` and `isLocalHost`), and a host
+    whose `%` does not decode away is unknown and counts as production, whatever the file says.
+    A URL's authority ends at `/`, `?` or `#` before the credentials are cut (curl:
+    `http://prod.db?x=@dev.db` connects to `prod.db`).
+  - libpq environment: `PGHOST`, `PGHOSTADDR` and `PGPORT` set in the command (`PGHOST=db psql`,
+    `env PGHOST=db psql`, `export PGHOST=db; psql`, a bare `PGHOST=db;`) fill what the command
+    names no host or port for; a host the command names wins. A service (`PGSERVICE=name`,
+    `service=name`, `?service=name`) stands for a host only `pg_service.conf` knows: the target
+    is `pg-service:<name>`, unlisted, so a change from a subagent is denied and the main session
+    is advised; list `allow pg-service:<name>` (or `production pg-service:<name>`) to say what
+    that service is.
+  - mongosh/mongo read the positional `host[:port]/db` address (a bare word is a database on
+    localhost; a `.js` file is a script); `redis-cli --cluster <command> host:port ...` reads its
+    nodes; curl's `--connect-to` and `--resolve` add the redirected destination as a target
+    next to the URL's own host (the URL may be a decoy; every destination counts, bounded at
+    1024 URL and entry pairs for a port-only `--connect-to`).
+- Decision: a production entry always beats an allow entry that matches the same target,
+  whatever the ports. The request said the most specific entry wins; taken literally,
+  `allow db:5432` would lift `production db`, and the model may add allow lines (only removing
+  a production line is guarded). To keep one port of a production host open, list the other
+  ports as production, or the production host:port and `allow <host>`. Flipping this is one
+  ordering in `classifyHost`.
+- The production guard needed no change: entries stay strings, so `removedProduction`, the
+  Bash-removal restore (`restoreProductionHosts`) and the session memory
+  (`rememberProduction`) treat `host:port` lines like any other; tests pin it.
+- Denial and advice messages show `host:port` when a port is known.
+
+Tests: `tests/outward-host-port.test.ts`.
+
+#### #21 worktrees: a worktree anywhere inside the project is its own project
+
+Observed: a version's worktree in a dot-folder of the project (not `.claude/worktrees`) was
+read as the main checkout. The gate asked for the other version's acceptance criteria, and
+the agents' records landed in the main checkout. `projectDir` (I10) took only
+`.claude/worktrees/<name>`.
+
+Fix (`lib/project-dir.ts`): the nearest dir above the hook's `cwd` that is a worktree of the
+project's repository is the project, wherever it sits, when it existed at the session's
+start. SessionStart notes the repository's worktrees (`worktrees.txt` in the session dir),
+and the hooks pass the session id. It counts only when its `.git` is a file (a linked
+worktree's is; a nested clone's is a directory and costs no git call), git takes it as a work
+tree's top, its common git dir is the project's, and the project's `git worktree list` names
+it. Two review findings shaped this: a `.git` file pointing at the project's own git dir
+passed the first checks, and a worktree a model adds mid-session (`git worktree add --detach
+docs/.v2 HEAD`, then `cd`) dropped the main checkout's edits from the Stop's scope and lifted
+the role limits there. Under `.claude/worktrees/<name>` the I10 rule stays (Claude Code makes
+agent worktrees there mid-session); a model adding one there is a known limit. A nested clone
+or a submodule stays part of the project.
+
+#### #21 agent cap: fuses and runaway detection instead of a budget
+
+Observed (#21, and in this repo's own session on 2026-10-22): after eight agents in one user
+turn the spawn guard refused the test agent the Stop gate asked for, and `test-write` refuses
+the main session, so the turn could only end blocked.
+
+Fix, the user's choice (`lib/spawn-guard.ts`, `lib/routing-policy.ts`):
+- The per-task and per-session counts are fuses: 30 per user prompt and 150 per session. At
+  the task fuse the denial tells the model to report the progress and ask the user, whose
+  next message starts a new count.
+- A runaway is told by repetition: the third near-identical brief (the same first and last
+  200 characters, whitespace and case folded, and the same named files) to one agent in a
+  task is denied when nothing it covers changed since the last run (a file the brief names,
+  or with none named, any edit). An exact repeat stays with the duplicate rule (its one retry
+  and one escalation), and a rephrased retry of a blocked run or a stronger model or effort is
+  no loop (review). The depth rule and the cap of three running at once stay. A loop that
+  varies its briefs more is stopped by the fuses.
+
+#### #22 the test gate re-blocked every turn on unbuilt UI criteria
+
+Observed: at stage 5 the Stop blocked turn after turn on the same 31 UI criteria, also on
+turns that changed no code: the earlier turns' edits were never accepted, so each later Stop
+judged them again. A blocked turn ends through the `stop_hook_active` early return, which
+accepts only when the evaluation passes (`tryAcceptPendingTest`); otherwise the test cursor
+stays where it was.
+
+Resolved by I11 (§15.15): before the verification stage the UI criteria are pending and do
+not block, so the earlier edits are accepted once their own tests pass. Known limit, kept: a
+turn that ends still blocked leaves the cursor where it was, so the next turn judges the same
+edits again; that is intended (the change is still untested), and the user's approval moves
+the cursor.
 
 ## 16. J — Field reports (v0.34.0)
 

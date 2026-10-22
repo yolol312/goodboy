@@ -48,6 +48,8 @@ export type DispatchRecord =
       callerId: string | null;
       callee: string;
       hash: string;
+      /** nearKey of the prompt (#21); absent in older logs. */
+      near?: string;
       model: string | null;
       effort: string | null;
       files: string[];
@@ -183,7 +185,23 @@ export type SpawnCode =
   | 'task-cap'
   | 'concurrency'
   | 'duplicate-running'
-  | 'duplicate';
+  | 'duplicate'
+  | 'runaway';
+
+/** Prompts that differ only in their middle read as the same work (#21): the first and last 200
+ *  characters of the normalized prompt and the files it names. A loop that rephrases the body
+ *  of one brief keeps this key; briefs that share a long preamble but end differently (one per
+ *  review axis) or name other files do not (#21 review). */
+const NEAR_CHARS = 200;
+export function nearKey(prompt: string, files: readonly string[] = []): string {
+  const t = (prompt ?? '').replace(/\s+/g, ' ').trim();
+  return hashPrompt(`${t.slice(0, NEAR_CHARS)}\u0000${t.slice(-NEAR_CHARS)}\u0000${[...files].sort().join('\u0000')}`);
+}
+
+/** Near-identical dispatches of one agent in a task, with no edit since the last, that make a
+ *  runaway (#21: the per-task count starved the test and review agents a gate needed; a loop is
+ *  told by its repetition, not by the count). */
+const RUNAWAY_REPEATS = 3;
 
 export interface SpawnDecision {
   allow: boolean;
@@ -301,14 +319,40 @@ export function decideSpawn(
   for (const r of log) if (r.k === 'prompt' && r.t > taskStart) taskStart = r.t;
   const mainSinceTask = all.filter((d) => d.caller === null && d.t >= taskStart);
   if (mainSinceTask.length >= caps.perTask) {
+    // A fuse, not the budget (#21): the user's next prompt starts a new count.
     return {
       allow: false,
       code: 'task-cap',
-      reason: `This task already started ${mainSinceTask.length} agents (cap ${caps.perTask}). Finish it yourself or report it to the user as incomplete.`,
+      reason:
+        `This task already started ${mainSinceTask.length} agents (fuse ${caps.perTask}). Report the progress to the user and ` +
+        'ask whether to continue; their next message starts a new count.',
+    };
+  }
+  const hash = hashPrompt(req.prompt);
+  const near = nearKey(req.prompt, req.files);
+  const nearRuns = mainSinceTask.filter((d) => d.callee === req.callee && d.near === near);
+  const lastNear = nearRuns[nearRuns.length - 1];
+  // The same evidence of new work as for an exact repeat: a file the brief names changed, or
+  //   with none named, any edit. An exact repeat is the duplicate rule's (its one retry and one
+  //   escalation stay); a rephrased retry of a blocked run, or a stronger model or effort, is
+  //   no loop either (#21 review).
+  const changedSinceNear =
+    lastNear !== undefined &&
+    (lastNear.files.length > 0 ? lastNear.files.some((f) => deps.fileChangedSince(f, lastNear.t)) : deps.editsSince(lastNear.t));
+  const exactRepeat = mainSinceTask.some((d) => d.callee === req.callee && d.hash === hash);
+  const lastNearBlocked = lastNear !== undefined && outcomeOfDispatch(log, lastNear) !== 'ok';
+  const strongerThanLast =
+    lastNear !== undefined && (modelRank(req.model) > modelRank(lastNear.model) || effortRank(req.effort) > effortRank(lastNear.effort));
+  if (nearRuns.length >= RUNAWAY_REPEATS - 1 && lastNear && !changedSinceNear && !exactRepeat && !lastNearBlocked && !strongerThanLast) {
+    return {
+      allow: false,
+      code: 'runaway',
+      reason:
+        `${req.callee} already ran ${nearRuns.length} times in this task with a near-identical brief and nothing changed ` +
+        'since the last run. Use its results, change the work first, or ask the user.',
     };
   }
   const running = runningDispatches(log, now).filter((d) => d.caller === null);
-  const hash = hashPrompt(req.prompt);
   const sameRunning = running.find((d) => d.callee === req.callee && d.hash === hash);
   if (sameRunning) {
     return {

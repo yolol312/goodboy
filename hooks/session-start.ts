@@ -11,7 +11,7 @@
 import { pinCommitIssueSettings } from '../lib/commit-issue';
 import { pinProjectMode, projectMode } from '../lib/project-mode';
 // After a compact or a resume the shell may still be in a model's `cd` subdir (I10).
-import { projectDir } from '../lib/project-dir';
+import { pinWorktrees, projectDir } from '../lib/project-dir';
 import { knowledgeRoot, knowledgeSessionNotice } from '../lib/project-knowledge';
 import { claudeMdNotice } from '../lib/doc-map';
 import { tierAdvice } from '../lib/test-profile';
@@ -77,19 +77,22 @@ if (import.meta.main) {
       // A new, resumed or cleared session uses the commit issue settings on disk now
       //   (lib/commit-issue.ts; `/clear` starts a new session id).
       if ((source === 'startup' || source === 'resume' || source === 'clear') && sessionId) {
+        // (#21) The worktrees that exist now: one nested elsewhere than .claude/worktrees is
+        //   its own project only when noted here, so the pins below follow it too.
+        pinWorktrees(sessionId);
         try {
-          pinCommitIssueSettings(sessionId, projectDir(input.cwd ?? process.cwd()));
+          pinCommitIssueSettings(sessionId, projectDir(input.cwd ?? process.cwd(), process.env, sessionId));
         } catch {
           // best-effort: without pins, a later file counts only when unchanged since the session dir was made
         }
         // …and the project mode its cwd has now (lib/project-mode.ts; not on compact, which
         //   would trust a marker written during the session).
-        pinProjectMode(sessionId, projectDir(input.cwd ?? process.cwd()));
+        pinProjectMode(sessionId, projectDir(input.cwd ?? process.cwd(), process.env, sessionId ?? undefined));
         // …and the user's policy globs with the start HEAD (I1, lib/changed-coverage.ts). Pinned
         //   whatever the changed-line mode: the static previews (I3a) count without it.
-        pinCoverageStart(sessionId, projectDir(input.cwd ?? process.cwd()));
+        pinCoverageStart(sessionId, projectDir(input.cwd ?? process.cwd(), process.env, sessionId ?? undefined));
         // …and the requirement rows and policy `test:` lines it starts from (I2).
-        pinSessionCriteria(sessionId, projectDir(input.cwd ?? process.cwd()));
+        pinSessionCriteria(sessionId, projectDir(input.cwd ?? process.cwd(), process.env, sessionId ?? undefined));
       }
       const warnings = source === 'startup' || source === 'resume' ? configWarnings(process.env) : [];
       // (H2) Every source, project mode: the project's knowledge files to read first, or the
@@ -97,7 +100,7 @@ if (import.meta.main) {
       let knowledge: { context?: string; systemMessage?: string } = {};
       if (sessionId && (process.env.GOODBOY_POLICY_GATE ?? 'on').trim().toLowerCase() !== 'off') {
         try {
-          knowledge = knowledgeSessionNotice(projectDir(input.cwd ?? process.cwd()), sessionId);
+          knowledge = knowledgeSessionNotice(projectDir(input.cwd ?? process.cwd(), process.env, sessionId ?? undefined), sessionId);
         } catch {
           knowledge = {};
         }
@@ -107,7 +110,7 @@ if (import.meta.main) {
       let decisions: string | null = null;
       if (sessionId) {
         try {
-          decisions = decisionAuthorityContext(projectDir(input.cwd ?? process.cwd()), sessionId);
+          decisions = decisionAuthorityContext(projectDir(input.cwd ?? process.cwd(), process.env, sessionId ?? undefined), sessionId);
         } catch {
           decisions = null;
         }
@@ -117,7 +120,7 @@ if (import.meta.main) {
       let claudeMd: string | null = null;
       let tier: { context: string; systemMessage: string } | null = null;
       if (sessionId) {
-        const dir = projectDir(input.cwd ?? process.cwd());
+        const dir = projectDir(input.cwd ?? process.cwd(), process.env, sessionId ?? undefined);
         try {
           if (projectMode(dir, sessionId) !== 'non-project') {
             const root = knowledgeRoot(dir).root;
@@ -133,7 +136,7 @@ if (import.meta.main) {
       let inbox: { systemMessage: string; context: string } | null = null;
       if (source === 'startup' || source === 'resume' || source === 'clear') {
         try {
-          inbox = inboxNotice(projectDir(input.cwd ?? process.cwd()));
+          inbox = inboxNotice(projectDir(input.cwd ?? process.cwd(), process.env, sessionId ?? undefined));
         } catch {
           inbox = null;
         }

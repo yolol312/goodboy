@@ -19,7 +19,7 @@ import { segmentChanging } from './outward-command';
 import { safeToolUseId } from './approval-marker';
 import { MAX_STATE_BYTES } from './safe-read';
 
-const GUARDED = /^(?:edits\.jsonl|dispatch-log\.jsonl|skill-evidence\.jsonl|commit-issue-pins\.json|marker-evidence\.jsonl|project-mode-pin\.json|coverage-pin\.json|criteria-pin\.json|criteria-seen\.json|judged-weakened\.json|\.goodboy-last-(?:review|test)-[0-9a-f]+\.json|\.goodboy-validation-failed\.json)$/;
+const GUARDED = /^(?:edits\.jsonl|dispatch-log\.jsonl|skill-evidence\.jsonl|commit-issue-pins\.json|marker-evidence\.jsonl|project-mode-pin\.json|coverage-pin\.json|criteria-pin\.json|criteria-seen\.json|judged-weakened\.json|worktrees\.txt|\.goodboy-last-(?:review|test)-[0-9a-f]+\.json|\.goodboy-validation-failed\.json)$/;
 const CURSOR = /^\.goodboy-last-(?:review|test)-[0-9a-f]+\.json$/;
 /** Evidence logs: a line added during a model Bash call would be forged evidence (a skill run,
  *  the user's non-project answer), so these keep only their old lines, and one the call
@@ -29,8 +29,10 @@ const CURSOR = /^\.goodboy-last-(?:review|test)-[0-9a-f]+\.json$/;
 const EVIDENCE = /^(?:skill-evidence|marker-evidence)\.jsonl$/;
 /** Written only by SessionStart (the pins) and the Stop (the criteria it required, the weakened
  *  tests a review judged): one a Bash call created would set the session's start or criteria
- *  (I2 security review round 2: a crafted seen list failed the gate open). */
-const HOOK_ONLY = /^(?:project-mode-pin|coverage-pin|criteria-pin|criteria-seen|judged-weakened)\.json$/;
+ *  (I2 security review round 2: a crafted seen list failed the gate open). The worktree pin
+ *  (#21) too: a line a Bash call added would make a worktree the model created mid-session
+ *  its own project and narrow the gates' scope. */
+const HOOK_ONLY = /^(?:(?:project-mode-pin|coverage-pin|criteria-pin|criteria-seen|judged-weakened)\.json|worktrees\.txt)$/;
 
 function keptEvidenceLine(name: string, line: string): boolean {
   if (name !== 'skill-evidence.jsonl') return false;

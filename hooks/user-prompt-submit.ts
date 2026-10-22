@@ -133,8 +133,8 @@ function main(): void {
 
       // The project dir, not the shell's current dir after a model's `cd`: the session state
       //   and risk approvals it writes are read by PreToolUse from there (I10).
-      const cwd = projectDir(input.cwd ?? process.cwd());
       const sessionId = input.session_id ?? 'unknown';
+      const cwd = projectDir(input.cwd ?? process.cwd(), process.env, sessionId);
       // For the goodboy CLI that agents run through Bash, which has no CLAUDE_PROJECT_DIR.
       if (sessionId !== 'unknown') noteProjectDir(sessionId);
       errorSession = sessionId;

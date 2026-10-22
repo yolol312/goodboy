@@ -28,6 +28,7 @@ import {
   CLI_PATH,
   decideOutward,
   decideSpawn,
+  nearKey,
   ensureApprovalDir,
   ensureSessionDir,
   statusFiles,
@@ -80,6 +81,7 @@ import {
   resultWriterDenial,
   ownsResultDir,
   classifyHost,
+  targetLabel,
   readCommand,
   MAX_SEGMENTS,
   bashChangedPaths,
@@ -397,8 +399,8 @@ function main(): void {
       //   follows a model's `cd`, so the project's records, state and approval markers come
       //   from the project dir instead (I10).
       const cwd = input.cwd ?? process.cwd();
-      const projectCwd = projectDir(cwd);
       const sessionId = input.session_id ?? 'unknown';
+      const projectCwd = projectDir(cwd, process.env, sessionId);
       const toolName = input.tool_name ?? '';
       const toolInput = input.tool_input ?? {};
 
@@ -554,6 +556,7 @@ function main(): void {
             callerId: req.callerId,
             callee,
             hash: hashPrompt(prompt),
+            near: nearKey(prompt, req.files),
             model: typeof rewrite.model === 'string' ? rewrite.model : req.model,
             effort: typeof rewrite.effort === 'string' ? rewrite.effort : req.effort,
             files: req.files,
@@ -895,13 +898,19 @@ function main(): void {
             const { action, target } = decideOutward(targets, rules, inSubagent);
             // A broken hosts file makes every external host production (classifyHost): say so,
             //   and do not call an unlisted host "listed".
-            const listed = !!target && classifyHost(target.host, { ...rules, broken: [] }) === 'production';
+            const listed = !!target && classifyHost(target.host, { ...rules, broken: [] }, target.port) === 'production';
             const brokenNote =
               target && !listed && (rules.broken ?? []).length > 0
                 ? `goodboy cannot read ${rules.broken!.join(', ')}, so every external host counts as production until the user fixes it`
                 : '';
-            const what = target ? `${target.kind} → ${target.host}${brokenNote ? ` (${brokenNote})` : ''}` : '';
-            const listedAs = brokenNote ? 'treated as production' : 'listed as production in .goodboy/hosts';
+            const what = target ? `${target.kind} → ${targetLabel(target)}${brokenNote ? ` (${brokenNote})` : ''}` : '';
+            // A `%` left in the host name (classifyHost): the real host is unknown, not listed.
+            const undecodable = !!target && target.host.includes('%') && !target.host.includes(':');
+            const listedAs = brokenNote
+              ? 'treated as production'
+              : undecodable
+                ? 'treated as production (its host name cannot be decoded, so the real host is unknown)'
+                : 'listed as production in .goodboy/hosts';
             if (action === 'deny-production') {
               const marker = approvalMarkerPath(projectCwd,'outward', sessionId);
               if (!inSubagent && userMarkerPresent(sessionId, marker, input.tool_use_id)) {
