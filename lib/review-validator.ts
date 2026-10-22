@@ -3,6 +3,7 @@
 import { readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { axesOfDimensions } from './review-dimensions';
+import { freshFor } from './test-validator';
 import { canonicalTimestamp, isTrustedTimestamp, MAX_CLOCK_SKEW_MS } from './trusted-time';
 import type { ReviewFinding, ReviewResult, Verdict } from './types';
 
@@ -225,7 +226,8 @@ export interface ChangedFileEdit {
   file: string;
   /** 이 파일의 마지막 편집 ISO 시각. 없으면 staleness 검사 생략. */
   lastEditTimestamp: string | null;
-  /** (#23) The record trees (`TestResult.tree`, set by test-write) that hold this file's current
+  /** (#23) The record trees (`TestResult.tree` and, #26, `ReviewResult.tree`, set by test-write and
+   *  review-write) that hold this file's current
    *  content: a record made on one tested what is there now, whenever it was made. */
   sameContentTrees?: ReadonlySet<string>;
 }
@@ -303,10 +305,8 @@ export function validateReviewCoverage(
     const freshCovering: ReviewResult[] = [];
     for (const r of sorted) {
       if (!(r.reviewed_files ?? []).some((f) => normalizePath(f) === key)) continue;
-      const isFresh =
-        typeof edit.lastEditTimestamp !== 'string' ||
-        edit.lastEditTimestamp === '' ||
-        r.timestamp > edit.lastEditTimestamp;
+      // (#26) Newer than the last edit, or its tree holds the file's current content.
+      const isFresh = freshFor(r, edit);
       if (isFresh) {
         if (chosen === null) chosen = r; // 최신순이므로 첫 fresh가 파일별 최신 커버 리뷰
         freshCovering.push(r);

@@ -1043,6 +1043,28 @@ function testChangedEdits(sessionId: string, cwd: string, cursorTurn: number, re
   return withSameContent(edits, results, scopeOf(sessionId, cwd).top);
 }
 
+/** (#26) The files edited since the review cursor that are a change of this session, judged as
+ *  layer 1 judges them (testEditsSince): a file whose content is its blob at the session's start
+ *  HEAD needs no review and no doc update. All kept when that check fails. */
+function reviewEditsSince(sessionId: string, cwd: string, cursorTurn: number, withinDir = cwd): ReturnType<typeof getEditsWithLastTimestampSince> {
+  const edits = getEditsWithLastTimestampSince(sessionId, cursorTurn, withinDir);
+  try {
+    const s = scopeOf(sessionId, cwd);
+    return netChangedEdits(edits, s.top, sessionCoverageStart(sessionId, cwd, s.top).head);
+  } catch {
+    return edits;
+  }
+}
+
+/** The same edits with (#26) the review trees that hold their content. */
+function reviewChangedEdits(sessionId: string, cwd: string, edits: ReturnType<typeof getEditsWithLastTimestampSince>, reviews: readonly ReviewResult[]): ReturnType<typeof getEditsWithLastTimestampSince> {
+  try {
+    return withSameContent(edits, reviews, scopeOf(sessionId, cwd).top, (r) => r.reviewed_files);
+  } catch {
+    return edits;
+  }
+}
+
 function tryAcceptPendingTest(sessionId: string, cwd: string): boolean {
   if (testGateMode() === 'off') return false;
   try {
@@ -1189,7 +1211,7 @@ function staleDocsNow(sessionId: string, cwd: string): StaleDoc[] | null {
   // The whole map: a doc without covers still counts as a doc, not as code (H4 review).
   if (!map.docs.some((d) => d.covers.length > 0)) return null;
   const cursor = readReviewCursor(cwd, sessionId);
-  const edits = getEditsWithLastTimestampSince(sessionId, cursor ? cursor.turn : 0, root);
+  const edits = reviewEditsSince(sessionId, cwd, cursor ? cursor.turn : 0, root);
   return edits.length === 0 ? [] : staleDocs({ root, edits, docs: map.docs });
 }
 
@@ -1360,12 +1382,13 @@ function tryAcceptPendingReview(
   try {
     const cursor = readReviewCursor(cwd, sessionId);
     const cursorTurn = cursor ? cursor.turn : 0;
-    const recentEdits = getEditsSince(sessionId, cursorTurn, cwd);
+    const netEdits = reviewEditsSince(sessionId, cwd, cursorTurn);
+    const recentEdits = netEdits.map((e) => e.file);
     if (recentEdits.length === 0) return null;
     const reviewsDir = resolvePath(cwd, '.claude', 'reviews');
     const reviews = findRecentReviewFiles(reviewsDir, reviewWindowMinutes());
     if (reviews.length === 0) return null;
-    const changedEdits = getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd);
+    const changedEdits = reviewChangedEdits(sessionId, cwd, netEdits, reviews);
     const v = validateReviewCoverage(reviews, changedEdits);
     if (!v.ok) return null;
     const { own, foreign } = splitFindings(reviews, sessionId, cwd, cursor ? cursor.timestamp : null);
@@ -1783,13 +1806,15 @@ function main(): void {
       // withinDir=cwd: 프로젝트 안의 파일만 리뷰 대상. 리뷰 에이전트의 프로브 파일은
       //   `mktemp -d`(프로젝트 밖)에 만들도록 강제하므로 자기참조 루프가 끊긴다.
       //   에이전트로는 거르지 않는다 — 서브에이전트 편집도 리뷰 대상(위임 우회 차단).
-      const recentEdits = (() => {
+      //   (#26) Only files with a net change since the session start.
+      const netEdits = (() => {
         try {
-          return getEditsSince(sessionId, cursorTurn, cwd);
+          return reviewEditsSince(sessionId, cwd, cursorTurn);
         } catch {
           return [];
         }
       })();
+      const recentEdits = netEdits.map((e) => e.file);
       if (recentEdits.length === 0) {
         statusSnapshot.reviewPending = false;
         emit({});
@@ -1841,14 +1866,8 @@ function main(): void {
       // (E) 파일별 커버리지 + staleness(v0.26.5) — 각 변경 파일은 "그 파일의 마지막
       //   편집보다 나중인 커버 리뷰"가 있으면 된다. 전역 staleness(최신 편집 1개 시각)는
       //   편집 안 된 파일의 유효한 리뷰까지 무효화하는 오차단이라 파일별로 판정한다.
-      const changedEdits = (() => {
-        try {
-          // recentEdits와 동일 필터(withinDir)여야 커버리지 집합이 어긋나지 않는다.
-          return getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd);
-        } catch {
-          return recentEdits.map((f) => ({ file: f, lastEditTimestamp: null }));
-        }
-      })();
+      //   The same files as recentEdits, with (#26) the review trees that hold their content.
+      const changedEdits = reviewChangedEdits(sessionId, cwd, netEdits, reviews);
       const v = (() => {
         try {
           return validateReviewCoverage(reviews, changedEdits);

@@ -310,6 +310,8 @@ async function cmdReviewWrite(cwd: string, args: string[]): Promise<void> {
   const result = validated.value;
   const outside = recordOutsideRepo(cwd, result.reviewed_files ?? []);
   if (outside !== null) failOutsideRepo('review-write', outside);
+  // (#26) The reviewed content, taken here and never from the agent, as test-write does.
+  result.tree = workTreeState(cwd).tree;
   const reviewsDir = join(cwd, '.claude', 'reviews');
   ensureDir(reviewsDir);
   const outPath = uniqueJsonPath(reviewsDir, timestampToFilename(result.timestamp));

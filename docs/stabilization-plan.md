@@ -1963,6 +1963,27 @@ Known limits: the push check still scans whole test files; subprocess evidence i
 the tester and checked by text, not by measurement; a file that differs only by what git's
 attributes normalise (line endings, `ident`) counts as unchanged.
 
+### 15.18 #26: the review gate asked to review a restored edit (v0.36.2)
+
+Seen in the live check of v0.36.1: a session added one line to a file and removed it again, and
+the next Stop denied with `no-review-file`. The test gate had judged net change since #23; the
+review gate, its pending accept and the docs rule still read the edit log alone.
+
+Fixed:
+- Net change: the review gate, `tryAcceptPendingReview` and the docs rule take their edits from
+  one helper (`reviewEditsSince`) that drops a file whose content is its blob at the
+  session-start HEAD (`netChangedEdits`). A failing check keeps every edit.
+- Content freshness: `review-write` stamps the working tree it ran on as `tree`
+  (`workTreeState`, never the agent's input). `validateReviewCoverage` uses `freshFor`: a review
+  counts for a file when it is newer than the file's last edit or its tree holds the file's
+  current content (`withSameContent` with the reviews' `reviewed_files`). A file edited after its
+  review and brought back to the reviewed content needs no new review.
+
+Known limits: reviews written before v0.36.2 have no tree and are judged by time alone; the effort
+advice still counts every edit (it never blocks); net change and tree freshness compare blob ids,
+so a change of file mode alone (`chmod +x`) or of type with the same bytes (a symlink made a
+regular file holding its target) counts as no change, as in the test gate since #23.
+
 ## 16. J — Field reports (v0.34.0)
 
 Asked by the user on 2026-10-16: improvements and bugs found while using goodboy elsewhere

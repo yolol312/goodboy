@@ -44,6 +44,9 @@ export interface ReviewResult {
   /** The Codex second opinion of this round (GOODBOY_CODEX=on): ran, or skipped with why and
    *  the error output (missing, not logged in, over 10 minutes, failing). */
   codex?: { status: 'ran' | 'skipped'; reason?: string; output?: string };
+  /** (#26) Set by `cli.ts review-write`, never by the agent: the working tree it ran on as a git
+   *  tree hash, so a file edited since and brought back to this content is still reviewed. */
+  tree?: string | null;
 }
 
 // ---- 층1 테스트 게이트 ----

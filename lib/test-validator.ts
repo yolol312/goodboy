@@ -257,8 +257,9 @@ function hasTrustedTimestamp(r: TestResult, nowMs: number): boolean {
 
 /** (#23) A record counts for an edited file when it was made after the file's last edit, or when
  *  its tree holds the file's current content (an edit since then was undone, or the file came
- *  back with a branch switch). The one freshness rule of every layer-1 check. */
-export function freshFor(r: TestResult, edit: ChangedFileEdit): boolean {
+ *  back with a branch switch). The one freshness rule of every layer-1 check, and (#26) of the
+ *  review coverage. */
+export function freshFor(r: Pick<TestResult, 'timestamp' | 'tree'>, edit: ChangedFileEdit): boolean {
   const last = edit.lastEditTimestamp;
   if (typeof last !== 'string' || last === '' || r.timestamp > last) return true;
   return typeof r.tree === 'string' && edit.sameContentTrees?.has(r.tree) === true;

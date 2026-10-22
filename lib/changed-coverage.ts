@@ -448,16 +448,22 @@ const MAX_TREES = 30;
 const TREE_BUDGET_MS = 2_000;
 
 /** (#23) Each edit with the record trees that hold its current content (`sameContentTrees`).
- *  Only the trees of records that list the file and are older than its last edit are read:
- *  for the rest the time already decides. */
-export function withSameContent<T extends ChangedFileEdit>(edits: T[], results: readonly TestResult[], top: string): T[] {
+ *  Only the trees of records that list the file (`filesOf`: a test record's tested files, #26 a
+ *  review's reviewed files) and are older than its last edit are read: for the rest the time
+ *  already decides. */
+export function withSameContent<T extends ChangedFileEdit, R extends Pick<TestResult, 'timestamp' | 'tree'> = TestResult>(
+  edits: T[],
+  results: readonly R[],
+  top: string,
+  filesOf: (r: R) => readonly unknown[] | undefined = (r) => (r as Partial<TestResult>).tested_files,
+): T[] {
   const want = new Map<string, Set<string>>(); // tree → rels to look up
   const relOf = new Map<string, string>();
   // Newest first, each with its tested files resolved once (performance review).
   const newest = results
     .filter((t) => typeof t.tree === 'string' && TREE_ID.test(t.tree))
     .sort((a, b) => (a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0))
-    .map((t) => ({ t, tested: new Set((t.tested_files ?? []).filter((f) => typeof f === 'string').map((f) => resolvePath(f))) }));
+    .map((t) => ({ t, tested: new Set((filesOf(t) ?? []).filter((f): f is string => typeof f === 'string').map((f) => resolvePath(f))) }));
   for (const e of edits) {
     const last = e.lastEditTimestamp;
     if (typeof last !== 'string' || last === '') continue;
