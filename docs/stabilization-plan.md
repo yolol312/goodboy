@@ -4548,7 +4548,8 @@ Decided by the user (2026-10-22):
   only a failing run's are kept for analysis.
 - It is part of `/backfill-tests`. With a sandbox, the goal becomes "both 100% gates pass";
   without one, the command works as in track L.
-- Release: L and M together as v0.37.0. The runtime is Colima with the docker CLI.
+- Release: L and M together as v0.37.0 (changed the same day: L shipped alone as v0.36.0, so M
+  is v0.37.0). The runtime is Colima with the docker CLI.
 
 Measured (2026-10-22, Colima, docker 29): a container on a `--internal` network gets no DNS
 answer for a public name and no connection to a public IP. The default bridge reaches out.
@@ -4598,7 +4599,7 @@ Design:
   The test records carry the sandbox check (`sandbox: {inner_only, egress_blocked}`).
 - M5 trials: g2bsale with its real dump (JVM, Thymeleaf, LDAP, mail, external API), then one
   Node project.
-- M6 release v0.37.0 (L and M).
+- M6 release v0.37.0 (M; L shipped as v0.36.0).
 
 As built (M1-M4; M5 and M6 are open):
 - `lib/sandbox-scan.ts` (`sandbox-scan`): read-only scan of build, port, data stores and outbound
