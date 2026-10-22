@@ -197,6 +197,10 @@ export interface TestResult {
   /** The agent's free-text notes on the run (what was left out and why, flakes seen), at most 4000 characters. No
    *  gate reads them; they are kept for the people who read the record (test-write dropped them). */
   notes?: string;
+  /** Track M (§19): the check of the isolated sandbox the suites ran in (`sandbox-check`), and
+   *  the run's directory name under `.goodboy/sandbox/out/`. With a sandbox in the project, the
+   *  backfill mark counts only records with `inner_only` and `egress_blocked` both true. */
+  sandbox?: { inner_only: boolean; egress_blocked: boolean; hosts_to_dummies?: boolean; run?: string };
   /** Set by `cli.ts test-write` from `suites`: per test type, the suites, tests and wall time. */
   by_type?: Partial<Record<TestType, { suites: number; tests: number; duration_ms: number }>>;
   /** Set by `cli.ts test-write`, never by the agent: HEAD and the working tree it tested as a

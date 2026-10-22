@@ -37,7 +37,10 @@ Make each kind of test runnable in the project, with the least change to it.
    that code in a scratch copy and show the test fails. E2E: before starting the app, read
    the config it loads (`.env`, `application*.yml`, settings modules), point every non-local
    host (database, API, mail, storage) at a local container or a dummy value, and ask the
-   user about any host left; then start it locally and open its first page.
+   user about any host left; then start it locally and open its first page. When the app
+   needs real services (database, mail, LDAP, an API) to start or to be tested, do not run
+   e2e or integration tests against anything shared: offer the isolated sandbox instead
+   (`sandbox-scan`, `sandbox-init`, `run-sandbox`; backfill-tests sets it up with the user).
 5. A tester records the smoke tests (the main session may not write results): in
    backfill-tests, the first batch's tester brief; alone, `goodboy:test-unit`. The record's
    `tested_files` name the code they run and every build or config file this setup changed

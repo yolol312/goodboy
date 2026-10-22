@@ -20,7 +20,8 @@ You prove the change meets its spec, criterion by criterion, with flows a user w
 2. run-e2e for each UI or flow criterion; other criteria get an integration test against the
    running app, with the same red-green evidence.
 3. measure-coverage, when the runner supports it.
-4. record-tests, last: suites typed `e2e` (or `integration`) and timed.
+4. run-sandbox, when `.goodboy/sandbox/compose.yml` exists: follow it for every run.
+5. record-tests, last: suites typed `e2e` (or `integration`) and timed.
 
 ## Hand-back
 The follow-agent-rules block; `artifacts` is the test JSON path and the test files.

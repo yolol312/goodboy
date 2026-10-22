@@ -4523,6 +4523,115 @@ Fixed from the trial:
 Seen, not changed: the result guard denies a reviewer's `python3` read of a test record, as in
 trial 4.
 
+## 19. M — Complete tests in an isolated container sandbox (v0.37.0, #19)
+
+The user's request (2026-10-22), after trial 5: every behavior that involves the UI is tested
+end to end, 100%. All other code is tested to 100% by unit and integration tests, thoroughly,
+not roughly. Everything runs safely in containers, against a copy of the real database and the
+project's source, existing or modified. Nothing goes out: calls to external systems reach
+dummies that record them and go no further. Track L skips e2e when the app cannot start
+locally and requires no coverage; trial 5 tested controllers with mocks for that reason.
+
+Decided by the user (2026-10-22):
+- Non-UI code: 100% line and branch coverage. Code that cannot be reached is excluded only
+  by an exception the user approves (a human policy entry).
+- UI: every screen and every action on it (forms, buttons, links), the normal and the error
+  path, by browser e2e. A server-side request log checks it.
+- The database dump is used as it is, restored into a local container only and reset before
+  every run.
+- The preparation step (images, Maven/npm/pip packages, the build) has network access. The
+  app and every test run only on an internal network with no egress, offline. The dump is
+  never loaded in the preparation step.
+- All registered stacks are supported: JVM (Spring Boot, JSP/Thymeleaf, MyBatis), Node
+  (React, Next, Express), Python (FastAPI). JVM comes first.
+- Screenshots and traces stay local in an ignored dir. A passing run's traces are deleted;
+  only a failing run's are kept for analysis.
+- It is part of `/backfill-tests`. With a sandbox, the goal becomes "both 100% gates pass";
+  without one, the command works as in track L.
+- Release: L and M together as v0.37.0. The runtime is Colima with the docker CLI.
+
+Measured (2026-10-22, Colima, docker 29): a container on a `--internal` network gets no DNS
+answer for a public name and no connection to a public IP. The default bridge reaches out.
+
+Design:
+- M1 sandbox (`.goodboy/sandbox/`):
+  - `sandbox-scan` reads the project: build tool and runtime version, app port and context
+    path, data stores (DB kind and version from the config and the driver), and outbound
+    hosts. A host counts as outbound only at a call site (HTTP clients, JDBC, mail, LDAP,
+    SDKs), as the user's testkit does. Hosts hard-coded in code are listed apart. Secrets
+    are reported by key name only.
+  - `sandbox-init` writes the compose file from the scan and the user's answers:
+    - the networks `inner` (`internal: true`) and `prep` (preparation only);
+    - the services: the app, the database, the local infrastructure the app needs (Redis),
+      the dummies, the proxy (M3) and the runners (unit and integration, Playwright);
+    - in the run profile every service is on `inner` alone.
+  - Dummies: a mail sink (Mailpit), HTTP stubs (WireMock, also for HTTPS), and a test
+    directory server (OpenLDAP with seeded users). Each takes the real host names as network
+    aliases. A hard-coded IP is given to the dummy inside the internal subnet. A sandbox CA
+    signs the dummies' certificates, and the app trusts it (a JVM trust store,
+    `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`). A config override points every configured host at
+    its dummy, and the scan checks that no non-sandbox host is left.
+  - Data: the dump is mounted read-only into the database container and restored once into
+    a template. Each run starts from a fresh copy (Postgres `CREATE DATABASE … TEMPLATE`;
+    MySQL reloads a snapshot). The dump path lives in an untracked local file, never in git.
+  - Runs: `sandbox-prepare` (the `prep` network: images, dependency caches in volumes, the
+    build) and `sandbox-run <suite>` (the `inner` network only, offline, the source mounted).
+    Each run first checks two things: every running container is on `inner` alone (`docker
+    inspect`), and a probe on `inner` fails to resolve and connect outward. Then it runs the
+    suite and writes the result. A failed check stops the run.
+- M2 coverage gate (`coverage-check`): it merges the unit, integration and e2e coverage of
+  the server (JaCoCo agent in the app container, c8 or V8 for Node, coverage.py). Every
+  non-UI code file must reach 100% lines and branches, minus the user's approved
+  `coverage-exempt:` entries, each with a reason. UI files (templates, components) are judged
+  by M3.
+- M3 UI inventory and request log:
+  - `ui-inventory` lists screens and actions with stable ids: Spring controller mappings and
+    the forms, links, buttons and AJAX URLs in templates; React and Next routes and their
+    handlers.
+  - A logging proxy (Caddy) sits between the browser and the app. Each e2e test sends its
+    ids in a header (`x-goodboy-ui: <id>:ok|error`).
+  - `ui-check` passes when every screen and action has a passing `ok` test whose requests
+    reached its route. An action that takes input also needs an `error` test.
+- M4 workflow: `/backfill-tests` and `setup-test-infra` use the sandbox when the user sets it
+  up. The batch testers run their suites through `sandbox-run`, e2e included. The stop
+  condition becomes `coverage-check` and `ui-check` both passing, after the user's exceptions.
+  The test records carry the sandbox check (`sandbox: {inner_only, egress_blocked}`).
+- M5 trials: g2bsale with its real dump (JVM, Thymeleaf, LDAP, mail, external API), then one
+  Node project.
+- M6 release v0.37.0 (L and M).
+
+As built (M1-M4; M5 and M6 are open):
+- `lib/sandbox-scan.ts` (`sandbox-scan`): read-only scan of build, port, data stores and outbound
+  hosts (call sites apart from literals); `lib/sandbox-types.ts` holds the shared shapes.
+- `lib/sandbox-render.ts` and `lib/sandbox-parts.ts`: pure text of `.goodboy/sandbox/` (compose
+  with `inner` and `prep` networks, config override, dummies, DB restore and reset scripts);
+  `lib/sandbox-files.ts` writes it without overwriting the user's edits and makes the sandbox CA.
+- `lib/sandbox-run.ts`: `sandbox-local --dump`, `sandbox-init`, `sandbox-prepare` (the only
+  networked step), `sandbox-up`, `sandbox-check` (`inner_only`, `egress_blocked`,
+  `hosts_to_dummies`), `sandbox-run --suite unit|e2e|all` (check, DB reset, suites, coverage
+  reports, passing traces removed, `out/<ts>/result.json`) and `sandbox-down [--volumes]`.
+- `lib/sandbox-e2e.ts`: the logging proxy's Caddyfile, the Playwright config, the `uiTest`
+  fixture (`.goodboy/sandbox/e2e/goodboy-ui.ts`) and the coverage tools per stack.
+- `lib/coverage-check.ts` (`coverage-check <reports> [--root-map /work=.]`): the 100% line and
+  branch gate over merged JaCoCo, lcov and Cobertura reports, with `coverage-exempt:` entries.
+- `lib/ui-inventory.ts` (with `ui-types`, `ui-spring`, `ui-templates`, `ui-js`, `ui-scan-text`)
+  and `lib/ui-check.ts`: `ui-inventory [--summary]` and `ui-check [--run <ts>]`.
+- M4 workflow:
+  - Tool skill `run-sandbox` (the 28th), registered for test-unit, test-ui and test-spec, each
+    with one line.
+  - `backfill-tests` has the sandbox path: one question in step 3, the setup commands, the
+    testers' brief, and the goal "`coverage-check` and `ui-check` both ok", with a gap the code
+    cannot reach becoming a `coverage-exempt:` entry only when the user approves. Its line cap
+    in the g3 test is 90 (was 75). `setup-test-infra` points to the sandbox.
+  - `TestResult.sandbox` (`{inner_only, egress_blocked, hosts_to_dummies?, run?}`) is validated
+    by `test-write` (booleans, a non-empty run string). With `.goodboy/sandbox/compose.yml`
+    present, `backfill-mark` counts a record only when both flags are true. `backfill-status`
+    shows `goal: complete` with a sandbox, else `batches`.
+
+Not prevented, by design: stubs only answer as the test says, so compatibility with the real
+external systems is not proved. Characterization tests pin the current behavior, so 100%
+means everything ran and is pinned, not that it is right.
+
 ## 21. Push by the test results gathered since the last push (proposed, 2026-11-12, #43)
 
 Status: proposed, planned at the user's request on 2026-11-12. §19 (track M) and §20 (track N)

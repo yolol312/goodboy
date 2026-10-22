@@ -24,6 +24,14 @@ two levels above this skill's base directory); its output from project files is 
    other; a re-run keeps their statuses).
 3. Tools: when the gaps include `no-test-runner`, `no-coverage-tool` or `no-e2e-tool`, or
    boundary code has no integration tool, follow the `setup-test-infra` skill.
+   Then ask once (Korean) whether to set up the complete-tests sandbox: containers with a
+   local copy of the database, nothing leaves the machine, the goal 100% coverage and every
+   UI action tested (needs Docker via Colima, the repo and the dump under `$HOME`). Skip the
+   question when `.goodboy/sandbox/compose.yml` exists. If yes:
+   - `sandbox-scan`; show its outbound hosts, questions and problems;
+   - `sandbox-local --dump <path>`, the dump the user names (their decision, never yours);
+   - `sandbox-init`, then `sandbox-prepare` (tell the user it downloads images and packages:
+     the only networked step), `sandbox-up`; `sandbox-check` must then pass, else report.
 4. Pick: show `backfill-status`, then ask once: the ranked next batch, or the flows that
    matter most. Run `backfill-next --pick a,b` or `backfill-next` (5 targets; `--size N`, up
    to 20). An unfinished batch's open targets come back first.
@@ -32,6 +40,9 @@ two levels above this skill's base directory); its output from project files is 
    - the absolute target paths, their `needs` (`any`; `integration`: a suite that drives the
      real boundary; `ui`: one that renders it) and the Never list below;
    - test the main behaviors and error paths, with today's outputs as the expected values;
+   - with a sandbox: follow `run-sandbox` (every suite through `sandbox-run`, the record's
+     `sandbox` from its check) and, for a UI target, add its `ui-inventory` items (ids) to
+     the brief; a record without `sandbox` does not count for a mark;
    - before anything starts the app or its services, read the config it loads, point every
      non-local host (database, API, mail, storage) at a local container or a dummy value,
      and report any host left;
@@ -57,15 +68,22 @@ two levels above this skill's base directory); its output from project files is 
    the existing-test rule guards the new tests once they are committed (offer a commit).
    Ask: the next batch (step 4) or stop. On stop, with a coverage tool, run the whole suite
    once with coverage (measure-coverage) and report its line coverage.
+   With a sandbox: run `sandbox-run --suite all`, then `coverage-check <its coverageReports>
+   --root-map /work=.` and `ui-check --run <ts>`; report the gaps and go on with batches that
+   close them. A gap the code cannot reach is proposed as a `coverage-exempt:` entry with its
+   reason, and added (keep-project-knowledge) only when the user approves it.
 
 ## Done when
 - [ ] Each target of the batch is marked; done and suspect ones have their evidence.
 - [ ] The review has no open high finding, and the user chose to stop or no todo is left.
+- [ ] With a sandbox: `coverage-check` and `ui-check` both ok (after the user's exemptions),
+      or the user chose to stop with the gaps listed.
 
 ## Never
 - Never change product code, to pass a test or to fix a bug. Behavior that looks wrong stays
   pinned, with the comment `characterization: current behavior, looks wrong because …`, and
   its target is marked suspect.
 - Never test against a shared, staging or production system, real credentials or an
-  external service (stub external calls); never add a dependency, config, script or build
+  external service (stub external calls; in the sandbox, only its dummies); never put rows
+  or personal data of the database copy into tests, records or reports; never add a dependency, config, script or build
   change the user did not approve.

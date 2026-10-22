@@ -17,6 +17,9 @@ import type { TestResult } from './types';
 export const BACKFILL_DIR = '.goodboy';
 export const BACKFILL_FILE = join(BACKFILL_DIR, 'test-backfill.json');
 const LOCK_FILE = join(BACKFILL_DIR, 'test-backfill.lock');
+/** Track M: a project with this file has an isolated sandbox (`sandbox-init`); its tests run there. */
+const SANDBOX_COMPOSE = join(BACKFILL_DIR, 'sandbox', 'compose.yml');
+const hasSandbox = (root: string) => existsSync(join(root, SANDBOX_COMPOSE));
 export const DEFAULT_BATCH = 5;
 const MAX_BATCH = 20;
 /** More targets than this are cut (the lowest ranked): the file stays small. */
@@ -244,14 +247,20 @@ export function evidenceProblem(projectDir: string, root: string, target: string
   const all = records ?? findRecentTestFiles(join(projectDir, '.claude', 'tests'), RECORD_WINDOW_MIN);
   const abs = (f: string) => resolve(root, f);
   const targetAbs = abs(target);
-  const fit = all.filter(
+  const named = all.filter(
     (r) =>
       r.verdict === 'pass' &&
       isTrustedTimestamp(r.timestamp) &&
       (r.tested_files ?? []).some((f) => typeof f === 'string' && abs(f) === targetAbs) &&
       recordStandsAlone(r),
   );
-  if (fit.length === 0) return `no passing layer-1 record that stands on its own names ${target} in tested_files`;
+  if (named.length === 0) return `no passing layer-1 record that stands on its own names ${target} in tested_files`;
+  // With a sandbox the tests count only when they ran inside it (track M): the record carries
+  // the sandbox check of the run, both flags true.
+  const fit = hasSandbox(root) ? named.filter((r) => r.sandbox?.inner_only === true && r.sandbox?.egress_blocked === true) : named;
+  if (fit.length === 0) {
+    return `the project has a sandbox (${SANDBOX_COMPOSE.split(sep).join('/')}), so a record counts only when its tests ran inside it: ${named.length} record(s) name ${target} but none carries sandbox: {inner_only: true, egress_blocked: true}; run the suites with sandbox-run (run-sandbox) and put its check in the record`;
+  }
   const at = (r: TestResult) => Date.parse(r.timestamp);
   let newest = 0;
   for (const t of tests) {
@@ -312,11 +321,14 @@ export function markTarget(s: BackfillState, projectDir: string, root: string, m
   return null;
 }
 
-export function backfillSummary(s: BackfillState): Record<string, unknown> {
+/** `root` (the repo top) tells whether the project has a sandbox: the goal is then `complete`
+ *  (coverage-check and ui-check both ok), else `batches` (track L). */
+export function backfillSummary(s: BackfillState, root?: string): Record<string, unknown> {
   const counts: Record<TargetStatus, number> = { todo: 0, done: 0, skipped: 0, suspect: 0 };
   for (const t of s.targets) counts[t.status]++;
   const last = s.batches[s.batches.length - 1];
   return {
+    goal: root !== undefined && hasSandbox(root) ? 'complete' : 'batches',
     counts,
     batches: s.batches.length,
     open: last ? s.targets.filter((t) => t.status === 'todo' && t.batch === last.n).map((t) => t.rel) : [],

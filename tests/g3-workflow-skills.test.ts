@@ -29,8 +29,9 @@ describe('workflow skills', () => {
       const text = readFileSync(path, 'utf8');
       const lines = text.split('\n').length;
       // backfill-tests runs four phases (survey, tools, batches, report) and briefs the
-      //   testers on the evidence its marks need (track L review).
-      expect([name, lines >= 30 && lines <= (name === 'backfill-tests' ? 75 : 55)]).toEqual([name, true]);
+      //   testers on the evidence its marks need (track L review). Track M adds the sandbox
+      //   path (setup questions, the two 100% gates): the cap is 90 for this one skill.
+      expect([name, lines >= 30 && lines <= (name === 'backfill-tests' ? 90 : 55)]).toEqual([name, true]);
       const fm = parseSkillFrontmatter(path)!;
       expect([fm.name, fm.risk_default]).toEqual([name, want.risk as never]);
       expect(text).toMatch(new RegExp(`^effort: ${want.effort}$`, 'm'));

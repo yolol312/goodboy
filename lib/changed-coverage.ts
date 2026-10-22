@@ -374,7 +374,7 @@ export function sessionUserGlobs(sessionId: string, cwd: string, top: string, ke
  *  hidden in one that a test imports by its full name is a known limit (plan §15.2a). After
  *  `until` (epoch ms) a file counts as code unread (I8 review: many crafted files must not run
  *  the Stop past its timeout). */
-function measurableCode(abs: string, until: number): boolean {
+export function measurableCode(abs: string, until: number): boolean {
   const ext = extname(abs).toLowerCase();
   // A Gradle Kotlin build script runs in the build, never in a test (track L review: a test
   //   tool setup that adds JaCoCo could not pass).

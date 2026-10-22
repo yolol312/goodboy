@@ -41,7 +41,7 @@ export interface ProjectSurvey {
   problems: string[];
 }
 
-const MAX_FILES = 50_000;
+export const MAX_FILES = 50_000;
 const MAX_MANIFESTS = 200;
 const MAX_MANIFEST_BYTES = 1_000_000;
 const MAX_TEST_BYTES = 512 * 1024;
@@ -161,7 +161,7 @@ const FRAMEWORK_RULES: { name: string; dep?: RegExp; text?: Partial<Record<Eco, 
   { name: 'echo', text: { go: /labstack\/echo/ } },
 ];
 
-function listFiles(root: string): string[] | null {
+export function listFiles(root: string): string[] | null {
   // null: not a repo, a failure, or no git at all.
   const out = gitOut(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], { timeoutMs: 30_000 });
   if (out === null) return null;
@@ -180,7 +180,7 @@ function reposBelow(root: string): string[] {
   }
 }
 
-function inSkippedDir(rel: string): boolean {
+export function inSkippedDir(rel: string): boolean {
   const dirs = rel.split('/').slice(0, -1);
   const src = dirs.indexOf('src');
   return dirs.some((d, i) => SKIP_DIRS.has(d) || (OUTPUT_DIRS.has(d) && (src < 0 || i < src)));
@@ -188,7 +188,7 @@ function inSkippedDir(rel: string): boolean {
 
 /** Not the project's own code: a skipped dir, a library copied under a static web root, a
  *  minified, declaration, bundle, config or story file. */
-function notOwnCode(rel: string): boolean {
+export function notOwnCode(rel: string): boolean {
   const segs = rel.split('/');
   const dirs = segs.slice(0, -1);
   const s = dirs.findIndex((d) => STATIC_ROOTS.has(d));

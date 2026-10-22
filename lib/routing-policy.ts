@@ -51,9 +51,9 @@ export const ROLES: readonly RoleSpec[] = [
   { name: 'review-infra', team: 'review', model: 'sonnet', effort: 'high', writes: 'result', toolSkills: ['summarize-diff', 'record-review', 'check-infra-config'] },
   { name: 'review-evidence', team: 'review', model: 'opus', effort: 'high', writes: 'result', toolSkills: ['summarize-diff', 'record-review', 'check-evidence'] },
   { name: 'test-lead', team: 'test', model: 'sonnet', effort: 'high', writes: 'none', members: ['test-unit', 'test-spec', 'test-ui', 'test-security'], toolSkills: [] },
-  { name: 'test-unit', team: 'test', model: 'sonnet', effort: 'high', writes: 'tests', toolSkills: ['record-tests', 'check-spec-coverage', 'write-regression-test', 'measure-coverage'] },
-  { name: 'test-spec', team: 'test', model: 'sonnet', effort: 'high', writes: 'tests', toolSkills: ['record-tests', 'check-spec-coverage', 'run-e2e', 'measure-coverage'] },
-  { name: 'test-ui', team: 'test', model: 'sonnet', effort: 'high', writes: 'tests', toolSkills: ['record-tests', 'check-ui-states', 'run-e2e'] },
+  { name: 'test-unit', team: 'test', model: 'sonnet', effort: 'high', writes: 'tests', toolSkills: ['record-tests', 'check-spec-coverage', 'write-regression-test', 'measure-coverage', 'run-sandbox'] },
+  { name: 'test-spec', team: 'test', model: 'sonnet', effort: 'high', writes: 'tests', toolSkills: ['record-tests', 'check-spec-coverage', 'run-e2e', 'measure-coverage', 'run-sandbox'] },
+  { name: 'test-ui', team: 'test', model: 'sonnet', effort: 'high', writes: 'tests', toolSkills: ['record-tests', 'check-ui-states', 'run-e2e', 'run-sandbox'] },
   { name: 'test-security', team: 'test', model: 'opus', effort: 'high', writes: 'tests', toolSkills: ['record-tests', 'attack-sandbox', 'write-regression-test'] },
   { name: 'test-probe', team: 'test', model: 'sonnet', effort: 'high', writes: 'none', toolSkills: ['probe-runtime'] },
 ];

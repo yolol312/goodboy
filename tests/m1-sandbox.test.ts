@@ -1,0 +1,1258 @@
+// Track M, M1b (plan §19): the sandbox's files (lib/sandbox-render.ts), their writer
+// (lib/sandbox-files.ts) and the docker side (lib/sandbox-run.ts), with a fake docker for the
+// check logic and one opt-in test against a real docker (GOODBOY_DOCKER_IT=1).
+
+import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { checkSandbox, type Ctx, loadCtx, parseNslookup, probeScript, projectName, staticProblems } from '../lib/sandbox-run';
+import { configKeyAt, IMAGES, planSandbox, renderSandbox, SANDBOX_DIR, SCAN_FILE } from '../lib/sandbox-render';
+import { initSandbox, outOfDate, readLocal, writeLocal } from '../lib/sandbox-files';
+import type { SandboxLocal, SandboxOutbound, SandboxScan, SandboxStore } from '../lib/sandbox-types';
+
+// Each CLI run starts bun and loads the whole CLI: a test with a few of them takes seconds.
+setDefaultTimeout(60_000);
+
+const CLI = resolve(import.meta.dir, '..', 'lib', 'cli.ts');
+const tmpDirs: string[] = [];
+const savedBin = process.env.GOODBOY_DOCKER_BIN;
+afterEach(() => {
+  while (tmpDirs.length) rmSync(tmpDirs.pop()!, { recursive: true, force: true });
+  if (savedBin === undefined) delete process.env.GOODBOY_DOCKER_BIN;
+  else process.env.GOODBOY_DOCKER_BIN = savedBin;
+});
+
+function dir(prefix = 'goodboy-m1-'): string {
+  const d = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  tmpDirs.push(d);
+  return d;
+}
+
+const w = (file: string, line: number) => ({ file, line });
+const NO_DUMP: SandboxLocal = { dump: null, dumpFormat: null };
+const APP_YML = 'src/main/resources/application.yml';
+
+/** The Spring config the JVM fixture's hosts are written in, with a credential in a URL and a
+ *  real-looking password that must never reach a rendered file. */
+const CONFIG = `spring:
+  datasource:
+    url: jdbc:postgresql://prod-db.corp:5432/shop
+    username: shop_rw
+    password: Pr0dPassw0rd!
+    driver-class-name: org.postgresql.Driver
+  redis:
+    host: redis.corp
+    port: 6379
+partner:
+  base-url: https://admin:S3cretToken@api.partner.example/v2?apikey=XYZ123
+mail:
+  host: smtp.corp.example
+ldap:
+  url: ldap://ldap.corp.example:389/dc=corp,dc=example
+jwt:
+  secret: RealJwtSecretValue
+`;
+
+const lineOf = (text: string, needle: string): number => text.split('\n').findIndex((l) => l.includes(needle)) + 1;
+
+function out(host: string, kind: SandboxOutbound['kind'], over: Partial<SandboxOutbound> = {}, needle = host): SandboxOutbound {
+  return {
+    host,
+    port: kind === 'smtp' ? 587 : kind === 'ldap' ? 389 : 443,
+    scheme: kind === 'http' ? 'https' : kind === 'ldap' ? 'ldap' : null,
+    kind,
+    where: w(APP_YML, lineOf(CONFIG, needle)),
+    callSite: w('src/main/java/A.java', 10),
+    hardcoded: false,
+    ipLiteral: false,
+    ...over,
+  };
+}
+
+function store(kind: SandboxStore['kind'], over: Partial<SandboxStore> = {}): SandboxStore {
+  return { kind, version: kind === 'postgres' ? '15' : '7', database: kind === 'postgres' ? 'shop' : null, configKeys: [], where: w(APP_YML, 3), ...over };
+}
+
+function jvmScan(): SandboxScan {
+  return {
+    root: '/nonexistent/repo',
+    stack: 'jvm',
+    frameworks: ['spring-boot', 'thymeleaf'],
+    build: {
+      tool: 'gradle',
+      runtimeVersion: '17',
+      depsCommand: ['./gradlew', 'dependencies'],
+      buildCommand: ['./gradlew', 'bootJar', '-x', 'test'],
+      testCommand: ['./gradlew', 'test', '--offline'],
+      startCommand: ['java', '-jar', 'build/libs/app.jar'],
+      artifact: 'build/libs/app.jar',
+    },
+    app: { port: 8080, contextPath: '/', healthPath: '/actuator/health', configFiles: [APP_YML] },
+    stores: [
+      store('postgres', { configKeys: ['spring.datasource.url', 'spring.datasource.username', 'spring.datasource.password', 'spring.datasource.driver-class-name'], where: w(APP_YML, 3) }),
+      store('redis', { configKeys: ['spring.redis.host', 'spring.redis.port'], where: w(APP_YML, 7) }),
+    ],
+    outbound: [
+      out('api.partner.example', 'http', {}, 'base-url'),
+      out('smtp.corp.example', 'smtp', {}, 'host: smtp'),
+      out('ldap.corp.example', 'ldap', {}, 'ldap.corp'),
+      { host: '10.20.30.40', port: 8080, scheme: 'http', kind: 'http', where: w('src/main/java/D.java', 7), callSite: w('src/main/java/D.java', 7), hardcoded: true, ipLiteral: true },
+    ],
+    secretKeys: ['jwt.secret', 'spring.datasource.password'],
+    questions: [],
+    problems: [],
+  };
+}
+
+const read = (scan: SandboxScan, local = NO_DUMP, o = {}) => planSandbox(scan, local, { readConfig: () => CONFIG, ...o });
+
+interface Compose {
+  services: Record<string, { image: string; profiles?: string[]; networks?: string[] | Record<string, { aliases?: string[]; ipv4_address?: string } | null>; ports?: unknown[]; volumes?: string[]; environment?: Record<string, string>; env_file?: string[]; command?: string[]; entrypoint?: string[]; depends_on?: Record<string, unknown> }>;
+  networks: Record<string, { internal?: boolean; driver?: string; ipam?: { config: { subnet: string; gateway?: string }[] } }>;
+  volumes: Record<string, unknown>;
+}
+
+const parse = (plan: { files: Map<string, string> }): Compose => Bun.YAML.parse(plan.files.get('compose.yml')!) as Compose;
+const netNames = (s: Compose['services'][string]): string[] => (s.networks === undefined ? [] : Array.isArray(s.networks) ? s.networks : Object.keys(s.networks));
+const netOpts = (s: Compose['services'][string], net: string) => (s.networks && !Array.isArray(s.networks) ? s.networks[net] : null);
+
+describe('compose networks', () => {
+  test('every service outside the prep profile is on internal networks only, without published ports', () => {
+    const c = parse(read(jvmScan(), { dump: '/data/shop.sql', dumpFormat: 'sql' }));
+    expect(Object.keys(c.services).sort()).toEqual(['app', 'db', 'e2e', 'e2e-prep', 'ldap', 'mail', 'prep', 'probe', 'proxy', 'redis', 'runner', 'stubs']);
+    for (const [name, s] of Object.entries(c.services)) {
+      expect(s.ports).toBeUndefined();
+      if (s.profiles?.includes('prep')) continue;
+      const nets = netNames(s);
+      expect(nets.length).toBeGreaterThan(0);
+      for (const n of nets) expect({ name, net: n, internal: c.networks[n]?.internal }).toEqual({ name, net: n, internal: true });
+      expect(nets).not.toContain('prep');
+    }
+  });
+
+  test('prep and e2e-prep are the only services on the prep bridge and only in the prep profile', () => {
+    const c = parse(read(jvmScan()));
+    expect(c.networks.prep).toEqual({ driver: 'bridge' });
+    expect(c.networks.prep!.internal).toBeUndefined();
+    expect(c.services.prep!.profiles).toEqual(['prep']);
+    expect(netNames(c.services.prep!)).toEqual(['prep']);
+    const onPrep = Object.entries(c.services).filter(([, s]) => netNames(s).includes('prep')).map(([n]) => n);
+    expect(onPrep).toEqual(['e2e-prep', 'prep']);
+    expect(c.services['e2e-prep']!.profiles).toEqual(['prep']);
+    expect(netNames(c.services.db!)).toEqual(['inner']);
+  });
+
+  test('inner is internal with a fixed subnet that can be moved', () => {
+    expect(parse(read(jvmScan())).networks.inner).toEqual({ internal: true, ipam: { config: [{ subnet: '10.231.0.0/24' }] } });
+    expect(parse(read(jvmScan(), NO_DUMP, { innerSubnet: '10.99.0.0/24' })).networks.inner!.ipam!.config[0]!.subnet).toBe('10.99.0.0/24');
+  });
+
+  test('the dummies take the real host names as aliases on inner', () => {
+    const c = parse(read(jvmScan()));
+    expect(netOpts(c.services.mail!, 'inner')).toEqual({ aliases: ['smtp.corp.example'] });
+    expect(netOpts(c.services.stubs!, 'inner')).toEqual({ aliases: ['api.partner.example'] });
+    expect(netOpts(c.services.ldap!, 'inner')).toEqual({ aliases: ['ldap.corp.example'] });
+  });
+
+  test('an IP literal gets its own internal /24 where the dummy holds that exact address and the app joins', () => {
+    const c = parse(read(jvmScan()));
+    expect(c.networks.ip_10_20_30).toEqual({ internal: true, ipam: { config: [{ subnet: '10.20.30.0/24', gateway: '10.20.30.254' }] } });
+    expect(netOpts(c.services.stubs!, 'ip_10_20_30')).toEqual({ ipv4_address: '10.20.30.40' });
+    expect(netNames(c.services.app!)).toEqual(['inner', 'ip_10_20_30']);
+    expect(netNames(c.services.runner!)).toEqual(['inner', 'ip_10_20_30']);
+    const plan = read(jvmScan());
+    expect(plan.dummies).toContainEqual({ service: 'stubs', host: '10.20.30.40', ip: '10.20.30.40' });
+    expect(plan.internalNets).toEqual(['inner', 'ip_10_20_30']);
+  });
+
+  test('a literal at .254 moves the gateway aside; a literal in the inner subnet and a second one for a dummy are reported', () => {
+    const s = jvmScan();
+    s.outbound = [
+      { ...out('x', 'http'), host: '192.168.5.254', ipLiteral: true, hardcoded: true },
+      { ...out('x', 'smtp'), host: '192.168.5.9', ipLiteral: true, hardcoded: true },
+      { ...out('x', 'smtp'), host: '192.168.5.10', ipLiteral: true, hardcoded: true },
+      { ...out('x', 'http'), host: '10.231.0.7', ipLiteral: true, hardcoded: true },
+    ];
+    const plan = read(s);
+    expect(parse(plan).networks.ip_192_168_5!.ipam!.config[0]!.gateway).toBe('192.168.5.253');
+    expect(plan.notes.some((n) => n.includes('192.168.5.10') && n.includes('one address per network'))).toBe(true);
+    expect(plan.notes.some((n) => n.includes('10.231.0.7') && n.includes('inner subnet'))).toBe(true);
+    expect(plan.dummies.map((d) => d.host)).toEqual(['192.168.5.254', '192.168.5.9']);
+  });
+
+  test('other kinds get no dummy and are listed; a host with no call site, a bad name and a service name are reported', () => {
+    const s = jvmScan();
+    s.outbound.push(out('mq.corp.example', 'other', { port: 5672 }));
+    s.outbound.push(out('unused.example', 'http', { callSite: null }));
+    s.outbound.push(out('Bad_Name.example', 'http'));
+    s.outbound.push(out('db', 'http'));
+    s.outbound.push(out('localhost', 'http'));
+    const plan = read(s);
+    const compose = plan.files.get('compose.yml')!;
+    expect(compose).toContain('# No dummy (kind other)');
+    expect(compose).toContain('mq.corp.example:5672');
+    expect(plan.dummies.map((d) => d.host)).not.toContain('mq.corp.example');
+    expect(plan.notes.join('\n')).toContain('unused.example');
+    expect(plan.notes.join('\n')).toContain('Bad_Name.example');
+    expect(plan.notes.join('\n')).toContain('name of a sandbox service');
+    expect(parse(plan).services.stubs!.networks).toEqual({ inner: { aliases: ['api.partner.example'] }, ip_10_20_30: { ipv4_address: '10.20.30.40' } });
+  });
+
+  test('no dummy service is made for a kind the project does not use', () => {
+    const s = jvmScan();
+    s.outbound = [out('api.partner.example', 'http', {}, 'base-url')];
+    expect(Object.keys(parse(read(s)).services).sort()).toEqual(['app', 'db', 'e2e', 'e2e-prep', 'prep', 'probe', 'proxy', 'redis', 'runner', 'stubs']);
+  });
+});
+
+describe('compose content', () => {
+  test('every image has a pinned tag, never latest', () => {
+    for (const scan of [jvmScan(), nodeScan(), pythonScan()]) {
+      const c = parse(read(scan));
+      for (const [name, s] of Object.entries(c.services)) {
+        const tag = s.image.split(':')[1];
+        expect({ name, tag: tag !== undefined && tag !== 'latest' && tag !== '' }).toEqual({ name, tag: true });
+      }
+    }
+    expect(Object.values(IMAGES).every((i) => /:[^:]+$/.test(i) && !i.endsWith(':latest'))).toBe(true);
+  });
+
+  test('the dump is mounted read-only from a variable, so its path never enters the repo', () => {
+    const plan = read(jvmScan(), { dump: '/Users/me/dumps/shop.sql', dumpFormat: 'sql' });
+    const c = parse(plan);
+    const mounts = c.services.db!.volumes!.filter((v) => v.includes('/dump/'));
+    expect(mounts).toEqual(['${GOODBOY_DUMP}:/dump/dump.sql:ro']);
+    for (const text of plan.files.values()) expect(text).not.toContain('/Users/me');
+    expect(parse(read(jvmScan(), { dump: '/d/x.dump', dumpFormat: 'custom' })).services.db!.volumes).toContain('${GOODBOY_DUMP}:/dump/dump.custom:ro');
+    expect(parse(read(jvmScan())).services.db!.volumes!.some((v) => v.includes('/dump/'))).toBe(false);
+  });
+
+  test('the db is on inner, never on prep, and its data is a named volume', () => {
+    const c = parse(read(jvmScan()));
+    expect(c.services.db!.image).toBe('postgres:15-alpine');
+    expect(netNames(c.services.db!)).toEqual(['inner']);
+    expect(c.services.db!.volumes).toContain('dbdata:/var/lib/postgresql/data');
+    expect(c.volumes).toHaveProperty('dbdata');
+    expect(c.services.redis!.image).toBe('redis:7-alpine');
+    expect(c.services.app!.depends_on).toMatchObject({ db: { condition: 'service_healthy' }, mail: { condition: 'service_started' } });
+  });
+
+  test('Postgres: the restore goes into <name>_template once and the reset creates <name> from it', () => {
+    const f = read(jvmScan(), { dump: '/d/x.sql', dumpFormat: 'sql' }).files;
+    const restore = f.get('db/db/restore.sh')!;
+    const reset = f.get('db/db/reset.sh')!;
+    expect(restore).toContain('TEMPLATE=shop_template');
+    expect(restore).toContain('template $TEMPLATE exists');
+    expect(restore).toContain('-f /dump/dump.sql');
+    expect(restore).toContain('RENAME TO');
+    expect(reset).toContain('DROP DATABASE IF EXISTS "shop" WITH (FORCE)');
+    expect(reset).toContain('CREATE DATABASE "shop" TEMPLATE "shop_template"');
+    const custom = read(jvmScan(), { dump: '/d/x.dump', dumpFormat: 'custom' }).files.get('db/db/restore.sh')!;
+    expect(custom).toContain('pg_restore');
+    expect(custom).toContain('/dump/dump.custom');
+    const old = jvmScan();
+    old.stores[0]!.version = '12';
+    expect(read(old).files.get('db/db/reset.sh')).toContain('pg_terminate_backend');
+    expect(read(old).files.get('db/db/reset.sh')).not.toContain('WITH (FORCE)');
+  });
+
+  test('MySQL and MariaDB reload the app database from the template', () => {
+    for (const kind of ['mysql', 'mariadb'] as const) {
+      const s = jvmScan();
+      s.stores = [store(kind, { version: kind === 'mysql' ? '8.0' : '11', database: 'shop' })];
+      const f = read(s, { dump: '/d/x.sql', dumpFormat: 'sql' }).files;
+      const cli = kind === 'mysql' ? 'mysql' : 'mariadb';
+      expect(f.get('db/db/restore.sh')).toContain(`${cli} -h 127.0.0.1`);
+      expect(f.get('db/db/restore.sh')).toContain('__goodboy_loaded');
+      expect(f.get('db/db/reset.sh')).toContain(kind === 'mysql' ? 'mysqldump' : 'mariadb-dump');
+      expect(f.get('db/db/reset.sh')).toContain('DROP DATABASE IF EXISTS \\`shop\\`');
+      expect(parse({ files: f }).services.db!.image).toBe(`${kind}:${s.stores[0]!.version}`);
+    }
+  });
+
+  test('a store with no pinned version gets a default, not latest', () => {
+    const s = jvmScan();
+    s.stores[0]!.version = 'latest';
+    s.stores[1]!.version = '';
+    const c = parse(read(s));
+    expect(c.services.db!.image).toBe('postgres:16-alpine');
+    expect(c.services.redis!.image).toBe('redis:7-alpine');
+  });
+
+  test('WireMock serves HTTP and HTTPS from the sandbox keystore with a catch-all 404 stub', () => {
+    const plan = read(jvmScan());
+    const stubs = parse(plan).services.stubs!;
+    expect(stubs.command).toContain('--https-keystore');
+    expect(stubs.command![stubs.command!.indexOf('--https-port') + 1]).toBe('443');
+    expect(stubs.volumes).toContain('./ca/server.p12:/certs/server.p12:ro');
+    const stub = JSON.parse(plan.files.get('dummies/stubs/mappings/catch-all.json')!);
+    expect(stub.response.status).toBe(404);
+    expect(stub.request.urlPattern).toBe('.*');
+  });
+
+  test('the mail sink listens on the SMTP port the app uses', () => {
+    expect(parse(read(jvmScan())).services.mail!.environment!.MP_SMTP_BIND_ADDR).toBe('0.0.0.0:587');
+  });
+
+  test('the directory is seeded with a test user and takes its base DN from the config', () => {
+    const plan = read(jvmScan());
+    expect(parse(plan).services.ldap!.environment).toMatchObject({ LDAP_DOMAIN: 'corp.example' });
+    const seed = plan.files.get('dummies/ldap/seed.ldif')!;
+    expect(seed).toContain('dn: uid=test,ou=people,dc=corp,dc=example');
+    expect(seed).toContain('userPassword: test');
+    expect(plan.notes.join('\n')).toContain('dc=corp,dc=example');
+    expect(parse(plan).services.ldap!.image).toBe('osixia/openldap:1.5.0');
+    const bare = jvmScan();
+    expect(parse(planSandbox(bare, NO_DUMP, { readConfig: () => null })).services.ldap!.environment!.LDAP_DOMAIN).toBe('sandbox.test');
+  });
+
+  test('the app trusts the CA: the JVM imports it into cacerts at start', () => {
+    const plan = read(jvmScan());
+    const c = parse(plan);
+    expect(c.services.app!.volumes).toContain('./ca/ca.crt:/sandbox/ca.crt:ro');
+    expect(c.services.app!.entrypoint).toEqual(['sh', '/sandbox/entrypoint.sh']);
+    expect(c.services.app!.command).toEqual(['java', '-jar', 'build/libs/app.jar']);
+    expect(c.services.app!.volumes).toContain('build:/build');
+    expect(plan.files.get('runtime/entrypoint.sh')).toContain('keytool -importcert -noprompt -trustcacerts -cacerts');
+    const jdk8 = jvmScan();
+    jdk8.build.runtimeVersion = '1.8';
+    expect(read(jdk8).files.get('runtime/entrypoint.sh')).toContain('jre/lib/security/cacerts');
+    expect(parse(read(jdk8)).services.app!.image).toBe('eclipse-temurin:8-jdk');
+    expect(c.services.app!.environment).toMatchObject({ SPRING_PROFILES_ACTIVE: 'sandbox', SPRING_CONFIG_ADDITIONAL_LOCATION: 'optional:file:/sandbox/overrides/', SERVER_PORT: '8080' });
+  });
+
+  test('the runner runs the test command from the source with cache volumes, on inner only', () => {
+    const c = parse(read(jvmScan()));
+    const r = c.services.runner!;
+    expect(r.profiles).toEqual(['tools']);
+    expect(r.command).toEqual(['./gradlew', 'test', '--offline']);
+    expect(r.volumes).toEqual(expect.arrayContaining(['../..:/work', 'gradle:/root/.gradle', 'm2:/root/.m2']));
+    expect(c.services.probe).toMatchObject({ image: 'busybox:1.36', profiles: ['tools'], networks: ['inner'] });
+  });
+
+  test('prep copies the source into the build volume, builds there, and never gets the dump', () => {
+    const plan = read(jvmScan(), { dump: '/d/x.sql', dumpFormat: 'sql' });
+    const prep = parse(plan).services.prep!;
+    expect(prep.volumes).toContain('../..:/src:ro');
+    expect(prep.volumes).toContain('build:/build');
+    expect(prep.volumes!.some((v) => v.includes('/dump') || v.includes('GOODBOY_DUMP'))).toBe(false);
+    const script = plan.files.get('runtime/prep.sh')!;
+    expect(script).toContain('./gradlew dependencies');
+    expect(script).toContain('./gradlew bootJar -x test');
+    expect(script).toContain('tar xf - -C /build');
+  });
+
+  test('a `$` in a command is escaped for compose, and only the dump variable stays', () => {
+    const s = jvmScan();
+    s.build.startCommand = ['sh', '-c', 'java -jar $APP_JAR'];
+    const text = read(s, { dump: '/d/x.sql', dumpFormat: 'sql' }).files.get('compose.yml')!;
+    expect(text).toContain('java -jar $$APP_JAR');
+    expect(text).toContain('${GOODBOY_DUMP}');
+    expect(/(?<!\$)\$APP_JAR/.test(text)).toBe(false);
+  });
+
+  test('the sandbox dir ignores the local answers, the output and the keys', () => {
+    const ignore = read(jvmScan()).files.get('.gitignore')!.split('\n');
+    expect(ignore).toEqual(expect.arrayContaining(['local.json', 'out/', 'ca/*.key', '*.p12']));
+  });
+
+  test('a scan with no start command or test command gets no app or runner, with a note', () => {
+    const s = jvmScan();
+    s.build.startCommand = [];
+    s.build.testCommand = [];
+    const plan = read(s);
+    expect(Object.keys(parse(plan).services)).not.toContain('app');
+    expect(Object.keys(parse(plan).services)).not.toContain('runner');
+    expect(plan.hasApp).toBe(false);
+    expect(plan.notes.join('\n')).toContain('no start command');
+  });
+
+  test('a second SQL store is empty and only the first gets the dump', () => {
+    const s = jvmScan();
+    s.stores.push(store('mysql', { version: '8.0', database: 'other' }));
+    const plan = read(s, { dump: '/d/x.sql', dumpFormat: 'sql' });
+    const c = parse(plan);
+    expect(c.services.db2!.volumes!.some((v) => v.includes('/dump/'))).toBe(false);
+    expect(plan.files.has('db/db2/reset.sh')).toBe(true);
+    expect(plan.upServices).toEqual(['db', 'db2', 'redis', 'mail', 'stubs', 'ldap']);
+  });
+
+  test('the server certificate names every dummy host and address', () => {
+    expect(read(jvmScan()).sans).toEqual({ dns: ['api.partner.example', 'smtp.corp.example', 'ldap.corp.example', 'mail', 'stubs', 'ldap', 'localhost'], ips: ['10.20.30.40', '127.0.0.1'] });
+  });
+
+  test('the health URL joins the context path and the health path once', () => {
+    const s = jvmScan();
+    expect(read(s).healthUrl).toBe('http://app:8080/actuator/health');
+    s.app.contextPath = '/shop';
+    expect(read(s).healthUrl).toBe('http://app:8080/shop/actuator/health');
+    s.app.healthPath = '/shop/health';
+    expect(read(s).healthUrl).toBe('http://app:8080/shop/health');
+  });
+});
+
+describe('the config override', () => {
+  test('Spring: stores point at the sandbox, hosts keep their shape without credentials, secrets are dummies', () => {
+    const plan = read(jvmScan());
+    const y = Bun.YAML.parse(plan.files.get('overrides/application-sandbox.yml')!) as Record<string, string>;
+    expect(y['spring.datasource.url']).toBe('jdbc:postgresql://db:5432/shop');
+    expect(y['spring.datasource.username']).toBe('sandbox');
+    expect(y['spring.datasource.password']).toBe('sandbox');
+    expect(y['spring.redis.host']).toBe('redis');
+    expect(y['spring.redis.port']).toBe('6379');
+    expect(y['partner.base-url']).toBe('https://api.partner.example:443/v2');
+    expect(y['mail.host']).toBe('smtp.corp.example');
+    expect(y['ldap.url']).toBe('ldap://ldap.corp.example:389/dc=corp,dc=example');
+    expect(y['jwt.secret']).toMatch(/^[A-Za-z0-9]{64}$/);
+    expect(y['spring.datasource.driver-class-name']).toBeUndefined();
+    expect(plan.notes.join('\n')).toContain('spring.datasource.driver-class-name');
+  });
+
+  test('no real secret, credential or host-only detail from the config reaches any file', () => {
+    const plan = read(jvmScan(), { dump: '/Users/me/dump.sql', dumpFormat: 'sql' });
+    const all = [...plan.files.values()].join('\n') + plan.notes.join('\n');
+    for (const secret of ['Pr0dPassw0rd', 'S3cretToken', 'XYZ123', 'RealJwtSecretValue', 'shop_rw', 'prod-db.corp', 'redis.corp', 'apikey']) expect(all).not.toContain(secret);
+  });
+
+  test('MySQL gets a JDBC url that allows key retrieval and root credentials', () => {
+    const s = jvmScan();
+    s.stores = [store('mysql', { version: '8.0', database: 'shop', configKeys: ['spring.datasource.url', 'spring.datasource.username'] })];
+    const y = Bun.YAML.parse(read(s).files.get('overrides/application-sandbox.yml')!) as Record<string, string>;
+    expect(y['spring.datasource.url']).toBe('jdbc:mysql://db:3306/shop?useSSL=false&allowPublicKeyRetrieval=true');
+    expect(y['spring.datasource.username']).toBe('root');
+  });
+
+  test('Node: an env file with the stores, the hosts and dummy secrets; the app trusts the CA by NODE_EXTRA_CA_CERTS', () => {
+    const plan = read(nodeScan(), NO_DUMP, { readConfig: () => ENV_FILE });
+    const env = plan.files.get('overrides/sandbox.env')!;
+    expect(env).toContain('DATABASE_URL=postgresql://sandbox:sandbox@db:5432/shop');
+    expect(env).toContain('REDIS_URL=redis://redis:6379');
+    expect(env).toContain('PARTNER_API_URL=https://api.partner.example:443/v1');
+    expect(env).toContain('JWT_SECRET=goodboysandboxdummysecret');
+    for (const secret of ['hunter2', 'sk_live_abc']) expect(env + plan.files.get('compose.yml')!).not.toContain(secret);
+    const c = parse(plan);
+    expect(c.services.app!.image).toBe('node:20-bookworm');
+    expect(c.services.app!.env_file).toEqual(['./overrides/sandbox.env']);
+    expect(c.services.app!.environment).toMatchObject({ NODE_EXTRA_CA_CERTS: '/sandbox/ca.crt', PORT: '3000' });
+    expect(c.services.app!.environment!.SPRING_PROFILES_ACTIVE).toBeUndefined();
+    expect(c.services.app!.volumes).toContain('node_modules:/build/node_modules');
+    expect(c.services.runner!.volumes).toContain('node_modules:/work/node_modules');
+    expect(c.services.prep!.volumes).toContain('node_modules:/build/node_modules');
+    expect(plan.files.get('runtime/entrypoint.sh')).not.toContain('keytool');
+  });
+
+  test('Python: the CA bundle variables, a deps volume shared by prep, the app and the runner', () => {
+    const plan = read(pythonScan(), NO_DUMP, { readConfig: () => null });
+    const c = parse(plan);
+    expect(c.services.app!.image).toBe('python:3.12-slim');
+    expect(c.services.app!.environment).toMatchObject({ SSL_CERT_FILE: '/sandbox/ca.crt', REQUESTS_CA_BUNDLE: '/sandbox/ca.crt', PYTHONUSERBASE: '/deps/py' });
+    for (const s of ['app', 'runner', 'prep']) expect(c.services[s]!.volumes).toContain('deps:/deps');
+    expect(c.services.prep!.environment).toMatchObject({ PIP_USER: '1' });
+    expect(plan.files.get('overrides/sandbox.env')).toContain('DATABASE_URL=');
+  });
+
+  test('a JVM project that is not Spring gets no override and no overrides mount', () => {
+    const s = jvmScan();
+    s.frameworks = ['jsp'];
+    const plan = read(s);
+    expect(plan.files.has('overrides/application-sandbox.yml')).toBe(false);
+    expect(parse(plan).services.app!.volumes!.some((v) => v.includes('overrides'))).toBe(false);
+    expect(parse(plan).services.app!.environment!.SPRING_PROFILES_ACTIVE).toBeUndefined();
+    expect(plan.notes.join('\n')).toContain('not a Spring Boot app');
+  });
+
+  test('configKeyAt finds the dotted key of a YAML line, a properties key and an env var', () => {
+    expect(configKeyAt(APP_YML, CONFIG, lineOf(CONFIG, 'username'))?.key).toBe('spring.datasource.username');
+    expect(configKeyAt(APP_YML, CONFIG, lineOf(CONFIG, 'host: redis'))?.key).toBe('spring.redis.host');
+    expect(configKeyAt(APP_YML, CONFIG, lineOf(CONFIG, 'base-url'))).toEqual({ key: 'partner.base-url', scheme: 'https', port: null, path: '/v2' });
+    expect(configKeyAt(APP_YML, CONFIG, 1)).toBeNull();
+    expect(configKeyAt('a.properties', 'x=1\nldap.url = ldap://h:389/dc=a,dc=b\n', 2)).toEqual({ key: 'ldap.url', scheme: 'ldap', port: 389, path: '/dc=a,dc=b' });
+    expect(configKeyAt('.env.production', 'export SMTP_HOST="smtp.x.com"\n', 1)).toEqual({ key: 'SMTP_HOST', scheme: null, port: null, path: '' });
+    expect(configKeyAt('src/A.java', 'String h = "a.b";', 1)).toBeNull();
+    expect(configKeyAt(APP_YML, 'a:\n  - b: c\n', 2)).toBeNull();
+  });
+});
+
+const ENV_FILE = `DATABASE_URL=postgres://u:hunter2@prod:5432/shop
+REDIS_URL=redis://prod-redis:6379
+PARTNER_API_URL=https://api.partner.example/v1
+JWT_SECRET=sk_live_abc
+`;
+
+function nodeScan(): SandboxScan {
+  return {
+    root: '/nonexistent/node',
+    stack: 'node',
+    frameworks: ['express'],
+    build: { tool: 'npm', runtimeVersion: '20.11.1', depsCommand: ['npm', 'ci'], buildCommand: ['npm', 'run', 'build'], testCommand: ['npm', 'test'], startCommand: ['node', 'dist/server.js'], artifact: 'dist' },
+    app: { port: 3000, contextPath: '/', healthPath: '/', configFiles: ['.env.production'] },
+    stores: [store('postgres', { configKeys: ['DATABASE_URL'], where: w('.env.production', 1) }), store('redis', { configKeys: ['REDIS_URL'], where: w('.env.production', 2) })],
+    outbound: [{ ...out('api.partner.example', 'http'), where: w('.env.production', 3) }],
+    secretKeys: ['JWT_SECRET'],
+    questions: [],
+    problems: [],
+  };
+}
+
+function pythonScan(): SandboxScan {
+  return {
+    root: '/nonexistent/py',
+    stack: 'python',
+    frameworks: ['fastapi'],
+    build: { tool: 'pip', runtimeVersion: '3.12.4', depsCommand: ['pip', 'install', '-r', 'requirements.txt'], buildCommand: [], testCommand: ['python', '-m', 'pytest'], startCommand: ['uvicorn', 'main:app', '--host', '0.0.0.0'], artifact: null },
+    app: { port: 8000, contextPath: '/', healthPath: '/health', configFiles: [] },
+    stores: [store('postgres', { configKeys: ['DATABASE_URL'], where: w('.env', 1) })],
+    outbound: [],
+    secretKeys: [],
+    questions: [],
+    problems: [],
+  };
+}
+
+// ---- the writer ----
+
+function repo(scan: SandboxScan = jvmScan()): string {
+  const root = dir();
+  mkdirSync(join(root, '.goodboy', 'sandbox'), { recursive: true });
+  writeFileSync(join(root, SCAN_FILE), JSON.stringify({ ...scan, root }));
+  return root;
+}
+
+const cli = (root: string, args: string[], env: Record<string, string> = {}) =>
+  Bun.spawnSync(['bun', CLI, ...args], { cwd: root, env: { ...process.env, CLAUDE_PROJECT_DIR: root, ...env }, stdout: 'pipe', stderr: 'pipe' });
+
+const json = (r: ReturnType<typeof cli>) => JSON.parse(r.stdout.toString());
+const hasOpenssl = Bun.which('openssl') !== null;
+
+describe.skipIf(!hasOpenssl)('sandbox-init', () => {
+  test('writes the files and the ledger, and a second run changes nothing', async () => {
+    const root = repo();
+    const a = json(cli(root, ['sandbox-init']));
+    expect(a.written).toContain('compose.yml');
+    expect(a.written).toContain('overrides/application-sandbox.yml');
+    expect(a.ca).toBe('created');
+    expect(readFileSync(join(root, SANDBOX_DIR, 'compose.yml'), 'utf8')).toBe(renderSandbox(jvmScan(), NO_DUMP, { readConfig: () => null }).get('compose.yml')!);
+    const ledger = JSON.parse(readFileSync(join(root, SANDBOX_DIR, '.written.json'), 'utf8'));
+    expect(Object.keys(ledger.files)).toContain('compose.yml');
+    const before = readFileSync(join(root, SANDBOX_DIR, 'compose.yml'), 'utf8');
+    const caBefore = readFileSync(join(root, SANDBOX_DIR, 'ca', 'ca.crt'), 'utf8');
+    const r = cli(root, ['sandbox-init']);
+    expect(r.exitCode).toBe(0);
+    const b = json(r);
+    expect(b.written).toEqual([]);
+    expect(b.updated).toEqual([]);
+    expect(b.stale).toEqual([]);
+    expect(b.drift).toEqual([]);
+    expect(b.unchanged).toContain('compose.yml');
+    expect(b.ca).toBe('kept');
+    expect(readFileSync(join(root, SANDBOX_DIR, 'compose.yml'), 'utf8')).toBe(before);
+    expect(readFileSync(join(root, SANDBOX_DIR, 'ca', 'ca.crt'), 'utf8')).toBe(caBefore);
+  });
+
+  test('a file the user changed is drift: reported, never overwritten, not even with --force', () => {
+    const root = repo();
+    cli(root, ['sandbox-init']);
+    const compose = join(root, SANDBOX_DIR, 'compose.yml');
+    writeFileSync(compose, readFileSync(compose, 'utf8') + '# my edit\n');
+    for (const args of [['sandbox-init'], ['sandbox-init', '--force']]) {
+      const r = cli(root, args);
+      expect(r.exitCode).toBe(1);
+      expect(json(r).drift).toEqual(['compose.yml']);
+      expect(readFileSync(compose, 'utf8')).toContain('# my edit');
+    }
+  });
+
+  test('a file that existed before goodboy wrote anything is drift too', () => {
+    const root = repo();
+    mkdirSync(join(root, SANDBOX_DIR, 'runtime'), { recursive: true });
+    writeFileSync(join(root, SANDBOX_DIR, 'runtime', 'prep.sh'), 'mine\n');
+    const r = cli(root, ['sandbox-init']);
+    expect(json(r).drift).toEqual(['runtime/prep.sh']);
+    expect(readFileSync(join(root, SANDBOX_DIR, 'runtime', 'prep.sh'), 'utf8')).toBe('mine\n');
+    expect(r.exitCode).toBe(1);
+  });
+
+  test('a render that changed replaces an unchanged file only with --force', () => {
+    const root = repo();
+    cli(root, ['sandbox-init']);
+    const s = jvmScan();
+    s.build.startCommand = ['java', '-jar', 'build/libs/other.jar'];
+    writeFileSync(join(root, SCAN_FILE), JSON.stringify({ ...s, root }));
+    const a = json(cli(root, ['sandbox-init']));
+    expect(a.stale).toEqual(['compose.yml']);
+    expect(readFileSync(join(root, SANDBOX_DIR, 'compose.yml'), 'utf8')).toContain('app.jar');
+    const b = json(cli(root, ['sandbox-init', '--force']));
+    expect(b.updated).toEqual(['compose.yml']);
+    expect(readFileSync(join(root, SANDBOX_DIR, 'compose.yml'), 'utf8')).toContain('other.jar');
+    expect(json(cli(root, ['sandbox-init'])).unchanged).toContain('compose.yml');
+  });
+
+  test('a linked .goodboy is refused and nothing is written through it', () => {
+    const root = dir();
+    const elsewhere = dir('goodboy-m1-elsewhere-');
+    mkdirSync(join(elsewhere, 'sandbox'));
+    writeFileSync(join(elsewhere, SCAN_FILE.replace('.goodboy/', '')), JSON.stringify({ ...jvmScan(), root }));
+    symlinkSync(elsewhere, join(root, '.goodboy'));
+    const r = cli(root, ['sandbox-init']);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr.toString()).toContain('link');
+    expect(readdirSync(join(elsewhere, 'sandbox'))).toEqual(['scan.json']);
+    const l = cli(root, ['sandbox-local', '--dump', join(root, 'x.sql')]);
+    expect(l.exitCode).toBe(1);
+  });
+
+  test('a linked sandbox subdir is refused', () => {
+    const root = repo();
+    const elsewhere = dir('goodboy-m1-elsewhere-');
+    symlinkSync(elsewhere, join(root, SANDBOX_DIR, 'runtime'));
+    const r = cli(root, ['sandbox-init']);
+    expect(r.exitCode).toBe(1);
+    expect(readdirSync(elsewhere)).toEqual([]);
+  });
+
+  test('it needs a scan without problems', () => {
+    const none = dir();
+    const r = cli(none, ['sandbox-init']);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr.toString()).toContain('sandbox-scan');
+    const bad = jvmScan();
+    bad.problems = ['no build tool found'];
+    const root = repo(bad);
+    const r2 = cli(root, ['sandbox-init']);
+    expect(r2.exitCode).toBe(1);
+    expect(r2.stderr.toString()).toContain('no build tool found');
+    expect(existsSync(join(root, SANDBOX_DIR, 'compose.yml'))).toBe(false);
+    const garbled = repo();
+    writeFileSync(join(garbled, SCAN_FILE), '{"stack":"cobol"}');
+    expect(cli(garbled, ['sandbox-init']).stderr.toString()).toContain('not a scan goodboy wrote');
+  });
+
+  test('questions of the scan are passed on in the report', () => {
+    const s = jvmScan();
+    s.questions = ['Which profile does production use?'];
+    expect(json(cli(repo(s), ['sandbox-init'])).questions).toEqual(['Which profile does production use?']);
+  });
+
+  test('a CA is made once; the server certificate names every dummy host and is renewed when they change', async () => {
+    const root = repo();
+    cli(root, ['sandbox-init']);
+    const ca = join(root, SANDBOX_DIR, 'ca');
+    expect(readdirSync(ca).sort()).toEqual(['ca.crt', 'ca.key', 'server.crt', 'server.key', 'server.p12', 'server.sans']);
+    expect(statSync(join(ca, 'ca.key')).mode & 0o777).toBe(0o600);
+    expect(statSync(join(ca, 'server.key')).mode & 0o777).toBe(0o600);
+    const run = (args: string[]) => Bun.spawnSync(['openssl', ...args], { stdout: 'pipe', stderr: 'pipe' });
+    expect(run(['verify', '-CAfile', join(ca, 'ca.crt'), join(ca, 'server.crt')]).stdout.toString()).toContain('OK');
+    const text = run(['x509', '-in', join(ca, 'server.crt'), '-noout', '-text']).stdout.toString();
+    for (const name of ['DNS:api.partner.example', 'DNS:smtp.corp.example', 'DNS:ldap.corp.example', 'IP Address:10.20.30.40']) expect(text).toContain(name);
+    expect(run(['pkcs12', '-in', join(ca, 'server.p12'), '-noout', '-passin', 'pass:password']).exitCode).toBe(0);
+    const crt = readFileSync(join(ca, 'ca.crt'), 'utf8');
+    const s = jvmScan();
+    s.outbound.push(out('extra.partner.example', 'http'));
+    writeFileSync(join(root, SCAN_FILE), JSON.stringify({ ...s, root }));
+    expect(json(cli(root, ['sandbox-init'])).ca).toBe('server-renewed');
+    expect(readFileSync(join(ca, 'ca.crt'), 'utf8')).toBe(crt);
+    expect(run(['x509', '-in', join(ca, 'server.crt'), '-noout', '-text']).stdout.toString()).toContain('DNS:extra.partner.example');
+    expect(run(['verify', '-CAfile', join(ca, 'ca.crt'), join(ca, 'server.crt')]).stdout.toString()).toContain('OK');
+  });
+
+  test('no openssl: the error names it and nothing is written', async () => {
+    const root = repo();
+    const r = cli(root, ['sandbox-init'], { GOODBOY_OPENSSL_BIN: '/nonexistent/openssl' });
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr.toString()).toContain('openssl');
+    expect(existsSync(join(root, SANDBOX_DIR, 'compose.yml'))).toBe(false);
+  });
+
+  test('initSandbox reports the files out of date after the scan changes', async () => {
+    const root = repo();
+    const rep = await initSandbox(root, jvmScan(), NO_DUMP, false);
+    expect(rep).not.toBeInstanceOf(Error);
+    expect(outOfDate(root, planSandbox({ ...jvmScan(), root }, NO_DUMP))).toEqual([]);
+    const s = { ...jvmScan(), root };
+    s.app.port = 9090;
+    expect(outOfDate(root, planSandbox(s, NO_DUMP))).toContain('compose.yml');
+  });
+});
+
+describe('sandbox-local', () => {
+  test('writes local.json with mode 0600, a .gitignore that hides it, and reads back', () => {
+    const root = dir();
+    const dump = join(dir(), 'shop.sql');
+    writeFileSync(dump, 'select 1;');
+    const r = cli(root, ['sandbox-local', '--dump', dump]);
+    expect(r.exitCode).toBe(0);
+    const p = join(root, SANDBOX_DIR, 'local.json');
+    expect(statSync(p).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(p, 'utf8'))).toEqual({ dump, dumpFormat: 'sql' });
+    expect(readFileSync(join(root, SANDBOX_DIR, '.gitignore'), 'utf8')).toContain('local.json');
+    expect(readLocal(root)).toEqual({ dump, dumpFormat: 'sql' });
+  });
+
+  test('the format is taken from the option, else from the file name', () => {
+    const root = dir();
+    const d = dir();
+    writeFileSync(join(d, 'a.dump'), 'x');
+    writeFileSync(join(d, 'b.sql'), 'x');
+    expect(json(cli(root, ['sandbox-local', '--dump', join(d, 'a.dump')])).dumpFormat).toBe('custom');
+    expect(json(cli(root, ['sandbox-local', '--dump', join(d, 'a.dump'), '--format', 'sql'])).dumpFormat).toBe('sql');
+    expect(json(cli(root, ['sandbox-local', '--dump', join(d, 'b.sql')])).dumpFormat).toBe('sql');
+  });
+
+  test('refuses a relative path, a missing file, a directory and a bad format', () => {
+    const root = dir();
+    const d = dir();
+    writeFileSync(join(d, 'a.sql'), 'x');
+    expect(cli(root, ['sandbox-local', '--dump', 'a.sql']).stderr.toString()).toContain('absolute');
+    expect(cli(root, ['sandbox-local', '--dump', join(d, 'nope.sql')]).stderr.toString()).toContain('does not exist');
+    expect(cli(root, ['sandbox-local', '--dump', d]).stderr.toString()).toContain('not a file');
+    expect(cli(root, ['sandbox-local', '--dump', join(d, 'a.sql'), '--format', 'tar']).exitCode).toBe(1);
+    expect(cli(root, ['sandbox-local']).exitCode).toBe(1);
+    expect(existsSync(join(root, SANDBOX_DIR, 'local.json'))).toBe(false);
+  });
+
+  test('a garbled local.json is an error, not an empty answer', () => {
+    const root = dir();
+    mkdirSync(join(root, SANDBOX_DIR), { recursive: true });
+    writeFileSync(join(root, SANDBOX_DIR, 'local.json'), '{"dump":"relative"}');
+    expect(readLocal(root)).toBeInstanceOf(Error);
+    expect(writeLocal(root, 'rel', null)).toBeInstanceOf(Error);
+  });
+});
+
+// ---- the check, with a fake docker ----
+
+interface Fake {
+  root: string;
+  bin: string;
+  state: string;
+  ctx: Ctx;
+  calls: () => string[];
+}
+
+const FAKE = `#!/bin/sh
+d="$FAKE_DOCKER_DIR"
+echo "$*" >> "$d/calls.log"
+case " $* " in
+  *" network inspect "*) cat "$d/network.json" ;;
+  *" inspect "*) cat "$d/inspect.json" ;;
+  *" config "*) cat "$d/config.json" ;;
+  *" ps -q app "*|*" ps -q app") cat "$d/ps-app.txt" 2>/dev/null ;;
+  *" ps "*) cat "$d/ps.txt" ;;
+  *" exec "*) exit "\${FAKE_EXEC_EXIT:-0}" ;;
+  *" run "*)
+    case " $* " in
+      *" probe "*) cat "$d/probe.txt" ;;
+      *" e2e "*|*" e2e")
+        out=""; prev=""
+        for a in "$@"; do if [ "$prev" = "-v" ]; then out="\${a%%:*}"; fi; prev="$a"; done
+        echo "e2e output line"
+        if [ -n "$out" ]; then
+          [ -f "$d/playwright-report.json" ] && cp "$d/playwright-report.json" "$out/playwright-report.json"
+          mkdir -p "$out/e2e-artifacts" && echo trace > "$out/e2e-artifacts/trace.zip"
+        fi
+        exit "\${FAKE_E2E_EXIT:-0}" ;;
+      *"coverage.sh "*)
+        out=""; prev=""
+        for a in "$@"; do if [ "$prev" = "-v" ]; then out="\${a%%:*}"; fi; prev="$a"; done
+        if [ "\${FAKE_COVERAGE_EXIT:-0}" = 0 ] && [ -n "$out" ]; then mkdir -p "$out/coverage" && echo "<report/>" > "$out/coverage/jacoco.xml"; fi
+        echo "coverage mode: $*"; exit "\${FAKE_COVERAGE_EXIT:-0}" ;;
+      *" runner "*|*" runner") echo "runner output line"; exit "\${FAKE_RUNNER_EXIT:-0}" ;;
+    esac ;;
+esac
+exit 0
+`;
+
+type Tweak = { bridgeContainer?: boolean; externalNetwork?: boolean; reachOut?: boolean; brokenTool?: boolean; wrongHost?: boolean; cfgPorts?: boolean; cfgDefaultNet?: boolean; noDummyRunning?: boolean; wrongLiteral?: boolean; probeFails?: boolean };
+
+function nslookup(name: string, ips: string[]): string {
+  return `@@ ${name}\nServer:\t\t127.0.0.11\nAddress:\t127.0.0.11:53\n\nNon-authoritative answer:\n${ips.map((ip) => `Name:\t${name}\nAddress: ${ip}\n`).join('')}\n`;
+}
+
+function fake(t: Tweak = {}, scan: SandboxScan = jvmScan()): Fake {
+  const root = repo(scan);
+  const state = dir('goodboy-m1-fake-');
+  const bin = join(state, 'docker');
+  writeFileSync(bin, FAKE);
+  chmodSync(bin, 0o755);
+  writeFileSync(join(root, SANDBOX_DIR, 'compose.yml'), 'services: {}\n');
+  const ctx = loadCtx(root, true);
+  if (ctx instanceof Error) throw ctx;
+  const p = ctx.project;
+  const compose = parse(ctx.plan) as Compose & { services: Record<string, Record<string, unknown>> };
+  if (t.cfgPorts) compose.services.app!.ports = ['8080:8080'];
+  if (t.cfgDefaultNet) delete compose.services.app!.networks;
+  const net = (name: string, ip: string) => ({ [`${p}_${name}`]: { IPAddress: ip } });
+  const ids: string[] = [];
+  const inspect: unknown[] = [];
+  const services: Record<string, { inner: string; literal?: [string, string] }> = { mail: { inner: '10.231.0.3' }, stubs: { inner: '10.231.0.4', literal: ['ip_10_20_30', t.wrongLiteral ? '10.20.30.99' : '10.20.30.40'] }, ldap: { inner: '10.231.0.5' }, db: { inner: '10.231.0.6' } };
+  for (const [svc, a] of Object.entries(services)) {
+    if (t.noDummyRunning && svc === 'mail') continue;
+    ids.push(`id-${svc}`);
+    inspect.push({
+      Id: `id-${svc}`,
+      Name: `/${p}-${svc}-1`,
+      Config: { Labels: { 'com.docker.compose.service': svc } },
+      HostConfig: { NetworkMode: `${p}_inner` },
+      NetworkSettings: { Networks: { ...net('inner', a.inner), ...(a.literal ? net(a.literal[0], a.literal[1]) : {}), ...(svc === 'db' && t.bridgeContainer ? { bridge: { IPAddress: '172.17.0.2' } } : {}), ...(svc === 'db' && t.externalNetwork ? { 'other_net': { IPAddress: '10.9.9.9' } } : {}) } },
+    });
+  }
+  const netsJson = [
+    { Name: `${p}_inner`, Internal: true },
+    { Name: `${p}_ip_10_20_30`, Internal: true },
+    ...(t.bridgeContainer ? [{ Name: 'bridge', Internal: false }] : []),
+    ...(t.externalNetwork ? [{ Name: 'other_net', Internal: true }] : []),
+  ];
+  const marks = t.reachOut ? 'DNS=open\nTCP=open\nHTTP=open' : 'DNS=blocked\nTCP=blocked\nHTTP=blocked';
+  const ctl = t.brokenTool ? 'CTL_DNS=ok\nCTL_NC=fail\nCTL_WGET=ok' : 'CTL_DNS=ok\nCTL_NC=ok\nCTL_WGET=ok';
+  const svcIp: Record<string, string> = { mail: '10.231.0.3', stubs: '10.231.0.4', ldap: '10.231.0.5' };
+  const answers = ctx.plan.dummies
+    .filter((d) => d.ip === null)
+    .flatMap((d) => [nslookup(d.host, [t.wrongHost && d.service === 'stubs' ? '93.184.216.34' : svcIp[d.service]!]), nslookup(d.service, [svcIp[d.service]!])]);
+  const probe = t.probeFails ? '' : `${ctl}\n${marks}\n${answers.join('')}@@END\n`;
+  const w2 = (f: string, text: string) => writeFileSync(join(state, f), text);
+  w2('config.json', JSON.stringify(compose));
+  w2('ps.txt', ids.join('\n') + '\n');
+  w2('inspect.json', JSON.stringify(inspect));
+  w2('network.json', JSON.stringify(netsJson));
+  w2('probe.txt', probe);
+  process.env.GOODBOY_DOCKER_BIN = bin;
+  process.env.FAKE_DOCKER_DIR = state;
+  return { root, bin, state, ctx, calls: () => (existsSync(join(state, 'calls.log')) ? readFileSync(join(state, 'calls.log'), 'utf8').trim().split('\n') : []) };
+}
+
+const withFake = (f: Fake, args: string[], env: Record<string, string> = {}) => cli(f.root, args, { GOODBOY_DOCKER_BIN: f.bin, FAKE_DOCKER_DIR: f.state, ...env });
+
+describe('sandbox-check (fake docker)', () => {
+  test('passes when every container is on internal networks, nothing gets out and the hosts reach their dummies', async () => {
+    const f = fake();
+    const c = await checkSandbox(f.ctx);
+    expect(c).toEqual({ inner_only: true, egress_blocked: true, hosts_to_dummies: true, problems: [] });
+    const r = withFake(f, ['sandbox-check']);
+    expect(r.exitCode).toBe(0);
+    expect(json(r)).toEqual(c);
+    expect(f.calls().some((l) => l.includes(`-p ${f.ctx.project}`) && l.includes('--profile *') && l.includes('ps -q'))).toBe(true);
+  });
+
+  test('a container on a bridge network makes inner_only false', async () => {
+    const f = fake({ bridgeContainer: true });
+    const c = await checkSandbox(f.ctx);
+    expect(c.inner_only).toBe(false);
+    expect(c.problems.some((p) => p.includes('network bridge') && p.includes('not one of the sandbox'))).toBe(true);
+    expect(c.problems.some((p) => p.includes('not internal'))).toBe(true);
+    expect(withFake(f, ['sandbox-check']).exitCode).toBe(1);
+  });
+
+  test('an internal network that is not the sandbox\'s makes inner_only false too', async () => {
+    const c = await checkSandbox(fake({ externalNetwork: true }).ctx);
+    expect(c.inner_only).toBe(false);
+    expect(c.problems.some((p) => p.includes('other_net'))).toBe(true);
+  });
+
+  test('a compose file with a published port or a service on the default network makes inner_only false', async () => {
+    expect((await checkSandbox(fake({ cfgPorts: true }).ctx)).problems.some((p) => p.includes('service app publishes ports'))).toBe(true);
+    const c = await checkSandbox(fake({ cfgDefaultNet: true }).ctx);
+    expect(c.inner_only).toBe(false);
+    expect(c.problems.some((p) => p.includes('service app is on network default'))).toBe(true);
+  });
+
+  test('a probe that reaches out makes egress_blocked false', async () => {
+    const f = fake({ reachOut: true });
+    const c = await checkSandbox(f.ctx);
+    expect(c.egress_blocked).toBe(false);
+    expect(c.problems.filter((p) => p.startsWith('egress is not blocked'))).toHaveLength(3);
+    expect(c.inner_only).toBe(true);
+    expect(withFake(f, ['sandbox-check']).exitCode).toBe(1);
+  });
+
+  test('a probe tool that does not work is not taken for a blocked network', async () => {
+    const c = await checkSandbox(fake({ brokenTool: true }).ctx);
+    expect(c.egress_blocked).toBe(false);
+    expect(c.problems.join('\n')).toContain('CTL_NC');
+  });
+
+  test('a probe that did not run is not taken for a blocked network', async () => {
+    const c = await checkSandbox(fake({ probeFails: true }).ctx);
+    expect(c.egress_blocked).toBe(false);
+    expect(c.problems.join('\n')).toContain('did not run to its end');
+  });
+
+  test('a host that does not resolve to its dummy makes hosts_to_dummies false', async () => {
+    const c = await checkSandbox(fake({ wrongHost: true }).ctx);
+    expect(c.hosts_to_dummies).toBe(false);
+    expect(c.problems.some((p) => p.startsWith('api.partner.example resolves to 93.184.216.34') && p.includes('not to stubs'))).toBe(true);
+  });
+
+  test('a dummy that is not running fails the check, and so does an IP literal it does not hold', async () => {
+    const c1 = await checkSandbox(fake({ noDummyRunning: true }).ctx);
+    expect(c1.hosts_to_dummies).toBe(true);
+    const c2 = await checkSandbox(fake({ wrongLiteral: true }).ctx);
+    expect(c2.hosts_to_dummies).toBe(false);
+    expect(c2.problems.some((p) => p.includes('does not hold 10.20.30.40'))).toBe(true);
+  });
+
+  test('a docker that fails fails the check, never passes it', async () => {
+    const f = fake();
+    process.env.GOODBOY_DOCKER_BIN = '/nonexistent/docker';
+    const c = await checkSandbox(f.ctx);
+    expect(c.inner_only).toBe(false);
+    expect(c.egress_blocked).toBe(false);
+    expect(c.hosts_to_dummies).toBe(false);
+  });
+
+  test('without the compose file the command says to run sandbox-init; without a scan, sandbox-scan', () => {
+    const f = fake();
+    rmSync(join(f.root, SANDBOX_DIR, 'compose.yml'));
+    expect(withFake(f, ['sandbox-check']).stderr.toString()).toContain('sandbox-init');
+    const none = dir();
+    expect(cli(none, ['sandbox-run']).stderr.toString()).toContain('sandbox-scan');
+  });
+
+  test('parseNslookup reads the answer, not the server, in both busybox layouts', () => {
+    expect(parseNslookup('Server:\t127.0.0.11\nAddress:\t127.0.0.11:53\n\nNon-authoritative answer:\nName:\tmail\nAddress: 10.0.0.3\n')).toEqual(['10.0.0.3']);
+    expect(parseNslookup('Server:    127.0.0.11\nAddress 1: 127.0.0.11\n\nName:      mail\nAddress 1: 10.0.0.3 mail.x\n')).toEqual([]);
+    expect(parseNslookup('Name:\tmail\nAddress 1: 10.0.0.3\nAddress 2: 10.0.0.4\n')).toEqual(['10.0.0.3', '10.0.0.4']);
+    expect(parseNslookup("** server can't find nope: NXDOMAIN\n")).toEqual([]);
+  });
+
+  test('the probe script verifies its tools first and names every host', () => {
+    const s = probeScript(['a.example', 'mail']);
+    expect(s.indexOf('CTL_NC')).toBeLessThan(s.indexOf('TCP=open'));
+    expect(s).toContain('nc -z -w 3 1.1.1.1 443');
+    expect(s).toContain('wget -T 3 -q --spider http://example.com');
+    expect(s).toContain('nslookup example.com');
+    expect(s).toContain('nslookup a.example');
+  });
+
+  test('staticProblems lets prep-only services keep their network', () => {
+    expect(staticProblems({ services: { prep: { profiles: ['prep'], networks: { prep: null } } }, networks: { prep: {} } })).toEqual([]);
+    expect(staticProblems({ services: { x: { network_mode: 'host' } }, networks: {} })).toEqual(['service x sets network_mode host', 'service x is on network default, which is not internal']);
+    expect(staticProblems(undefined)).toEqual(['compose config has no services']);
+  });
+
+  test('the project name carries the dir name and a hash of the real path', () => {
+    const a = dir('goodboy-m1-same-');
+    expect(projectName(a)).toMatch(/^gb-goodboy-m1-same-[a-z0-9]+-[0-9a-f]{6}$/);
+    expect(projectName(a)).toBe(projectName(a));
+    expect(projectName(a)).not.toBe(projectName(dir('goodboy-m1-same-')));
+  });
+});
+
+describe('sandbox-run (fake docker)', () => {
+  test('a failed check stops the run: exit 1, no runner, a result with the check', () => {
+    const f = fake({ bridgeContainer: true });
+    const r = withFake(f, ['sandbox-run']);
+    expect(r.exitCode).toBe(1);
+    expect(f.calls().some((l) => l.includes(' runner'))).toBe(false);
+    expect(f.calls().some((l) => l.includes('reset.sh'))).toBe(false);
+    const o = json(r);
+    expect(o.check.inner_only).toBe(false);
+    const res = JSON.parse(readFileSync(o.result, 'utf8'));
+    expect(res.check.inner_only).toBe(false);
+    expect(res.exit).toBeNull();
+    expect(res.stopped).toContain('check failed');
+  });
+
+  test('an egress that is open stops the run too', () => {
+    const f = fake({ reachOut: true });
+    expect(withFake(f, ['sandbox-run']).exitCode).toBe(1);
+    expect(f.calls().some((l) => l.includes(' runner'))).toBe(false);
+  });
+
+  test('a passing check resets the db from the template, runs the runner, writes the result; the exit code is the suite\'s', () => {
+    const f = fake();
+    const r = withFake(f, ['sandbox-run', '--suite', 'unit'], { FAKE_RUNNER_EXIT: '3' });
+    expect(r.exitCode).toBe(3);
+    const calls = f.calls();
+    const reset = calls.findIndex((l) => l.includes('exec -T db sh /goodboy-db/reset.sh'));
+    const run = calls.findIndex((l) => l.includes('run --rm -T --no-deps --name') && l.includes(' runner'));
+    const probe = calls.findIndex((l) => l.includes(' probe '));
+    expect(probe).toBeGreaterThanOrEqual(0);
+    expect(reset).toBeGreaterThan(probe);
+    expect(run).toBeGreaterThan(reset);
+    expect(calls[run]).toContain(`-p ${f.ctx.project}`);
+    const o = json(r);
+    const res = JSON.parse(readFileSync(o.result, 'utf8'));
+    expect(res).toMatchObject({ suite: 'unit', exit: 3, command: ['./gradlew', 'test', '--offline'], timedOut: false });
+    expect(res.check).toEqual({ inner_only: true, egress_blocked: true, hosts_to_dummies: true, problems: [] });
+    expect(res.tail).toContain('runner output line');
+    expect(typeof res.durationMs).toBe('number');
+    expect(o.result.startsWith(join(f.root, SANDBOX_DIR, 'out'))).toBe(true);
+    expect(readFileSync(join(dirname(o.result), 'output.log'), 'utf8')).toContain('runner output line');
+  });
+
+  test('a command after -- replaces the test command', () => {
+    const f = fake();
+    const r = withFake(f, ['sandbox-run', '--', './gradlew', 'test', '--tests', 'com.acme.UserTest']);
+    expect(r.exitCode).toBe(0);
+    const run = f.calls().find((l) => l.includes(' runner'))!;
+    expect(run).toContain('runner ./gradlew test --tests com.acme.UserTest');
+    expect(JSON.parse(readFileSync(json(r).result, 'utf8')).command).toEqual(['./gradlew', 'test', '--tests', 'com.acme.UserTest']);
+  });
+
+  test('a db that cannot be reset stops the run before the suite', () => {
+    const f = fake();
+    const r = withFake(f, ['sandbox-run'], { FAKE_EXEC_EXIT: '1' });
+    expect(r.exitCode).toBe(1);
+    expect(json(r).stopped).toContain('resetting db');
+    expect(f.calls().some((l) => l.includes(' runner'))).toBe(false);
+  });
+
+  test('a running app is restarted after the reset', () => {
+    const f = fake();
+    writeFileSync(join(f.state, 'ps-app.txt'), 'id-app\n');
+    withFake(f, ['sandbox-run']);
+    const calls = f.calls();
+    expect(calls.findIndex((l) => l.includes(' restart app'))).toBeGreaterThan(calls.findIndex((l) => l.includes('reset.sh')));
+  });
+
+  test('refuses a bad suite and an empty command', () => {
+    const f = fake();
+    expect(withFake(f, ['sandbox-run', '--suite', 'bogus']).stderr.toString()).toContain('--suite');
+    expect(withFake(f, ['sandbox-run', '--']).stderr.toString()).toContain('nothing after');
+    expect(f.calls().some((l) => l.includes(' runner'))).toBe(false);
+  });
+
+  test('sandbox-up starts the stores and dummies, restores once, resets and waits for the app through the probe', () => {
+    const f = fake();
+    const r = withFake(f, ['sandbox-up', '--wait-seconds', '5']);
+    expect(r.exitCode).toBe(0);
+    const calls = f.calls();
+    const idx = (s: string) => calls.findIndex((l) => l.includes(s));
+    expect(calls[idx('up -d --wait')]).toContain(' db redis mail stubs ldap');
+    expect(idx('restore.sh')).toBeGreaterThan(idx('up -d --wait'));
+    expect(idx('reset.sh')).toBeGreaterThan(idx('restore.sh'));
+    expect(idx('up -d app')).toBeGreaterThan(idx('reset.sh'));
+    const health = calls[idx(' probe sh -c')]!;
+    expect(health).toContain('http://app:8080/actuator/health');
+    expect(json(r).appUrl).toBe('http://app:8080/actuator/health');
+  });
+
+  test('sandbox-prepare pulls, then runs prep in its profile; sandbox-down keeps the volumes unless asked', () => {
+    const f = fake();
+    expect(withFake(f, ['sandbox-prepare']).exitCode).toBe(0);
+    const calls = f.calls();
+    expect(calls.findIndex((l) => l.includes(' pull'))).toBeLessThan(calls.findIndex((l) => l.includes('--profile prep run --rm -T prep')));
+    withFake(f, ['sandbox-down']);
+    expect(f.calls().at(-1)).toContain('down --remove-orphans');
+    expect(f.calls().at(-1)).not.toContain(' -v');
+    expect(json(withFake(f, ['sandbox-down', '--volumes'])).volumes).toBe('removed');
+    expect(f.calls().at(-1)).toContain(' -v');
+  });
+
+  test('sandbox-prepare also installs the e2e packages in their own step; sandbox-up starts the proxy and waits on it', () => {
+    const f = fake();
+    const p = json(withFake(f, ['sandbox-prepare']));
+    expect(p.e2e).toMatchObject({ step: 'e2e-prep', exit: 0 });
+    expect(f.calls().some((l) => l.includes('--profile prep run --rm -T e2e-prep'))).toBe(true);
+    const r = withFake(f, ['sandbox-up', '--wait-seconds', '5']);
+    expect(r.exitCode).toBe(0);
+    const calls = f.calls();
+    const idx = (s: string) => calls.findIndex((l) => l.includes(s));
+    expect(idx('up -d proxy')).toBeGreaterThan(idx('up -d app'));
+    expect(calls.filter((l) => l.includes(' probe sh -c'))).toHaveLength(2);
+    expect(calls.filter((l) => l.includes(' probe sh -c')).at(-1)).toContain('http://proxy:8080/actuator/health');
+    expect(json(r).proxyUrl).toBe('http://proxy:8080/actuator/health');
+    expect(existsSync(join(f.root, SANDBOX_DIR, 'out', 'live'))).toBe(true);
+  });
+});
+
+// ---- the e2e suite, the proxy log and the coverage reports (M3, with a fake docker) ----
+
+const REPORT = JSON.stringify({ suites: [{ title: 'a.spec.ts', specs: [] }] });
+const ACCESS = '{"request":{"method":"GET","uri":"/","headers":{}},"status":200}\n';
+
+/** A fake docker project with the project's e2e tests, a Playwright report and an access log in place. */
+function e2eFake(t: Tweak = {}, scan?: SandboxScan): Fake {
+  const f = fake(t, scan);
+  mkdirSync(join(f.root, 'e2e'), { recursive: true });
+  writeFileSync(join(f.root, 'e2e', 'a.spec.ts'), 'export {};\n');
+  writeFileSync(join(f.state, 'playwright-report.json'), REPORT);
+  mkdirSync(join(f.root, SANDBOX_DIR, 'out', 'live'), { recursive: true });
+  writeFileSync(join(f.root, SANDBOX_DIR, 'out', 'live', 'access.log'), ACCESS);
+  return f;
+}
+
+describe('sandbox-run --suite e2e (fake docker)', () => {
+  test('starts the proxy and the app fresh, runs the e2e service, stops the app, copies the log and writes the reports into the result', () => {
+    const f = e2eFake();
+    writeFileSync(join(f.state, 'ps-app.txt'), 'id-app\n');
+    const r = withFake(f, ['sandbox-run', '--suite', 'e2e']);
+    expect(r.exitCode).toBe(0);
+    const calls = f.calls();
+    const at = (s: string) => calls.findIndex((l) => l.includes(s));
+    const order = [at('up -d proxy'), at('rm -rf /live/jacoco-e2e.exec'), at(' restart app'), at('http://proxy:8080/actuator/health'), at(': > /live/access.log'), at(' e2e'), at('stop -t 60 app'), at('coverage.sh report-e2e')];
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    const o = json(r);
+    const ts = o.ts as string;
+    const runDir = join(f.root, SANDBOX_DIR, 'out', ts);
+    expect(calls[at(' e2e')]).toContain(`-v ${runDir}:/out e2e`);
+    expect(o.accessLog).toBe(join(runDir, 'access.log'));
+    expect(readFileSync(o.accessLog, 'utf8')).toBe(ACCESS);
+    expect(o.playwrightReport).toBe(join(runDir, 'playwright-report.json'));
+    expect(o.coverageReports).toEqual([join(runDir, 'coverage', 'jacoco.xml')]);
+    expect(existsSync(o.coverageReports[0])).toBe(true);
+    const res = JSON.parse(readFileSync(o.result, 'utf8'));
+    expect(res).toMatchObject({ suite: 'e2e', exit: 0, accessLog: o.accessLog, playwrightReport: o.playwrightReport, coverageReports: o.coverageReports });
+    expect(res.e2e).toMatchObject({ exit: 0, artifacts: 'removed', problems: [] });
+    expect(res.unit).toBeUndefined();
+    expect(readFileSync(join(runDir, 'e2e-output.log'), 'utf8')).toContain('e2e output line');
+  });
+
+  test('a passing run deletes its traces and screenshots; a failing run keeps them and exits with the failure', () => {
+    const pass = e2eFake();
+    const p = json(withFake(pass, ['sandbox-run', '--suite', 'e2e']));
+    expect(existsSync(join(dirname(p.result), 'e2e-artifacts'))).toBe(false);
+    const fail = e2eFake();
+    const r = withFake(fail, ['sandbox-run', '--suite', 'e2e'], { FAKE_E2E_EXIT: '1' });
+    expect(r.exitCode).toBe(1);
+    const o = json(r);
+    expect(readFileSync(join(dirname(o.result), 'e2e-artifacts', 'trace.zip'), 'utf8')).toContain('trace');
+    expect(JSON.parse(readFileSync(o.result, 'utf8')).e2e).toMatchObject({ exit: 1, artifacts: 'kept' });
+  });
+
+  test('--suite all runs the unit suite, resets the database again, then the e2e suite, and one coverage report for both', () => {
+    const f = e2eFake();
+    const r = withFake(f, ['sandbox-run']);
+    expect(r.exitCode).toBe(0);
+    const calls = f.calls();
+    const resets = calls.map((l, i) => (l.includes('reset.sh') ? i : -1)).filter((i) => i >= 0);
+    expect(resets).toHaveLength(2);
+    const unit = calls.findIndex((l) => l.includes('--name') && l.includes('-runner-') && l.includes(' runner'));
+    const e2e = calls.findIndex((l) => l.includes(' e2e') && l.includes('--name'));
+    expect(resets[0]!).toBeLessThan(unit);
+    expect(unit).toBeLessThan(resets[1]!);
+    expect(resets[1]!).toBeLessThan(e2e);
+    expect(calls.filter((l) => l.includes('coverage.sh'))).toHaveLength(1);
+    expect(calls.find((l) => l.includes('coverage.sh'))).toContain('report-e2e');
+    const res = JSON.parse(readFileSync(json(r).result, 'utf8'));
+    expect(res.unit).toMatchObject({ exit: 0 });
+    expect(res.e2e).toMatchObject({ exit: 0 });
+  });
+
+  test('a failing unit suite does not stop the e2e suite; the exit code is the first failure', () => {
+    const f = e2eFake();
+    const r = withFake(f, ['sandbox-run'], { FAKE_RUNNER_EXIT: '3', FAKE_E2E_EXIT: '1' });
+    expect(r.exitCode).toBe(3);
+    const res = JSON.parse(readFileSync(json(r).result, 'utf8'));
+    expect(res).toMatchObject({ exit: 3, unit: { exit: 3 }, e2e: { exit: 1 } });
+  });
+
+  test('the unit runner gets the run dir at /out, and a unit-only run takes no e2e data into its coverage report', () => {
+    const f = e2eFake();
+    const r = withFake(f, ['sandbox-run', '--suite', 'unit']);
+    expect(r.exitCode).toBe(0);
+    const o = json(r);
+    const calls = f.calls();
+    const runDir = dirname(o.result);
+    expect(calls.find((l) => l.includes('-runner-') && l.includes(' runner'))).toContain(`-v ${runDir}:/out runner`);
+    const cov = calls.find((l) => l.includes('coverage.sh'))!;
+    expect(cov).toContain('coverage.sh report');
+    expect(cov).not.toContain('report-e2e');
+    expect(cov).toContain('-e GOODBOY_COVERAGE_OUT= ');
+    expect(calls.some((l) => l.includes('up -d proxy'))).toBe(false);
+    expect(o.accessLog).toBeNull();
+    expect(o.coverageReports).toEqual([join(runDir, 'coverage', 'jacoco.xml')]);
+  });
+
+  test('a coverage report that fails is reported in the result and does not change the exit code', () => {
+    const f = e2eFake();
+    const r = withFake(f, ['sandbox-run', '--suite', 'e2e'], { FAKE_COVERAGE_EXIT: '4' });
+    expect(r.exitCode).toBe(0);
+    const o = json(r);
+    expect(o.coverage).toMatchObject({ ok: false, exit: 4, reports: [] });
+    expect(o.coverage.note).toContain('sandbox-prepare');
+    expect(o.coverageReports).toEqual([]);
+  });
+
+  test('--suite e2e needs the project\'s e2e tests; --suite all without them runs the unit suite only', () => {
+    const f = fake();
+    const r = withFake(f, ['sandbox-run', '--suite', 'e2e']);
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain('e2e/');
+    expect(f.calls().some((l) => l.includes('up -d proxy'))).toBe(false);
+    const all = withFake(f, ['sandbox-run']);
+    expect(all.exitCode).toBe(0);
+    expect(json(all).e2e).toBeUndefined();
+    expect(f.calls().some((l) => l.includes(' e2e'))).toBe(false);
+  });
+
+  test('a scan with no test command can still run the e2e suite; there is no runner, so the coverage report says so', () => {
+    const scan = jvmScan();
+    scan.build.testCommand = [];
+    const f = e2eFake({}, scan);
+    const r = withFake(f, ['sandbox-run', '--suite', 'e2e']);
+    expect(r.exitCode).toBe(0);
+    expect(json(r).coverage).toMatchObject({ ok: false, exit: null, reports: [] });
+    expect(json(r).coverage.note).toContain('no test command');
+    expect(f.calls().some((l) => l.includes('coverage.sh'))).toBe(false);
+    expect(json(r).accessLog).not.toBeNull();
+  });
+
+  test('a command after -- goes to the e2e service for --suite e2e and to the runner otherwise', () => {
+    const f = e2eFake();
+    withFake(f, ['sandbox-run', '--suite', 'e2e', '--', '/work/node_modules/.bin/playwright', 'test', 'a.spec.ts']);
+    expect(f.calls().find((l) => l.includes(' e2e') && l.includes('--name'))).toContain('e2e /work/node_modules/.bin/playwright test a.spec.ts');
+    const g = e2eFake();
+    withFake(g, ['sandbox-run', '--', './gradlew', 'test']);
+    expect(g.calls().find((l) => l.includes(' e2e') && l.includes('--name'))!.endsWith(' e2e')).toBe(true);
+    expect(g.calls().find((l) => l.includes('-runner-'))).toContain('runner ./gradlew test');
+  });
+
+  test('a missing access log is a problem in the result, not a crash', () => {
+    const f = e2eFake();
+    rmSync(join(f.root, SANDBOX_DIR, 'out', 'live', 'access.log'));
+    const r = withFake(f, ['sandbox-run', '--suite', 'e2e']);
+    const res = JSON.parse(readFileSync(json(r).result, 'utf8'));
+    expect(res.accessLog).toBeNull();
+    expect(res.e2e.problems.some((p: string) => p.includes('access log'))).toBe(true);
+  });
+});
+
+// ---- a real docker: opt in with GOODBOY_DOCKER_IT=1 (pulls busybox only) ----
+
+describe.skipIf(process.env.GOODBOY_DOCKER_IT !== '1' || !hasOpenssl)('real docker', () => {
+  const docker = (args: string[]) => Bun.spawnSync(['docker', ...args], { stdout: 'pipe', stderr: 'pipe' });
+
+  test('a probe on an internal network cannot resolve or reach out; the sandbox check passes and sees an intruder', async () => {
+    delete process.env.GOODBOY_DOCKER_BIN;
+    const scan = nodeScan();
+    scan.stores = [];
+    scan.outbound = [];
+    scan.secretKeys = [];
+    const root = repo(scan);
+    const rep = await initSandbox(root, scan, NO_DUMP, false);
+    expect(rep).not.toBeInstanceOf(Error);
+    const ctx = loadCtx(root, true);
+    if (ctx instanceof Error) throw ctx;
+    const intruder = `${ctx.project}-intruder`;
+    try {
+      const c = await checkSandbox(ctx);
+      expect(c.problems).toEqual([]);
+      expect(c).toEqual({ inner_only: true, egress_blocked: true, hosts_to_dummies: true, problems: [] });
+      // The same compose project with one container on the default bridge: inner_only must turn false.
+      const run = docker(['run', '-d', '--name', intruder, '--label', `com.docker.compose.project=${ctx.project}`, '--label', 'com.docker.compose.service=intruder', IMAGES.probe, 'sleep', '120']);
+      expect(run.exitCode).toBe(0);
+      const bad = await checkSandbox(ctx);
+      expect(bad.inner_only).toBe(false);
+      expect(bad.problems.some((p) => p.includes('intruder') || p.includes('bridge'))).toBe(true);
+    } finally {
+      docker(['rm', '-f', intruder]);
+      Bun.spawnSync(['docker', 'compose', '-f', ctx.composeFile, '-p', ctx.project, '--profile', '*', 'down', '--remove-orphans', '-v'], { stdout: 'pipe', stderr: 'pipe', cwd: ctx.dir });
+    }
+  }, 240_000);
+
+  test('the probe script itself, on a bare internal network: tools work, nothing gets out', () => {
+    const net = `gbtest-${Math.random().toString(36).slice(2, 8)}`;
+    expect(docker(['network', 'create', '--internal', net]).exitCode).toBe(0);
+    try {
+      const r = docker(['run', '--rm', '--network', net, '--name', `${net}-probe`, IMAGES.probe, 'sh', '-c', probeScript([])]);
+      expect(r.exitCode).toBe(0);
+      const out = r.stdout.toString();
+      for (const line of ['CTL_DNS=ok', 'CTL_NC=ok', 'CTL_WGET=ok', 'DNS=blocked', 'TCP=blocked', 'HTTP=blocked', '@@END']) expect(out).toContain(line);
+    } finally {
+      docker(['network', 'rm', net]);
+    }
+  }, 180_000);
+});

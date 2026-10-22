@@ -35,7 +35,8 @@ catch it breaking again.
 2. write-regression-test, for each behavior change: red, green, mutation.
 3. measure-coverage, after the suites pass: every changed code line must have run (the gate
    checks it); for a line that did not, go back to step 2.
-4. record-tests, last: every suite with `type` and `duration_ms`.
+4. run-sandbox, when `.goodboy/sandbox/compose.yml` exists: every suite runs through it.
+5. record-tests, last: every suite with `type` and `duration_ms` (and `sandbox`).
 
 ## Full regression (before a push)
 When the prompt or a push check asks for it: `bun "$GB/lib/cli.ts" regression` from the repo.

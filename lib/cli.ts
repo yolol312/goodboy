@@ -74,6 +74,10 @@ import { changedEntries, MAX_CHANGED_ENTRIES, scopeCoverageTops } from './covera
 import { repoOfFile, type RepoWalkMemo } from './nested-repos';
 import { isUnder, realDeep } from './private-files';
 import { readTopStart, topIdentity } from './start-pins';
+import { cmdCoverageCheck } from './coverage-check';
+import { cmdUiCheck } from './ui-check';
+import { cmdUiInventory } from './ui-inventory';
+import { sandboxCommand } from './sandbox-run';
 
 // ---- 유틸 ----
 
@@ -601,6 +605,7 @@ export function validateTestResultInput(parsed: unknown, bases: readonly string[
   }
 
   if (p.notes !== undefined && typeof p.notes !== 'string') errors.push('notes, when given, must be a string.');
+  if (p.sandbox !== undefined) validateSandboxInput(p.sandbox, errors);
 
   if (errors.length > 0) return { ok: false, errors };
 
@@ -623,6 +628,7 @@ export function validateTestResultInput(parsed: unknown, bases: readonly string[
   if (p.coverage !== undefined) value.coverage = p.coverage as TestResult['coverage'];
   // Kept, cut at 4000 characters (they were dropped without a word); no gate reads them.
   if (typeof p.notes === 'string' && p.notes.trim() !== '') value.notes = p.notes.slice(0, MAX_NOTES);
+  if (p.sandbox !== undefined) value.sandbox = pickSandbox(p.sandbox as Record<string, unknown>);
   if (value.suites.length > 0) value.by_type = byTestType(value.suites);
   return { ok: true, errors: [], value };
 }
@@ -682,6 +688,28 @@ function validateChangedEntry(raw: unknown, label: string, errors: string[]): bo
     errors.push(`${label}.base_source must be "start", "head" or "arg", as diff-coverage prints it.`);
   }
   return true;
+}
+
+/** The sandbox check a record carries (track M): booleans for the checks, a string for the run. */
+function validateSandboxInput(raw: unknown, errors: string[]): void {
+  const s = raw as Record<string, unknown> | null;
+  if (typeof s !== 'object' || s === null || Array.isArray(s)) {
+    errors.push('sandbox must be {inner_only, egress_blocked, hosts_to_dummies?, run?}: the sandbox-check booleans and the sandbox-run directory name.');
+    return;
+  }
+  for (const k of ['inner_only', 'egress_blocked'] as const) {
+    if (typeof s[k] !== 'boolean') errors.push(`sandbox.${k} must be a boolean (the sandbox-check field of that name).`);
+  }
+  if (s.hosts_to_dummies !== undefined && typeof s.hosts_to_dummies !== 'boolean') errors.push('sandbox.hosts_to_dummies must be a boolean.');
+  if (s.run !== undefined && (typeof s.run !== 'string' || s.run.trim() === '')) errors.push('sandbox.run must be the non-empty directory name of the sandbox-run result.');
+}
+
+/** Only the known sandbox fields are kept (the input was validated). */
+function pickSandbox(s: Record<string, unknown>): NonNullable<TestResult['sandbox']> {
+  const out: NonNullable<TestResult['sandbox']> = { inner_only: s.inner_only === true, egress_blocked: s.egress_blocked === true };
+  if (typeof s.hosts_to_dummies === 'boolean') out.hosts_to_dummies = s.hosts_to_dummies;
+  if (typeof s.run === 'string') out.run = s.run;
+  return out;
 }
 
 function validateCoverageInput(raw: unknown, errors: string[]): void {
@@ -1273,7 +1301,7 @@ function cmdBackfill(command: string, cwd: string, args: string[]): void {
       case 'backfill-plan': {
         const { state: next, added, dropped } = mergeSurvey(state, survey!.untested.targets);
         const path = writeBackfill(root, next);
-        return { value: { path, added, dropped, survey: { ...survey!, untested: { count: survey!.untested.count, targets: survey!.untested.targets.slice(0, 10) } }, ...backfillSummary(next) } };
+        return { value: { path, added, dropped, survey: { ...survey!, untested: { count: survey!.untested.count, targets: survey!.untested.targets.slice(0, 10) } }, ...backfillSummary(next, root) } };
       }
       case 'backfill-next': {
         const b = nextBatch(state, intOpt(args, '--size', DEFAULT_BATCH, 1, 20), list(optValue(args, '--pick')).map((f) => repoRel(root, f)));
@@ -1286,14 +1314,44 @@ function cmdBackfill(command: string, cwd: string, args: string[]): void {
         const err = markTarget(state, cwd, root, m);
         if (err) return { error: err.message };
         writeBackfill(root, state);
-        return { value: backfillSummary(state) };
+        return { value: backfillSummary(state, root) };
       }
       default:
-        return { value: backfillSummary(state) };
+        return { value: backfillSummary(state, root) };
     }
   });
   if ('error' in result) fail(`${command}: ${result.error}`);
   process.stdout.write(JSON.stringify(result.value, null, 2) + '\n');
+}
+
+/** The sandbox commands (track M, M1b): `sandbox-init [--force]`, `sandbox-local --dump <abs> [--format
+ *  sql|custom]`, `sandbox-check`, `sandbox-prepare`, `sandbox-up`, `sandbox-run [--suite unit|all] [--
+ *  cmd...]`, `sandbox-down [--volumes]`. They read `.goodboy/sandbox/scan.json`; the exit code of
+ *  `sandbox-run` is the suite's. */
+async function cmdSandbox(command: string, cwd: string, args: string[]): Promise<void> {
+  const r = await sandboxCommand(command, repoTop(cwd), args);
+  if ('error' in r) fail(r.error);
+  process.stdout.write(JSON.stringify(r.out, null, 2) + '\n');
+  if (r.code !== 0) process.exitCode = r.code;
+}
+
+/** The track M gates (plan §19): `coverage-check <report...> [--root-map from=to]` (M2, every
+ *  non-UI code file at 100% lines and branches), `ui-inventory [--summary]` and `ui-check [--run
+ *  <ts>] [--log f]... [--report f]... [--inventory f]` (M3, every screen and action by e2e).
+ *  File paths resolve from the shell's dir. */
+function cmdTrackMCheck(command: string, cwd: string, shell: string, args: string[]): void {
+  const root = repoTop(cwd);
+  let r: { out: unknown; code: number } | { error: string };
+  if (command === 'coverage-check') {
+    r = cmdCoverageCheck(root, args.map((a, i) => (a.startsWith('--') || args[i - 1] === '--root-map' ? a : resolve(shell, a))));
+  } else {
+    const fileOpts = new Set(['--log', '--report', '--inventory']);
+    const resolved = args.map((a, i) => (fileOpts.has(args[i - 1] ?? '') ? resolve(shell, a) : a));
+    r = command === 'ui-inventory' ? cmdUiInventory(root, resolved) : cmdUiCheck(root, resolved);
+  }
+  if ('error' in r) fail(`${command}: ${r.error}`);
+  process.stdout.write(JSON.stringify(r.out, null, 2) + '\n');
+  if (r.code !== 0) process.exitCode = r.code;
 }
 
 /** The checkup commands: state, begin, changelog, write, complete, abort (lib/checkup.ts). */
@@ -1481,7 +1539,7 @@ async function cmdCheckup(command: string, args: string[]): Promise<void> {
 
 const USAGE =
   '사용법: bun lib/cli.ts <command> [args...]\n' +
-  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | test-survey [--all | --dir <dir>] [--max N] | backfill-plan | backfill-next [--size N] [--pick a,b] | backfill-mark <file> --status done|skipped|suspect [--tests a,b] [--note text] | backfill-status | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text> | checkup-state | checkup-begin [--cli <v>] [--replace] | checkup-changelog [--from <v>|none] [--to <v>] [--ids a,b] [--changelog <path>] [--max-matched N] [--max-unmapped N] [--run <id>] | checkup-write --run <id> --name <file> | checkup-complete --run <id> | checkup-abort --run <id> | checkup-projects [--add <dir>|--remove <dir>] [--suggest] | checkup-inventory [--run <id>] (checkup-changelog --inventory adds its identifiers) | checkup-health [--run <id>] [--timeout-ms N] | checkup-smoke [--run <id>] | checkup-compare --run <id> | checkup-probe --run <id> (--estimate | --estimate-id <id>)';
+  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | test-survey [--all | --dir <dir>] [--max N] | backfill-plan | backfill-next [--size N] [--pick a,b] | backfill-mark <file> --status done|skipped|suspect [--tests a,b] [--note text] | backfill-status | sandbox-scan | sandbox-init [--force] | sandbox-local --dump <abs path> [--format sql|custom] | sandbox-check | sandbox-prepare [--timeout-ms N] | sandbox-up [--wait-seconds N] | sandbox-run [--suite unit|e2e|all] [--timeout-ms N] [-- cmd...] | sandbox-down [--volumes] | coverage-check <report...> [--root-map from=to] | ui-inventory [--summary] | ui-check [--run <ts>] [--log f]... [--report f]... [--inventory f] | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text> | checkup-state | checkup-begin [--cli <v>] [--replace] | checkup-changelog [--from <v>|none] [--to <v>] [--ids a,b] [--changelog <path>] [--max-matched N] [--max-unmapped N] [--run <id>] | checkup-write --run <id> --name <file> | checkup-complete --run <id> | checkup-abort --run <id> | checkup-projects [--add <dir>|--remove <dir>] [--suggest] | checkup-inventory [--run <id>] (checkup-changelog --inventory adds its identifiers) | checkup-health [--run <id>] [--timeout-ms N] | checkup-smoke [--run <id>] | checkup-compare --run <id> | checkup-probe --run <id> (--estimate | --estimate-id <id>)';
 
 async function main(): Promise<void> {
   // The session's project dir, not the shell's dir after a `cd`: the records written here are
@@ -1549,6 +1607,21 @@ async function main(): Promise<void> {
       case 'backfill-mark':
       case 'backfill-status':
         cmdBackfill(command, cwd, args);
+        break;
+      case 'coverage-check':
+      case 'ui-inventory':
+      case 'ui-check':
+        cmdTrackMCheck(command, cwd, shell, args);
+        break;
+      case 'sandbox-scan':
+      case 'sandbox-init':
+      case 'sandbox-local':
+      case 'sandbox-check':
+      case 'sandbox-prepare':
+      case 'sandbox-up':
+      case 'sandbox-run':
+      case 'sandbox-down':
+        await cmdSandbox(command, cwd, args);
         break;
       case 'report-evidence':
         cmdReportEvidence(cwd, args);

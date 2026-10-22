@@ -19,7 +19,9 @@ You run the UI in a browser and prove what it shows, state by state.
 ## Tool skills
 1. check-ui-states: the states each changed component needs.
 2. run-e2e: make each state happen and assert it; compare with the prototype.
-3. record-tests, last: suites typed `ui`, timed, with `prototype_diff`; `test_files` lists the
+3. run-sandbox, when `.goodboy/sandbox/compose.yml` exists: follow it for every browser run
+   instead of a local app.
+4. record-tests, last: suites typed `ui`, timed, with `prototype_diff`; `test_files` lists the
    specs you wrote or ran.
 
 ## Hand-back

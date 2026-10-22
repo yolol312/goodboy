@@ -133,7 +133,7 @@ POSIX 셸을 전제하므로 **Git for Windows 설치가 필수**입니다. 이�
 - `/diagnose-failure <증상>` — 원인 진단, 수정은 `/fix-bug`로 (effort high, 구 `/debug`)
 - `/write-doc <주제>` — 문서 작성 (effort medium)
 - `/request-review <기준>` — 리뷰 요청 (effort low)
-- `/backfill-tests [이 프로젝트만 | 폴더]` — 기존 코드 테스트 보강: 등록된 프로젝트 조사, 테스트 도구 구성(승인 후), 현재 동작을 고정하는 테스트를 묶음 단위로 작성 (effort high, v0.36.0, [아래](#기존-코드-테스트-보강-v0360-트랙-l))
+- `/backfill-tests [이 프로젝트만 | 폴더]` — 기존 코드 테스트 보강: 등록된 프로젝트 조사, 테스트 도구 구성(승인 후), 현재 동작을 고정하는 테스트를 묶음 단위로 작성 (effort high, v0.36.0, [아래](#기존-코드-테스트-보강-v0360-트랙-l)). 격리 샌드박스를 만들면 목표가 완전 테스트(100%)로 바뀐다 (v0.37.0, [아래](#기존-코드-완전-테스트--격리-샌드박스-v0370-트랙-m))
 
 각 스킬은 적힌 effort로 그 턴만 실행된다(끝나면 원래 설정). 각 카테고리에 위험도 override 가능: `/fix-bug --risk risky <설명>`
 
@@ -400,7 +400,7 @@ Agent 도구와 모든 서브에이전트의 `claude -p` 차단), 훅이 검사�
 없이 정해진 human 항목을 찾는다(프로젝트 항목은 high, 기본 항목은 medium). 사용자가 내린 결정은 정책 항목으로
 기록되어(`keep-project-knowledge` 갱신 모드) 다음부터 ai 항목이 된다.
 
-#### 에이전트 24개와 도구 스킬 27개
+#### 에이전트 24개와 도구 스킬 28개
 
 에이전트 이름은 `<팀>-<역할>`이고 리드는 `-lead`로 끝난다(전체 표: 계획서 §10.3). 리뷰 게이트는
 `goodboy:review-all`(구 review-changes), 테스트 게이트와 push 확인은 `goodboy:test-unit`(구 test-changes)을
@@ -423,7 +423,8 @@ check-ui-states, run-e2e, record-review, record-tests, run-long-command, run-cod
 measure-coverage, follow-agent-rules, keep-project-knowledge(`/` 메뉴에도 보임, 트랙 H),
 report-goodboy(`/report-goodboy`, 트랙 J: goodboy 자체의 문제를 현장 리포트로 남김),
 cli-update-check(`/cli-update-check`, 트랙 K: CLI 업데이트 뒤 사용자 설정 점검),
-setup-test-infra(트랙 L: `/backfill-tests`가 쓰는 테스트 도구 구성).
+setup-test-infra(트랙 L: `/backfill-tests`가 쓰는 테스트 도구 구성),
+run-sandbox(트랙 M: 격리 샌드박스가 있는 프로젝트에서 테스트 에이전트가 스위트를 돌리는 절차).
 
 ## 결정 근거 기록 (4분류)
 
@@ -650,7 +651,7 @@ goodboy/                                # 플러그인 루트
 │   ├── request-review/SKILL.md
 │   ├── backfill-tests/SKILL.md         # 기존 코드 테스트 보강 (트랙 L)
 │   ├── setup-statusline/SKILL.md       # 상태바 설치/연동
-│   └── <도구 스킬 27개>/SKILL.md        # 에이전트가 쓰는 절차 (check-*, record-*, run-*, write-* …, keep-project-knowledge, report-goodboy, cli-update-check, setup-test-infra)
+│   └── <도구 스킬 28개>/SKILL.md        # 에이전트가 쓰는 절차 (check-*, record-*, run-*, write-* …, keep-project-knowledge, report-goodboy, cli-update-check, setup-test-infra, run-sandbox)
 ├── agents/                             # 에이전트 24개 (research-*, build-*, review-*, test-*)
 │   ├── test-unit.md                    # 층1 — 테스트 작성/실행·red-green·커버리지 (구 test-changes)
 │   └── review-all.md                   # 층2 — 전 축 또는 축 하나 리뷰 (구 review-changes)
@@ -857,6 +858,60 @@ dev-cycle 문서가 있는데 수용 기준이 하나도 나오지 않으면(현
 만든 테스트를 커밋한 뒤에 약하게 고치거나 지우면, 기존 테스트 규칙(I5)이 리뷰를 요구한다.
 v0.36.0부터 Java·Kotlin 테스트(`src/test/` 등 테스트 소스 폴더의 `*Test.java`, `*IT.java`,
 `*Spec.kt` 등)도 이 규칙과 테스트 카탈로그에 포함된다.
+
+### 기존 코드 완전 테스트 — 격리 샌드박스 (v0.37.0, 트랙 M)
+
+트랙 L의 테스트는 앱을 띄우지 못하는 프로젝트에서 목(mock)에 기대고, e2e는 건너뛴다. 실제 DB와 외부
+시스템이 필요한 코드는 그대로 남는다. 샌드박스는 이를 안전하게 풀어 준다. 프로젝트 소스와 실제 DB 덤프의
+복사본을 컨테이너에서 돌려, 화면에 닿는 동작은 브라우저 e2e로, 나머지 코드는 단위·통합 테스트로
+**완전하게** 테스트한다. `/backfill-tests` 3단계에서 사용자가 한 번 승인하면 만들어지고, 만들지 않으면
+트랙 L 그대로 동작한다.
+
+**안전 모델**
+- **준비와 실행을 나눈다.** 준비(`sandbox-prepare`)만 네트워크를 쓴다: 이미지, Maven·npm·pip 패키지,
+  빌드. 앱과 모든 테스트는 `internal: true` 네트워크 하나에서만, 밖으로 나가는 길 없이 오프라인으로 돈다.
+  DB 덤프는 준비 단계에서 올리지 않는다.
+- **외부 호스트는 더미로 간다.** 앱이 부르는 외부 호스트(HTTP API, 메일, LDAP 등)는 같은 이름의 더미
+  컨테이너(WireMock, Mailpit, OpenLDAP)가 대신 받아 기록하고 더 보내지 않는다. 설정이 가리키는 호스트가
+  더미가 아닌 곳으로 남으면 조사가 알려 준다.
+- **DB 덤프는 로컬에만 있다.** 덤프는 사용자가 지정한 경로(`sandbox-local --dump`, git에 안 들어가는 로컬
+  파일)에서 읽기 전용으로 컨테이너에 올라가고, 매 실행 전에 처음 상태로 되돌린다. 덤프의 행과 개인정보는
+  테스트·픽스처·기록·주석·보고서에 쓰지 않는다. 데이터는 앱의 화면과 id를 통해 실행 시점에 찾는다.
+- **실행마다 탈출 검사.** `sandbox-run`은 스위트 전에 매번 확인한다: 실행 중인 모든 컨테이너가 내부
+  네트워크에만 있는지(`inner_only`), 내부 네트워크의 프로브가 공개 이름을 찾지도 공개 IP에 닿지도
+  못하는지(`egress_blocked`), 외부 호스트가 더미로 향하는지(`hosts_to_dummies`). 하나라도 실패하면
+  스위트는 돌지 않는다. 테스트 기록은 이 검사 결과(`sandbox: {inner_only, egress_blocked, …, run}`)를
+  담고, 샌드박스가 있는 프로젝트에서는 두 값이 모두 true인 기록만 `backfill-mark`가 인정한다.
+- **추적은 로컬에, 실패한 것만.** 스크린샷과 트레이스는 무시되는 로컬 폴더(`.goodboy/sandbox/out/`)에만
+  남고, 통과한 실행의 것은 지운다.
+
+**두 개의 100% 게이트** (샌드박스가 있으면 `backfill-status`의 `goal`이 `batches`에서 `complete`로 바뀐다)
+- `coverage-check`: 화면이 아닌 모든 코드 파일이 단위·통합·e2e 커버리지를 합쳐 줄 100%, 분기 100%여야
+  한다. 코드가 닿을 수 없는 부분은 사용자가 승인한 `coverage-exempt:` 정책 항목(이유 포함)으로만 뺀다.
+- `ui-check`: `ui-inventory`가 컨트롤러 매핑과 템플릿의 폼·링크·버튼·AJAX(React·Next는 라우트와 핸들러)에서
+  뽑은 모든 화면과 동작에, 통과한 `<id>:ok` e2e 테스트가 있고 그 테스트의 요청이 실제로 그 경로에
+  닿아야 한다(프록시 접근 로그로 확인). 입력을 받는 동작은 `<id>:error` 테스트도 필요하다.
+
+**흐름**: `sandbox-scan`(읽기만: 빌드·포트·데이터 저장소·외부 호스트) → `sandbox-local --dump <경로>`
+→ `sandbox-init` → `sandbox-prepare` → `sandbox-up` → `sandbox-check` 통과 → 묶음마다 테스트 에이전트가
+`run-sandbox` 절차로 `sandbox-run --suite unit|e2e|all` → 끝나면 `coverage-check`와 `ui-check` → 둘 다
+통과할 때까지 반복. e2e 테스트는 `e2e/`에 두고 `.goodboy/sandbox/e2e/goodboy-ui.ts`의 `uiTest`로 쓴다.
+기대값은 지금 동작이다(현재 동작 고정). 필요한 것은 Colima로 돌리는 Docker이고, 저장소와 덤프는 `$HOME`
+아래에 있어야 한다. 끝나면 `sandbox-down [--volumes]`.
+
+| 명령 | 하는 일 |
+|---|---|
+| `sandbox-scan` | 프로젝트를 읽기만 해서 빌드·포트·저장소·외부 호스트를 보고 |
+| `sandbox-local --dump <경로>` | 덤프 경로를 로컬 파일에 기록 (사용자가 정한 것만) |
+| `sandbox-init` / `sandbox-prepare` / `sandbox-up` | compose 파일 생성 / 준비(네트워크 사용) / 기동 |
+| `sandbox-check` | `inner_only`·`egress_blocked`·`hosts_to_dummies` 검사 |
+| `sandbox-run --suite unit\|e2e\|all` | 검사 후 DB를 되돌리고 스위트 실행, `result.json`에 접근 로그·Playwright 보고서·커버리지 보고서 경로 기록 |
+| `coverage-check <보고서...> --root-map /work=.` | 줄·분기 100% 게이트 |
+| `ui-inventory [--summary]` / `ui-check [--run <ts>]` | 화면·동작 목록 / UI e2e 게이트 |
+| `sandbox-down [--volumes]` | 컨테이너 정리 |
+
+보증하지 않는 것: 더미는 테스트가 정한 대로만 답하므로 실제 외부 시스템과의 호환은 증명되지 않는다.
+현재 동작을 고정하는 테스트라서 100%는 "모두 실행되고 고정됐다"는 뜻이지 "맞다"는 뜻이 아니다.
 
 ## 층2 리뷰 — 크기에 맞춰 (v0.32.0, 트랙 H7)
 
@@ -1226,6 +1281,7 @@ v0.8.0까지의 환경변수는 `VCF_` 접두였고, v0.9.0부터 `GOODBOY_`로 
 
 | 버전 | 날짜 | 상태 | 한 줄 요약 |
 |---|---|---|---|
+| v0.37.0 | — | 개발 중 | 기존 코드 완전 테스트: 컨테이너 격리 샌드박스(내부 네트워크, 외부 호스트는 더미, DB 덤프는 로컬에만)에서 줄·분기 100% 게이트와 화면·동작별 e2e 게이트를 통과할 때까지 `/backfill-tests` 진행 (트랙 M) |
 | v0.36.19 | 2026-11-12 | 배포됨 | 세션 폴더 밖 형제 저장소의 push가 통과한 테스트 기록을 찾지 못하던 문제 수정 — 그 저장소에서 쓴 테스트·회귀 기록의 사본을 세션 폴더에도 남긴다 (#42) |
 | v0.36.18 | 2026-11-12 | 배포됨 | 상태 가드·리뷰 게이트의 빈틈을 막는다 — 세션 파일 읽기를 일반 파일로 제한하고 `turn.txt`를 보호, 스냅샷 index를 키 해시로 봉인 (#12), 리뷰 차원을 파일별로 판정하고 셸 스크립트에 차원을 요구, 차원 계산 오류 시 막음 (#27) — 에이전트의 `git branch -r` 같은 읽기와 `review-axes … lib/regression.ts`를 쓰기로 막던 오탐 수정 |
 | v0.36.17 | 2026-11-11 | 배포됨 | 로컬 전용 파일을 두는 저장소도 push 검사를 통과할 수 있게, 깨끗한 worktree에서 돌린 테스트를 그 커밋의 기록으로 남긴다(`test-write --worktree`, `regression --worktree`), 거부 메시지가 `.git/info/exclude`를 안내 (#41) — 뮤테이션 실행을 suite로 적으면 경고(#25), 테스트 파일이 사라져 빠진 기록을 한 번 알림(#36), 상태 가드의 `tree -I…` 오탐 |
@@ -1305,6 +1361,18 @@ v0.8.0까지의 환경변수는 `VCF_` 접두였고, v0.9.0부터 `GOODBOY_`로 
 | v0.3.0 | 2026-07-02 | 배포됨 | 컨텍스트 자동 compact 강제 + 재귀 기준 강화 |
 | v0.2.0 | 2026-07-02 | 배포됨 | 재귀 폭주 방어 + 토큰 낭비 방지 게이트 |
 | v0.1.0 (초기 버전) | 2026-06-24 | 배포됨 | 첫 커밋: vcf (Vibe Coding Framework) |
+
+<details>
+<summary><b>v0.37.0</b> — 개발 중 · 기존 코드 완전 테스트, 격리 샌드박스 (트랙 M)</summary>
+
+- `/backfill-tests`가 샌드박스를 선택할 수 있다(3단계에서 한 번 질문). 샌드박스가 있으면 목표는 완전 테스트이고 `backfill-status`의 `goal`이 `complete`가 된다. 없으면 트랙 L과 같다
+- 격리: 준비(`sandbox-prepare`)만 네트워크를 쓰고, 앱과 테스트는 내부 네트워크에서 오프라인으로 돈다. 외부 호스트는 같은 이름의 더미(WireMock·Mailpit·OpenLDAP)가 받는다. DB 덤프는 로컬 컨테이너에만 올라가고 매 실행 전에 되돌린다
+- `sandbox-run`은 스위트 전에 매번 탈출 검사(`inner_only`, `egress_blocked`, `hosts_to_dummies`)를 하고, 실패하면 스위트를 돌리지 않는다. 통과한 실행의 트레이스는 지운다
+- 테스트 기록에 `sandbox: {inner_only, egress_blocked, hosts_to_dummies?, run?}`이 생겼고(`test-write`가 불리언 여부를 검증), 샌드박스가 있는 프로젝트에서는 두 값이 true인 기록만 `backfill-mark`의 증거로 인정된다
+- 두 게이트: `coverage-check`(화면이 아닌 모든 코드 줄·분기 100%, 승인한 `coverage-exempt:` 항목만 제외)와 `ui-check`(`ui-inventory`의 모든 화면·동작에 통과한 e2e `ok` 테스트, 입력을 받는 동작은 `error` 테스트도)
+- 도구 스킬 `run-sandbox`(28번째)를 test-unit·test-ui·test-spec이 쓴다. e2e는 `uiTest`(`.goodboy/sandbox/e2e/goodboy-ui.ts`)와 `ui-inventory`의 id로 쓴다. `setup-test-infra`는 실제 서비스가 필요한 앱에 샌드박스를 안내한다
+
+</details>
 
 <details>
 <summary><b>v0.36.19</b> — 2026-11-12 · 세션 폴더 밖 저장소의 push (#42)</summary>
