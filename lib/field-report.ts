@@ -664,18 +664,49 @@ export function inGoodboyRepo(cwd: string, env: NodeJS.ProcessEnv = process.env)
  *  for the user and one for the model; nothing runs by itself (GOODBOY_INBOX_NOTICE=off). */
 export function inboxNotice(cwd: string, env: NodeJS.ProcessEnv = process.env): { systemMessage: string; context: string } | null {
   if ((env.GOODBOY_INBOX_NOTICE ?? 'on').trim().toLowerCase() === 'off' || !inGoodboyRepo(cwd, env)) return null;
-  let n: number;
+  let n = 0;
   try {
     n = listInbox(env).length;
   } catch {
-    // An unsafe inbox is refused by report-list with the reason; the notice stays silent.
+    // An unsafe inbox is refused by report-list with the reason; the notice says nothing of it.
+  }
+  const issues = unansweredReportIssues(env) ?? 0;
+  if (n === 0 && issues === 0) return null;
+  const parts = [
+    ...(n > 0 ? [`아직 정리하지 않은 현장 리포트가 ${n}건(${inboxDir(env)})`] : []),
+    ...(issues > 0 ? [`답하지 않은 현장 리포트 이슈가 ${issues}건(GitHub)`] : []),
+  ];
+  return {
+    systemMessage: `[goodboy] ${parts.join(', ')} 있어요. /triage-reports로 정리할 수 있어요`,
+    context:
+      `${n} untriaged goodboy field report(s) in ${inboxDir(env)} and ${issues} open field-report issue(s) on ` +
+      `${REPORT_REPO} with no comment. The user may run the repo-local triage-reports skill; do not triage them unless asked.`,
+  };
+}
+
+/** Open field-report issues on goodboy's repo with no comment yet (triage answers each with
+ *  one): titles starting `[field-report]` or labelled so (a non-collaborator's issue may lack
+ *  the label). null when gh cannot tell (missing, no login, offline, slower than 3 s): the
+ *  notice then says nothing of issues. `GOODBOY_GH_BIN` names gh, from `env` or else the
+ *  process (tests point it away; their `env` objects carry only the inbox). gh runs with the
+ *  process environment: it needs PATH, HOME and its login. */
+export function unansweredReportIssues(env: NodeJS.ProcessEnv = process.env): number | null {
+  const gh = (env.GOODBOY_GH_BIN ?? process.env.GOODBOY_GH_BIN)?.trim() || 'gh';
+  const args = ['issue', 'list', '--repo', REPORT_REPO, '--state', 'open', '--search', 'field-report', '--limit', '100', '--json', 'title,labels,comments'];
+  const r = spawnSync(gh, args, { encoding: 'utf8', timeout: 3_000, stdio: ['ignore', 'pipe', 'ignore'] });
+  if (r.status !== 0 || typeof r.stdout !== 'string') return null;
+  try {
+    const list: unknown = JSON.parse(r.stdout);
+    if (!Array.isArray(list)) return null;
+    return list.filter((i: { title?: unknown; labels?: unknown; comments?: unknown }) => {
+      const report =
+        (typeof i?.title === 'string' && i.title.startsWith('[field-report]')) ||
+        (Array.isArray(i?.labels) && i.labels.some((l: { name?: unknown }) => l?.name === 'field-report'));
+      return report && Array.isArray(i.comments) && i.comments.length === 0;
+    }).length;
+  } catch {
     return null;
   }
-  if (n === 0) return null;
-  return {
-    systemMessage: `[goodboy] 아직 정리하지 않은 현장 리포트가 ${n}건 있어요(${inboxDir(env)}). /triage-reports로 정리할 수 있어요`,
-    context: `${n} untriaged goodboy field report(s) wait in ${inboxDir(env)}. The user may run the repo-local triage-reports skill; do not triage them unless asked.`,
-  };
 }
 
 /** Moves a triaged report (`<name>.json` and its `.public.md`) from the inbox's top level to

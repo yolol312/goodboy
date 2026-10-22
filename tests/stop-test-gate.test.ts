@@ -360,6 +360,38 @@ describe('Stop hook — 층1 테스트 게이트', () => {
     expect(out.reason).toContain('UIUX-NEW-1');
   });
 
+  // (I11, #20) Before the verification stage a UI criterion is pending: its screen may have no
+  //   product code yet. From stage 6 (and at 완료) it blocks; an unknown stage blocks too. The
+  //   stage pinned at the session's start counts as well: setting it back relaxes nothing.
+  test.each([
+    ['5', 5, false],
+    ['3', 3, false],
+    ['5', 6, true], // set back from 6 to 5 during the session
+    ['5', undefined, true], // no stage in the pin (an older pin)
+    ['6', 6, true],
+    ['완료', 'done', true],
+    ['', null, true],
+  ])('UI criteria at stage "%s" (pinned %p): block = %p', async (stage, pinned, blocks) => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 3, [CODE_FILE], cwd);
+    const pin = { top: cwd, rows: null, policy: null, ...(pinned === undefined ? {} : { stage: pinned }) };
+    writeFileSync(join(tmp, `goodboy-session-${sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_')}`, 'criteria-pin.json'), JSON.stringify(pin), 'utf8');
+    mkdirSync(join(cwd, 'docs', 'versions', 'v0.1'), { recursive: true });
+    writeFileSync(join(cwd, 'docs', 'CYCLE.md'), `- **현재 버전**: v0.1\n- **현재 단계**: ${stage}\n`, 'utf8');
+    writeFileSync(
+      join(cwd, 'docs', 'versions', 'v0.1', 'UIUX.md'),
+      '## 화면 목록\n\n| 화면 | 구분 |\n|---|---|\n| 설정 | 신규 |\n',
+      'utf8',
+    );
+    const tf = makeTestFile(cwd, 'tests/a.test.ts');
+    writeTestResult(cwd, { testedFiles: [resolve(cwd, CODE_FILE)], testFiles: [tf], acceptance: [goodAcceptance()] });
+
+    const out = await runStop(tmp, cwd, sessionId);
+    const blockedForUi = out.decision === 'block' && String(out.reason).includes('UIUX-NEW-1');
+    expect(blockedForUi).toBe(blocks);
+    if (!blocks) expect(JSON.stringify(out)).toContain('UIUX-NEW-1');
+  });
+
   test('acceptance가 비면 BLOCK — red-green 전체를 건너뛰는 우회 (라이브 실측)', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
     seedSession(tmp, sessionId, 3, [CODE_FILE], cwd);

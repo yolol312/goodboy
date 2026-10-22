@@ -1774,6 +1774,30 @@ Tests: `tests/codex-review-fixes.test.ts`, plus new cases in `tests/i9-claim-roo
   checkup within 24 hours then needs `--replace`. It could complete with the optional steps
   named as skipped.
 
+### 15.15 I11 (#20): UI criteria are pending before the verification stage
+
+A field report (#20, goodboy 0.35.0) came from a dev-cycle project at the start of stage 5
+(implementation). The first change there was one small, already-built requirement. The Stop
+then listed all 31 UIUX/PT criteria of the version as uncovered and blocked the turn. None of
+their screens had product code yet, and a UI criterion's evidence must break product code
+(I2), so the only way out was a blocked result.
+
+Verified: `readAcceptance` returns every UIUX/PT criterion of the version, and the Stop
+requires them on any code-changing turn, whatever the stage.
+
+Fix: `readAcceptance` reads `현재 단계` / `Current stage` from docs/CYCLE.md. Before stage 6
+(verification), uncovered UI criteria are pending: the gate logs `ui-pending(n)` and the user
+sees them listed, and the turn is not blocked. Requirement rows in progress and policy entries
+still block. From stage 6 on, at `완료` and with an unknown stage, every UI criterion blocks as
+before. The product-code evidence rule is unchanged. The criteria pin of SessionStart keeps
+the stage the session started at, and the criteria are pending only when that stage and the
+stage now are both before 6: setting the stage back mid-session relaxes nothing (review of
+I11). `acceptance-list` warns that the UI criteria are pending.
+
+Triage habit (the user, 2026-10-22): in goodboy's repo, the SessionStart notice also counts
+open field-report issues with no comment yet. It asks gh (`GOODBOY_GH_BIN`, at most 3 s) and
+says nothing of issues when gh fails.
+
 ## 16. J — Field reports (v0.34.0)
 
 Asked by the user on 2026-10-16: improvements and bugs found while using goodboy elsewhere

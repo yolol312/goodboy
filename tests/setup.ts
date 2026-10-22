@@ -6,9 +6,15 @@
 // review). It runs before the first test file, not before each: a test that sets one of
 // these variables in process.env restores it itself.
 
+// GOODBOY_DOCKER_IT is an opt-in switch for the real-docker test of track M
+// (tests/m1-sandbox.test.ts), not a gate setting: it stays.
 for (const key of Object.keys(process.env)) {
-  if (key.startsWith('GOODBOY_')) delete process.env[key];
+  if (key.startsWith('GOODBOY_') && key !== 'GOODBOY_DOCKER_IT') delete process.env[key];
 }
+
+// The field-report notice asks gh for unanswered issues on goodboy's repo (#20 triage); a test
+// never reaches GitHub: gh points at a path that does not exist.
+process.env.GOODBOY_GH_BIN = '/nonexistent/goodboy-test-gh';
 
 // The skill rule (track G) denies a main-session code edit without a workflow skill, which
 // every older hook test that edits a source file would hit first. It is off for the suite;

@@ -18,7 +18,7 @@
 
 import { existsSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve as resolvePath } from 'node:path';
-import { findDevCycleArtifacts, isPlaceholderCell, type AcceptanceCriterion } from './acceptance';
+import { findDevCycleArtifacts, isPlaceholderCell, readCurrentStage, VERIFY_STAGE, type AcceptanceCriterion } from './acceptance';
 import { repoTop } from './changed-coverage';
 import { isDocumentFile } from './doc-verification';
 import { ensureSessionDir } from './file-tracker';
@@ -222,6 +222,10 @@ interface CriteriaPin {
   top: string;
   rows: RequirementRow[] | null;
   policy: Record<string, string> | null;
+  /** (I11) The dev-cycle stage at the start: UI criteria are pending only when it and the
+   *  stage now are both before verification, so setting the stage back mid-session relaxes
+   *  nothing (I11 review). Absent in an older pin: unknown. */
+  stage?: number | 'done' | null;
 }
 
 const PIN = 'criteria-pin.json';
@@ -266,7 +270,7 @@ export function pinSessionCriteria(sessionId: string, cwd: string): void {
     const prev = readPin(sessionId);
     if (prev && prev.top === top) return;
     const docs = currentDocs(cwd, top);
-    const pin: CriteriaPin = { top, rows: docs.rows, policy: docs.policy };
+    const pin: CriteriaPin = { top, rows: docs.rows, policy: docs.policy, stage: readCurrentStage(cwd) };
     writeState(sessionId, PIN, pin);
   } catch {
     // no pin: the start counts as unknown
@@ -280,10 +284,18 @@ function readPin(sessionId: string): CriteriaPin | null {
     const rowsOk = p.rows === null || (Array.isArray(p.rows) && p.rows.every((r) => r && typeof r.rank === 'string' && PIN_RANK.test(r.rank) && typeof r.title === 'string' && typeof r.status === 'string'));
     const policyOk = p.policy === null || (typeof p.policy === 'object' && p.policy !== undefined && !Array.isArray(p.policy));
     if (!rowsOk || !policyOk) return null;
-    return { top: p.top, rows: p.rows as RequirementRow[] | null, policy: p.policy as Record<string, string> | null };
+    const stage = p.stage === 'done' || (typeof p.stage === 'number' && Number.isInteger(p.stage) && p.stage >= 0 && p.stage < 100) ? p.stage : null;
+    return { top: p.top, rows: p.rows as RequirementRow[] | null, policy: p.policy as Record<string, string> | null, stage };
   } catch {
     return null;
   }
+}
+
+/** (I11) Whether the session started before the verification stage: its pin names a stage
+ *  below it. No pin, an older pin or an unknown stage: false (UI criteria block). */
+export function startedBeforeVerification(sessionId: string): boolean {
+  const stage = readPin(sessionId)?.stage;
+  return typeof stage === 'number' && stage < VERIFY_STAGE;
 }
 
 const SEEN_ID = new RegExp(`^(?:REQ-\\d{1,${RANK_DIGITS}}|POL-\\S{0,${POLICY_ID_CHARS}})$`);

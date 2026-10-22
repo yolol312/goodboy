@@ -7,7 +7,7 @@ import { readAcceptance } from '../lib/acceptance';
 import { validateTestResultInput } from '../lib/cli';
 import { ensureSessionDir } from '../lib/file-tracker';
 import { MAX_DOC_BYTES, readRegular } from '../lib/safe-read';
-import { pinSessionCriteria, policyInScope, policyTests, productEvidenceProblems, requirementRows, requirementsInScope, sessionCriteria } from '../lib/session-criteria';
+import { pinSessionCriteria, policyInScope, policyTests, productEvidenceProblems, requirementRows, requirementsInScope, sessionCriteria, startedBeforeVerification } from '../lib/session-criteria';
 import { restoreGateState, snapshotGateState } from '../lib/state-guard';
 import type { AcceptanceCoverage, TestResult } from '../lib/types';
 
@@ -179,6 +179,43 @@ describe('requirements', () => {
     const t0 = performance.now();
     expect(requirementRows(md)).toEqual([]);
     expect(performance.now() - t0).toBeLessThan(2000);
+  });
+});
+
+describe('the stage pinned at the session start (I11, #20)', () => {
+  const stageRepo = (stage: string | null) => {
+    const d = devCycleRepo(reqs([[1, '로그인', '구현중']]));
+    write(d, 'docs/CYCLE.md', `# Cycle\n\n- **현재 버전**: 1.0\n${stage === null ? '' : `- **현재 단계**: ${stage}\n`}`);
+    return d;
+  };
+
+  test.each([
+    ['1', true],
+    ['5', true],
+    ['5 (구현)', true],
+    ['6', false],
+    ['완료', false],
+    ['', false],
+    [null, false],
+  ] as const)('stage %p at the start: before verification = %p', (stage, expected) => {
+    const d = stageRepo(stage);
+    const s = sid();
+    pinSessionCriteria(s, d);
+    expect(startedBeforeVerification(s)).toBe(expected);
+  });
+
+  test('no pin at all: not before verification (the UI criteria block)', () => {
+    expect(startedBeforeVerification(sid())).toBe(false);
+  });
+
+  test('setting the stage back after the pin relaxes nothing; a second pin keeps the start', () => {
+    const d = stageRepo('6');
+    const s = sid();
+    pinSessionCriteria(s, d);
+    write(d, 'docs/CYCLE.md', '# Cycle\n\n- **현재 버전**: 1.0\n- **현재 단계**: 5\n');
+    expect(startedBeforeVerification(s)).toBe(false);
+    pinSessionCriteria(s, d); // SessionStart again (resume, clear, compact)
+    expect(startedBeforeVerification(s)).toBe(false);
   });
 });
 
@@ -377,6 +414,29 @@ describe('end to end', () => {
     r.record(['REQ-1']);
     const next = await r.stop();
     expect(next.reason ?? '').not.toContain('REQ-1');
+    expect(next.reason).toContain('Review is required');
+  }, 60_000);
+
+  // (I11, #20) At stage 5 the UI criteria are pending, but a requirement row in progress still
+  //   blocks: only the UI ones wait for the verification stage.
+  test('I11 AC-3: at stage 5 an uncovered UI criterion is only listed, the requirement in progress still blocks', async () => {
+    const d = devCycleRepo(reqs([[1, '내보내기', '구현중']]));
+    write(d, 'docs/CYCLE.md', '# Cycle\n\n- **현재 버전**: 1.0\n- **현재 단계**: 5\n');
+    write(d, 'docs/versions/1.0/UIUX.md', '## 화면 목록\n\n| 화면 | 구분 |\n|---|---|\n| 설정 | 신규 |\n');
+    sh(d, "git add -A && git -c commit.gpgsign=false commit -q -m 'ABC-1 stage 5'");
+    expect(readAcceptance(d).uiPending).toBe(true);
+    const r = rig(d);
+    await r.start();
+    await r.edit();
+    r.record(['AC-1']);
+    const blocked = await r.stop();
+    expect(blocked.decision).toBe('block');
+    expect(blocked.reason).toContain('REQ-1');
+    expect(blocked.reason).not.toContain('UIUX-NEW-1');
+    r.record(['REQ-1']);
+    const next = await r.stop();
+    expect(next.reason ?? '').not.toContain('REQ-1');
+    expect(next.reason ?? '').not.toContain('UIUX-NEW-1');
     expect(next.reason).toContain('Review is required');
   }, 60_000);
 

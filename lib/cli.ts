@@ -33,11 +33,7 @@ import { catalogRows, renderCatalog, TEST_CATALOG_FILE } from './test-catalog';
 import { recordTestProfile } from './test-profile';
 import { changedLineCount, realish, reviewPlan, reviewPlanNote } from './review-scope';
 import { agentName, ROUTE } from './routing-policy';
-import {
-  findDevCycleArtifacts,
-  prototypeContractWarnings,
-  requiredAcceptanceCriteria,
-} from './acceptance';
+import { findDevCycleArtifacts, prototypeContractWarnings, readAcceptance, VERIFY_STAGE } from './acceptance';
 import { AXIS_DIMENSIONS, axesFor, requiredDimensionsFor } from './review-dimensions';
 import { MAX_DOC_BYTES, readRegular } from './safe-read';
 import { appendSkillGapLog, recordSkillEvidence, validateSkillGapNote } from './skill-rule';
@@ -749,8 +745,14 @@ function cmdAcceptanceList(cwd: string): void {
   const artifacts = findDevCycleArtifacts(cwd);
   // (I2) Plus the requirements in progress. The rest of the session's criteria (rows done or
   //   policy lines added since its start) need the session's pin: the gate's message lists them.
-  const criteria = [...requiredAcceptanceCriteria(cwd), ...criteriaNow(cwd)];
+  const reading = readAcceptance(cwd);
+  const criteria = [...reading.criteria, ...criteriaNow(cwd)];
   const warnings: string[] = [];
+  // (I11, #20) Before the verification stage the UI criteria are pending: the gate lists them
+  //   without blocking when the session also started before it.
+  if (reading.uiPending) {
+    warnings.push(`UIUX-*/PT-* criteria are pending until dev-cycle stage ${VERIFY_STAGE} (verification): test them as their screens get product code.`);
+  }
   if (artifacts?.prototypePath) {
     // Not a plain read: a FIFO there hung acceptance-list (I2 refactoring review round 4).
     const read = readRegular(artifacts.prototypePath, MAX_DOC_BYTES);

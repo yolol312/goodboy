@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { type Evidence, type FieldReportInput, inboxNotice, inGoodboyRepo, listInbox, markFiled, markTriaged, publishProblems, writeFieldReport } from '../lib/field-report';
+import { type Evidence, type FieldReportInput, inboxNotice, inGoodboyRepo, listInbox, markFiled, markTriaged, publishProblems, unansweredReportIssues, writeFieldReport } from '../lib/field-report';
 
 // Track J, J2 (#9, plan §16): the inbox notice in goodboy's repo, the inbox moves the
 // triage-reports skill uses, and the GitHub issue form.
@@ -79,6 +79,31 @@ describe('J2: the inbox list and the notice', () => {
     expect(inboxNotice(tmp(), env)).toBeNull();
     expect(inboxNotice(ROOT, { GOODBOY_INBOX_DIR: join(tmp(), 'empty') })).toBeNull();
     expect(inboxNotice(ROOT, { ...env, GOODBOY_INBOX_NOTICE: 'off' })).toBeNull();
+  });
+
+  // (#20 triage) The notice also counts field-report issues nobody answered yet, through gh.
+  test('unanswered field-report issues on GitHub join the notice; gh failing says nothing of them', () => {
+    const fake = join(tmp(), 'gh');
+    const issues = [
+      { title: '[field-report] a', labels: [], comments: [] },
+      { title: 'labelled only', labels: [{ name: 'field-report' }], comments: [] },
+      { title: '[field-report] answered', labels: [], comments: [{ body: 'decision' }] },
+      { title: 'another issue', labels: [], comments: [] },
+    ];
+    writeFileSync(fake, `#!/bin/sh\ncat <<'EOF'\n${JSON.stringify(issues)}\nEOF\n`);
+    chmodSync(fake, 0o755);
+    const empty = { GOODBOY_INBOX_DIR: join(tmp(), 'empty'), GOODBOY_GH_BIN: fake };
+    expect(unansweredReportIssues(empty)).toBe(2);
+    const n = inboxNotice(ROOT, empty)!;
+    expect(n.systemMessage).toContain('답하지 않은 현장 리포트 이슈가 2건');
+    expect(n.systemMessage).not.toContain('정리하지 않은 현장 리포트가');
+    const failing = join(tmp(), 'gh-fail');
+    writeFileSync(failing, '#!/bin/sh\nexit 1\n');
+    chmodSync(failing, 0o755);
+    expect(unansweredReportIssues({ GOODBOY_GH_BIN: failing })).toBeNull();
+    expect(inboxNotice(ROOT, { ...empty, GOODBOY_GH_BIN: failing })).toBeNull();
+    writeFileSync(fake, `#!/bin/sh\necho 'not json'\n`);
+    expect(unansweredReportIssues(empty)).toBeNull();
   });
 
   test('through the SessionStart hook: on startup in the repo, not after a compaction', async () => {

@@ -34,7 +34,7 @@ import { missingTestTypes, testerFor, testTypesMode, type TypeNeed, typeGapReaso
 import { needsTests } from '../lib/verification-scope';
 import { documentChangeNote, isDocumentChange } from '../lib/doc-verification';
 import { frictionNotice } from '../lib/friction';
-import { productEvidenceProblems, sessionCriteria } from '../lib/session-criteria';
+import { productEvidenceProblems, sessionCriteria, startedBeforeVerification } from '../lib/session-criteria';
 import {
   citationBlockMessage,
   CLI_PATH,
@@ -753,7 +753,20 @@ function evaluateTestResults(
     logGate(sessionId, 'test', 'deny', 'criteria-unreadable');
     return block(`${session.problem} Fix the file (or ask the user); until then its criteria count as untested.`);
   }
-  const uncovered = uncoveredCriteria(ran, [...acceptance.criteria, ...session.criteria]);
+  // (I11, #20) Before the verification stage the UI criteria are pending: their screens may
+  //   have no product code yet, and only a test of product code proves one. They are listed,
+  //   not blocking; the requirement rows and policy entries still block. The stage at the
+  //   session's start counts too, so setting it back mid-session relaxes nothing.
+  const uiPending = acceptance.uiPending === true && startedBeforeVerification(sessionId);
+  const pendingUi = uiPending ? uncoveredCriteria(ran, acceptance.criteria) : [];
+  if (pendingUi.length > 0) {
+    logGate(sessionId, 'test', 'warn', `ui-pending(${pendingUi.length})`);
+    habitWarnings.push(
+      `[goodboy] 아직 테스트되지 않은 UI 수용 기준 ${pendingUi.length}개는 검증 단계(6단계)부터 막아요: ` +
+        `${pendingUi.slice(0, 5).map((c) => c.id).join(', ')}${pendingUi.length > 5 ? ` 외 ${pendingUi.length - 5}개` : ''}.`,
+    );
+  }
+  const uncovered = uncoveredCriteria(ran, [...(uiPending ? [] : acceptance.criteria), ...session.criteria]);
   if (uncovered.length > 0) {
     // The uncovered ones, up to 20: the list is the session's, which acceptance-list (the
     //   documents now) cannot show.

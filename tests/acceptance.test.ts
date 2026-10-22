@@ -18,9 +18,11 @@ import {
   findDevCycleArtifacts,
   hasStateToggle,
   isPlaceholderCell,
+  parseCurrentStage,
   parseCurrentVersion,
   prototypeContractWarnings,
   readAcceptance,
+  readCurrentStage,
   requiredAcceptanceCriteria,
 } from '../lib/acceptance';
 
@@ -39,6 +41,79 @@ afterEach(() => {
       // best-effort
     }
   }
+});
+
+describe('parseCurrentStage (I11, #20)', () => {
+  test.each([
+    ['- **현재 단계**: 5\n', 5],
+    ['- **Current stage**: 3\n', 3],
+    ['* **current stage**: 6\n', 6],
+    ['# 개발 사이클\n\n- **현재 버전**: v0.3\n- **현재 단계**: 12\n', 12],
+    ['- **현재 단계**: **5**\n', 5],
+    ['- **현재 단계**: `5`\n', 5],
+    ['- **현재 단계**: 5 (구현)\n', 5],
+    ['- **현재 단계**: 5. 구현\n', 5],
+    ['- **현재 단계**: 완료\n', 'done'],
+    ['- **현재 단계**: **완료**\n', 'done'],
+    ['- **Current stage**: done\n', 'done'],
+    ['- **Current stage**: `Done`\n', 'done'],
+    ['- **Current stage**: completed\n', 'done'],
+  ] as const)('%j reads as %p', (text, expected) => {
+    expect(parseCurrentStage(text)).toBe(expected);
+  });
+
+  test.each([
+    ['empty value', '- **현재 단계**: \n'],
+    ['a placeholder', '- **현재 단계**: <1-6>\n'],
+    ['a word that is not a stage', '- **현재 단계**: 구현\n'],
+    ['a number glued to letters', '- **현재 단계**: 5abc\n'],
+    ['no stage line', '- **현재 버전**: v0.3\n'],
+    ['an empty document', ''],
+  ])('%s is null', (_name, text) => {
+    expect(parseCurrentStage(text)).toBeNull();
+  });
+});
+
+describe('readCurrentStage (I11, #20)', () => {
+  test('reads the stage from docs/CYCLE.md; null without the file or the line', () => {
+    const cwd = newSandbox();
+    expect(readCurrentStage(cwd)).toBeNull();
+    mkdirSync(join(cwd, 'docs'), { recursive: true });
+    writeFileSync(join(cwd, 'docs', 'CYCLE.md'), '- **현재 버전**: v0.1\n', 'utf8');
+    expect(readCurrentStage(cwd)).toBeNull();
+    writeFileSync(join(cwd, 'docs', 'CYCLE.md'), '- **현재 버전**: v0.1\n- **현재 단계**: 4\n', 'utf8');
+    expect(readCurrentStage(cwd)).toBe(4);
+    writeFileSync(join(cwd, 'docs', 'CYCLE.md'), '- **현재 단계**: 완료\n', 'utf8');
+    expect(readCurrentStage(cwd)).toBe('done');
+  });
+
+  test('a CYCLE.md that is a directory reads as null', () => {
+    const cwd = newSandbox();
+    mkdirSync(join(cwd, 'docs', 'CYCLE.md'), { recursive: true });
+    expect(readCurrentStage(cwd)).toBeNull();
+  });
+});
+
+describe('readAcceptance: uiPending follows the stage (I11, #20)', () => {
+  const read = (stage: string | null) => {
+    const cwd = newSandbox();
+    mkdirSync(join(cwd, 'docs', 'versions', 'v0.1'), { recursive: true });
+    writeFileSync(join(cwd, 'docs', 'CYCLE.md'), `- **현재 버전**: v0.1\n${stage === null ? '' : `- **현재 단계**: ${stage}\n`}`, 'utf8');
+    writeFileSync(join(cwd, 'docs', 'versions', 'v0.1', 'UIUX.md'), '## 화면 목록\n\n| 화면 | 구분 |\n|---|---|\n| 설정 | 신규 |\n', 'utf8');
+    return readAcceptance(cwd);
+  };
+
+  test.each(['1', '5', '5 (구현)'])('stage %s: pending, criteria kept', (stage) => {
+    const r = read(stage);
+    expect(r.uiPending).toBe(true);
+    expect(r.criteria.map((c) => c.id)).toContain('UIUX-NEW-1');
+  });
+
+  test.each(['6', '7', '완료', 'done', '', null])('stage %p: not pending', (stage) => {
+    const r = read(stage);
+    expect(r.uiPending).toBeUndefined();
+    expect(r.criteria.map((c) => c.id)).toContain('UIUX-NEW-1');
+  });
 });
 
 describe('parseCurrentVersion', () => {

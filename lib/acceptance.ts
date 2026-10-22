@@ -202,6 +202,28 @@ export function parseCurrentVersion(cycleMd: string): string | null {
   return v;
 }
 
+const CURRENT_STAGE_LINE = /^[ \t]*[-*][ \t]*\*\*(?:현재 단계|current stage)\*\*[ \t]*:[ \t]*(.*)$/im;
+
+/** docs/CYCLE.md's `- **현재 단계**: 5` (or `Current stage`): the stage number, `done` (완료),
+ *  or null when it is missing or unreadable. */
+export function parseCurrentStage(cycleMd: string): number | 'done' | null {
+  const m = CURRENT_STAGE_LINE.exec(cycleMd ?? '');
+  if (!m) return null;
+  const v = m[1]!.trim().replace(/[*`]/g, '');
+  if (/^(?:완료|done|complete[d]?)$/i.test(v)) return 'done';
+  const n = /^(\d{1,2})(?:\s|\.|$|\()/.exec(v);
+  return n ? Number(n[1]) : null;
+}
+
+/** The dev-cycle stage that verifies the version: from here on every UI criterion blocks. */
+export const VERIFY_STAGE = 6;
+
+/** The stage docs/CYCLE.md names now, or null (no file, unreadable, no stage line). */
+export function readCurrentStage(cwd: string): number | 'done' | null {
+  const cycle = readCycleMd(cwd);
+  return typeof cycle === 'string' ? null : parseCurrentStage(cycle.text);
+}
+
 /** docs/CYCLE.md: its text, `missing`, or `unreadable` when it exists but cannot be read. */
 function readCycleMd(cwd: string): { text: string } | 'missing' | 'unreadable' {
   const read = readRegular(resolvePath(cwd, 'docs', 'CYCLE.md'), MAX_DOC_BYTES);
@@ -504,6 +526,10 @@ export interface AcceptanceReading {
    * `no-criteria`, which is why this is a warning and not a block.
    */
   problem: AcceptanceProblem | null;
+  /** (I11, #20) The stage is before verification (6): the UI criteria are pending, listed but
+   *  not blocking, since their screens may have no product code yet. An unknown stage is not
+   *  before it: the criteria block as before. Set only when true. */
+  uiPending?: true;
 }
 
 /** Nothing to read: no dev-cycle documents, or layer 1 switched off. */
@@ -524,9 +550,11 @@ export function readAcceptance(cwd: string): AcceptanceReading {
     if (!art) return NO_ACCEPTANCE;
     const { criteria, unreadable } = criteriaOf(art);
     const files = [art.uiuxPath, art.prototypePath].filter((p): p is string => p !== null);
+    const stage = parseCurrentStage(cycle.text);
     return {
       devCycle: true,
       criteria,
+      ...(typeof stage === 'number' && stage < VERIFY_STAGE ? { uiPending: true as const } : {}),
       problem:
         unreadable.length > 0
           ? { kind: 'unreadable', files: unreadable }
