@@ -635,6 +635,8 @@ function isAllowedInsideProject(rel: string): boolean {
   //   shell redirect), so a shell write into .claude/tests or .claude/reviews is a forged
   //   result and counts as a project write.
   if (first === '.claude' && ['tests', 'reviews', 'pending'].includes(parts[1] ?? '')) return false;
+  // Track M: the sandbox run results (result.json of each run) are written by sandbox-run only.
+  if (first === '.goodboy' && parts[1] === 'sandbox' && parts[2] === 'out') return false;
   if (['.claude', '.git', 'node_modules', 'dist', 'build', 'coverage', 'target'].includes(first)) {
     return true;
   }

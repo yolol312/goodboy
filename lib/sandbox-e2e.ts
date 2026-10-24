@@ -10,6 +10,7 @@
 //   /build    the build volume the preparation step filled (the app runs from it)
 
 import type { SandboxStack } from './sandbox-types';
+import { NONCE_ANNOTATION, NONCE_HEADER } from './ui-types';
 
 export const E2E_DIR = 'e2e';
 /** Where the proxy listens inside `inner`; the e2e service's baseURL. */
@@ -135,14 +136,17 @@ export default defineConfig({
 export function uiFixture(): string {
   return `// The e2e fixture of the sandbox (goodboy sandbox-init, track M3): ties a browser test to the ids of
 // \`bun lib/cli.ts ui-inventory\`. Every request the test sends (page, context and \`request\`) carries
-// the header \`x-goodboy-ui: <id>:ok|error\`, which the logging proxy records, and the test carries
-// a \`goodboy-ui\` annotation with the same claims, which the Playwright JSON report records.
-// \`ui-check\` joins the two: a claim counts only when the test passed and a logged request under
-// it reached the item's route.
+// the header \`x-goodboy-ui: <id>:ok|error\` and a header \`${NONCE_HEADER}\` with a nonce that is new for
+// each \`uiTest\`, which the logging proxy records; the test carries a \`goodboy-ui\` annotation with
+// the same claims and a \`${NONCE_ANNOTATION}\` annotation with the nonce, which the Playwright JSON report
+// records. \`ui-check\` joins the two by the nonce: a claim counts only when the test that holds it
+// passed and a request of that same test reached the item's route (a screen or a form needs a page
+// navigation: a request sent with \`page.request\` or \`fetch\` does not cover it).
 //
 //   import { uiTest } from '../.goodboy/sandbox/e2e/goodboy-ui';
 //   uiTest(['form:POST:/orders/save:ok'], 'saves an order', async ({ page }) => { ... });
 //   uiTest(['form:POST:/orders/save:error'], 'rejects an empty title', async ({ page }) => { ... });
+import { randomBytes } from 'node:crypto';
 import {
   test as base,
   type PlaywrightTestArgs,
@@ -154,13 +158,17 @@ import {
 
 export const HEADER = 'x-goodboy-ui';
 export const ANNOTATION = 'goodboy-ui';
+export const NONCE_HEADER = '${NONCE_HEADER}';
+export const NONCE_ANNOTATION = '${NONCE_ANNOTATION}';
 
-/** \`test\` with the claims of the running test as an option and an annotation that records them. */
-export const test = base.extend<{ goodboyClaims: string[]; goodboyAnnotate: void }>({
+/** \`test\` with the claims and the nonce of the running test as options and annotations that record them. */
+export const test = base.extend<{ goodboyClaims: string[]; goodboyNonce: string; goodboyAnnotate: void }>({
   goodboyClaims: [[], { option: true }],
+  goodboyNonce: ['', { option: true }],
   goodboyAnnotate: [
-    async ({ goodboyClaims }, use, testInfo) => {
+    async ({ goodboyClaims, goodboyNonce }, use, testInfo) => {
       for (const c of goodboyClaims) testInfo.annotations.push({ type: ANNOTATION, description: c });
+      if (goodboyNonce !== '') testInfo.annotations.push({ type: NONCE_ANNOTATION, description: goodboyNonce });
       await use();
     },
     { auto: true },
@@ -175,8 +183,10 @@ export function uiTest(ids: string[], title: string, fn: (args: Args, testInfo: 
   for (const c of ids) {
     if (!/^[\\x21-\\x7e]+:(?:ok|error)$/.test(c) || /[,;]/.test(c)) throw new Error(\`uiTest: "\${c}" is not <id>:ok|error (an id has no space, comma, semicolon or non-ASCII character)\`);
   }
+  // one nonce per uiTest call, so that ui-check can tell this test's requests from any other's
+  const nonce = randomBytes(8).toString('hex');
   test.describe(() => {
-    test.use({ goodboyClaims: ids, extraHTTPHeaders: { [HEADER]: ids.join(',') } });
+    test.use({ goodboyClaims: ids, goodboyNonce: nonce, extraHTTPHeaders: { [HEADER]: ids.join(','), [NONCE_HEADER]: nonce } });
     test(title, fn);
   });
 }
@@ -284,11 +294,13 @@ export function coveragePrep(stack: SandboxStack, tool: string): string[] {
     ];
   }
   if (stack === 'node') {
-    return ['# the coverage tool: c8 turns the V8 coverage data into lcov', `npm install --prefix /goodboy-tools --no-save --no-package-lock --ignore-scripts c8@${C8_VERSION}`];
+    // (c8's own dependencies are not pinned: that needs a lock file made with network access)
+    return ['# the coverage tool: c8 turns the V8 coverage data into lcov', `npm install --prefix /goodboy-tools --no-save --no-package-lock --ignore-scripts --no-audit --no-fund c8@${C8_VERSION}`];
   }
   return [
     '# the coverage tool: coverage.py, started in every Python process by a .pth file when COVERAGE_PROCESS_START is set',
-    `pip install coverage==${COVERAGE_PY_VERSION}`,
+    '# (a wheel only: an sdist would run its build script, and coverage has no dependencies)',
+    `pip install --only-binary=:all: --no-deps coverage==${COVERAGE_PY_VERSION}`,
     ...(tool === 'poetry' || tool === 'uv' ? ['echo "goodboy: this project runs in a poetry or uv environment; the coverage hook is installed for the system Python only"'] : []),
     'SITE="$(python -c \'import site; print(site.getusersitepackages())\')"',
     'mkdir -p "$SITE"',
@@ -335,16 +347,17 @@ for f in /out/coverage-raw/unit/jacoco.exec /out/coverage-raw/e2e/jacoco.exec; d
 done
 if [ -z "$EXECS" ]; then echo "goodboy: no JaCoCo execution data"; exit 3; fi
 java -jar /jacoco/jacococli.jar merge $EXECS --destfile /out/coverage-raw/merged.exec || exit 5
-CLASSES=""
-for d in $(find /build -type d \\( -path '*/build/classes/java/main' -o -path '*/build/classes/kotlin/main' -o -path '*/target/classes' \\) ! -path '*/node_modules/*'); do
-  CLASSES="$CLASSES --classfiles $d"
-done
-SOURCES=""
-for d in $(find /build -type d \\( -path '*/src/main/java' -o -path '*/src/main/kotlin' \\) ! -path '*/node_modules/*'); do
-  SOURCES="$SOURCES --sourcefiles $d"
-done
-if [ -z "$CLASSES" ]; then echo "goodboy: no compiled classes in /build; run sandbox-prepare"; exit 6; fi
-java -jar /jacoco/jacococli.jar report /out/coverage-raw/merged.exec $CLASSES $SOURCES --xml /out/coverage/jacoco.xml || exit 5
+# The class and source dirs go into "$@" one quoted word each (read -r per line, no word splitting):
+# a dir with a space or a glob character in its name stays one argument and cannot add an option.
+LIST="$(mktemp)"
+find /build -type d \\( -path '*/build/classes/java/main' -o -path '*/build/classes/kotlin/main' -o -path '*/target/classes' \\) ! -path '*/node_modules/*' > "$LIST"
+set --
+while IFS= read -r d; do set -- "$@" --classfiles "$d"; done < "$LIST"
+if [ "$#" -eq 0 ]; then echo "goodboy: no compiled classes in /build; run sandbox-prepare"; exit 6; fi
+find /build -type d \\( -path '*/src/main/java' -o -path '*/src/main/kotlin' \\) ! -path '*/node_modules/*' > "$LIST"
+while IFS= read -r d; do set -- "$@" --sourcefiles "$d"; done < "$LIST"
+rm -f "$LIST"
+java -jar /jacoco/jacococli.jar report /out/coverage-raw/merged.exec "$@" --xml /out/coverage/jacoco.xml || exit 5
 echo "goodboy: wrote /out/coverage/jacoco.xml"
 `;
   }

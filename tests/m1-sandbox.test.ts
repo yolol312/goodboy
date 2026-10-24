@@ -2,13 +2,14 @@
 // (lib/sandbox-files.ts) and the docker side (lib/sandbox-run.ts), with a fake docker for the
 // check logic and one opt-in test against a real docker (GOODBOY_DOCKER_IT=1).
 
-import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { afterAll, afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { checkSandbox, type Ctx, loadCtx, parseNslookup, probeScript, projectName, staticProblems } from '../lib/sandbox-run';
+import { checkSandbox, type Ctx, loadCtx, parseNslookup, probeScript, projectName, sandboxCommand, staticProblems } from '../lib/sandbox-run';
+import { RESTORE_TAG } from '../lib/sandbox-parts';
 import { configKeyAt, IMAGES, planSandbox, renderSandbox, SANDBOX_DIR, SCAN_FILE } from '../lib/sandbox-render';
-import { initSandbox, outOfDate, readLocal, writeLocal } from '../lib/sandbox-files';
+import { initSandbox, outOfDate, readLocal, readScan, writeLocal, writeScan } from '../lib/sandbox-files';
 import type { SandboxLocal, SandboxOutbound, SandboxScan, SandboxStore } from '../lib/sandbox-types';
 
 // Each CLI run starts bun and loads the whole CLI: a test with a few of them takes seconds.
@@ -17,11 +18,19 @@ setDefaultTimeout(60_000);
 const CLI = resolve(import.meta.dir, '..', 'lib', 'cli.ts');
 const tmpDirs: string[] = [];
 const savedBin = process.env.GOODBOY_DOCKER_BIN;
-afterEach(() => {
-  while (tmpDirs.length) rmSync(tmpDirs.pop()!, { recursive: true, force: true });
+const savedFakeDir = process.env.FAKE_DOCKER_DIR;
+/** fake() points the process at its fake docker; the file leaves the environment as it found it. */
+function restoreDockerEnv(): void {
   if (savedBin === undefined) delete process.env.GOODBOY_DOCKER_BIN;
   else process.env.GOODBOY_DOCKER_BIN = savedBin;
+  if (savedFakeDir === undefined) delete process.env.FAKE_DOCKER_DIR;
+  else process.env.FAKE_DOCKER_DIR = savedFakeDir;
+}
+afterEach(() => {
+  while (tmpDirs.length) rmSync(tmpDirs.pop()!, { recursive: true, force: true });
+  restoreDockerEnv();
 });
+afterAll(restoreDockerEnv);
 
 function dir(prefix = 'goodboy-m1-'): string {
   const d = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
@@ -109,7 +118,7 @@ const read = (scan: SandboxScan, local = NO_DUMP, o = {}) => planSandbox(scan, l
 
 interface Compose {
   services: Record<string, { image: string; profiles?: string[]; networks?: string[] | Record<string, { aliases?: string[]; ipv4_address?: string } | null>; ports?: unknown[]; volumes?: string[]; environment?: Record<string, string>; env_file?: string[]; command?: string[]; entrypoint?: string[]; depends_on?: Record<string, unknown> }>;
-  networks: Record<string, { internal?: boolean; driver?: string; ipam?: { config: { subnet: string; gateway?: string }[] } }>;
+  networks: Record<string, { internal?: boolean; driver?: string; driver_opts?: Record<string, string>; ipam?: { config: { subnet: string; gateway?: string; aux_addresses?: Record<string, string> }[] } }>;
   volumes: Record<string, unknown>;
 }
 
@@ -144,8 +153,16 @@ describe('compose networks', () => {
   });
 
   test('inner is internal with a fixed subnet that can be moved', () => {
-    expect(parse(read(jvmScan())).networks.inner).toEqual({ internal: true, ipam: { config: [{ subnet: '10.231.0.0/24' }] } });
-    expect(parse(read(jvmScan(), NO_DUMP, { innerSubnet: '10.99.0.0/24' })).networks.inner!.ipam!.config[0]!.subnet).toBe('10.99.0.0/24');
+    // no address for the host (inhibit_ipv4); the first address stays reserved so nothing answers there
+    expect(parse(read(jvmScan())).networks.inner).toEqual({
+      internal: true,
+      driver_opts: { 'com.docker.network.bridge.inhibit_ipv4': 'true' },
+      ipam: { config: [{ subnet: '10.231.0.0/24', aux_addresses: { 'goodboy-gateway': '10.231.0.1' } }] },
+    });
+    const moved = read(jvmScan(), NO_DUMP, { innerSubnet: '10.99.0.0/24' });
+    expect(parse(moved).networks.inner!.ipam!.config[0]!.subnet).toBe('10.99.0.0/24');
+    expect(moved.innerGateway).toBe('10.99.0.1');
+    expect(read(jvmScan()).innerGateway).toBe('10.231.0.1');
   });
 
   test('the dummies take the real host names as aliases on inner', () => {
@@ -157,7 +174,7 @@ describe('compose networks', () => {
 
   test('an IP literal gets its own internal /24 where the dummy holds that exact address and the app joins', () => {
     const c = parse(read(jvmScan()));
-    expect(c.networks.ip_10_20_30).toEqual({ internal: true, ipam: { config: [{ subnet: '10.20.30.0/24', gateway: '10.20.30.254' }] } });
+    expect(c.networks.ip_10_20_30).toEqual({ internal: true, driver_opts: { 'com.docker.network.bridge.inhibit_ipv4': 'true' }, ipam: { config: [{ subnet: '10.20.30.0/24' }] } });
     expect(netOpts(c.services.stubs!, 'ip_10_20_30')).toEqual({ ipv4_address: '10.20.30.40' });
     expect(netNames(c.services.app!)).toEqual(['inner', 'ip_10_20_30']);
     expect(netNames(c.services.runner!)).toEqual(['inner', 'ip_10_20_30']);
@@ -166,7 +183,7 @@ describe('compose networks', () => {
     expect(plan.internalNets).toEqual(['inner', 'ip_10_20_30']);
   });
 
-  test('a literal at .254 moves the gateway aside; a literal in the inner subnet and a second one for a dummy are reported', () => {
+  test('a literal anywhere in its /24 is fine (no gateway to avoid); a literal in the inner subnet and a second one for a dummy are reported', () => {
     const s = jvmScan();
     s.outbound = [
       { ...out('x', 'http'), host: '192.168.5.254', ipLiteral: true, hardcoded: true },
@@ -175,7 +192,7 @@ describe('compose networks', () => {
       { ...out('x', 'http'), host: '10.231.0.7', ipLiteral: true, hardcoded: true },
     ];
     const plan = read(s);
-    expect(parse(plan).networks.ip_192_168_5!.ipam!.config[0]!.gateway).toBe('192.168.5.253');
+    expect(parse(plan).networks.ip_192_168_5!.ipam!.config[0]).toEqual({ subnet: '192.168.5.0/24' });
     expect(plan.notes.some((n) => n.includes('192.168.5.10') && n.includes('one address per network'))).toBe(true);
     expect(plan.notes.some((n) => n.includes('10.231.0.7') && n.includes('inner subnet'))).toBe(true);
     expect(plan.dummies.map((d) => d.host)).toEqual(['192.168.5.254', '192.168.5.9']);
@@ -327,7 +344,7 @@ describe('compose content', () => {
     const r = c.services.runner!;
     expect(r.profiles).toEqual(['tools']);
     expect(r.command).toEqual(['./gradlew', 'test', '--offline']);
-    expect(r.volumes).toEqual(expect.arrayContaining(['../..:/work', 'gradle:/root/.gradle', 'm2:/root/.m2']));
+    expect(r.volumes).toEqual(expect.arrayContaining(['../..:/work', 'gradle:/gradle-home', 'm2:/root/.m2']));
     expect(c.services.probe).toMatchObject({ image: 'busybox:1.36', profiles: ['tools'], networks: ['inner'] });
   });
 
@@ -442,6 +459,15 @@ describe('the config override', () => {
     expect(plan.files.get('runtime/entrypoint.sh')).not.toContain('keytool');
   });
 
+  test('a literal `$` in an env file value is written `$$`, which Compose turns back into `$`', () => {
+    const s = nodeScan();
+    s.outbound = [{ ...out('api.partner.example', 'http'), where: w('.env.production', 3) }];
+    const cfg = 'PARTNER_API_URL=https://api.partner.example/v1/$TENANT/${REGION}\n';
+    const env = read(s, NO_DUMP, { readConfig: () => cfg.replace(/^/, '\n\n') }).files.get('overrides/sandbox.env')!;
+    expect(env).toContain('PARTNER_API_URL=https://api.partner.example:443/v1/$$TENANT/$${REGION}');
+    expect(/(?<!\$)\$(?!\$)/.test(env.replace(/\$\$/g, ''))).toBe(false);
+  });
+
   test('Python: the CA bundle variables, a deps volume shared by prep, the app and the runner', () => {
     const plan = read(pythonScan(), NO_DUMP, { readConfig: () => null });
     const c = parse(plan);
@@ -524,6 +550,26 @@ const cli = (root: string, args: string[], env: Record<string, string> = {}) =>
 
 const json = (r: ReturnType<typeof cli>) => JSON.parse(r.stdout.toString());
 const hasOpenssl = Bun.which('openssl') !== null;
+
+describe('the saved scan and the config root', () => {
+  test('the saved scan keeps root as `.`, and the override keys are read from the repo the command runs in', () => {
+    const root = dir();
+    mkdirSync(dirname(join(root, APP_YML)), { recursive: true });
+    writeFileSync(join(root, APP_YML), CONFIG);
+    const scan = jvmScan();
+    scan.root = root;
+    const path = writeScan(root, scan);
+    expect(typeof path).toBe('string');
+    const saved = JSON.parse(readFileSync(path as string, 'utf8'));
+    expect(saved.root).toBe('.');
+    expect(readFileSync(path as string, 'utf8')).not.toContain(root);
+    expect(readScan(root)).not.toBeInstanceOf(Error);
+    const ctx = loadCtx(root, false);
+    if (ctx instanceof Error) throw ctx;
+    // the base DN of the test directory comes from ldap.url in the config file at root
+    expect(ctx.plan.files.get('dummies/ldap/seed.ldif')).toContain('dc=corp,dc=example');
+  });
+});
 
 describe.skipIf(!hasOpenssl)('sandbox-init', () => {
   test('writes the files and the ledger, and a second run changes nothing', async () => {
@@ -676,6 +722,17 @@ describe.skipIf(!hasOpenssl)('sandbox-init', () => {
 });
 
 describe('sandbox-local', () => {
+  // A dump must be under the home directory (the docker VMs mount only that): the temp dirs the
+  // tests use stand in for it.
+  const savedHome = process.env.HOME;
+  beforeEach(() => {
+    process.env.HOME = realpathSync(tmpdir());
+  });
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+  });
+
   test('writes local.json with mode 0600, a .gitignore that hides it, and reads back', () => {
     const root = dir();
     const dump = join(dir(), 'shop.sql');
@@ -733,16 +790,44 @@ interface Fake {
 const FAKE = `#!/bin/sh
 d="$FAKE_DOCKER_DIR"
 echo "$*" >> "$d/calls.log"
+# What a test running as root in a container with the run dir at /out can do: leave links in it
+# that point at a file of the host (the first argument lists the file names, FAKE_VICTIM is the
+# target; FAKE_PLANT_RUNNER, _E2E and _COVERAGE say what each container leaves).
+plant() {
+  names="$1"; shift
+  out=""; prev=""
+  for a in "$@"; do if [ "$prev" = "-v" ]; then out="\${a%%:*}"; fi; prev="$a"; done
+  if [ -n "$out" ] && [ -n "$names" ]; then
+    for n in $names; do ln -sf "$FAKE_VICTIM" "$out/$n"; done
+  fi
+  if [ -n "$out" ]; then for n in \${FAKE_PLANT_DIRS:-}; do mkdir -p "$out/$n" && touch "$out/$n/x"; done; fi
+}
 case " $* " in
+  *" context "*) cat "$d/context.txt" 2>/dev/null ;;
+  *" network ls "*) cat "$d/netls.txt" 2>/dev/null ;;
   *" network inspect "*) cat "$d/network.json" ;;
-  *" inspect "*) cat "$d/inspect.json" ;;
+  *" inspect "*)
+    case " $* " in
+      *" id-intruder "*) cat "$d/intruder.json" ;;
+      *) cat "$d/inspect.json" ;;
+    esac ;;
   *" config "*) cat "$d/config.json" ;;
   *" ps -q app "*|*" ps -q app") cat "$d/ps-app.txt" 2>/dev/null ;;
   *" ps "*) cat "$d/ps.txt" ;;
-  *" exec "*) exit "\${FAKE_EXEC_EXIT:-0}" ;;
+  *" exec "*)
+    case " $* " in
+      *restore.sh*)
+        [ -f "$d/restore-out.txt" ] && cat "$d/restore-out.txt"
+        [ -f "$d/restore-err.txt" ] && cat "$d/restore-err.txt" >&2
+        exit "\${FAKE_RESTORE_EXIT:-0}" ;;
+    esac
+    exit "\${FAKE_EXEC_EXIT:-0}" ;;
+  *" logs "*) cat "$d/app-logs.txt" 2>/dev/null ;;
   *" run "*)
     case " $* " in
-      *" probe "*) cat "$d/probe.txt" ;;
+      *" probe "*)
+        case " $* " in *"wget -S"*) exit "\${FAKE_HEALTH_EXIT:-0}" ;; esac
+        cat "$d/probe.txt" ;;
       *" e2e "*|*" e2e")
         out=""; prev=""
         for a in "$@"; do if [ "$prev" = "-v" ]; then out="\${a%%:*}"; fi; prev="$a"; done
@@ -751,19 +836,22 @@ case " $* " in
           [ -f "$d/playwright-report.json" ] && cp "$d/playwright-report.json" "$out/playwright-report.json"
           mkdir -p "$out/e2e-artifacts" && echo trace > "$out/e2e-artifacts/trace.zip"
         fi
+        plant "\${FAKE_PLANT_E2E:-}" "$@"
         exit "\${FAKE_E2E_EXIT:-0}" ;;
       *"coverage.sh "*)
         out=""; prev=""
         for a in "$@"; do if [ "$prev" = "-v" ]; then out="\${a%%:*}"; fi; prev="$a"; done
         if [ "\${FAKE_COVERAGE_EXIT:-0}" = 0 ] && [ -n "$out" ]; then mkdir -p "$out/coverage" && echo "<report/>" > "$out/coverage/jacoco.xml"; fi
+        if [ -n "\${FAKE_COVERAGE_LINK:-}" ] && [ -n "$out" ]; then rm -rf "$out/coverage"; ln -s "$FAKE_COVERAGE_LINK" "$out/coverage"; fi
+        plant "\${FAKE_PLANT_COVERAGE:-}" "$@"
         echo "coverage mode: $*"; exit "\${FAKE_COVERAGE_EXIT:-0}" ;;
-      *" runner "*|*" runner") echo "runner output line"; exit "\${FAKE_RUNNER_EXIT:-0}" ;;
+      *" runner "*|*" runner") plant "\${FAKE_PLANT_RUNNER:-}" "$@"; echo "runner output line"; exit "\${FAKE_RUNNER_EXIT:-0}" ;;
     esac ;;
 esac
 exit 0
 `;
 
-type Tweak = { bridgeContainer?: boolean; externalNetwork?: boolean; reachOut?: boolean; brokenTool?: boolean; wrongHost?: boolean; cfgPorts?: boolean; cfgDefaultNet?: boolean; noDummyRunning?: boolean; wrongLiteral?: boolean; probeFails?: boolean };
+type Tweak = { handAttached?: boolean; gatewayPing?: boolean; gatewayTcp?: boolean; noPingTool?: boolean; noInhibit?: boolean; withGateway?: boolean; bridgeContainer?: boolean; externalNetwork?: boolean; reachOut?: boolean; brokenTool?: boolean; wrongHost?: boolean; cfgPorts?: boolean; cfgDefaultNet?: boolean; noDummyRunning?: boolean; wrongLiteral?: boolean; probeFails?: boolean };
 
 function nslookup(name: string, ips: string[]): string {
   return `@@ ${name}\nServer:\t\t127.0.0.11\nAddress:\t127.0.0.11:53\n\nNon-authoritative answer:\n${ips.map((ip) => `Name:\t${name}\nAddress: ${ip}\n`).join('')}\n`;
@@ -797,14 +885,16 @@ function fake(t: Tweak = {}, scan: SandboxScan = jvmScan()): Fake {
       NetworkSettings: { Networks: { ...net('inner', a.inner), ...(a.literal ? net(a.literal[0], a.literal[1]) : {}), ...(svc === 'db' && t.bridgeContainer ? { bridge: { IPAddress: '172.17.0.2' } } : {}), ...(svc === 'db' && t.externalNetwork ? { 'other_net': { IPAddress: '10.9.9.9' } } : {}) } },
     });
   }
+  const opts = t.noInhibit ? {} : { 'com.docker.network.bridge.inhibit_ipv4': 'true' };
+  const ipam = t.withGateway ? { Config: [{ Subnet: '10.231.0.0/24', Gateway: '10.231.0.1' }] } : { Config: [{ Subnet: '10.231.0.0/24' }] };
   const netsJson = [
-    { Name: `${p}_inner`, Internal: true },
-    { Name: `${p}_ip_10_20_30`, Internal: true },
+    { Name: `${p}_inner`, Internal: true, Options: opts, IPAM: ipam, ...(t.handAttached ? { Containers: { 'id-db': {}, 'id-intruder': {} } } : {}) },
+    { Name: `${p}_ip_10_20_30`, Internal: true, Options: opts, IPAM: { Config: [{ Subnet: '10.20.30.0/24' }] } },
     ...(t.bridgeContainer ? [{ Name: 'bridge', Internal: false }] : []),
     ...(t.externalNetwork ? [{ Name: 'other_net', Internal: true }] : []),
   ];
-  const marks = t.reachOut ? 'DNS=open\nTCP=open\nHTTP=open' : 'DNS=blocked\nTCP=blocked\nHTTP=blocked';
-  const ctl = t.brokenTool ? 'CTL_DNS=ok\nCTL_NC=fail\nCTL_WGET=ok' : 'CTL_DNS=ok\nCTL_NC=ok\nCTL_WGET=ok';
+  const marks = `${t.reachOut ? 'DNS=open\nTCP=open\nHTTP=open' : 'DNS=blocked\nTCP=blocked\nHTTP=blocked'}\nGW_PING=${t.gatewayPing ? 'open' : 'blocked'}\nGW_TCP=${t.gatewayTcp ? 'open' : 'blocked'}`;
+  const ctl = `${t.brokenTool ? 'CTL_DNS=ok\nCTL_NC=fail\nCTL_WGET=ok' : 'CTL_DNS=ok\nCTL_NC=ok\nCTL_WGET=ok'}\nCTL_PING=${t.noPingTool ? 'fail' : 'ok'}`;
   const svcIp: Record<string, string> = { mail: '10.231.0.3', stubs: '10.231.0.4', ldap: '10.231.0.5' };
   const answers = ctx.plan.dummies
     .filter((d) => d.ip === null)
@@ -815,6 +905,13 @@ function fake(t: Tweak = {}, scan: SandboxScan = jvmScan()): Fake {
   w2('ps.txt', ids.join('\n') + '\n');
   w2('inspect.json', JSON.stringify(inspect));
   w2('network.json', JSON.stringify(netsJson));
+  if (t.handAttached) {
+    // a container with no compose label, attached by hand to inner and to the default bridge
+    w2('netls.txt', `${p}_inner\n`);
+    w2('intruder.json', JSON.stringify([{ Id: 'id-intruder', Name: '/intruder', Config: { Labels: {} }, HostConfig: { NetworkMode: `${p}_inner` }, NetworkSettings: { Networks: { ...net('inner', '10.231.0.77'), bridge: { IPAddress: '172.17.0.9' } } } }]));
+    netsJson.push({ Name: 'bridge', Internal: false } as never);
+    w2('network.json', JSON.stringify(netsJson));
+  }
   w2('probe.txt', probe);
   process.env.GOODBOY_DOCKER_BIN = bin;
   process.env.FAKE_DOCKER_DIR = state;
@@ -863,6 +960,162 @@ describe('sandbox-check (fake docker)', () => {
     expect(c.problems.filter((p) => p.startsWith('egress is not blocked'))).toHaveLength(3);
     expect(c.inner_only).toBe(true);
     expect(withFake(f, ['sandbox-check']).exitCode).toBe(1);
+  });
+
+  test('a host that answers on the gateway address makes egress_blocked false, by ping or by port', async () => {
+    const ping = await checkSandbox(fake({ gatewayPing: true }).ctx);
+    expect(ping.egress_blocked).toBe(false);
+    expect(ping.problems).toEqual([`egress is not blocked: the host's gateway address 10.231.0.1 answered a ping`]);
+    const tcp = await checkSandbox(fake({ gatewayTcp: true }).ctx);
+    expect(tcp.egress_blocked).toBe(false);
+    expect(tcp.problems[0]).toContain('a port of 10.231.0.1 (22, 80, 443, 2375, 2376, 8080) accepted a connection');
+  });
+
+  test('a gateway mark the probe did not print fails closed', async () => {
+    const f = fake();
+    writeFileSync(join(f.state, 'probe.txt'), readFileSync(join(f.state, 'probe.txt'), 'utf8').replace('GW_TCP=blocked\n', ''));
+    const c = await checkSandbox(f.ctx);
+    expect(c.egress_blocked).toBe(false);
+    expect(c.problems.some((p) => p.includes('accepted a connection'))).toBe(true);
+  });
+
+  test('a ping tool that does not work is not taken for a blocked gateway', async () => {
+    const c = await checkSandbox(fake({ noPingTool: true }).ctx);
+    expect(c.egress_blocked).toBe(false);
+    expect(c.problems.join('\n')).toContain('CTL_PING');
+  });
+
+  test('a network that kept the host address makes inner_only false, from Docker\'s own report and from the compose file', async () => {
+    const noOpt = await checkSandbox(fake({ noInhibit: true }).ctx);
+    expect(noOpt.inner_only).toBe(false);
+    expect(noOpt.problems.some((p) => p.includes('has a host address') && p.includes('Docker 28'))).toBe(true);
+    const gw = await checkSandbox(fake({ withGateway: true }).ctx);
+    expect(gw.inner_only).toBe(false);
+    expect(gw.problems.some((p) => p.includes('has a host address (10.231.0.1)'))).toBe(true);
+    expect(await checkSandbox(fake().ctx)).toMatchObject({ inner_only: true, egress_blocked: true });
+  });
+
+  test('staticProblems flags an internal network without the option, and passes one with it', () => {
+    const cfg = (opts?: Record<string, string>) => ({ services: { app: { networks: ['inner'] } }, networks: { inner: { internal: true, ...(opts ? { driver_opts: opts } : {}) } } });
+    expect(staticProblems(cfg())).toEqual([expect.stringContaining('network inner is internal but keeps an address for the host')]);
+    expect(staticProblems(cfg({ 'com.docker.network.bridge.inhibit_ipv4': 'false' }))).toHaveLength(1);
+    expect(staticProblems(cfg({ 'com.docker.network.bridge.inhibit_ipv4': 'true' }))).toEqual([]);
+  });
+
+  test('a container attached by hand to a sandbox network is found through the network, and its other networks count', async () => {
+    const f = fake({ handAttached: true });
+    const c = await checkSandbox(f.ctx);
+    expect(c.inner_only).toBe(false);
+    expect(c.problems).toContain("container intruder is on network bridge, which is not one of the sandbox's internal networks");
+    // the project's own containers alone pass, with the same network list
+    expect(await checkSandbox(fake().ctx)).toMatchObject({ inner_only: true });
+  });
+
+  test('staticProblems refuses privileged, added capabilities, devices, host namespaces and the docker socket, prep included', () => {
+    const svc = (extra: Record<string, unknown>, profiles?: string[]) => ({ services: { x: { networks: ['inner'], ...(profiles ? { profiles } : {}), ...extra } }, networks: { inner: { internal: true, driver_opts: { 'com.docker.network.bridge.inhibit_ipv4': 'true' } } } });
+    expect(staticProblems(svc({ privileged: true }))).toEqual(['service x is privileged']);
+    expect(staticProblems(svc({ cap_add: ['SYS_ADMIN'] }))).toEqual(['service x adds capabilities (SYS_ADMIN)']);
+    expect(staticProblems(svc({ devices: [{ source: '/dev/sda' }] }))).toEqual(['service x maps host devices']);
+    expect(staticProblems(svc({ pid: 'host' }))).toEqual(["service x shares the host's pid namespace"]);
+    expect(staticProblems(svc({ ipc: 'host' }))).toEqual(["service x shares the host's ipc namespace"]);
+    expect(staticProblems(svc({ volumes: [{ type: 'bind', source: '/var/run/docker.sock', target: '/var/run/docker.sock' }] }))).toEqual(['service x mounts the docker socket']);
+    expect(staticProblems(svc({ privileged: true }, ['prep']))).toEqual(['service x is privileged']);
+    expect(staticProblems(svc({ cap_add: [], devices: [], pid: 'container:y' }))).toEqual([]);
+  });
+
+  test('sandbox-up and sandbox-prepare check the compose file first and start nothing when it is unsafe', () => {
+    const f = fake();
+    const cfg = JSON.parse(readFileSync(join(f.state, 'config.json'), 'utf8'));
+    cfg.services.app.privileged = true;
+    cfg.services.prep.volumes = [...cfg.services.prep.volumes, '/var/run/docker.sock:/var/run/docker.sock'];
+    writeFileSync(join(f.state, 'config.json'), JSON.stringify(cfg));
+    for (const cmd of ['sandbox-up', 'sandbox-prepare']) {
+      const r = withFake(f, [cmd, '--wait-seconds', '5']);
+      expect(r.exitCode).toBe(1);
+      const err = r.stderr.toString();
+      expect(err).toContain('not safe to start');
+      expect(err).toContain('service app is privileged');
+      expect(err).toContain('service prep mounts the docker socket');
+    }
+    const calls = f.calls().join('\n');
+    expect(calls).not.toContain(' up -d');
+    expect(calls).not.toContain(' pull');
+    expect(calls).not.toContain(' run --rm');
+  });
+
+  test('bind sources are an allowlist: the repo and the dump only; unconfined security profiles are refused', () => {
+    const root = '/work/repo';
+    const bind = (source: string) => ({ services: { x: { networks: ['inner'], volumes: [{ type: 'bind', source, target: '/t' }] } }, networks: { inner: { internal: true, driver_opts: { 'com.docker.network.bridge.inhibit_ipv4': 'true' } } } });
+    const refused = (src: string) => staticProblems(bind(src), root, '/home/me/dump.sql');
+    for (const src of ['/var/run', '/run', '/', '/home/me', '/work', '/work/repo/../other', '/etc']) expect([src, refused(src).length]).toEqual([src, 1]);
+    expect(refused('/var/run')[0]).toContain('service x binds /var/run');
+    // the repo, its sandbox dir and subdirs, and the dump file
+    for (const src of ['/work/repo', '/work/repo/.goodboy/sandbox/out/live', '/work/repo/.goodboy/sandbox/ca/ca.crt', '/home/me/dump.sql']) expect([src, refused(src)]).toEqual([src, []]);
+    // a named volume is not a bind; without a root the allowlist does not apply (the socket still does)
+    expect(staticProblems({ services: { x: { networks: ['inner'], volumes: [{ type: 'volume', source: 'gradle', target: '/g' }] } }, networks: { inner: { internal: true, driver_opts: { 'com.docker.network.bridge.inhibit_ipv4': 'true' } } } }, root)).toEqual([]);
+    expect(staticProblems(bind('/var/run'))).toEqual([]);
+    const sec = (opts: string[]) => ({ services: { x: { networks: ['inner'], security_opt: opts } }, networks: { inner: { internal: true, driver_opts: { 'com.docker.network.bridge.inhibit_ipv4': 'true' } } } });
+    expect(staticProblems(sec(['seccomp=unconfined']))).toEqual(['service x turns off a security profile (security_opt unconfined)']);
+    expect(staticProblems(sec(['apparmor=unconfined']))).toHaveLength(1);
+    expect(staticProblems(sec(['no-new-privileges:true']))).toEqual([]);
+  });
+
+  test('a named volume that is really a host directory, and host network or published ports on prep, are refused; what the render makes passes', () => {
+    const inhibit = { 'com.docker.network.bridge.inhibit_ipv4': 'true' };
+    const base = (svc: Record<string, unknown>, volumes?: Record<string, unknown>) => ({ services: { prep: { profiles: ['prep'], networks: ['prep'], ...svc } }, networks: { prep: {}, inner: { internal: true, driver_opts: inhibit } }, ...(volumes ? { volumes } : {}) });
+    expect(staticProblems(base({}, { gradle: { name: 'p_gradle' }, m2: {}, build: null }))).toEqual([]);
+    expect(staticProblems(base({}, { loot: { driver: 'local', driver_opts: { type: 'none', o: 'bind', device: '/Users/me' } } }))).toEqual([expect.stringContaining('volume loot has driver options (type, o, device)')]);
+    expect(staticProblems(base({}, { loot: { driver: 'local' } }))).toEqual([]);
+    expect(staticProblems(base({}, { loot: { driver: 'nfs' } }))).toEqual(['volume loot uses the nfs driver']);
+    expect(staticProblems(base({}, { loot: { external: true, name: 'host_bind_volume' } }))).toEqual([expect.stringContaining('volume loot is external')]);
+    expect(staticProblems(base({ network_mode: 'host' }))).toEqual(['service prep sets network_mode host']);
+    expect(staticProblems(base({ ports: [{ target: 80, published: '80' }] }))).toEqual(['service prep publishes ports']);
+    expect(staticProblems(base({ ports: [] }))).toEqual([]);
+  });
+
+  test('the compose file the render makes passes the static check', () => {
+    const f = fake();
+    expect(staticProblems(JSON.parse(readFileSync(join(f.state, 'config.json'), 'utf8')), f.root)).toEqual([]);
+  });
+
+  test('a link in the repo that points outside it is not an allowed bind source', () => {
+    const root = dir();
+    const outside = dir('goodboy-m1-outside-');
+    symlinkSync(outside, join(root, 'shortcut'));
+    const cfg = { services: { x: { networks: ['inner'], volumes: [{ type: 'bind', source: join(root, 'shortcut'), target: '/t' }] } }, networks: { inner: { internal: true, driver_opts: { 'com.docker.network.bridge.inhibit_ipv4': 'true' } } } };
+    expect(staticProblems(cfg, root)).toHaveLength(1);
+  });
+
+  test('a remote daemon gets no container command at all from the check, and sandbox-down is guarded too', () => {
+    const f = fake();
+    const r = withFake(f, ['sandbox-check'], { DOCKER_HOST: 'tcp://203.0.113.9:2375' });
+    expect(r.exitCode).toBe(1);
+    expect(json(r)).toMatchObject({ inner_only: false, egress_blocked: false, hosts_to_dummies: false });
+    expect(json(r).problems).toHaveLength(1);
+    const down = withFake(f, ['sandbox-down'], { DOCKER_HOST: 'ssh://me@box' });
+    expect(down.exitCode).toBe(1);
+    expect(down.stderr.toString()).toContain('local docker daemon');
+    // only the local context lookup ran
+    expect(f.calls().every((l) => l.startsWith('context '))).toBe(true);
+    const run = withFake(f, ['sandbox-run'], { DOCKER_HOST: 'tcp://203.0.113.9:2375' });
+    expect(run.exitCode).toBe(1);
+    expect(f.calls().join('\n')).not.toContain(' run --rm');
+  });
+
+  test('a remote docker daemon, by DOCKER_HOST or by the current context, is refused by the check, up and prepare', () => {
+    const f = fake();
+    const viaEnv = withFake(f, ['sandbox-check'], { DOCKER_HOST: 'tcp://10.1.1.1:2375' });
+    expect(viaEnv.exitCode).toBe(1);
+    expect(json(viaEnv).problems.join('\n')).toContain('DOCKER_HOST is tcp://10.1.1.1:2375');
+    expect(withFake(f, ['sandbox-up'], { DOCKER_HOST: 'ssh://me@box' }).stderr.toString()).toContain('local docker daemon');
+    expect(withFake(f, ['sandbox-prepare'], { DOCKER_HOST: 'tcp://x:1' }).stderr.toString()).toContain('local docker daemon');
+    expect(withFake(f, ['sandbox-check'], { DOCKER_HOST: 'unix:///var/run/docker.sock' }).exitCode).toBe(0);
+    writeFileSync(join(f.state, 'context.txt'), 'ssh://me@box\n');
+    const viaContext = withFake(f, ['sandbox-check'], { DOCKER_HOST: '' });
+    expect(viaContext.exitCode).toBe(1);
+    expect(json(viaContext).problems.join('\n')).toContain('docker context points at ssh://me@box');
+    writeFileSync(join(f.state, 'context.txt'), 'unix:///Users/me/.colima/default/docker.sock\n');
+    expect(withFake(f, ['sandbox-check'], { DOCKER_HOST: '' }).exitCode).toBe(0);
   });
 
   test('a probe tool that does not work is not taken for a blocked network', async () => {
@@ -916,8 +1169,13 @@ describe('sandbox-check (fake docker)', () => {
   });
 
   test('the probe script verifies its tools first and names every host', () => {
-    const s = probeScript(['a.example', 'mail']);
+    const s = probeScript(['a.example', 'mail'], '10.231.0.1');
     expect(s.indexOf('CTL_NC')).toBeLessThan(s.indexOf('TCP=open'));
+    expect(s.indexOf('CTL_PING')).toBeLessThan(s.indexOf('GW_PING='));
+    expect(s).toContain('ping -c 1 -W 2 10.231.0.1');
+    // the gateway attempts run side by side and are waited for together
+    expect(s).toContain('for p in 22 80 443 2375 2376 8080; do (nc -z -w 2 10.231.0.1 $p');
+    expect(s.slice(s.indexOf('ping -c 1 -W 2 10.231.0.1'), s.indexOf('echo GW_PING='))).toContain('wait $pids');
     expect(s).toContain('nc -z -w 3 1.1.1.1 443');
     expect(s).toContain('wget -T 3 -q --spider http://example.com');
     expect(s).toContain('nslookup example.com');
@@ -1054,6 +1312,56 @@ describe('sandbox-run (fake docker)', () => {
     expect(calls.filter((l) => l.includes(' probe sh -c')).at(-1)).toContain('http://proxy:8080/actuator/health');
     expect(json(r).proxyUrl).toBe('http://proxy:8080/actuator/health');
     expect(existsSync(join(f.root, SANDBOX_DIR, 'out', 'live'))).toBe(true);
+  });
+});
+
+describe('output the model sees (fake docker)', () => {
+  const CANARY = 'CANARY-real-person@example.com';
+
+  test('a passing suite prints no output tail; the full output stays in the run dir', () => {
+    const f = fake();
+    const r = withFake(f, ['sandbox-run', '--suite', 'unit']);
+    expect(r.exitCode).toBe(0);
+    const o = json(r);
+    expect(o.tail).toBe('');
+    expect(r.stdout.toString()).not.toContain('runner output line');
+    expect(JSON.parse(readFileSync(o.result, 'utf8')).tail).toBe('');
+    expect(readFileSync(join(dirname(o.result), 'output.log'), 'utf8')).toContain('runner output line');
+  });
+
+  test('a failing suite keeps a tail of at most 2000 characters', () => {
+    const f = fake();
+    const r = withFake(f, ['sandbox-run', '--suite', 'unit'], { FAKE_RUNNER_EXIT: '1' });
+    expect(r.exitCode).toBe(1);
+    expect(json(r).tail).toContain('runner output line');
+    expect(json(r).tail.length).toBeLessThanOrEqual(2000);
+  });
+
+  test('a failed restore shows only the tagged lines, never the client text', () => {
+    const f = fake();
+    writeFileSync(join(f.state, 'restore-err.txt'), `goodboy: SQLSTATE 23505 at dump line 3\nERROR:  duplicate key (email)=(${CANARY})\n`);
+    const r = withFake(f, ['sandbox-up', '--wait-seconds', '5'], { FAKE_RESTORE_EXIT: '1' });
+    expect(r.exitCode).toBe(1);
+    const text = r.stdout.toString() + r.stderr.toString();
+    expect(text).toContain('SQLSTATE 23505 at dump line 3');
+    expect(text).not.toContain(CANARY);
+    writeFileSync(join(f.state, 'restore-err.txt'), `psql: ${CANARY}\n`);
+    const r2 = withFake(f, ['sandbox-up', '--wait-seconds', '5'], { FAKE_RESTORE_EXIT: '1' });
+    const text2 = r2.stdout.toString() + r2.stderr.toString();
+    expect(text2).toContain('withheld');
+    expect(text2).not.toContain(CANARY);
+  });
+
+  test('the app log of an app that does not come up is shown only with --app-logs', () => {
+    const f = fake();
+    writeFileSync(join(f.state, 'app-logs.txt'), `started for ${CANARY}\n`);
+    const plain = withFake(f, ['sandbox-up', '--wait-seconds', '5'], { FAKE_HEALTH_EXIT: '1' });
+    expect(plain.exitCode).toBe(1);
+    const text = plain.stdout.toString() + plain.stderr.toString();
+    expect(text).not.toContain(CANARY);
+    expect(text).toContain('--app-logs');
+    const withLogs = withFake(f, ['sandbox-up', '--wait-seconds', '5', '--app-logs'], { FAKE_HEALTH_EXIT: '1' });
+    expect(withLogs.stdout.toString()).toContain(CANARY);
   });
 });
 
@@ -1200,6 +1508,70 @@ describe('sandbox-run --suite e2e (fake docker)', () => {
     expect(g.calls().find((l) => l.includes('-runner-'))).toContain('runner ./gradlew test');
   });
 
+  test('links a test left in the run dir are replaced, never written through', () => {
+    const f = e2eFake();
+    const victim = join(f.state, 'victim.txt');
+    writeFileSync(victim, 'VICTIM-ORIGINAL');
+    const r = withFake(f, ['sandbox-run', '--suite', 'all'], { FAKE_PLANT_RUNNER: 'output.log', FAKE_PLANT_E2E: 'e2e-output.log access.log', FAKE_PLANT_COVERAGE: 'result.json', FAKE_VICTIM: victim });
+    expect(readFileSync(victim, 'utf8')).toBe('VICTIM-ORIGINAL');
+    const dirAbs = dirname(json(r).result);
+    for (const n of ['output.log', 'e2e-output.log', 'access.log', 'result.json']) expect([n, lstatSync(join(dirAbs, n)).isFile()]).toEqual([n, true]);
+    expect(readFileSync(join(dirAbs, 'output.log'), 'utf8')).toContain('runner output line');
+    expect(readFileSync(join(dirAbs, 'e2e-output.log'), 'utf8')).toContain('e2e output line');
+    expect(readFileSync(join(dirAbs, 'access.log'), 'utf8')).toBe(ACCESS);
+    const res = JSON.parse(readFileSync(join(dirAbs, 'result.json'), 'utf8'));
+    expect(res.coverageReports.length).toBe(1);
+  });
+
+  test('a coverage dir that became a link makes no report: every part below the run dir is checked', () => {
+    const f = e2eFake();
+    const host = join(f.state, 'hostdir');
+    mkdirSync(host);
+    writeFileSync(join(host, 'jacoco.xml'), '<host-secret/>');
+    const r = withFake(f, ['sandbox-run', '--suite', 'unit'], { FAKE_COVERAGE_LINK: host });
+    const res = JSON.parse(readFileSync(json(r).result, 'utf8'));
+    expect(res.coverageReports).toEqual([]);
+    expect(res.coverage.ok).toBe(false);
+    // the same run with a real coverage dir has its report
+    const ok = JSON.parse(readFileSync(json(withFake(f, ['sandbox-run', '--suite', 'unit'])).result, 'utf8'));
+    expect(ok.coverage.ok).toBe(true);
+  });
+
+  test('a Playwright report that is a link is not passed on as the run\'s report', () => {
+    const f = e2eFake();
+    const victim = join(f.state, 'victim.txt');
+    writeFileSync(victim, 'VICTIM-ORIGINAL');
+    const r = withFake(f, ['sandbox-run', '--suite', 'e2e'], { FAKE_PLANT_E2E: 'playwright-report.json', FAKE_VICTIM: victim });
+    const res = JSON.parse(readFileSync(json(r).result, 'utf8'));
+    expect(res.playwrightReport).toBeNull();
+    expect(res.e2e.problems).toContain('the e2e run wrote no Playwright report');
+    expect(readFileSync(victim, 'utf8')).toBe('VICTIM-ORIGINAL');
+  });
+
+  test('a directory where a result file goes stops the run with the reason and writes nothing outside', () => {
+    const f = e2eFake();
+    const victim = join(f.state, 'victim.txt');
+    writeFileSync(victim, 'VICTIM-ORIGINAL');
+    const r = withFake(f, ['sandbox-run', '--suite', 'unit'], { FAKE_PLANT_DIRS: 'output.log', FAKE_VICTIM: victim });
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr.toString()).toContain('sandbox-run:');
+    expect(readFileSync(victim, 'utf8')).toBe('VICTIM-ORIGINAL');
+  });
+
+  test('an access log that is a link is refused, not followed or copied', () => {
+    const f = e2eFake();
+    const log = join(f.root, SANDBOX_DIR, 'out', 'live', 'access.log');
+    const elsewhere = join(f.state, 'secret.txt');
+    writeFileSync(elsewhere, 'host secret');
+    rmSync(log);
+    symlinkSync(elsewhere, log);
+    const r = withFake(f, ['sandbox-run', '--suite', 'e2e']);
+    const res = JSON.parse(readFileSync(json(r).result, 'utf8'));
+    expect(res.accessLog).toBeNull();
+    expect(res.e2e.problems.some((p: string) => p.includes('access log') && p.includes('not a regular file'))).toBe(true);
+    expect(existsSync(join(dirname(json(r).result), 'access.log'))).toBe(false);
+  });
+
   test('a missing access log is a problem in the result, not a crash', () => {
     const f = e2eFake();
     rmSync(join(f.root, SANDBOX_DIR, 'out', 'live', 'access.log'));
@@ -1243,16 +1615,381 @@ describe.skipIf(process.env.GOODBOY_DOCKER_IT !== '1' || !hasOpenssl)('real dock
     }
   }, 240_000);
 
-  test('the probe script itself, on a bare internal network: tools work, nothing gets out', () => {
-    const net = `gbtest-${Math.random().toString(36).slice(2, 8)}`;
-    expect(docker(['network', 'create', '--internal', net]).exitCode).toBe(0);
+  test('the probe script itself: on an internal network without a host address nothing answers; one with the usual gateway is caught', () => {
+    const third = 20 + Math.floor(Math.random() * 200);
+    const mk = (inhibit: boolean) => {
+      const net = `gbtest-${Math.random().toString(36).slice(2, 8)}`;
+      const subnet = `10.239.${inhibit ? third : third + 1}.0/24`;
+      const gw = subnet.replace('.0/24', '.1');
+      const args = ['network', 'create', '--internal', '--subnet', subnet, ...(inhibit ? ['-o', 'com.docker.network.bridge.inhibit_ipv4=true', '--aux-address', `goodboy-gateway=${gw}`] : [])];
+      return { net, gw, create: () => docker([...args, net]) };
+    };
+    const probe = (n: { net: string; gw: string }) => docker(['run', '--rm', '--network', n.net, '--name', `${n.net}-probe`, IMAGES.probe, 'sh', '-c', probeScript([], n.gw)]);
+    const safe = mk(true);
+    const open = mk(false);
     try {
-      const r = docker(['run', '--rm', '--network', net, '--name', `${net}-probe`, IMAGES.probe, 'sh', '-c', probeScript([])]);
-      expect(r.exitCode).toBe(0);
-      const out = r.stdout.toString();
-      for (const line of ['CTL_DNS=ok', 'CTL_NC=ok', 'CTL_WGET=ok', 'DNS=blocked', 'TCP=blocked', 'HTTP=blocked', '@@END']) expect(out).toContain(line);
+      expect(safe.create().exitCode).toBe(0);
+      expect(open.create().exitCode).toBe(0);
+      const out = probe(safe).stdout.toString();
+      for (const line of ['CTL_DNS=ok', 'CTL_NC=ok', 'CTL_WGET=ok', 'CTL_PING=ok', 'DNS=blocked', 'TCP=blocked', 'HTTP=blocked', 'GW_PING=blocked', 'GW_TCP=blocked', '@@END']) expect(out).toContain(line);
+      // the control: with Docker's own gateway the host answers a ping, so the probe sees it
+      expect(probe(open).stdout.toString()).toContain('GW_PING=open');
     } finally {
-      docker(['network', 'rm', net]);
+      docker(['network', 'rm', safe.net]);
+      docker(['network', 'rm', open.net]);
     }
   }, 180_000);
+});
+
+// ---- the docker commands in this process ----
+// The tests above start the CLI for the commands that start, run and stop containers; a spawned
+// process is not measured by the coverage tool and shows no failure path. These call
+// `sandboxCommand` in this process with a wrapper around the fake docker that can fail, answer
+// with garbage, sleep or script a sequence for chosen calls (FAKE_FAIL, FAKE_GARBAGE, FAKE_SLEEP
+// match a substring of " <arguments> "; FAKE_SEQ is a dir with the answers of a chain of inspect
+// calls).
+
+const WRAP = (orig: string) => `#!/bin/sh
+# the state dir is where the wrapper sits, so a call that carries no FAKE_DOCKER_DIR still logs there
+FAKE_DOCKER_DIR="\${FAKE_DOCKER_DIR:-$(dirname "$0")}"; export FAKE_DOCKER_DIR
+if [ -n "$FAKE_FAIL" ]; then case " $* " in *"$FAKE_FAIL"*) echo "fake failure" >&2; exit 1 ;; esac; fi
+if [ -n "$FAKE_GARBAGE" ]; then case " $* " in *"$FAKE_GARBAGE"*) echo "not json"; exit 0 ;; esac; fi
+if [ -n "$FAKE_SLEEP" ]; then case " $* " in *"$FAKE_SLEEP"*) sleep 4 ;; esac; fi
+if [ -n "$FAKE_SEQ" ]; then
+  case " $* " in
+    *" network inspect "*)
+      n=$(cat "$FAKE_SEQ/n" 2>/dev/null || echo 0); echo $((n+1)) > "$FAKE_SEQ/n"
+      if [ -f "$FAKE_SEQ/net-$n.json" ]; then cat "$FAKE_SEQ/net-$n.json"; exit 0; fi ;;
+    *" inspect id-n"*)
+      for a; do last="$a"; done
+      if [ -f "$FAKE_SEQ/ins-$last.json" ]; then cat "$FAKE_SEQ/ins-$last.json"; exit 0; fi ;;
+  esac
+fi
+exec ${orig} "$@"
+`;
+
+type Run = { out: Record<string, any>; code: number; error?: string };
+
+async function inproc(f: Fake, command: string, args: string[] = [], env: Record<string, string> = {}): Promise<Run> {
+  const wrap = join(f.state, 'wrap');
+  if (!existsSync(wrap)) {
+    writeFileSync(wrap, WRAP(f.bin));
+    chmodSync(wrap, 0o755);
+  }
+  const keys = ['FAKE_DOCKER_DIR', 'GOODBOY_DOCKER_BIN', ...Object.keys(env)];
+  const saved = keys.map((k) => [k, process.env[k]] as const);
+  process.env.FAKE_DOCKER_DIR = f.state;
+  process.env.GOODBOY_DOCKER_BIN = wrap;
+  for (const [k, v] of Object.entries(env)) process.env[k] = v;
+  try {
+    const r = await sandboxCommand(command, f.root, args);
+    return 'error' in r ? { out: {}, code: 1, error: r.error } : { out: r.out as Record<string, any>, code: r.code };
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+/** The compose file as docker resolves it, changed (a service that asks the host for too much). */
+function editConfig(f: Fake, change: (cfg: any) => void): void {
+  const file = join(f.state, 'config.json');
+  const cfg = JSON.parse(readFileSync(file, 'utf8'));
+  change(cfg);
+  writeFileSync(file, JSON.stringify(cfg));
+}
+
+describe('sandbox-check, failing docker calls (in this process)', () => {
+  test('a network list, a container inspect and a network inspect that fail or print no JSON each fail the check with the reason', async () => {
+    const f = fake();
+    const list = await inproc(f, 'sandbox-check', [], { FAKE_FAIL: ' network ls ' });
+    expect(list.code).toBe(1);
+    expect(list.out.inner_only).toBe(false);
+    expect(list.out.problems.some((p: string) => p.includes("listing the project's networks failed") && p.includes('fake failure'))).toBe(true);
+    const ins = await inproc(f, 'sandbox-check', [], { FAKE_FAIL: ' inspect id-' });
+    expect(ins.out.inner_only).toBe(false);
+    expect(ins.out.problems.some((p: string) => p.includes('docker inspect failed') && p.includes('fake failure'))).toBe(true);
+    const garbage = await inproc(f, 'sandbox-check', [], { FAKE_GARBAGE: ' inspect id-' });
+    expect(garbage.out.problems.some((p: string) => p.includes('docker inspect failed'))).toBe(true);
+    const net = await inproc(f, 'sandbox-check', [], { FAKE_FAIL: ' network inspect ' });
+    expect(net.out.inner_only).toBe(false);
+    expect(net.out.problems.some((p: string) => p.includes('docker network inspect failed'))).toBe(true);
+  });
+
+  test('a chain of containers found through the networks is followed three rounds; what is left is named, and the check fails', async () => {
+    const f = fake();
+    const p = f.ctx.project;
+    const seq = dir('goodboy-m1-seq-');
+    const opts = { 'com.docker.network.bridge.inhibit_ipv4': 'true' };
+    const net = (name: string, containers: string[]) => ({ Name: `${p}_${name}`, Internal: true, Options: opts, IPAM: { Config: [{ Subnet: '10.231.0.0/24' }] }, Containers: Object.fromEntries(containers.map((c) => [c, {}])) });
+    const box = (id: string, netName: string) => [{ Id: id, Name: `/${id}`, Config: { Labels: {} }, HostConfig: { NetworkMode: `${p}_${netName}` }, NetworkSettings: { Networks: { [`${p}_${netName}`]: { IPAddress: '10.231.0.50' } } } }];
+    const w3 = (file: string, v: unknown) => writeFileSync(join(seq, file), JSON.stringify(v));
+    w3('net-0.json', [net('inner', ['id-n1']), net('ip_10_20_30', [])]);
+    w3('ins-id-n1.json', box('id-n1', 'netA'));
+    w3('net-1.json', [net('netA', ['id-n2'])]);
+    w3('ins-id-n2.json', box('id-n2', 'netB'));
+    w3('net-2.json', [net('netB', ['id-n3'])]);
+    const r = await inproc(f, 'sandbox-check', [], { FAKE_SEQ: seq });
+    expect(r.out.inner_only).toBe(false);
+    expect(r.out.problems.some((x: string) => x.includes("1 container(s) on the sandbox's networks could not all be examined"))).toBe(true);
+    expect(r.out.problems.some((x: string) => x.includes('id-n1') && x.includes('not one of the sandbox'))).toBe(true);
+  });
+});
+
+describe('sandbox-prepare, sandbox-up and sandbox-down (in this process)', () => {
+  test('an unsafe compose file and a remote daemon are refused before any container is started', async () => {
+    const f = fake();
+    editConfig(f, (cfg) => {
+      cfg.services.app.privileged = true;
+    });
+    for (const command of ['sandbox-prepare', 'sandbox-up']) {
+      const r = await inproc(f, command);
+      expect(r.error).toContain(`${command}: the compose file is not safe to start`);
+      expect(r.error).toContain('privileged');
+    }
+    expect(f.calls().some((l) => /\bup -d\b|\bpull\b| run /.test(l))).toBe(false);
+    const g = fake();
+    for (const command of ['sandbox-prepare', 'sandbox-up', 'sandbox-down']) {
+      const r = await inproc(g, command, [], { DOCKER_HOST: 'tcp://build.example:2375' });
+      expect(r.error).toContain(`${command}: DOCKER_HOST is tcp://build.example:2375`);
+    }
+    expect(g.calls().some((l) => /\bup -d\b|\bpull\b| run | down /.test(l))).toBe(false);
+  });
+
+  test('sandbox-prepare pulls, runs prep and, with e2e tests, e2e-prep; a failing step stops there with its output tail', async () => {
+    const f = e2eFake();
+    const ok = await inproc(f, 'sandbox-prepare');
+    expect(ok.code).toBe(0);
+    expect(ok.out).toMatchObject({ step: 'prep', exit: 0, e2e: { step: 'e2e-prep', exit: 0 } });
+    const calls = f.calls();
+    const at = (s: string) => calls.findIndex((l) => l.includes(s));
+    expect([at(' pull'), at('run --rm -T prep'), at('run --rm -T e2e-prep')].every((i, n, a) => i >= 0 && (n === 0 || i > a[n - 1]!))).toBe(true);
+    const pull = await inproc(f, 'sandbox-prepare', [], { FAKE_FAIL: ' pull' });
+    expect(pull.code).toBe(1);
+    expect(pull.out).toMatchObject({ step: 'pull', exit: 1 });
+    expect(pull.out.tail).toContain('fake failure');
+    const prep = await inproc(f, 'sandbox-prepare', ['--timeout-ms', '5000'], { FAKE_FAIL: ' -T prep' });
+    expect(prep.code).toBe(1);
+    expect(prep.out).toMatchObject({ step: 'prep', exit: 1 });
+    expect(prep.out.e2e).toBeUndefined();
+    const e2e = await inproc(f, 'sandbox-prepare', [], { FAKE_FAIL: ' -T e2e-prep' });
+    expect(e2e.code).toBe(1);
+    expect(e2e.out).toMatchObject({ exit: 0, e2e: { step: 'e2e-prep', exit: 1 } });
+  });
+
+  test('sandbox-up starts the stores, restores, resets, waits for the app and the proxy, in that order', async () => {
+    const f = e2eFake();
+    writeFileSync(join(f.state, 'restore-out.txt'), 'template shop_template\n');
+    const r = await inproc(f, 'sandbox-up', ['--wait-seconds', '5', '--app-logs']);
+    expect(r.code).toBe(0);
+    expect(r.out.steps).toEqual([
+      { step: 'up stores and dummies', ok: true },
+      { step: 'restore db', ok: true, note: 'template shop_template' },
+      { step: 'reset', ok: true },
+      { step: 'app health', ok: true, note: f.ctx.plan.healthUrl },
+      { step: 'proxy health', ok: true, note: f.ctx.plan.proxyHealthUrl },
+    ]);
+    expect(r.out).toMatchObject({ appUrl: f.ctx.plan.healthUrl, proxyUrl: f.ctx.plan.proxyHealthUrl });
+    const calls = f.calls();
+    const at = (s: string) => calls.findIndex((l) => l.includes(s));
+    const order = [at('up -d --wait'), at('restore.sh'), at('reset.sh'), at('up -d app'), at('up -d proxy')];
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(order.every((i) => i >= 0)).toBe(true);
+  });
+
+  test('sandbox-up with no app starts only the stores and says so', async () => {
+    const scan = jvmScan();
+    scan.build.startCommand = [];
+    const f = fake({}, scan);
+    expect(f.ctx.plan.hasApp).toBe(false);
+    const r = await inproc(f, 'sandbox-up');
+    expect(r.code).toBe(0);
+    expect(r.out.notes).toEqual(['no app service: nothing to start']);
+    expect(f.calls().some((l) => l.includes('up -d app'))).toBe(false);
+  });
+
+  test('each failing step of sandbox-up is the last one reported, with what went wrong', async () => {
+    const f = e2eFake();
+    const stores = await inproc(f, 'sandbox-up', [], { FAKE_FAIL: ' up -d --wait' });
+    expect(stores.code).toBe(1);
+    expect(stores.out.steps).toEqual([{ step: 'up stores and dummies', ok: false, note: expect.stringContaining('fake failure') }]);
+
+    writeFileSync(join(f.state, 'restore-err.txt'), `${RESTORE_TAG} error 42P01 at dump line 12\nclient text that might quote a row\n`);
+    const tagged = await inproc(f, 'sandbox-up', [], { FAKE_RESTORE_EXIT: '3' });
+    expect(tagged.code).toBe(1);
+    const last = tagged.out.steps[tagged.out.steps.length - 1];
+    expect(last).toMatchObject({ step: 'restore db', ok: false });
+    expect(last.note).toContain('42P01 at dump line 12');
+    expect(last.note).not.toContain('might quote a row');
+
+    rmSync(join(f.state, 'restore-err.txt'));
+    const bare = await inproc(f, 'sandbox-up', [], { FAKE_RESTORE_EXIT: '3' });
+    expect(bare.out.steps[bare.out.steps.length - 1].note).toContain("exit 3 (the client's output is withheld");
+
+    const reset = await inproc(f, 'sandbox-up', [], { FAKE_FAIL: 'reset.sh' });
+    expect(reset.code).toBe(1);
+    expect(reset.out.steps[reset.out.steps.length - 1]).toMatchObject({ step: 'reset', ok: false });
+    expect(reset.out.steps[reset.out.steps.length - 1].note).toContain('resetting db from its template failed');
+
+    const app = await inproc(f, 'sandbox-up', [], { FAKE_FAIL: ' up -d app' });
+    expect(app.out.steps[app.out.steps.length - 1]).toMatchObject({ step: 'start app', ok: false });
+    const proxy = await inproc(f, 'sandbox-up', ['--wait-seconds', '5'], { FAKE_FAIL: ' up -d proxy' });
+    expect(proxy.out.steps[proxy.out.steps.length - 1]).toMatchObject({ step: 'start proxy', ok: false });
+  });
+
+  test('an app that does not answer: the note names the url and the app log stays unread unless --app-logs is passed', async () => {
+    const f = e2eFake();
+    writeFileSync(join(f.state, 'app-logs.txt'), 'APP-LOG-LINE\n');
+    const quiet = await inproc(f, 'sandbox-up', ['--wait-seconds', '5'], { FAKE_HEALTH_EXIT: '1' });
+    expect(quiet.code).toBe(1);
+    const step = quiet.out.steps[quiet.out.steps.length - 1];
+    expect(step).toMatchObject({ step: 'app health', ok: false });
+    expect(step.note).toBe(`${f.ctx.plan.healthUrl} did not answer in 5s`);
+    expect(step.detail).toContain('--app-logs');
+    expect(step.detail).not.toContain('APP-LOG-LINE');
+    const loud = await inproc(f, 'sandbox-up', ['--wait-seconds', '5', '--app-logs'], { FAKE_HEALTH_EXIT: '1' });
+    expect(loud.out.steps[loud.out.steps.length - 1].detail).toContain('APP-LOG-LINE');
+  }, 90_000);
+
+  test('a proxy that does not answer fails the step after the app is up', async () => {
+    const f = e2eFake();
+    const r = await inproc(f, 'sandbox-up', ['--wait-seconds', '5'], { FAKE_FAIL: 'http://proxy:8080' });
+    expect(r.code).toBe(1);
+    expect(r.out.steps.map((s: { step: string; ok: boolean }) => [s.step, s.ok]).slice(-2)).toEqual([['app health', true], ['proxy health', false]]);
+    expect(r.out.steps[r.out.steps.length - 1].note).toBe(`${f.ctx.plan.proxyHealthUrl} did not answer in 5s`);
+  }, 60_000);
+
+  test('sandbox-down removes the containers and keeps the volumes unless asked; a failure is reported', async () => {
+    const f = fake();
+    const keep = await inproc(f, 'sandbox-down');
+    expect(keep).toMatchObject({ code: 0, out: { exit: 0, volumes: 'kept' } });
+    const gone = await inproc(f, 'sandbox-down', ['--volumes']);
+    expect(gone.out.volumes).toBe('removed');
+    expect(f.calls().some((l) => / down --remove-orphans -v$/.test(l))).toBe(true);
+    const bad = await inproc(f, 'sandbox-down', [], { FAKE_FAIL: ' down ' });
+    expect(bad.code).toBe(1);
+    expect(bad.out.tail).toContain('fake failure');
+  });
+});
+
+describe('sandbox-run (in this process)', () => {
+  test('refuses what it cannot run: a suite that does not exist, nothing after --, no e2e tests, no test command, no app', async () => {
+    const f = fake();
+    expect((await inproc(f, 'sandbox-run', ['--suite', 'smoke'])).error).toContain('--suite is unit, e2e or all');
+    expect((await inproc(f, 'sandbox-run', ['--'])).error).toContain('nothing after --');
+    expect((await inproc(f, 'sandbox-run', ['--suite', 'e2e'])).error).toContain("needs the project's e2e tests");
+    const bare = jvmScan();
+    bare.build.startCommand = [];
+    expect((await inproc(fake({}, bare), 'sandbox-run', ['--suite', 'e2e'])).error).toContain('needs an app');
+    const none = jvmScan();
+    none.build.testCommand = [];
+    expect((await inproc(fake({}, none), 'sandbox-run')).error).toContain('no test command');
+  });
+
+  test('the unit suite restarts a running app, runs the runner with the run dir, builds the coverage report and writes the result', async () => {
+    const f = e2eFake();
+    writeFileSync(join(f.state, 'ps-app.txt'), 'id-app\n');
+    const r = await inproc(f, 'sandbox-run', ['--suite', 'unit']);
+    expect(r.code).toBe(0);
+    expect(r.out).toMatchObject({ suite: 'unit', exit: 0, timedOut: false, coverage: { ok: true } });
+    const calls = f.calls();
+    expect(calls.some((l) => l.includes(' restart app'))).toBe(true);
+    expect(calls.some((l) => l.includes('up -d proxy'))).toBe(false);
+    expect(JSON.parse(readFileSync(r.out.result, 'utf8')).exit).toBe(0);
+    expect(readFileSync(join(dirname(r.out.result), 'output.log'), 'utf8')).toContain('runner output line');
+  });
+
+  test('a failing runner gives its exit code; a coverage run that fails says why and does not change it', async () => {
+    const f = e2eFake();
+    const failed = await inproc(f, 'sandbox-run', ['--suite', 'unit'], { FAKE_RUNNER_EXIT: '2' });
+    expect(failed.code).toBe(2);
+    expect(failed.out.exit).toBe(2);
+    for (const [exit, note] of [['4', 'sandbox-prepare'], ['3', 'no coverage data'], ['1', 'fake']] as const) {
+      const r = await inproc(f, 'sandbox-run', ['--suite', 'unit'], { FAKE_COVERAGE_EXIT: exit });
+      expect(r.code).toBe(0);
+      expect(r.out.coverage).toMatchObject({ ok: false, exit: Number(exit), reports: [] });
+      if (exit !== '1') expect(r.out.coverage.note).toContain(note);
+    }
+  });
+
+  test('a runner that outlives --timeout-ms is stopped by name and the run reports a timeout', async () => {
+    const f = e2eFake();
+    const r = await inproc(f, 'sandbox-run', ['--suite', 'unit', '--timeout-ms', '1000'], { FAKE_SLEEP: ' --name ' });
+    expect(r.out.timedOut).toBe(true);
+    expect(r.code).not.toBe(0);
+    expect(f.calls()).toContainEqual(expect.stringMatching(/\brm -f \S+-runner-/));
+  }, 60_000);
+
+  test('the unit suite then the e2e suite: both run, the e2e starts from the dump again, the result holds both', async () => {
+    const f = e2eFake();
+    const r = await inproc(f, 'sandbox-run', ['--wait-seconds', '5']);
+    expect(r.code).toBe(0);
+    expect(r.out).toMatchObject({ suite: 'all', unit: { exit: 0 }, e2e: { exit: 0, artifacts: 'removed' } });
+    expect(f.calls().filter((l) => l.includes('reset.sh')).length).toBe(2);
+    const failing = await inproc(f, 'sandbox-run', ['--wait-seconds', '5'], { FAKE_E2E_EXIT: '1' });
+    expect(failing.code).toBe(1);
+    expect(failing.out.e2e).toMatchObject({ exit: 1, artifacts: 'kept' });
+  });
+
+  test('a failed sandbox check or database reset stops the run before any suite, and the result says why', async () => {
+    const f = e2eFake();
+    editConfig(f, (cfg) => {
+      cfg.services.app.privileged = true;
+    });
+    const unsafe = await inproc(f, 'sandbox-run', ['--suite', 'unit']);
+    expect(unsafe.code).toBe(1);
+    expect(unsafe.out.stopped).toContain('the sandbox check failed');
+    expect(JSON.parse(readFileSync(unsafe.out.result, 'utf8'))).toMatchObject({ exit: null, stopped: 'the sandbox check failed' });
+    expect(f.calls().some((l) => l.includes('-runner-'))).toBe(false);
+    const g = e2eFake();
+    const reset = await inproc(g, 'sandbox-run', ['--suite', 'unit'], { FAKE_FAIL: 'reset.sh' });
+    expect(reset.code).toBe(1);
+    expect(reset.out.stopped).toContain('resetting db from its template failed');
+    expect(g.calls().some((l) => l.includes('-runner-'))).toBe(false);
+    const again = e2eFake();
+    const second = await inproc(again, 'sandbox-run', ['--suite', 'e2e'], { FAKE_FAIL: 'reset.sh' });
+    expect(second.out.stopped).toContain('resetting db');
+  });
+
+  test('every step the e2e suite needs can fail, and the run stops with the step named', async () => {
+    const f = e2eFake();
+    for (const [fail, said] of [
+      [' up -d proxy', 'starting the proxy failed'],
+      ['rm -rf /live', 'cleaning /live failed'],
+      [' up -d app', 'starting the app failed'],
+      [': > /live/access.log', 'truncating the access log failed'],
+    ] as const) {
+      const r = await inproc(f, 'sandbox-run', ['--suite', 'e2e'], { FAKE_FAIL: fail });
+      expect({ fail, code: r.code, stopped: String(r.out.stopped).includes(said) }).toEqual({ fail, code: 1, stopped: true });
+    }
+    writeFileSync(join(f.state, 'ps-app.txt'), 'id-app\n');
+    const restart = await inproc(f, 'sandbox-run', ['--suite', 'e2e'], { FAKE_FAIL: ' restart app' });
+    expect(String(restart.out.stopped)).toContain('starting the app failed');
+    const slow = await inproc(f, 'sandbox-run', ['--suite', 'e2e', '--wait-seconds', '5'], { FAKE_FAIL: 'http://proxy:8080' });
+    expect(String(slow.out.stopped)).toContain('did not answer in 5s');
+  }, 90_000);
+
+  test('problems of the e2e run that do not stop it are in the result: the app that did not stop, no access log, no Playwright report', async () => {
+    const f = e2eFake();
+    rmSync(join(f.root, SANDBOX_DIR, 'out', 'live', 'access.log'));
+    rmSync(join(f.state, 'playwright-report.json'));
+    const r = await inproc(f, 'sandbox-run', ['--suite', 'e2e'], { FAKE_FAIL: ' stop -t 60' });
+    expect(r.code).toBe(0);
+    const problems: string[] = r.out.e2e.problems;
+    expect(problems.some((p) => p.includes('stopping the app failed'))).toBe(true);
+    expect(problems.some((p) => p.includes('access log could not be copied') && p.includes('it does not exist'))).toBe(true);
+    expect(problems).toContain('the e2e run wrote no Playwright report');
+    expect(r.out.accessLog).toBeNull();
+    expect(r.out.playwrightReport).toBeNull();
+  });
+
+  test('a directory planted where a result file goes stops the run with the reason and writes nothing outside', async () => {
+    const f = e2eFake();
+    const victim = join(f.state, 'victim.txt');
+    writeFileSync(victim, 'VICTIM-ORIGINAL');
+    const r = await inproc(f, 'sandbox-run', ['--suite', 'unit'], { FAKE_PLANT_DIRS: 'output.log', FAKE_VICTIM: victim });
+    expect(r.error).toContain('sandbox-run:');
+    expect(readFileSync(victim, 'utf8')).toBe('VICTIM-ORIGINAL');
+  });
 });

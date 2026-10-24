@@ -646,6 +646,15 @@ export function coverageCheck(root: string, reports: string[], opts: { rootMap?:
     if (gap.lines_missed.length > 0 || gap.branches_missed.length > 0) res.gaps.push(gap);
   }
 
+  // Fail closed on an empty requirement: a report that maps only to docs, config or exempted
+  //   files, a layout whose sources the pool skips, or a read budget that ran out would
+  //   otherwise pass as "100% of 0 files".
+  if (required.length === 0) {
+    problem(
+      `no file needs coverage: ${files.length} files listed, ${candidates.length} measurable code files, ${candidates.length - required.length} of them exempt, ${merged.size} with coverage in the reports; check the project layout, the reports and the coverage-exempt entries`,
+    );
+  }
+
   res.gaps.sort(byRel);
   res.required = required.length;
   res.full = required.length - res.gaps.length;

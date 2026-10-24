@@ -4,8 +4,8 @@
 // directory that is a real directory (a linked `.goodboy` would send the write outside the repo).
 
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, renameSync, rmSync, type Stats, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, type Stats, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { runBounded } from './bounded';
 import { KEYSTORE_PASSWORD, planSandbox, SANDBOX_DIR, SCAN_FILE, type SandboxPlan } from './sandbox-render';
@@ -60,6 +60,87 @@ export function readScan(root: string): SandboxScan | Error {
   return new Error(`${p} is not a scan goodboy wrote; run sandbox-scan again`);
 }
 
+/** `realpath(p)`, or `p` itself when it does not exist (yet). */
+export function realOrSelf(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
+/** A repo root as the paths under it may spell it: lexical and real, once each. */
+export const repoTops = (root: string): string[] => [...new Set([root, realOrSelf(root)])];
+
+/** Whether `base/parts…` exists with no link on the way (each part below `base` is looked at with
+ *  lstat) and the last part is a regular file, or a directory with `last: 'dir'`. */
+export function noLinksUnder(base: string, parts: readonly string[], last: 'file' | 'dir'): boolean {
+  if (parts.length === 0) return false;
+  try {
+    let cur = base;
+    for (const [i, part] of parts.entries()) {
+      cur = join(cur, part);
+      const st = lstatSync(cur);
+      if (st.isSymbolicLink() || (i < parts.length - 1 || last === 'dir' ? !st.isDirectory() : !st.isFile())) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The name of a `sandbox-run` directory under `.goodboy/sandbox/out/` (its timestamp). */
+export const RUN_NAME = /^\d{8}T\d{6}Z$/;
+
+/** What a record needs from the result of one `sandbox-run`. */
+export interface RunProof {
+  /** The run's directory name, which is also the `ts` inside its result. */
+  run: string;
+  /** SHA-256 of `result.json` as read. */
+  sha256: string;
+  exit: number | null;
+  command: string[];
+  /** `unit`, `e2e` or `all`: what the run ran (null in a result that does not say). */
+  suite: string | null;
+  check: { inner_only: boolean; egress_blocked: boolean; hosts_to_dummies: boolean };
+}
+
+/** The result of a sandbox run (`out/<run>/result.json`), read from the repo top without
+ *  following a link (not the file, not a directory above it), or an Error saying what is wrong.
+ *  The check flags a record carries come from here, never from the agent. */
+export function readRunResult(root: string, run: string): RunProof | Error {
+  if (!RUN_NAME.test(run)) return new Error(`sandbox.run must be the run's directory name (like 20261022T031816Z), not ${JSON.stringify(run).slice(0, 60)}`);
+  const dirParts = ['.goodboy', 'sandbox', 'out', run];
+  const cur = join(root, ...dirParts);
+  if (!noLinksUnder(root, dirParts, 'dir')) return new Error(`${cur} does not exist, or it or a directory above it is a link: no sandbox-run wrote run ${run} in this repository`);
+  const p = join(cur, 'result.json');
+  const r = readRegular(p, MAX_DOC_BYTES, true);
+  if (r === 'absent') return new Error(`${p} does not exist: the run ${run} wrote no result`);
+  if (r === 'refused') return new Error(`${p} is not a regular file of at most ${MAX_DOC_BYTES} bytes`);
+  try {
+    const j = JSON.parse(r.text) as Record<string, unknown>;
+    const c = j.check as Record<string, unknown> | null | undefined;
+    const exit = j.exit;
+    if (
+      typeof j === 'object' &&
+      j !== null &&
+      j.ts === run &&
+      typeof c === 'object' &&
+      c !== null &&
+      typeof c.inner_only === 'boolean' &&
+      typeof c.egress_blocked === 'boolean' &&
+      typeof c.hosts_to_dummies === 'boolean' &&
+      (exit === null || typeof exit === 'number') &&
+      isStrings(j.command)
+    ) {
+      return { run, sha256: sha(r.text), exit: exit as number | null, command: j.command as string[], suite: typeof j.suite === 'string' ? j.suite : null, check: { inner_only: c.inner_only, egress_blocked: c.egress_blocked, hosts_to_dummies: c.hosts_to_dummies } };
+    }
+  } catch {
+    // below
+  }
+  return new Error(`${p} is not a result goodboy's sandbox-run wrote (it needs ts equal to the run, a check with three booleans, exit and command)`);
+}
+
 /** The local answers; empty ones when there is no local.json, an Error when it is unreadable. */
 export function readLocal(root: string): SandboxLocal | Error {
   const p = join(root, LOCAL_FILE);
@@ -95,7 +176,7 @@ export function ensureRealDir(root: string, rel: string): void {
 
 /** Writes `text` to `abs` through a temp file and a rename; a link at `abs` is replaced, never
  *  followed. */
-function writeAtomic(abs: string, text: string, mode = 0o644): void {
+export function writeAtomic(abs: string, text: string, mode = 0o644): void {
   const tmp = `${abs}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
   try {
     writeFileSync(tmp, text, { flag: 'wx', mode });
@@ -110,16 +191,67 @@ function writeAtomic(abs: string, text: string, mode = 0o644): void {
   }
 }
 
-/** Writes `.goodboy/sandbox/scan.json`, the scan `sandbox-init` builds from (M1a). */
+/** Writes `.goodboy/sandbox/scan.json`, the scan `sandbox-init` builds from (M1a). The file is
+ *  committed with the repo, so it keeps `root` as `.`: no absolute path of this machine. */
 export function writeScan(root: string, scan: SandboxScan): string | Error {
   try {
     ensureRealDir(root, '.goodboy/sandbox');
     const abs = join(root, '.goodboy', 'sandbox', 'scan.json');
-    writeAtomic(abs, `${JSON.stringify(scan, null, 2)}\n`);
+    writeAtomic(abs, `${JSON.stringify({ ...scan, root: '.' }, null, 2)}\n`);
     return abs;
   } catch (err) {
     return err instanceof Error ? err : new Error(String(err));
   }
+}
+
+const within = (p: string, base: string): boolean => p === base || p.startsWith(base.endsWith(sep) ? base : base + sep);
+
+export type DockerKind = 'colima' | 'desktop' | 'native' | 'unknown';
+
+/** Which docker the commands talk to, from `DOCKER_HOST` or the current context's name and
+ *  endpoint: Colima (a VM that mounts only the home directory by default), Docker Desktop (shares
+ *  /Users, /Volumes, /private, /tmp and /var/folders on macOS), native Linux docker (no VM), or
+ *  unknown (no docker answered, or an endpoint of none of those). */
+export function dockerKind(platform: NodeJS.Platform = process.platform): DockerKind {
+  let id = process.env.DOCKER_HOST?.trim() ?? '';
+  if (id === '') {
+    try {
+      const r = Bun.spawnSync([process.env.GOODBOY_DOCKER_BIN?.trim() || 'docker', 'context', 'inspect', '--format', '{{.Name}} {{.Endpoints.docker.Host}}'], { stdout: 'pipe', stderr: 'ignore', timeout: 10_000 });
+      if (r.exitCode === 0) id = r.stdout.toString().trim();
+    } catch {
+      // no docker binary: unknown
+    }
+  }
+  if (/colima/i.test(id)) return 'colima';
+  if (/desktop|\.docker\/(?:desktop|run)\//i.test(id)) return 'desktop';
+  if (platform === 'linux' && /unix:\/\//.test(id)) return 'native';
+  return 'unknown';
+}
+
+/** The directories Docker Desktop shares with its VM by default. */
+const DESKTOP_ROOTS = ['/Users', '/Volumes', '/private', '/tmp', '/var/folders'];
+
+/** Why this dump can not be used, or null. Inside the repo it is one `git add` from being
+ *  committed and the preparation step would mount it. Outside what the docker VM mounts the
+ *  sandbox would restore an empty file: with Colima (the decided runtime) or an unknown docker,
+ *  that is everything outside the home directory; Docker Desktop shares more (DESKTOP_ROOTS on
+ *  macOS, the home directory elsewhere); native Linux docker has no such rule. */
+export function dumpProblem(root: string, dump: string, opts: { kind?: DockerKind; platform?: NodeJS.Platform } = {}): string | null {
+  if (!existsSync(dump)) return null;
+  const d = realOrSelf(dump);
+  const top = realOrSelf(root);
+  if (within(d, top)) return `${dump} is inside the repository (${top}); keep the dump outside it, so it can not be committed or reach the preparation step`;
+  const platform = opts.platform ?? process.platform;
+  const kind = opts.kind ?? dockerKind(platform);
+  if (kind === 'native') return null;
+  // $HOME as the process sees it now (os.homedir() can keep the value from the start)
+  const home = realOrSelf(process.env.HOME?.trim() || homedir());
+  if (kind === 'desktop' && platform === 'darwin') {
+    return DESKTOP_ROOTS.some((r) => within(d, realOrSelf(r))) ? null : `${dump} is outside Docker Desktop's shared folders (${DESKTOP_ROOTS.join(', ')}), so the sandbox would see an empty file: move the dump into one of them`;
+  }
+  if (within(d, home)) return null;
+  const who = kind === 'colima' ? 'Colima mounts only the home directory by default' : kind === 'desktop' ? "Docker Desktop shares only the home directory here" : 'the docker VM (Colima, the decided runtime) mounts only the home directory by default, and this docker could not be told apart from it';
+  return `${dump} is outside your home directory (${home}); ${who}, so the sandbox would see an empty file: move the dump there${kind === 'colima' ? " or add its directory to Colima's mounts" : ''}`;
 }
 
 /** Writes `.goodboy/sandbox/local.json` (mode 0600): the dump path and format. */
@@ -132,6 +264,8 @@ export function writeLocal(root: string, dump: string, format: 'sql' | 'custom' 
     return new Error(`${dump} does not exist`);
   }
   if (!st.isFile()) return new Error(`${dump} is not a file`);
+  const problem = dumpProblem(root, dump);
+  if (problem !== null) return new Error(problem);
   const fmt: 'sql' | 'custom' = format ?? (/\.(dump|custom|backup|pgdump)$/i.test(dump) ? 'custom' : 'sql');
   const local: SandboxLocal = { dump: resolve(dump), dumpFormat: fmt };
   ensureRealDir(root, SANDBOX_DIR);
@@ -211,11 +345,14 @@ async function ensureCa(root: string, sans: SandboxPlan['sans']): Promise<InitRe
   try {
     if (!haveCa) {
       for (const f of CA_FILES) rmSync(join(ca, f), { force: true });
+      // the key file exists with mode 0600 before openssl writes into it, so it is never readable by others
+      writeFileSync(join(ca, 'ca.key'), '', { mode: 0o600 });
       await openssl(tmp, ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', join(ca, 'ca.key'), '-out', join(ca, 'ca.crt'), '-sha256', '-days', '3650', '-subj', '/CN=goodboy sandbox CA']);
       chmodSync(join(ca, 'ca.key'), 0o600);
     }
     for (const f of ['server.crt', 'server.key', 'server.p12', 'server.sans']) rmSync(join(ca, f), { force: true });
     writeFileSync(join(tmp, 'ext.cnf'), `subjectAltName=${sansText}\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n`);
+    writeFileSync(join(ca, 'server.key'), '', { mode: 0o600 });
     await openssl(tmp, ['req', '-new', '-newkey', 'rsa:2048', '-nodes', '-keyout', join(ca, 'server.key'), '-out', join(tmp, 'server.csr'), '-subj', `/CN=${sans.dns[0] ?? 'sandbox'}`]);
     chmodSync(join(ca, 'server.key'), 0o600);
     await openssl(tmp, ['x509', '-req', '-in', join(tmp, 'server.csr'), '-CA', join(ca, 'ca.crt'), '-CAkey', join(ca, 'ca.key'), '-set_serial', `0x${randomBytes(8).toString('hex')}`, '-days', '825', '-sha256', '-extfile', join(tmp, 'ext.cnf'), '-out', join(ca, 'server.crt')]);
@@ -232,7 +369,7 @@ async function ensureCa(root: string, sans: SandboxPlan['sans']): Promise<InitRe
  *  replaced only with `force`; a file that differs from what goodboy wrote is drift and is
  *  never touched, `force` or not. The hash of each file written is kept in `.written.json`. */
 export async function initSandbox(root: string, scan: SandboxScan, local: SandboxLocal, force: boolean): Promise<InitReport | Error> {
-  const plan = planSandbox(scan, local);
+  const plan = planSandbox(scan, local, { root });
   const ledger = readLedger(root);
   if (ledger instanceof Error) return ledger;
   ensureRealDir(root, SANDBOX_DIR);

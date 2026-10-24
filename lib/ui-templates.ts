@@ -6,7 +6,7 @@
 // becomes a note, never a guess.
 
 import { BODY_METHODS, toPattern } from './ui-types';
-import { type SrcFile, Sink, blankComments, findClose, idOf, makeLineOf, slug } from './ui-scan-text';
+import { type SrcFile, Sink, blankComments, bounded, fileIdOf, findClose, idOf, lowerBound, makeLineOf } from './ui-scan-text';
 import { splitTop } from './ui-spring';
 
 export const TEMPLATE_EXT = /\.(?:html?|jsp|jspx|jspf|ftlh?|vm|mustache|hbs|ejs|njk|jinja2?|j2|xhtml)$/i;
@@ -15,6 +15,11 @@ const NON_URL = /^(?:#|javascript:|mailto:|tel:|data:|sms:|blob:|about:)/i;
 /** The first part of a URL that is the app's base (`${pageContext.request.contextPath}`, `${ctx}`,
  *  `<%=request.getContextPath()%>`, `[[@{/}]]`): the context path is removed from every route. */
 const CONTEXT_EXPR = /^(?:\$\{[^}]*\}|<%=[^%]*%>|\[\[[^\]]*\]\]|\{\}|<c:url[^>]*>)/;
+/** The placeholders of a URL (`${x}`, `#{x}`, `*{x}`, `<%= x %>`, `[[x]]`, `<c:out …>`) as one regex.
+ *  Each body is at most 300 characters: an unbounded `[^}]*` rescans to the end of the text from
+ *  every unterminated opener (`${` repeated), and no real placeholder is that long. */
+const PLACEHOLDER = bounded(/\$\{[^}]{0,N}\}|#\{[^}]{0,N}\}|\*\{[^}]{0,N}\}|<%=[^%]{0,N}%>|\[\[[^\]]{0,N}\]\]|<c:out[^>]{0,N}>/g);
+export const JS_PLACEHOLDER = bounded(/\$\{[^}]{0,N}\}/g);
 
 /** The route pattern a URL written in a template or script stands for, or null when it is not an
  *  internal path (external, relative, an asset, a `#`, a bare variable). */
@@ -22,7 +27,7 @@ export function urlPattern(raw: string, ctx = '/'): string | null {
   let v = raw.trim();
   if (v === '' || NON_URL.test(v)) return null;
   // `<c:url value="/x"/>` and `<spring:url value="/x" />` inside the value
-  const cu = /<(?:c|spring):url\b[^>]*?\bvalue\s*=\s*(["'])(.*?)\1/i.exec(v);
+  const cu = bounded(/<(?:c|spring):url\b[^>]{0,N}?\bvalue\s*=\s*(["'])(.{0,500}?)\1/i).exec(v);
   if (cu) v = cu[2]!;
   // Thymeleaf link expression `@{...}` and literal substitution `|...|`
   const th = /^@\{([\s\S]*)\}$/.exec(v);
@@ -31,14 +36,14 @@ export function urlPattern(raw: string, ctx = '/'): string | null {
     const params = findParams(v);
     if (params >= 0) v = v.slice(0, params);
     // `@{'/users/' + ${id}}`: a JavaScript-like concatenation
-    if (/^["']/.test(v)) return exprPattern(v.replace(/\$\{[^}]*\}/g, 'v'), ctx);
+    if (/^["']/.test(v)) return exprPattern(v.replace(JS_PLACEHOLDER, 'v'), ctx);
   } else if (/^\|[\s\S]*\|$/.test(v)) v = v.slice(1, -1);
   v = v.replace(/^~/, '');
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(v) || v.startsWith('//')) return null;
   // the leading base: a context variable or a dynamic part followed by `/`
   const lead = CONTEXT_EXPR.exec(v);
   if (lead && /^\//.test(v.slice(lead[0].length))) v = v.slice(lead[0].length);
-  v = v.replace(/\$\{[^}]*\}|#\{[^}]*\}|\*\{[^}]*\}|<%=[^%]*%>|\[\[[^\]]*\]\]|<c:out[^>]*>/g, '{}');
+  v = v.replace(PLACEHOLDER, '{}');
   const q = v.search(/[?#]/);
   if (q >= 0) v = v.slice(0, q);
   if (!v.startsWith('/') || v === '/{}') return null;
@@ -70,7 +75,7 @@ export function exprPattern(expr: string, ctx = '/'): string | null {
   for (const t of terms) {
     const lit = /^(["'`])([\s\S]*)\1$/.exec(t);
     let part: string;
-    if (lit) part = lit[1] === '`' ? lit[2]!.replace(/\$\{[^}]*\}/g, '{}') : lit[2]!;
+    if (lit) part = lit[1] === '`' ? lit[2]!.replace(JS_PLACEHOLDER, '{}') : lit[2]!;
     else if (/^[^\s"'`]+$/.test(t)) part = '{}';
     else return null;
     if (first && !lit) {
@@ -117,9 +122,12 @@ function methodIn(text: string): string | null {
 function callArgs(code: string, open: number): { first: string; rest: string } | null {
   const close = findClose(code, open);
   if (close < 0) return null;
-  const args = splitTop(code.slice(open + 1, close));
+  // Only the start of the arguments is read (the URL, the options object's `method`): nested calls
+  //   (`fetch(fetch(…))`) otherwise copy and split text as long as the whole nest, per call.
+  const args = splitTop(code.slice(open + 1, Math.min(close, open + 1 + ARGS_WINDOW)));
   return { first: args[0] ?? '', rest: args.slice(1).join(',') };
 }
+const ARGS_WINDOW = 6000;
 
 /** The requests and navigations in JavaScript text (comments already blanked). */
 export function jsCalls(code: string, withRouter = false): JsCall[] {
@@ -148,13 +156,19 @@ export function jsCalls(code: string, withRouter = false): JsCall[] {
       push('ajax', verb === 'getJSON' ? 'GET' : verb.toUpperCase(), a.first, m.index);
     } else if (name.endsWith('open') && !name.startsWith('window')) {
       // xhr.open('POST', url)
-      const parts = splitTop(code.slice(open + 1, findClose(code, open)));
+      const parts = splitTop(code.slice(open + 1, Math.min(findClose(code, open), open + 1 + ARGS_WINDOW)));
       const v = /^["'`](\w+)["'`]$/.exec(parts[0] ?? '');
       if (v && VERBS.has(v[1]!.toLowerCase()) && parts[1] !== undefined) push('ajax', v[1]!.toUpperCase(), parts[1], m.index);
     } else if (name === 'window.open' || name.startsWith('location.')) push('link', 'GET', a.first, m.index);
     else if (withRouter && (name.startsWith('router.') || name.startsWith('history.') || name === 'navigate')) push('link', 'GET', a.first, m.index);
   }
-  for (const m of code.matchAll(/(?<![\w$.])(?:window\.|document\.)?location(?:\.href)?\s*=(?!=)\s*([^;\n]+)/g)) push('link', 'GET', m[1]!.replace(/[\s})]+$/, ''), m.index!);
+  for (const m of code.matchAll(/(?<![\w$.])(?:window\.|document\.)?location(?:\.href)?\s*=(?!=)\s*([^;\n]+)/g)) {
+    // Trailing blanks and closers off by a loop: `/[\s})]+$/` tries every start of a long run of them.
+    const text = m[1]!;
+    let stop = text.length;
+    while (stop > 0 && /[\s})]/.test(text[stop - 1]!)) stop--;
+    push('link', 'GET', text.slice(0, stop), m.index!);
+  }
   return out;
 }
 
@@ -201,26 +215,116 @@ interface Tag {
   end: number;
 }
 
-const TAG_RE = /<([A-Za-z][\w:.-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/g;
+/** The most tags of one form that are read for its fields and `_method` override. */
+const MAX_FORM_TAGS = 4000;
 const ATTR_RE = /([^\s"'<>/=]+)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s"'>]+))?/g;
 const EVENT_ATTRS = /^(?:th:)?on[a-z]+$|^(?:@click|v-on:click|x-on:click|ng-click|\(click\))$/i;
 const SPRING_FIELD = /^\w+:(?:input|password|select|textarea|checkbox|checkboxes|radiobutton|radiobuttons)$/i;
 const NON_FIELD_TYPES = new Set(['hidden', 'submit', 'button', 'reset', 'image']);
 
-function tagsOf(html: string): Tag[] {
+/** For each offset, the offset of the next `ch` at or after it (the text length when none). */
+function nextOf(text: string, ch: string): Int32Array {
+  const code = ch.charCodeAt(0);
+  const next = new Int32Array(text.length + 1);
+  next[text.length] = text.length;
+  for (let i = text.length - 1; i >= 0; i--) next[i] = text.charCodeAt(i) === code ? i : next[i + 1]!;
+  return next;
+}
+
+const isAlpha = (c: number) => (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+const isNameChar = (c: number) => isAlpha(c) || (c >= 48 && c <= 57) || c === 95 || c === 58 || c === 46 || c === 45;
+
+interface Markup {
+  tags: Tag[];
+  /** The offsets of the next `>` at or after each offset (the text length when none). */
+  nextGt: Int32Array;
+}
+
+/** The start tags of a template: `<name`, attributes (a quoted value may hold `>`), `>`. The
+ *  regex this replaces (`<([A-Za-z][\w:.-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>`) rescanned to the end
+ *  of the text from every `<tag` with no `>` after it. Here the end of a tag is found by jumping
+ *  from quote to quote, and the answer for an offset is kept, so the scans of several starts that
+ *  reach the same offset share the rest: linear in the text. */
+export function markupOf(html: string): Markup {
+  const n = html.length;
+  const nextGt = nextOf(html, '>');
+  const nextDq = nextOf(html, '"');
+  const nextSq = nextOf(html, "'");
+  const known = new Map<number, number>();
+  /** The `>` that ends a tag whose name ends at `from`, or -1. */
+  const endOf = (from: number): number => {
+    const trail: number[] = [];
+    let p = from;
+    let res: number;
+    for (;;) {
+      const seen = known.get(p);
+      if (seen !== undefined) {
+        res = seen;
+        break;
+      }
+      trail.push(p);
+      const g = nextGt[p]!;
+      const d = nextDq[p]!;
+      const s = nextSq[p]!;
+      const m = Math.min(g, d, s);
+      if (m >= n) {
+        res = -1;
+        break;
+      }
+      if (m === g) {
+        res = g;
+        break;
+      }
+      const close = (m === d ? nextDq : nextSq)[m + 1]!;
+      if (close >= n) {
+        res = -1; // an unterminated quote: not a tag
+        break;
+      }
+      p = close + 1;
+    }
+    for (const t of trail) known.set(t, res);
+    return res;
+  };
   const tags: Tag[] = [];
-  for (const m of html.matchAll(TAG_RE)) {
+  for (let i = html.indexOf('<'); i >= 0; ) {
+    if (!isAlpha(html.charCodeAt(i + 1))) {
+      i = html.indexOf('<', i + 1);
+      continue;
+    }
+    let j = i + 2;
+    while (j < n && isNameChar(html.charCodeAt(j))) j++;
+    const gt = endOf(j);
+    if (gt < 0) {
+      i = html.indexOf('<', i + 1);
+      continue;
+    }
     const attrs = new Map<string, string>();
-    for (const a of m[2]!.matchAll(ATTR_RE)) {
+    for (const a of html.slice(j, gt).matchAll(ATTR_RE)) {
       const key = a[1]!.toLowerCase();
       if (key === '/') continue;
       const val = a[2] === undefined ? '' : a[2].replace(/^(["'])([\s\S]*)\1$/, '$2');
       if (!attrs.has(key)) attrs.set(key, val);
     }
-    tags.push({ name: m[1]!.toLowerCase(), attrs, start: m.index!, end: m.index! + m[0].length });
+    tags.push({ name: html.slice(i + 1, j).toLowerCase(), attrs, start: i, end: gt + 1 });
+    i = html.indexOf('<', gt + 1);
   }
-  return tags;
+  return { tags, nextGt };
 }
+
+/** The offsets (start, end) of every `</name>` by lower-case name, in order: one pass, so a form's
+ *  or a script's close is a binary search, not a scan to the end of the text. */
+function closeTags(html: string): Map<string, { starts: number[]; ends: number[] }> {
+  const out = new Map<string, { starts: number[]; ends: number[] }>();
+  for (const m of html.matchAll(/<\/([A-Za-z][\w:.-]*)\s*>/g)) {
+    const name = m[1]!.toLowerCase();
+    let l = out.get(name);
+    if (!l) out.set(name, (l = { starts: [], ends: [] }));
+    l.starts.push(m.index!);
+    l.ends.push(m.index! + m[0].length);
+  }
+  return out;
+}
+
 
 const attrOf = (t: Tag, ...names: string[]): string | undefined => {
   for (const n of names) {
@@ -230,13 +334,19 @@ const attrOf = (t: Tag, ...names: string[]): string | undefined => {
   return undefined;
 };
 
+const CLEAN_TAG = bounded(/<[^>]{0,N}>/g);
+const CLEAN_EXPR = bounded(/\$\{[^}]{0,N}\}|\[\[[^\]]{0,N}\]\]/g);
+
 /** A label for an item: `x` made of letters and digits, from a Thymeleaf message key, an
  *  expression or plain text. */
 function cleanLabel(raw: string): string {
+  // Only the start of a long text is read, and each markup run is bounded: an unterminated `<` or
+  //   `${` otherwise rescans to the end of the text from every opener.
   return raw
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/&#x[0-9a-f]+;|&#\d+;|&[a-z]+;/gi, ' ')
-    .replace(/\$\{[^}]*\}|\[\[[^\]]*\]\]/g, ' ')
+    .slice(0, 2000)
+    .replace(CLEAN_TAG, ' ')
+    .replace(/&#x[0-9a-f]{1,8};|&#\d{1,8};|&[a-z]{1,10};/gi, ' ')
+    .replace(CLEAN_EXPR, ' ')
     .replace(/[#{}'"|]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
@@ -286,17 +396,26 @@ function labelOf(html: string, t: Tag, events: [string, string][]): string {
 export function scanTemplate(f: SrcFile, sink: Sink, env: Env): void {
   const html = blankComments(f.text, 'html');
   const lineOf = makeLineOf(html);
-  const tags = tagsOf(html);
+  const { tags, nextGt } = markupOf(html);
+  const closes = closeTags(html);
+  const tagStarts = tags.map((t) => t.start);
   const seen = new Map<string, number>();
   type FormSpan = { start: number; end: number };
   const forms: FormSpan[] = [];
+  /** Largest `end` among the forms up to each index, to answer "is this offset inside a form". */
+  const formsMaxEnd: number[] = [];
 
   for (const t of tags) {
     if (t.name !== 'form' && !t.name.endsWith(':form')) continue;
-    const closeAt = new RegExp(`</${t.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*>`, 'i').exec(html.slice(t.end));
-    const end = closeAt ? t.end + closeAt.index : Math.min(html.length, t.end + 4000);
+    const list = closes.get(t.name);
+    const at = list ? lowerBound(list.starts, t.end) : 0;
+    const end = list && at < list.starts.length ? list.starts[at]! : Math.min(html.length, t.end + 4000);
     forms.push({ start: t.start, end });
-    const inner = tags.filter((x) => x.start >= t.end && x.start < end);
+    formsMaxEnd.push(Math.max(end, formsMaxEnd[formsMaxEnd.length - 1] ?? 0));
+    // the tags inside, by binary search; a form never reads more than MAX_FORM_TAGS of them (many
+    //   unclosed forms would each read every tag after them)
+    const first = lowerBound(tagStarts, t.end);
+    const inner = tags.slice(first, Math.min(lowerBound(tagStarts, end), first + MAX_FORM_TAGS));
     const hasFields = inner.some((x) => {
       if (x.name === 'input') return !NON_FIELD_TYPES.has((attrOf(x, 'type') ?? 'text').toLowerCase());
       return x.name === 'select' || x.name === 'textarea' || SPRING_FIELD.test(x.name);
@@ -316,9 +435,14 @@ export function scanTemplate(f: SrcFile, sink: Sink, env: Env): void {
     const label = cleanLabel(attrOf(t, 'id', 'name', 'th:object', 'modelattribute', 'commandname') ?? '') || method;
     const input = hasFields || BODY_METHODS.has(method);
     if (route !== null) sink.add({ id: idOf('form', method, route), kind: 'action', method, route, file: f.rel, line: lineOf(t.start), input, label: `form ${method} ${route}` });
-    else sink.addUnique({ id: `form:${f.rel}#${slug(label)}`, kind: 'action', method, file: f.rel, line: lineOf(t.start), input, label: `form ${label} (no action: posts to its own page)` }, seen);
+    else sink.addUnique({ id: fileIdOf('form', f.rel, label), kind: 'action', method, file: f.rel, line: lineOf(t.start), input, label: `form ${label} (no action: posts to its own page)` }, seen);
   }
-  const inForm = (t: Tag) => forms.some((s) => t.start > s.start && t.start < s.end);
+  // forms are in start order: those that start before the tag are a prefix
+  const formStarts = forms.map((s) => s.start);
+  const inForm = (t: Tag) => {
+    const k = lowerBound(formStarts, t.start);
+    return k > 0 && formsMaxEnd[k - 1]! > t.start;
+  };
 
   for (const t of tags) {
     const href = t.name === 'a' || t.name === 'area' ? attrOf(t, 'th:href', 'href') : undefined;
@@ -342,7 +466,7 @@ export function scanTemplate(f: SrcFile, sink: Sink, env: Env): void {
       const nav = jsCalls(blankComments(handler, 'c')).find((c) => c.sub === 'link');
       const pattern = nav ? exprPattern(nav.expr, env.ctx) : null;
       const route = pattern !== null && env.has(pattern) ? pattern : undefined;
-      sink.addUnique({ id: `button:${f.rel}#${slug(label)}`, kind: 'action', method: route ? 'GET' : undefined, route, file: f.rel, line: lineOf(t.start), input: false, label }, seen);
+      sink.addUnique({ id: fileIdOf('button', f.rel, label), kind: 'action', method: route ? 'GET' : undefined, route, file: f.rel, line: lineOf(t.start), input: false, label }, seen);
     }
     for (const [, v] of events) {
       if (v.trim() === '') continue;
@@ -351,10 +475,22 @@ export function scanTemplate(f: SrcFile, sink: Sink, env: Env): void {
   }
 
   // inline <script> blocks
-  for (const m of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)) {
-    if (/\bsrc\s*=/i.test(m[1]!) || m[2]!.trim() === '') continue;
-    const bodyStart = m.index! + m[0].indexOf('>') + 1;
-    const code = blankComments(thymeleafUrls(m[2]!), 'c');
+  // By search, not by `<script\b([^>]*)>([\s\S]*?)<\/script\s*>`: that scans to the end of the
+  //   text from every `<script` that has no `>` or no `</script>` after it. When one start finds
+  //   none, no later start does either, so the loop ends.
+  const scriptCloses = closes.get('script');
+  const startRe = /<script\b/gi;
+  for (let m = startRe.exec(html); m && scriptCloses; m = startRe.exec(html)) {
+    const gt = nextGt[m.index + m[0].length]!;
+    if (gt >= html.length) break; // no `>` ahead
+    const bodyStart = gt + 1;
+    const c = lowerBound(scriptCloses.starts, bodyStart);
+    if (c >= scriptCloses.starts.length) break; // no `</script>` ahead
+    startRe.lastIndex = scriptCloses.ends[c]!;
+    const attrs = html.slice(m.index + m[0].length, gt);
+    const body = html.slice(bodyStart, scriptCloses.starts[c]);
+    if (/\bsrc\s*=/i.test(attrs) || body.trim() === '') continue;
+    const code = blankComments(thymeleafUrls(body), 'c');
     const inner = makeLineOf(code);
     const first = lineOf(bodyStart);
     addCalls(jsCalls(code), f.rel, (p) => first + inner(p) - 1, sink, env);
@@ -367,9 +503,12 @@ export function scanScript(f: SrcFile, sink: Sink, env: Env, withRouter = false)
   addCalls(jsCalls(code, withRouter), f.rel, makeLineOf(code), sink, env);
 }
 
+const THYMELEAF_NATURAL = bounded(/\/\*\[\[(@\{[^\]]{0,N}\})\]\]\*\/\s*(?:'[^'\n]{0,N}'|"[^"\n]{0,N}")?/g);
+const THYMELEAF_BARE = bounded(/\[\[(@\{[^\]]{0,N}\})\]\]/g);
+
 /** Thymeleaf's natural-template idiom `/*[[@{/x}]]*\/ '/x'` and a bare `[[@{/x}]]` as a string literal. */
 function thymeleafUrls(text: string): string {
   return text
-    .replace(/\/\*\[\[(@\{[^\]]*\})\]\]\*\/\s*(?:'[^'\n]*'|"[^"\n]*")?/g, "'$1'")
-    .replace(/\[\[(@\{[^\]]*\})\]\]/g, "'$1'");
+    .replace(THYMELEAF_NATURAL, "'$1'")
+    .replace(THYMELEAF_BARE, "'$1'");
 }

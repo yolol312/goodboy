@@ -396,6 +396,29 @@ describe('coverageCheck: report paths', () => {
   });
 });
 
+describe('coverageCheck: an empty requirement fails closed', () => {
+  test('a project with no measurable code is not "100% of 0 files"', () => {
+    const root = repo({ 'notes.txt': 'hello\n' });
+    const out = check(root, { lcov: lcov('notes.txt', [[1, 1]]) });
+    expect(out).toMatchObject({ ok: false, required: 0, gaps: [] });
+    expect(out.problems.join('\n')).toContain('no file needs coverage');
+    expect(out.problems.join('\n')).toMatch(/\d+ files listed/);
+  });
+
+  test('a virtualenv is not the project: the coverage gate skips what the scan and the inventory skip', () => {
+    const root = repo({ 'src/calc.ts': TS('calc'), 'venv/lib/python3.12/site-packages/pkg/mod.py': 'def f(x):\n    if x:\n        return 1\n    return 2\n', '.tox/py312/lib/x.py': 'x = 1\ny = 2\n' });
+    const out = check(root, { lcov: lcov('src/calc.ts', [[1, 1], [2, 1], [3, 1]]) });
+    expect(out).toMatchObject({ ok: true, required: 1, gaps: [], problems: [] });
+  });
+
+  test('exempting every code file leaves nothing required and fails, naming the counts', () => {
+    const root = repo({ 'src/calc.ts': TS('calc'), '.goodboy/policy.md': policy('src/**') });
+    const out = check(root, { lcov: lcov('src/calc.ts', [[1, 1], [2, 1], [3, 1]]) });
+    expect(out.ok).toBe(false);
+    expect(out.problems.join('\n')).toMatch(/1 measurable code files, 1 of them exempt, 1 with coverage/);
+  });
+});
+
 describe('cmdCoverageCheck', () => {
   test('exit 0 when ok, 1 with gaps, and --root-map in both spellings', () => {
     const root = repo({ 'src/calc.ts': TS('calc') });

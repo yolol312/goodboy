@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 // PreToolUse hook — 도구 강제 위임, Read-before-edit, 추론 게이트, 위험도 게이트
 
-import { existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join, resolve as resolvePath, sep } from 'node:path';
+import { existsSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, resolve as resolvePath, sep } from 'node:path';
 import { addedUserGlobs, diffCoverageMode, isPolicyFile, type UserGlobKey } from '../lib/changed-coverage';
 import { HOOK_CLOCK_MS, startHookClock } from '../lib/hook-clock';
 import { readStateText } from '../lib/safe-read';
@@ -1287,12 +1287,47 @@ function main(): void {
           //   same-named path elsewhere is not this session's evidence and passes.
           const abs = resolvePath(cwd, filePath);
           const cwdAbs = resolvePath(cwd);
+          // The comparison runs on real paths (a link to a result dir is the result dir) and, on
+          //   macOS where the file system ignores case, on lower-cased ones (.GOODBOY/sandbox/OUT).
+          const keyOf = (p: string): string => {
+            const rest: string[] = [];
+            let cur = p;
+            let real = p;
+            for (;;) {
+              try {
+                real = join(realpathSync(cur), ...rest.reverse());
+                break;
+              } catch {
+                const parent = dirname(cur);
+                if (parent === cur) break;
+                rest.push(basename(cur));
+                cur = parent;
+              }
+            }
+            return process.platform === 'darwin' ? real.toLowerCase() : real;
+          };
+          const absKey = keyOf(abs);
+          const cwdKey = keyOf(cwdAbs);
           const resultDir = (kind: string): boolean => {
-            const at = abs.indexOf(`${sep}.claude${sep}${kind}${sep}`);
-            return at >= 0 && ownsResultDir(abs.slice(0, at) || sep, cwdAbs);
+            const at = absKey.indexOf(`${sep}.claude${sep}${kind}${sep}`);
+            return at >= 0 && ownsResultDir(absKey.slice(0, at) || sep, cwdKey);
           };
           const inTests = resultDir('tests');
           const inReviews = resultDir('reviews');
+          // Track M fix A8: the run results a test record is checked against are written by
+          //   `sandbox-run` only; one written here would make a sandbox claim without a run.
+          const outAt = absKey.indexOf(`${sep}.goodboy${sep}sandbox${sep}out${sep}`);
+          if (outAt >= 0 && ownsResultDir(absKey.slice(0, outAt) || sep, cwdKey)) {
+            const rel = abs.startsWith(cwdAbs + sep) ? abs.slice(cwdAbs.length + 1) : abs;
+            logGate(sessionId, 'artifact-write', 'deny', rel);
+            emit(
+              deny(
+                `The sandbox run results are written only by \`sandbox-run\`: ${rel}. A test record counts a sandbox run by the result.json of that run, so a file written here is a forged run. ` +
+                  `Run the suite with \`bun "${CLI_PATH}" sandbox-run\` and record it with sandbox: {run: "<ts>"}. (artifact write gate — off: GOODBOY_ARTIFACT_WRITE_GATE=off)`,
+              ),
+            );
+            return;
+          }
           if (inTests || inReviews) {
             const cmd = inTests ? 'test-write' : 'review-write';
             const schema = inTests ? 'TestResult' : 'ReviewResult';

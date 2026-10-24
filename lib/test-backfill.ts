@@ -7,6 +7,8 @@
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { suiteRan } from './existing-tests';
+import { E2E_DIR } from './sandbox-e2e';
+import { readRunResult, type RunProof } from './sandbox-files';
 import { MAX_STATE_BYTES, readRegular } from './safe-read';
 import { isTestCode, type SurveyTarget } from './test-survey';
 import { recordStandsAlone, testerFor } from './test-types';
@@ -234,6 +236,103 @@ function changedAt(abs: string): number {
   return Math.max(st.mtimeMs, st.ctimeMs);
 }
 
+/** The run a record's sandbox claim stands on, or why it does not hold: all three check flags
+ *  true in the record, a run and the hash of its result.json, and that file read again now
+ *  (no link) with the same hash, the same three flags true, exit 0, made before the record. */
+function sandboxProof(root: string, r: TestResult): RunProof | string {
+  const sb = r.sandbox;
+  if (!(sb?.inner_only === true && sb.egress_blocked === true && sb.hosts_to_dummies === true)) return 'the record lacks sandbox flags inner_only, egress_blocked and hosts_to_dummies all true';
+  if (typeof sb.run !== 'string' || typeof sb.result_sha256 !== 'string') return 'the record names no run or result hash (record with sandbox: {run})';
+  const proof = readRunResult(root, sb.run);
+  if (proof instanceof Error) return proof.message;
+  if (proof.sha256 !== sb.result_sha256) return `result.json of run ${sb.run} changed after the record`;
+  if (!proof.check.inner_only || !proof.check.egress_blocked || !proof.check.hosts_to_dummies) return `run ${sb.run} did not pass its sandbox check`;
+  if (proof.exit !== 0) return `run ${sb.run} did not exit 0`;
+  if (runStart(sb.run) > Date.parse(r.timestamp)) return `run ${sb.run} is later than the record`;
+  return proof;
+}
+
+/** The start of a sandbox run (its directory name is a UTC timestamp to the second). */
+function runStart(run: string): number {
+  const m = RUN_NAME_PARTS.exec(run)!;
+  return Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z`);
+}
+const RUN_NAME_PARTS = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/;
+
+/** The words of a command line, quotes taken off, or null when it holds shell syntax that is
+ *  not data: unquoted `;` `&` `|` `#` `<` `>` or `\`, a backtick or `$(` (also inside double
+ *  quotes), a newline anywhere, an unclosed quote. Inside quotes `#` `&` `;` `|` are text, so
+ *  Maven's `-Dtest='Foo#bar'` is fine. */
+export function shellWords(cmd: string): string[] | null {
+  const out: string[] = [];
+  let cur = '';
+  let has = false;
+  let q: '"' | "'" | null = null;
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!;
+    if (c === '\n' || c === '\r') return null;
+    if (q === "'") {
+      if (c === "'") q = null;
+      else cur += c;
+      continue;
+    }
+    if (q === '"') {
+      if (c === '"') q = null;
+      else if (c === '`' || c === '\\' || (c === '$' && cmd[i + 1] === '(')) return null;
+      else cur += c;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      q = c;
+      has = true;
+    } else if (/[;&|#<>`\\]/.test(c) || (c === '$' && cmd[i + 1] === '(')) return null;
+    else if (/\s/.test(c)) {
+      if (has || cur !== '') out.push(cur);
+      cur = '';
+      has = false;
+    } else {
+      cur += c;
+      has = true;
+    }
+  }
+  if (q !== null) return null;
+  if (has || cur !== '') out.push(cur);
+  return out;
+}
+
+/** What a suite's command is, against the run a record names: `command` for the `sandbox-run`
+ *  line with `--` and the command the run recorded (word for word), `whole` for the line with no
+ *  `--` (the run's own commands: the project's test command, the e2e tests), null for anything
+ *  else. The line IS the invocation from its first word (a JS runtime with flags, a `cli.ts`,
+ *  `sandbox-run`, flags), with no shell syntax around it (shellWords): not a comment, an echo or the
+ *  second half of a chain. A host command, even the same one, is not. `--suite` must be the run's.
+ *  For an e2e-only run `--` is refused: its words would replace the e2e service's command. */
+function lineKind(command: string, proof: RunProof): 'command' | 'whole' | null {
+  const w = shellWords(command);
+  if (w === null) return null;
+  let i = 0;
+  if (/^(?:bun|bunx|node|nodejs|tsx)$/.test((w[0] ?? '').split('/').pop()!)) {
+    i = 1;
+    while (i < w.length && w[i]!.startsWith('-')) i++;
+  }
+  if (!/(^|\/)cli\.ts$/.test(w[i] ?? '') || w[i + 1] !== 'sandbox-run') return null;
+  const rest = w.slice(i + 2);
+  const dd = rest.indexOf('--');
+  const flags = dd < 0 ? rest : rest.slice(0, dd);
+  const si = flags.indexOf('--suite');
+  if (proof.suite !== null && (si >= 0 ? flags[si + 1] : 'all') !== proof.suite) return null;
+  if (dd < 0) return 'whole';
+  if (proof.suite === 'e2e' || proof.command.length === 0) return null;
+  const tail = rest.slice(dd + 1);
+  return tail.length === proof.command.length && tail.every((x, k) => x === proof.command[k]) ? 'command' : null;
+}
+
+/** The one line a counted suite must be, for the run of a record (named in the refusal). */
+function expectedLine(proof: RunProof): string {
+  const base = `bun "$GB/lib/cli.ts" sandbox-run --suite ${proof.suite ?? 'unit'}`;
+  return proof.suite === 'e2e' ? base : `${base} -- ${proof.command.join(' ')}`;
+}
+
 /** Why `tests` do not yet prove `target`, or null. The evidence is passing layer-1 records, one
  *  or several (a test-lead's members record their own), each standing on its own (no failing
  *  suite, its test files exist, its evidence holds, no do-nothing pattern) and naming the
@@ -255,13 +354,46 @@ export function evidenceProblem(projectDir: string, root: string, target: string
       recordStandsAlone(r),
   );
   if (named.length === 0) return `no passing layer-1 record that stands on its own names ${target} in tested_files`;
-  // With a sandbox the tests count only when they ran inside it (track M): the record carries
-  // the sandbox check of the run, both flags true.
-  const fit = hasSandbox(root) ? named.filter((r) => r.sandbox?.inner_only === true && r.sandbox?.egress_blocked === true) : named;
+  // With a sandbox the tests count only when they ran inside it (track M): the record names a
+  // sandbox-run whose result.json is still on disk with the recorded hash, passed its check
+  // (all three flags) and exited 0.
+  const sandboxed = hasSandbox(root);
+  const proofs = new Map<TestResult, RunProof>();
+  const why: string[] = [];
+  if (sandboxed) {
+    for (const r of named) {
+      const p = sandboxProof(root, r);
+      if (typeof p === 'string') why.push(p);
+      else proofs.set(r, p);
+    }
+  }
+  const fit = sandboxed ? named.filter((r) => proofs.has(r)) : named;
   if (fit.length === 0) {
-    return `the project has a sandbox (${SANDBOX_COMPOSE.split(sep).join('/')}), so a record counts only when its tests ran inside it: ${named.length} record(s) name ${target} but none carries sandbox: {inner_only: true, egress_blocked: true}; run the suites with sandbox-run (run-sandbox) and put its check in the record`;
+    return `the project has a sandbox (${SANDBOX_COMPOSE.split(sep).join('/')}), so a record counts only when its tests ran inside it: ${named.length} record(s) name ${target} but none proves a sandbox run (${[...new Set(why)].slice(0, 3).join('; ')}); run the suites with sandbox-run (run-sandbox) and record with sandbox: {run: "<ts>"}`;
   }
   const at = (r: TestResult) => Date.parse(r.timestamp);
+  /** The suite is the sandbox-run line of the record's run (lineKind); it ran the test when the
+   *  run's command (the project's tests, or the one after `--`) did, or, for a run that includes
+   *  the e2e suite, when the test is in the e2e dir (the e2e service runs every file in it). */
+  const suiteRanTest = (r: TestResult, command: string, t: string): boolean => {
+    const proof = proofs.get(r);
+    if (proof === undefined) return suiteRan(command, t, root);
+    const kind = lineKind(command, proof);
+    if (kind === null) return false;
+    if (proof.suite !== 'e2e' && suiteRan(proof.command.join(' '), t, root)) return true;
+    return (proof.suite === 'e2e' || proof.suite === 'all') && repoRel(root, abs(t)).startsWith(`${E2E_DIR}/`);
+  };
+  /** The run started in or after the second of the change: a run before the last edit proves nothing about it. */
+  const runAfter = (r: TestResult, changed: number): boolean => {
+    const proof = proofs.get(r);
+    return proof === undefined || Math.floor(runStart(proof.run) / 1000) >= Math.floor(changed / 1000);
+  };
+  let targetChanged = 0;
+  try {
+    targetChanged = changedAt(targetAbs);
+  } catch {
+    // the target is gone: the other checks say so
+  }
   let newest = 0;
   for (const t of tests) {
     const changed = changedAt(abs(t));
@@ -269,14 +401,19 @@ export function evidenceProblem(projectDir: string, root: string, target: string
     const ran = fit.some(
       (r) =>
         at(r) >= changed &&
+        runAfter(r, Math.max(changed, targetChanged)) &&
         (r.test_files ?? []).some((f) => typeof f === 'string' && abs(f) === abs(t)) &&
-        (r.suites ?? []).some((s) => s.failed === 0 && s.passed > 0 && typeof s.command === 'string' && suiteRan(s.command, t, root)),
+        (r.suites ?? []).some((s) => s.failed === 0 && s.passed > 0 && typeof s.command === 'string' && suiteRanTest(r, s.command, t)),
     );
-    if (!ran) return `no such record, made after ${t} last changed, lists it in test_files with a passing suite that ran it`;
+    if (!ran) {
+      const proof = [...proofs.entries()].find(([r]) => (r.test_files ?? []).some((f) => typeof f === 'string' && abs(f) === abs(t)))?.[1] ?? [...proofs.values()][0];
+      return `no such record, made after ${t} last changed, lists it in test_files with a passing suite that ran it${proof ? `; in a project with a sandbox a counted suite is exactly this one line, with no other shell syntax: ${expectedLine(proof)} (the run must have started after the last edit of the target and its tests)` : ''}`;
+    }
   }
   const mutated = fit.some(
     (r) =>
       at(r) >= newest &&
+      runAfter(r, Math.max(newest, targetChanged)) &&
       (r.acceptance ?? []).some((a) => a?.mutation?.detected === true && typeof a.mutation.file === 'string' && repoRel(root, a.mutation.file) === target),
   );
   if (!mutated) return `no such record, made after the tests last changed, has an acceptance entry whose mutation of ${target} the tests detected (mutation.file: "${target}")`;

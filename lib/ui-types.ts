@@ -31,12 +31,23 @@ export interface UiInventory {
   /** What the inventory saw but could not turn into an item (a link to no known route, a route
    *  built from a constant it could not read). */
   notes: string[];
+  /** Why the inventory is not complete (a cap dropped items, the time ran out); ui-check fails when any. */
+  truncated?: string[];
+  /** The project has no UI source at all (no templates, no JS or TS files, no routes): an empty inventory is then the right one. */
+  noUi?: true;
 }
 
 export const BODY_METHODS = new Set(['POST', 'PUT', 'PATCH']);
 
 /** Files `sandbox-run` writes into `out/<ts>/` for an e2e run and `ui-check` reads. */
 export const ACCESS_LOG_FILE = 'access.log';
+/** The per-test nonce `uiTest` sends as a request header and records as a Playwright annotation:
+ *  `ui-check` joins a request to the one test that sent it by it (lib/sandbox-e2e.ts writes the
+ *  fixture, lib/ui-check.ts reads both sides). */
+export const NONCE_HEADER = 'x-goodboy-test';
+export const NONCE_ANNOTATION = 'goodboy-test';
+/** What a nonce looks like (the fixture makes 16 hex digits). */
+export const NONCE_RE = /^[A-Za-z0-9_-]{8,128}$/;
 export const PLAYWRIGHT_REPORT_FILE = 'playwright-report.json';
 
 /** `/a//b/` → `/a/b`; the root stays `/`. */
@@ -76,27 +87,61 @@ export function toPattern(raw: string, starIsRest = false): string {
   return `/${parts.join('/')}`;
 }
 
-const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** One segment pattern, matched against a decoded path segment. `{name}` is one or more
+ *  characters, `*` any number, `?` one; none of them matches a `/`. */
+interface SegmentMatcher {
+  /** The same for segments that mean the same (`{id}` and `{x}`), so a trie shares a node. */
+  key: string;
+  test(segment: string): boolean;
+}
 
-/** One segment pattern as a regex over a decoded path segment. */
-function segmentRe(seg: string): RegExp {
-  let out = '';
-  let i = 0;
-  while (i < seg.length) {
-    if (seg[i] === '{') {
-      const j = seg.indexOf('}', i);
-      if (j > 0) {
-        out += '[^/]+';
-        i = j + 1;
-        continue;
-      }
-    }
-    if (seg[i] === '*') out += '[^/]*';
-    else if (seg[i] === '?') out += '[^/]';
-    else out += escapeRe(seg[i]!);
-    i++;
+const WILD_ONE = '\u0001'; // one character (not `/`)
+const WILD_ANY = '\u0002'; // any number of characters (not `/`)
+const segmentCache = new Map<string, SegmentMatcher>();
+
+/** A segment pattern as a matcher (one per distinct segment). A glob walk, not a regex: a regex
+ *  with several wildcards (`[^/]+-[^/]+-…`) backtracks polynomially in their number; the walk
+ *  keeps one place to go back to (the last `*`), so it is at most pattern x segment steps. */
+function segmentMatcher(seg: string): SegmentMatcher {
+  let m = segmentCache.get(seg);
+  if (m) return m;
+  let tokens = '';
+  for (let i = 0; i < seg.length; i++) {
+    const j = seg[i] === '{' ? seg.indexOf('}', i) : -1;
+    if (j > 0) {
+      tokens += WILD_ONE + WILD_ANY; // `[^/]+`
+      i = j;
+    } else if (seg[i] === '*') tokens += WILD_ANY;
+    else if (seg[i] === '?') tokens += WILD_ONE;
+    else tokens += seg[i];
   }
-  return new RegExp(`^${out}$`);
+  tokens = tokens.replace(/\u0002{2,}/g, WILD_ANY); // `**` is `*`
+  m = { key: tokens, test: (s) => globMatches(tokens, s) };
+  if (segmentCache.size >= 10_000) segmentCache.clear();
+  segmentCache.set(seg, m);
+  return m;
+}
+
+function globMatches(tokens: string, s: string): boolean {
+  let t = 0;
+  let i = 0;
+  let starT = -1; // the token after the last `*`, and where in `s` it was last tried
+  let starI = 0;
+  while (i < s.length) {
+    const tok = t < tokens.length ? tokens[t] : undefined;
+    if (tok === WILD_ANY) {
+      starT = ++t;
+      starI = i;
+    } else if (tok !== undefined && s[i] !== '/' && (tok === WILD_ONE || tok === s[i])) {
+      t++;
+      i++;
+    } else if (starT >= 0 && s[starI] !== '/') {
+      t = starT; // let the last `*` take one more character
+      i = ++starI;
+    } else return false;
+  }
+  while (tokens[t] === WILD_ANY) t++;
+  return t === tokens.length;
 }
 
 const safeDecode = (s: string): string => {
@@ -123,16 +168,99 @@ export function underContext(path: string, contextPath: string): string | null {
   return path.startsWith(`${ctx}/`) ? path.slice(ctx.length) : null;
 }
 
-/** Whether the request path (no context path, no query) is an instance of the route pattern. */
+/** Whether the request path (no context path, no query) is an instance of the route pattern. The
+ *  reference implementation: nothing in lib/ calls it any more (they go through RouteIndex), and
+ *  the tests check RouteIndex against it. */
 export function routeMatches(pattern: string, path: string): boolean {
+  // (One pattern against one path; many patterns go through RouteIndex.)
   const pat = normRoute(pattern).split('/').filter(Boolean);
   const got = normRoute(path).split('/').filter(Boolean).map(safeDecode);
   for (let i = 0; i < pat.length; i++) {
     if (pat[i] === '{*}') return true; // the rest of the path, possibly empty
     if (i >= got.length) return false;
-    if (!segmentRe(pat[i]!).test(got[i]!)) return false;
+    if (!segmentMatcher(pat[i]!).test(got[i]!)) return false;
   }
   return got.length === pat.length;
+}
+
+interface RouteNode<T> {
+  /** Segments with no `{`, `*` or `?`: looked up by text. */
+  lit: Map<string, RouteNode<T>>;
+  /** The other segments, one child per distinct matcher. */
+  dyn: Map<string, { match: SegmentMatcher; node: RouteNode<T> }>;
+  /** Values of patterns that end here. */
+  end: T[];
+  /** Values of patterns with a `{*}` here (the rest of the path, possibly empty). */
+  rest: T[];
+}
+
+const newNode = <T>(): RouteNode<T> => ({ lit: new Map(), dyn: new Map(), end: [], rest: [] });
+
+/** Route patterns as a trie, so the patterns that match one path are found by walking the path
+ *  (cost: its segments times the few patterns that share a prefix), not by trying every pattern.
+ *  `find` agrees with `routeMatches` on every pattern and path. */
+export class RouteIndex<T = true> {
+  private readonly root = newNode<T>();
+
+  add(pattern: string, value: T): void {
+    let n = this.root;
+    for (const seg of normRoute(pattern).split('/').filter(Boolean)) {
+      if (seg === '{*}') {
+        n.rest.push(value);
+        return;
+      }
+      if (/[{*?]/.test(seg)) {
+        const match = segmentMatcher(seg);
+        let d = n.dyn.get(match.key);
+        if (!d) n.dyn.set(match.key, (d = { match, node: newNode<T>() }));
+        n = d.node;
+      } else {
+        let c = n.lit.get(seg);
+        if (!c) n.lit.set(seg, (c = newNode<T>()));
+        n = c;
+      }
+    }
+    n.end.push(value);
+  }
+
+  /** The values of the patterns the request path (no context path, no query) is an instance of. */
+  find(path: string): T[] {
+    const out: T[] = [];
+    this.walk(path, (vs) => {
+      out.push(...vs);
+      return false;
+    });
+    return out;
+  }
+
+  has(path: string): boolean {
+    return this.walk(path, () => true);
+  }
+
+  /** Visits the matching nodes' value lists; stops when `on` returns true. Iterative and each
+   *  (node, depth) once, so neither a deep path nor many overlapping patterns blow it up. */
+  private walk(path: string, on: (values: T[]) => boolean): boolean {
+    const got = normRoute(path).split('/').filter(Boolean).map(safeDecode);
+    const seen: Set<RouteNode<T>>[] = [];
+    const stack: [RouteNode<T>, number][] = [[this.root, 0]];
+    while (stack.length > 0) {
+      const [n, i] = stack.pop()!;
+      let visited = seen[i];
+      if (!visited) seen[i] = visited = new Set();
+      if (visited.has(n)) continue;
+      visited.add(n);
+      if (n.rest.length > 0 && on(n.rest)) return true;
+      if (i === got.length) {
+        if (n.end.length > 0 && on(n.end)) return true;
+        continue;
+      }
+      const seg = got[i]!;
+      const lit = n.lit.get(seg);
+      if (lit) stack.push([lit, i + 1]);
+      for (const d of n.dyn.values()) if (d.match.test(seg)) stack.push([d.node, i + 1]);
+    }
+    return false;
+  }
 }
 
 /** Whether a request method serves an item's method. */

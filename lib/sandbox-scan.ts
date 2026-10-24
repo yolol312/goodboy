@@ -2,7 +2,10 @@
 // build, its port, the data stores it talks to and, most important, the outside hosts it calls.
 // It is read-only: git lists the files (with the hook git settings, so the repo's config runs no
 // program), the manifests, config and source files are read, no project tool runs and nothing is
-// written. Every regex is linear, every file and total read is capped.
+// written. Every regex and every loop is linear in the text it reads (no unbounded `\s*` run next
+// to another, no `^\s*` under /m, unterminated quotes and placeholders found once, per-file and
+// per-key lookups cached), every file and total read is capped, and the whole scan has a time
+// budget (ScanOptions.budgetMs): past it the rest is left out and a question says so.
 //
 // What the scan gets wrong must fail toward the safe side. A missed outbound host would be a call
 // the sandbox could not answer, so a host is kept when anything suggests it (a config value, a
@@ -11,7 +14,6 @@
 // value that sits under a secret-looking key is read into the output.
 
 import { join, posix } from 'node:path';
-import { HOOK_GIT_ARGS, HOOK_GIT_ENV } from './hook-git';
 import { readRegular } from './safe-read';
 import type {
   OutboundKind,
@@ -24,74 +26,23 @@ import type {
   StoreKind,
   Where,
 } from './sandbox-types';
-import { isTestCode } from './test-survey';
+import { inSkippedDir, isBrowserAsset, listFiles, MAX_FILES, ownFile } from './test-survey';
 
-const MAX_FILES = 50_000;
 const MAX_CONFIG_BYTES = 1_000_000;
 const MAX_SRC_BYTES = 512 * 1024;
 const MAX_SRC_TOTAL = 64_000_000;
 const MAX_OUTBOUND = 300;
 const MAX_SECRET_KEYS = 300;
+/** Wall time for a whole scan; past it the rest is left out and said so in a question. */
+const SCAN_BUDGET_MS = 60_000;
 
 /** Pinned image tags for a store whose version the project does not state. */
 const DEFAULT_VERSION: Record<StoreKind, string> = { postgres: '16', mysql: '8.4', mariadb: '11', redis: '7', mongo: '7' };
 
 // --- Which files count --------------------------------------------------------------------
 
-/** Dirs whose files are not the project's own: dependencies, tool state, virtualenvs. */
-const SKIP_DIRS = new Set([
-  'node_modules', 'vendor', 'vendors', 'third_party', 'third-party', 'bower_components', '.next', '.nuxt', '.svelte-kit',
-  '.gradle', '.idea', '.vscode', '.goodboy', '.claude', '.github', '.git', 'venv', '.venv', 'site-packages',
-  '__pycache__', '.tox', '.mypy_cache', '.pytest_cache',
-]);
-/** Build outputs and docs, skipped only outside a `src` dir (inside one they are package names). */
-const OUTPUT_DIRS = new Set(['dist', 'build', 'out', 'target', 'coverage', 'generated', 'docs']);
-/** Dirs that hold what a browser loads; a copied library under one is skipped. */
-const STATIC_ROOTS = new Set(['static', 'public', 'assets', 'webapp', 'www', 'wwwroot']);
-const STATIC_LIB_DIRS = new Set(['lib', 'libs', 'plugin', 'plugins', 'vendor', 'external', 'ext', 'dist', 'build']);
-const TEST_DIRS = new Set(['test', 'tests', '__tests__', '__mocks__', 'spec', 'specs', 'e2e', 'cypress', 'testdata']);
-const SKIP_NAME = /\.min\.[^.]+$|\.d\.[cm]?ts$|\.bundle\.[cm]?js$/;
-
-export function listFiles(root: string): string[] | null {
-  try {
-    const r = Bun.spawnSync(['git', ...HOOK_GIT_ARGS, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
-      cwd: root,
-      env: { ...process.env, ...HOOK_GIT_ENV },
-      stdout: 'pipe',
-      stderr: 'pipe',
-      timeout: 30_000,
-    });
-    if (r.exitCode !== 0) return null;
-    return [...new Set(r.stdout.toString().split('\0'))].filter((f) => f !== '' && !f.includes('\n')).sort();
-  } catch {
-    return null; // no git at all
-  }
-}
-
-function inSkippedDir(rel: string): boolean {
-  const dirs = rel.split('/').slice(0, -1);
-  const src = dirs.indexOf('src');
-  return dirs.some((d, i) => SKIP_DIRS.has(d) || (OUTPUT_DIRS.has(d) && (src < 0 || i < src)));
-}
-
-function inStaticLib(rel: string): boolean {
-  const segs = rel.split('/');
-  const dirs = segs.slice(0, -1);
-  const s = dirs.findIndex((d) => STATIC_ROOTS.has(d));
-  return (s >= 0 && dirs.slice(s + 1).some((d) => STATIC_LIB_DIRS.has(d))) || SKIP_NAME.test(segs[segs.length - 1]!);
-}
-
-/** The project's own non-test file: what the scan reads for config, code and templates. */
-export function ownFile(rel: string): boolean {
-  if (inSkippedDir(rel) || inStaticLib(rel)) return false;
-  if (rel.split('/').slice(0, -1).some((d) => TEST_DIRS.has(d))) return false;
-  return !isTestCode(rel);
-}
-
-/** Code a browser loads (JS under a static root): it has no server-side call sites. */
-function isBrowserAsset(rel: string): boolean {
-  return rel.split('/').slice(0, -1).some((d) => STATIC_ROOTS.has(d));
-}
+// The file lister and the ownership rules are lib/test-survey.ts's (listFiles, inSkippedDir,
+// ownFile, isBrowserAsset): the scan, the UI inventory and the coverage gate see one file set.
 
 const extOf = (rel: string): string => {
   const base = posix.basename(rel);
@@ -314,13 +265,17 @@ function flattenProps(text: string): Parsed {
     const start = i;
     let line = lines[i]!.replace(/\r$/, '').trimStart();
     if (line === '' || line[0] === '#' || line[0] === '!' || line[0] === ';') continue;
-    // A line ending in an odd number of backslashes continues on the next one.
+    // A line ending in an odd number of backslashes continues on the next one. The pieces are
+    //   joined once at the end: joining each time made a long continuation quadratic.
+    const pieces: string[] = [];
     for (;;) {
       let k = 0;
       while (line[line.length - 1 - k] === '\\') k++;
       if (k % 2 === 0 || i + 1 >= lines.length) break;
-      line = line.slice(0, -1) + lines[++i]!.replace(/\r$/, '').trimStart();
+      pieces.push(line.slice(0, -1));
+      line = lines[++i]!.replace(/\r$/, '').trimStart();
     }
+    if (pieces.length > 0) line = pieces.join('') + line;
     if (/^\[[^\]]*\]$/.test(line.trim())) continue; // an ini section header
     if (/[\0-\x08\x0e-\x1f]/.test(line)) {
       bad++;
@@ -378,12 +333,13 @@ function flattenJson(text: string): Parsed {
   } catch {
     return { entries: [], bad: 1 };
   }
-  const lines = text.split('\n');
-  const lineOf = (k: string) => {
-    const needle = `"${k}"`;
-    const i = lines.findIndex((l) => l.includes(needle));
-    return i < 0 ? 1 : i + 1;
-  };
+  // The first line each quoted string stands on, found in one pass (a lookup per leaf that scanned
+  //   the lines made a large file quadratic). A key with an escape in it is not found: line 1.
+  const firstLine = new Map<string, number>();
+  text.split('\n').forEach((l, i) => {
+    for (const m of l.matchAll(/"([^"\\]*)"/g)) if (!firstLine.has(m[1]!)) firstLine.set(m[1]!, i + 1);
+  });
+  const lineOf = (k: string) => firstLine.get(k) ?? 1;
   const entries: Raw[] = [];
   const walk = (v: unknown, path: string, last: string, depth: number) => {
     if (typeof v === 'string') entries.push({ key: path, value: v, line: lineOf(last) });
@@ -402,6 +358,50 @@ function parseConfig(rel: string, text: string): Parsed {
   if (ext === 'yml' || ext === 'yaml') return flattenYaml(text);
   if (ext === 'json') return flattenJson(text);
   return flattenProps(text); // .properties, .ini
+}
+
+/** The first parsed entry of each line of the config files `configEntryAt` was asked about, per
+ *  file: the renderer asks once per host, and the hosts of a project sit in several files
+ *  (application.yml, application-dev.yml, …), so one slot, or a handful, parsed a file again for
+ *  each host. The cache is bounded by an estimate of the heap it holds, the least recently used
+ *  file going first: a project's own config files all fit. The estimate counts the parsed entries,
+ *  not only the text: a dense file (one key per 10 characters) costs several times its text in
+ *  entries (measured on 400 000-line files: 104 bytes of heap per entry for YAML, 137 for properties,
+ *  205 for env, so 200 are counted), and a bound on characters let 60 such files be kept at once. */
+const CONFIG_CACHE_BYTES = 100 * 1024 * 1024;
+const BYTES_PER_CACHED_ENTRY = 200;
+const configCache = new Map<string, { text: string; byLine: Map<number, { key: string; value: string }>; cost: number }>();
+let configCacheCost = 0;
+
+/** The key and value the scan's own parser reads on `line` (1-based) of a YAML, properties or
+ *  `.env` file, or null for any other file, a line with no entry, and a key that sits inside a
+ *  list (it has no stable name to override). The renderer uses this so it never disagrees with
+ *  the scan about which key a host was written at. */
+export function configEntryAt(file: string, text: string, line: number): { key: string; value: string } | null {
+  let cached = configCache.get(file);
+  if (cached !== undefined && cached.text !== text) cached = undefined;
+  if (configCache.has(file)) configCacheCost -= configCache.get(file)!.cost;
+  if (cached === undefined) {
+    const base = posix.basename(file);
+    let parsed: Parsed | null = null;
+    if (/\.ya?ml$/i.test(file)) parsed = flattenYaml(text);
+    else if (/\.properties$/i.test(file)) parsed = flattenProps(text);
+    else if (base.startsWith('.env') || /\.env$/i.test(base)) parsed = flattenEnv(text);
+    const byLine = new Map<number, { key: string; value: string }>();
+    for (const e of parsed?.entries ?? []) if (!byLine.has(e.line)) byLine.set(e.line, { key: e.key, value: e.value });
+    cached = { text, byLine, cost: text.length + byLine.size * BYTES_PER_CACHED_ENTRY };
+  }
+  // (re)insert last: the map's order is the order of use
+  configCache.delete(file);
+  configCache.set(file, cached);
+  configCacheCost += cached.cost;
+  while (configCacheCost > CONFIG_CACHE_BYTES && configCache.size > 1) {
+    const [oldest, entry] = configCache.entries().next().value!;
+    configCache.delete(oldest);
+    configCacheCost -= entry.cost;
+  }
+  const e = cached.byLine.get(line);
+  return e === undefined || /\[\d+\]/.test(e.key) ? null : e;
 }
 
 // --- Config entries -----------------------------------------------------------------------
@@ -441,7 +441,50 @@ function isSecretKey(key: string): boolean {
 
 /** `${a.b:default}` placeholders replaced by their default. A value still holding `${` after it
  *  has an unresolved host. */
-const resolveDefaults = (v: string) => v.replace(/\$\{[^}:]*:([^}]*)\}/g, '$1');
+export function resolveDefaults(v: string): string {
+  // The regex `\$\{[^}:]*:([^}]*)\}` rescans to the end of the text from every `${a:` that has no
+  //   `}`; here the next `:`/`}` and the next `}` are looked up once and reused (both only move on).
+  let out = '';
+  let from = 0;
+  // `found(a)` caches the answer of a search that starts at `a`: while the next start is at or
+  //   before the hit, nothing in between can change it.
+  let stop = { from: 0, at: -2 }; // the next `:` or `}`; at -1: none, -2: not searched yet
+  let close = { from: 0, at: -2 }; // the next `}`
+  const nextStop = (a: number): number => {
+    if (stop.at !== -2 && stop.from <= a && (stop.at === -1 || stop.at >= a)) return stop.at;
+    let at = -1;
+    for (let i = a; i < v.length; i++) {
+      const c = v.charCodeAt(i);
+      if (c === 58 || c === 125) {
+        at = i;
+        break;
+      }
+    }
+    stop = { from: a, at };
+    return at;
+  };
+  const nextClose = (a: number): number => {
+    if (close.at !== -2 && close.from <= a && (close.at === -1 || close.at >= a)) return close.at;
+    close = { from: a, at: v.indexOf('}', a) };
+    return close.at;
+  };
+  for (;;) {
+    const s = v.indexOf('${', from);
+    if (s < 0) break;
+    const colon = nextStop(s + 2);
+    if (colon < 0) break; // no `:` or `}` ahead: no later start can match either
+    if (v.charCodeAt(colon) === 125) {
+      out += v.slice(from, s + 2); // `${abc}`: not a placeholder with a default
+      from = s + 2;
+      continue;
+    }
+    const end = nextClose(colon + 1);
+    if (end < 0) break; // no `}` after the colon: no later start can match either
+    out += v.slice(from, s) + v.slice(colon + 1, end);
+    from = end + 1;
+  }
+  return out + v.slice(from);
+}
 
 // --- Hosts ----------------------------------------------------------------------------------
 
@@ -528,7 +571,10 @@ interface UrlHit {
 function urlsIn(text: string, browser: boolean): UrlHit[] {
   const out: UrlHit[] = [];
   for (const m of text.matchAll(URL_RE)) {
-    const url = m[0].replace(/[.,;:)]+$/, '');
+    // Trailing punctuation off by a loop: `/[.,;:)]+$/` tries every start of a run of it.
+    let stop = m[0].length;
+    while (stop > 0 && '.,;:)'.includes(m[0][stop - 1]!)) stop--;
+    const url = m[0].slice(0, stop);
     const parts = urlParts(url);
     if (!parts) continue;
     const ref = hostRef(parts.host);
@@ -684,7 +730,50 @@ const HOST_TLD = new Set([
 ]);
 const HOST_CONTEXT = /host|server|smtp|ldap|setHost|createTransport|SMTP|connect|InetSocketAddress|socket|broker|endpoint/i;
 const FQDN = /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,24}$/;
-const STRING_LITERAL = /"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\\n]|\\.)*`/g;
+/** The text inside each `"…"`, `'…'` and `` `…` `` literal of one line (a backslash escapes the next
+ *  character; a literal ends on its line). A tokenizer, not a regex: an unterminated quote made
+ *  the regex scan to the end of the line from each of its quotes. When the scan from a quote ends
+ *  at `stop` without a closing one, no later quote of that kind before `stop` has one either (a
+ *  quote's escapes are the backslash runs before it, the same from any earlier start, and the
+ *  scan stops at the same place), so those are not tried again. */
+export function stringLiterals(line: string): string[] {
+  const out: string[] = [];
+  const deadUntil = new Map<string, number>();
+  const n = line.length;
+  let i = 0;
+  while (i < n) {
+    const q = line[i]!;
+    if ((q !== '"' && q !== "'" && q !== '`') || i <= (deadUntil.get(q) ?? -1)) {
+      i++;
+      continue;
+    }
+    let end = -1;
+    let stop = n;
+    for (let j = i + 1; j < n; ) {
+      const c = line[j]!;
+      if (c === q) {
+        end = j;
+        break;
+      }
+      if (c === '\\') {
+        const d = line[j + 1];
+        if (d === undefined || d === '\r' || d === '\u2028' || d === '\u2029') {
+          stop = j; // `\\.` does not match these: the literal cannot go on
+          break;
+        }
+        j += 2;
+      } else j++;
+    }
+    if (end < 0) {
+      deadUntil.set(q, stop);
+      i++;
+    } else {
+      out.push(line.slice(i + 1, end));
+      i = end + 1;
+    }
+  }
+  return out;
+}
 const CONST_ASSIGN = /\b([A-Za-z_]\w*)\s*(?::\s*[\w.<>?]+\s*)?=\s*[`"']/;
 
 // --- Stack detection ------------------------------------------------------------------------
@@ -829,7 +918,9 @@ function scanJvm(ctx: Ctx): StackInfo {
   const all = texts.map((t) => t.text).join('\n');
 
   const boot = /org\.springframework\.boot|spring-boot/.test(all);
-  const war = isMaven ? /<packaging>\s*war\s*<\/packaging>/.test(all) : /\bid\s*\(?\s*['"]war['"]|apply\s+plugin:\s*['"]war['"]|^\s*war\s*\{/m.test(all);
+  // No `\s*\(?\s*` (two runs of blanks that split a long run in n ways) and no `^\s*` under /m (a run
+  //   of blank lines is walked again from each of its starts): both were quadratic.
+  const war = isMaven ? /<packaging>\s*war\s*<\/packaging>/.test(all) : /\bid(?:[ \t]*\()?[ \t]*['"]war['"]|apply\s+plugin:\s*['"]war['"]|^[ \t]*war[ \t]*\{/m.test(all);
   const jsp = /tomcat-embed-jasper|\bjstl\b|jakarta\.servlet\.jsp/i.test(all) || files.some((f) => /\.jsp$/i.test(f));
   const frameworks: string[] = [];
   if (boot) frameworks.push('spring-boot');
@@ -841,12 +932,12 @@ function scanJvm(ctx: Ctx): StackInfo {
 
   // JDK.
   const jdkRules: RegExp[] = isMaven
-    ? [/<java\.version>\s*([^<]+)</, /<maven\.compiler\.release>\s*([^<]+)</, /<maven\.compiler\.source>\s*([^<]+)</, /<release>\s*([^<]+)</, /<source>\s*([^<]+)</]
+    ? [/<java\.version>\s*([^<\s][^<]*)</, /<maven\.compiler\.release>\s*([^<\s][^<]*)</, /<maven\.compiler\.source>\s*([^<\s][^<]*)</, /<release>\s*([^<\s][^<]*)</, /<source>\s*([^<\s][^<]*)</]
     : [
         /JavaLanguageVersion\.of\(\s*(\d+)\s*\)/,
         /jvmToolchain\(\s*(\d+)\s*\)/,
-        /sourceCompatibility\s*=?\s*['"]?([\w.]+)/,
-        /targetCompatibility\s*=?\s*['"]?([\w.]+)/,
+        /sourceCompatibility(?:\s*=)?\s*['"]?([\w.]+)/,
+        /targetCompatibility(?:\s*=)?\s*['"]?([\w.]+)/,
         /jvmTarget\s*=\s*['"]([\d.]+)['"]/,
       ];
   let runtimeVersion: string | null = null;
@@ -927,6 +1018,7 @@ function scanJvm(ctx: Ctx): StackInfo {
     const mgmtPort = pick(entries, 'management.server.port');
     if (mgmtPort && portOf(mgmtPort.value) !== port) questions.push('the actuator listens on its own port (management.server.port): the health check must use it');
   }
+  if (healthPath === contextPath) questions.push(noHealthRoute(healthPath));
 
   // Store drivers and clients from the build files.
   const deps: { kind: StoreKind; where: Where }[] = [];
@@ -1069,6 +1161,7 @@ function scanNode(ctx: Ctx): StackInfo {
     }
   }
   const health = healthRoute(ctx.src, 'node');
+  if (health === null) questions.push(noHealthRoute('/'));
 
   const deps: { kind: StoreKind; where: Where }[] = [];
   for (const [kind, names] of [
@@ -1100,6 +1193,12 @@ function scanNode(ctx: Ctx): StackInfo {
     artifact,
   };
   return { frameworks, build, app: { port, contextPath: '/', healthPath: health ?? '/', configFiles: ctx.configFiles }, deps, questions, problems };
+}
+
+/** The question for an app with no health route to find (no actuator, no `/health` handler): the
+ *  health check falls back to the root of the app, and a 404 there counts as down. */
+function noHealthRoute(path: string): string {
+  return `no health route found (no actuator, no /health handler): the health check requests \`${path}\`, and a 404 there counts as down; if the app answers 404 at that path, set app.healthPath to one that answers 2xx, 3xx, 401 or 403`;
 }
 
 /** A `/health`-like route written in code (`app.get('/health'`, `@app.get("/healthz")`). */
@@ -1157,7 +1256,7 @@ function scanPython(ctx: Ctx): StackInfo {
   const pv = ctx.read(rel('.python-version')) ?? ctx.read('.python-version');
   if (pv !== null) runtimeVersion = pythonVersion(pv);
   if (!runtimeVersion) {
-    const m = /requires-python\s*=\s*["']([^"']+)["']/.exec(pyproject) ?? /^\s*python\s*=\s*["']([^"']+)["']/m.exec(pyproject);
+    const m = /requires-python\s*=\s*["']([^"']+)["']/.exec(pyproject) ?? /^[ \t]*python[ \t]*=[ \t]*["']([^"']+)["']/m.exec(pyproject);
     if (m) runtimeVersion = pythonVersion(m[1]!);
   }
   if (!runtimeVersion) {
@@ -1203,7 +1302,7 @@ function scanPython(ctx: Ctx): StackInfo {
       }
       for (const f of ctx.src) {
         if (f.lang !== 'python') continue;
-        const m = /uvicorn\.run\([^)]*\bport\s*=\s*(\d{2,5})/.exec(f.text);
+        const m = /uvicorn\.run\([^)]{0,400}\bport\s*=\s*(\d{2,5})/.exec(f.text);
         if (m) return Number(m[1]);
       }
       return null;
@@ -1232,6 +1331,7 @@ function scanPython(ctx: Ctx): StackInfo {
     if (name) deps.push({ kind, where: names.get(name)! });
   }
   const build: SandboxBuild = { tool, runtimeVersion, depsCommand, buildCommand: [], testCommand, startCommand, artifact: null };
+  if (health === null) questions.push(noHealthRoute('/'));
   return { frameworks, build, app: { port, contextPath: '/', healthPath: health ?? '/', configFiles: ctx.configFiles }, deps, questions, problems: [] };
 }
 
@@ -1305,10 +1405,21 @@ function composeVersions(root: string, files: string[]): Map<StoreKind, string> 
 
 // --- The scan -------------------------------------------------------------------------------
 
+export interface ScanOptions {
+  /** Wall time for the scan (default 60 s); past it the rest is left out and a question says so. */
+  budgetMs?: number;
+  /** The project's files when the caller has listed them already (no second `git ls-files`). */
+  files?: string[];
+  /** `false`: read the build and config files only (stack, port, context path, stores), not the
+   *  source files, so no outbound hosts. The UI inventory asks for the context path this way. */
+  sources?: boolean;
+}
+
 /** Scan a project root for the test sandbox. Read-only: it runs no project tool and writes
  *  nothing. A scan with `problems` is not usable; `questions` need the user's answers. */
-export function scanSandbox(root: string): SandboxScan {
-  const listed = listFiles(root);
+export function scanSandbox(root: string, opts: ScanOptions = {}): SandboxScan {
+  const deadline = Date.now() + (opts.budgetMs ?? SCAN_BUDGET_MS);
+  const listed = opts.files ?? listFiles(root);
   if (listed === null) return problemScan(root, ['git cannot list the files (not a git repository, or git is missing)']);
   const questions: string[] = [];
   const problems: string[] = [];
@@ -1318,7 +1429,18 @@ export function scanSandbox(root: string): SandboxScan {
     files = files.slice(0, MAX_FILES);
   }
   const fileSet = new Set(files);
-  const read = (rel: string): string | null => readText(root, rel, MAX_CONFIG_BYTES);
+  // A small read cache: a build file is read for the stack, again for its module, again for the
+  //   dependency rules (a pyproject twice, every pom once per module). Big texts are not kept.
+  const readCache = new Map<string, string | null>();
+  const read = (rel: string): string | null => {
+    if (readCache.has(rel)) return readCache.get(rel)!;
+    const t = readText(root, rel, MAX_CONFIG_BYTES);
+    if (t === null || t.length <= 200_000) {
+      if (readCache.size >= 64) readCache.delete(readCache.keys().next().value!);
+      readCache.set(rel, t);
+    }
+    return t;
+  };
   const has = (rel: string) => fileSet.has(rel);
 
   // 1. The stack: the shallowest build file, a Spring Boot build first among Java ones.
@@ -1386,12 +1508,12 @@ export function scanSandbox(root: string): SandboxScan {
   const src: Src[] = [];
   let total = 0;
   let skippedSrc = 0;
-  for (const rel of files) {
+  for (const rel of opts.sources === false ? [] : files) {
     if (!ownFile(rel)) continue;
     const ext = extOf(rel);
     const lang = LANG_EXT[ext] ?? null;
     if (!lang && !(TEMPLATE_EXT.has(ext) && posix.basename(rel) !== 'pom.xml')) continue;
-    if (total > MAX_SRC_TOTAL) {
+    if (total > MAX_SRC_TOTAL || Date.now() > deadline) {
       skippedSrc++;
       continue;
     }
@@ -1403,7 +1525,7 @@ export function scanSandbox(root: string): SandboxScan {
     total += text.length;
     src.push({ rel, ext, lang, browser: lang === null || isBrowserAsset(rel), text, lines: text.split('\n') });
   }
-  if (skippedSrc > 0) questions.push(`${skippedSrc} source file(s) were not read (over ${MAX_SRC_BYTES} bytes, not regular files, or past the total cap): outbound calls in them are unknown`);
+  if (skippedSrc > 0) questions.push(`${skippedSrc} source file(s) were not read (over ${MAX_SRC_BYTES} bytes, not regular files, or past the total cap or the time budget): outbound calls in them are unknown`);
 
   // 4. The stack's build, port and store drivers.
   const ctx: Ctx = { root, files, manifest: chosen, entries, configFiles: main, src, read, has };
@@ -1435,11 +1557,17 @@ export function scanSandbox(root: string): SandboxScan {
     if (!groups.has(id)) groups.set(id, g);
     if (g.database === null && url?.database) g.database = url.database;
   }
+  // The groups by normalized prefix: each entry looked at every group.
+  const groupsByPrefix = new Map<string, StoreGroup[]>();
+  for (const g of groups.values()) {
+    const list = groupsByPrefix.get(g.prefix);
+    if (list) list.push(g);
+    else groupsByPrefix.set(g.prefix, [g]);
+  }
   for (const e of entries) {
     const { prefix, name } = keyParts(e.key);
-    const p = normKey(prefix);
-    for (const g of groups.values()) {
-      if (g.prefix !== p || !STORE_KEY_NAMES.has(name)) continue;
+    if (!STORE_KEY_NAMES.has(name)) continue;
+    for (const g of groupsByPrefix.get(normKey(prefix)) ?? []) {
       g.keys.add(e.key);
       if (g.database === null && g.kind !== 'redis' && (name === 'database' || name === 'dbname') && /^[\w.-]+$/.test(e.value) && !isSecretKey(e.key)) g.database = e.value;
     }
@@ -1474,7 +1602,7 @@ export function scanSandbox(root: string): SandboxScan {
   stores.sort((a, b) => (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : a.where.file < b.where.file ? -1 : a.where.line - b.where.line));
 
   // 6. Outbound hosts.
-  const outbound = outboundHosts(src, entries, questions);
+  const outbound = opts.sources === false ? [] : outboundHosts(src, entries, questions, deadline);
 
   // 7. Secret keys: names only.
   const secretKeys = [...new Set(entries.map((e) => e.key).filter(isSecretKey))].sort();
@@ -1499,8 +1627,20 @@ export function scanSandbox(root: string): SandboxScan {
 
 /** The outbound hosts: URLs and host keys in config, URL literals and IP literals in code. A host
  *  gets a call site when code that reads it (or the code it is written in) calls out. */
-function outboundHosts(src: Src[], entries: Entry[], questions: string[]): SandboxOutbound[] {
+function outboundHosts(src: Src[], entries: Entry[], questions: string[], deadline: number): SandboxOutbound[] {
   const code = src.filter((f) => f.lang !== null && !f.browser);
+  const srcByRel = new Map(src.map((f) => [f.rel, f]));
+  // The port key next to a host key (same prefix), first entry wins.
+  const portOfPrefix = new Map<string, Entry>();
+  for (const x of entries) {
+    const kp = keyParts(x.key);
+    if (kp.name === 'port' && !portOfPrefix.has(kp.prefix)) portOfPrefix.set(kp.prefix, x);
+  }
+  let timedOut = false;
+  const late = () => {
+    if (!timedOut && Date.now() > deadline) timedOut = true;
+    return timedOut;
+  };
 
   // Call sites, found per file and kind, first non-comment non-import match.
   const callCache = new Map<string, Where | null>();
@@ -1542,7 +1682,7 @@ function outboundHosts(src: Src[], entries: Entry[], questions: string[]): Sandb
     for (const u of urls) cands.push({ ...base, host: u.host, port: u.port, scheme: u.scheme, kind: u.kind, ipLiteral: u.ipLiteral });
     if (urls.length > 0 || !HOST_KEY_NAME.has(name) || STORE_PREFIX.test(prefix) || /^(?:server|management)(?:\.|$)/i.test(prefix)) continue;
     const kind: OutboundKind = /mail|smtp/i.test(prefix) ? 'smtp' : /ldap/i.test(prefix) ? 'ldap' : /api|url|http|rest|service|endpoint|client/i.test(prefix) ? 'http' : 'other';
-    const sibling = entries.find((x) => keyParts(x.key).prefix === prefix && keyParts(x.key).name === 'port');
+    const sibling = portOfPrefix.get(prefix);
     for (const part of v.split(',')) {
       const m = /^\s*([A-Za-z0-9.:-]+?)(?::(\d{1,5}))?\s*$/.exec(part);
       if (!m) continue;
@@ -1558,7 +1698,7 @@ function outboundHosts(src: Src[], entries: Entry[], questions: string[]): Sandb
 
   // Code and templates: URL literals, IP literals and host names in host-like calls.
   for (const f of src) {
-    if (cap()) break;
+    if (cap() || late()) break;
     for (let i = 0; i < f.lines.length; i++) {
       const line = f.lines[i]!;
       const t = line.trim();
@@ -1570,8 +1710,7 @@ function outboundHosts(src: Src[], entries: Entry[], questions: string[]): Sandb
       const browserish = f.browser || f.ext === 'jsx' || f.ext === 'tsx' || f.ext === 'vue';
       for (const u of urlsIn(line, browserish)) cands.push({ ...base, host: u.host, port: u.port, scheme: u.scheme, kind: u.kind, ipLiteral: u.ipLiteral });
       if (f.lang === null) continue;
-      for (const lit of line.matchAll(STRING_LITERAL)) {
-        const s = lit[0].slice(1, -1);
+      for (const s of stringLiterals(line)) {
         if (s.length > 260 || s.includes('://')) continue;
         let hostStr = s;
         let port: number | null = null;
@@ -1604,29 +1743,69 @@ function outboundHosts(src: Src[], entries: Entry[], questions: string[]): Sandb
     }
     return r;
   };
+  // Does the file name this word? Asked for every host key and every constant, against every file:
+  //   a file's words are listed once (lower-cased, the runs of `[\w$]`), then each question is a
+  //   set lookup. For a name made of `[\w$]` only, "the word occurs with a non-word character
+  //   on each side" is exactly "the name is one of those runs". A name with other characters
+  //   (`base-url`) is searched for in the lower-cased text, which is kept per file too.
+  const wordSets = new Map<Src, Set<string>>();
+  const wordsOf = (f: Src): Set<string> => {
+    let s = wordSets.get(f);
+    if (!s) wordSets.set(f, (s = new Set(f.text.toLowerCase().split(/[^\w$]+/))));
+    return s;
+  };
+  const lowerOf = new Map<Src, string>();
+  const lower = (f: Src): string => {
+    let t = lowerOf.get(f);
+    if (t === undefined) lowerOf.set(f, (t = f.text.toLowerCase()));
+    return t;
+  };
+  // The same words with their case, for the questions that must match the case exactly (a
+  //   constant's name): a regex over the file per constant made a file with many constants quadratic.
+  const exactWordSets = new Map<Src, Set<string>>();
+  const exactWordsOf = (f: Src): Set<string> => {
+    let s = exactWordSets.get(f);
+    if (!s) exactWordSets.set(f, (s = new Set(f.text.split(/[^\w$]+/))));
+    return s;
+  };
+  const SIMPLE_NAME = /^[\w$]+$/;
+  /** The files that name `name` as a word; case-insensitive, or with the exact case (`exact`). */
+  const filesNaming = (name: string, exact: boolean, among: Src[]): Src[] => {
+    const simple = SIMPLE_NAME.test(name);
+    if (simple && exact) return among.filter((f) => exactWordsOf(f).has(name));
+    const lowerName = name.toLowerCase();
+    if (simple) return among.filter((f) => wordsOf(f).has(lowerName));
+    const re = wordRe(name, exact ? '' : 'i');
+    return among.filter((f) => lower(f).includes(lowerName) && re.test(f.text));
+  };
+  const readerCache = new Map<string, Src[]>();
   const readersOf = (key: string): Src[] => {
+    const cached = readerCache.get(key);
+    if (cached) return cached;
     const nk = normKey(key);
-    const out: Src[] = [];
     const name = key.includes('.') ? key.slice(key.lastIndexOf('.') + 1) : key;
-    const re = wordRe(name, 'i');
-    for (const f of code) {
-      if (f.lang === 'jvm') {
-        const ph = placeholders(f);
-        if (ph.keys.has(nk) || ph.prefixes.some((p) => nk.startsWith(`${p}.`))) out.push(f);
-      } else if (f.text.toLowerCase().includes(name.toLowerCase()) && re.test(f.text)) {
-        out.push(f);
-      }
-    }
+    const named = new Set(filesNaming(name, false, code.filter((f) => f.lang !== 'jvm')));
+    const out = code.filter((f) => {
+      if (f.lang !== 'jvm') return named.has(f);
+      const ph = placeholders(f);
+      return ph.keys.has(nk) || ph.prefixes.some((p) => nk.startsWith(`${p}.`));
+    });
+    readerCache.set(key, out);
     return out;
   };
   const springAuto = (c: Cand) => {
     if (!c.key) return false;
     return (c.kind === 'smtp' && /^spring\.mail(?:\.|$)/i.test(c.key)) || (c.kind === 'ldap' && /^spring\.ldap(?:\.|$)/i.test(c.key));
   };
+  const usersCache = new Map<string, Src[]>();
   const nameUsers = (nm: string, except: string | null, kind: OutboundKind): Where | null => {
-    const re = wordRe(nm);
-    for (const f of code) {
-      if (f.rel === except || !f.text.includes(nm) || !re.test(f.text)) continue;
+    let users = usersCache.get(nm);
+    if (!users) {
+      users = filesNaming(nm, true, code);
+      usersCache.set(nm, users);
+    }
+    for (const f of users) {
+      if (f.rel === except) continue;
       const c = callIn(f, kind);
       if (c) return c;
     }
@@ -1634,7 +1813,7 @@ function outboundHosts(src: Src[], entries: Entry[], questions: string[]): Sandb
   };
   const callSiteOf = (c: Cand): Where | null => {
     if (c.file !== null) {
-      const own = callIn(src.find((f) => f.rel === c.file)!, c.kind);
+      const own = callIn(srcByRel.get(c.file)!, c.kind);
       return own ?? (c.name ? nameUsers(c.name, c.file, c.kind) : null);
     }
     if (springAuto(c)) return anyCall(c.kind);
@@ -1659,7 +1838,8 @@ function outboundHosts(src: Src[], entries: Entry[], questions: string[]): Sandb
     const id = `${c.host}|${c.port ?? ''}|${c.kind}|${c.hardcoded}`;
     const prev = merged.get(id);
     if (prev && prev.callSite) continue;
-    const callSite = callSiteOf(c);
+    // Out of time: the host stays, with no call site (the safe side: it gets a dummy anyway).
+    const callSite = late() ? null : callSiteOf(c);
     if (prev && !callSite) continue;
     merged.set(id, {
       host: c.host,
@@ -1677,6 +1857,7 @@ function outboundHosts(src: Src[], entries: Entry[], questions: string[]): Sandb
     questions.push(`${out.length} outbound hosts; only the first ${MAX_OUTBOUND} are listed`);
     out = out.slice(0, MAX_OUTBOUND);
   }
+  if (timedOut) questions.push('the scan ran out of its time budget: outbound hosts and call sites after that point are missing or unproven; review the list by hand');
   for (const o of out) {
     if (o.kind === 'other' && o.callSite) questions.push(`outbound ${o.host}${o.port ? `:${o.port}` : ''} (${o.where.file}:${o.where.line}) speaks a protocol with no dummy: it is reported, not stubbed`);
   }
@@ -1692,6 +1873,11 @@ function literalKind(f: Src, line: string): OutboundKind {
   if (/smtp|mail/i.test(line)) return 'smtp';
   if (/ldap/i.test(line)) return 'ldap';
   if (!f.lang) return 'other';
-  const kinds = CALL_KINDS.filter((k) => CALLS[f.lang!][k].test(f.text));
+  let kinds = FILE_CALL_KINDS.get(f);
+  if (!kinds) FILE_CALL_KINDS.set(f, (kinds = CALL_KINDS.filter((k) => CALLS[f.lang!][k].test(f.text))));
   return kinds.length === 1 ? kinds[0]! : 'other';
 }
+
+/** The kinds of call a file makes, per file: asked for every host literal in it, and a regex
+ *  pass over the whole text each time made a file with many literals quadratic. */
+const FILE_CALL_KINDS = new WeakMap<Src, CallKind[]>();

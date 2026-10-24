@@ -879,9 +879,11 @@ v0.36.0부터 Java·Kotlin 테스트(`src/test/` 등 테스트 소스 폴더의 
   테스트·픽스처·기록·주석·보고서에 쓰지 않는다. 데이터는 앱의 화면과 id를 통해 실행 시점에 찾는다.
 - **실행마다 탈출 검사.** `sandbox-run`은 스위트 전에 매번 확인한다: 실행 중인 모든 컨테이너가 내부
   네트워크에만 있는지(`inner_only`), 내부 네트워크의 프로브가 공개 이름을 찾지도 공개 IP에 닿지도
-  못하는지(`egress_blocked`), 외부 호스트가 더미로 향하는지(`hosts_to_dummies`). 하나라도 실패하면
-  스위트는 돌지 않는다. 테스트 기록은 이 검사 결과(`sandbox: {inner_only, egress_blocked, …, run}`)를
-  담고, 샌드박스가 있는 프로젝트에서는 두 값이 모두 true인 기록만 `backfill-mark`가 인정한다.
+  못하는지(`egress_blocked`, 내부 네트워크의 게이트웨이 포함), 외부 호스트가 더미로 향하는지
+  (`hosts_to_dummies`). 하나라도 실패하면 스위트는 돌지 않는다. 테스트 기록에는 실행 id만 적고
+  (`sandbox: {run}`), `test-write`가 그 실행의 결과 파일에서 세 검사 값과 해시를 옮겨 적는다.
+  샌드박스가 있는 프로젝트에서 `backfill-mark`는 결과 파일을 다시 읽어, 해시가 같고 세 값이 모두
+  true이며 스위트가 `sandbox-run`으로 돈 기록만 인정한다.
 - **추적은 로컬에, 실패한 것만.** 스크린샷과 트레이스는 무시되는 로컬 폴더(`.goodboy/sandbox/out/`)에만
   남고, 통과한 실행의 것은 지운다.
 
@@ -1368,7 +1370,10 @@ v0.8.0까지의 환경변수는 `VCF_` 접두였고, v0.9.0부터 `GOODBOY_`로 
 - `/backfill-tests`가 샌드박스를 선택할 수 있다(3단계에서 한 번 질문). 샌드박스가 있으면 목표는 완전 테스트이고 `backfill-status`의 `goal`이 `complete`가 된다. 없으면 트랙 L과 같다
 - 격리: 준비(`sandbox-prepare`)만 네트워크를 쓰고, 앱과 테스트는 내부 네트워크에서 오프라인으로 돈다. 외부 호스트는 같은 이름의 더미(WireMock·Mailpit·OpenLDAP)가 받는다. DB 덤프는 로컬 컨테이너에만 올라가고 매 실행 전에 되돌린다
 - `sandbox-run`은 스위트 전에 매번 탈출 검사(`inner_only`, `egress_blocked`, `hosts_to_dummies`)를 하고, 실패하면 스위트를 돌리지 않는다. 통과한 실행의 트레이스는 지운다
-- 테스트 기록에 `sandbox: {inner_only, egress_blocked, hosts_to_dummies?, run?}`이 생겼고(`test-write`가 불리언 여부를 검증), 샌드박스가 있는 프로젝트에서는 두 값이 true인 기록만 `backfill-mark`의 증거로 인정된다
+- 테스트 기록에 `sandbox`가 생겼다. 테스터는 실행 id(`run`)만 넘기고, `test-write`가 그 실행의 결과 파일에서 세 검사 값과 해시를 옮겨 적는다. 샌드박스가 있는 프로젝트에서는 결과 파일과 해시가 맞고 세 값이 모두 true인 기록만 `backfill-mark`의 증거로 인정된다
+- 격리 보강: 내부 네트워크의 게이트웨이를 막고 검사하며(Docker 28 이상), 준비 단계는 `.goodboy`를 가리고, 덤프는 저장소 밖에 있어야 하고, Colima나 종류를 알 수 없는 Docker에서는 `$HOME` 안에 있어야 한다(Docker Desktop은 공유 폴더 안, 리눅스 기본 Docker는 제한 없음). 복원은 오류가 나면 멈추고 오류 코드와 덤프 줄 번호만 보여 준다
+- `ui-check`는 테스트마다 붙는 nonce로 요청을 그 테스트에 묶는다. 화면·폼·링크는 그 테스트가 실제로 페이지를 열어야 인정되고, API 호출만으로는 인정되지 않는다
+- 조사·화면 목록·`ui-check`가 큰 입력에서도 선형 시간에 끝난다(병적 입력 45종이 모두 약 1.5초 이하, 수정 전에는 2.2초~1분 이상 걸렸고 약 20종은 30초를 넘겼다)
 - 두 게이트: `coverage-check`(화면이 아닌 모든 코드 줄·분기 100%, 승인한 `coverage-exempt:` 항목만 제외)와 `ui-check`(`ui-inventory`의 모든 화면·동작에 통과한 e2e `ok` 테스트, 입력을 받는 동작은 `error` 테스트도)
 - 도구 스킬 `run-sandbox`(28번째)를 test-unit·test-ui·test-spec이 쓴다. e2e는 `uiTest`(`.goodboy/sandbox/e2e/goodboy-ui.ts`)와 `ui-inventory`의 id로 쓴다. `setup-test-infra`는 실제 서비스가 필요한 앱에 샌드박스를 안내한다
 

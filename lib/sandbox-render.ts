@@ -21,8 +21,12 @@ import {
   envName,
   GITIGNORE,
   HOST,
+  firstAddress,
+  INHIBIT_IPV4,
   isIpv4,
   KEYSTORE_PASSWORD,
+  bareBuildTool,
+  buildImage,
   ldif,
   major,
   mysqlScripts,
@@ -36,6 +40,7 @@ import {
   STORE_DEFAULT_VERSION,
   type StoreEndpoint,
   stackProfile,
+  startCommandOf,
   storeValue,
   toYaml,
 } from './sandbox-parts';
@@ -46,6 +51,8 @@ export { CA_MOUNT, configKeyAt, KEYSTORE_PASSWORD };
 export const SANDBOX_DIR = '.goodboy/sandbox';
 export const SCAN_FILE = `${SANDBOX_DIR}/scan.json`;
 export const DEFAULT_INNER_SUBNET = '10.231.0.0/24';
+/** The prep services mount the repo at /src; this path inside it is an empty tmpfs. */
+export const PREP_MASK = '/src/.goodboy';
 
 /** Every image is pinned to a tag (checked by tests/m1-sandbox.test.ts). */
 export const IMAGES = {
@@ -59,7 +66,9 @@ export const IMAGES = {
 export interface RenderOptions {
   /** The subnet of the `inner` network (default 10.231.0.0/24). */
   innerSubnet?: string;
-  /** Reads a repo-relative file for the override keys (default: from `scan.root`). */
+  /** The repo top the override keys are read from (default: `scan.root`, which a saved scan keeps as `.`). */
+  root?: string;
+  /** Reads a repo-relative file for the override keys (default: from `root`). */
   readConfig?: (rel: string) => string | null;
 }
 
@@ -89,6 +98,8 @@ export interface SandboxPlan {
   dummies: PlanDummy[];
   /** Names of the SANs the server certificate needs. */
   sans: { dns: string[]; ips: string[] };
+  /** The address the host would have on `inner`: nothing may answer there (sandbox-check probes it). */
+  innerGateway: string;
   /** The app's URL path for the health wait. */
   healthUrl: string;
   /** The logging proxy and the e2e service exist (the scan has an app). */
@@ -108,13 +119,16 @@ export function planSandbox(scan: SandboxScan, local: SandboxLocal, opts: Render
     opts.readConfig ??
     ((rel: string) => {
       if (rel.startsWith('/') || rel.split('/').includes('..')) return null;
-      const r = readRegular(resolve(scan.root, rel), MAX_DOC_BYTES, true);
+      const r = readRegular(resolve(opts.root ?? scan.root, rel), MAX_DOC_BYTES, true);
       return typeof r === 'object' ? r.text : null;
     });
 
   const services: Record<string, Record<string, unknown>> = {};
   const volumes: Record<string, Record<string, never>> = {};
-  const networks: Record<string, unknown> = { inner: { internal: true, ipam: { config: [{ subnet: innerSubnet }] } } };
+  // No host address on any internal network (INHIBIT_IPV4); `inner` also keeps its first address
+  // reserved, so no container holds the address the host would have and sandbox-check can probe it.
+  const innerGateway = firstAddress(innerSubnet);
+  const networks: Record<string, unknown> = { inner: { internal: true, driver_opts: { [INHIBIT_IPV4]: 'true' }, ipam: { config: [{ subnet: innerSubnet, aux_addresses: { 'goodboy-gateway': innerGateway } }] } } };
   const internalNets = ['inner'];
   const upServices: string[] = [];
 
@@ -181,10 +195,7 @@ export function planSandbox(scan: SandboxScan, local: SandboxLocal, opts: Render
     dummies.push({ service, host, ip: null });
   }
   for (const [net, n] of literalNets) {
-    // The gateway is the last free address of the /24 (.254 unless a literal holds it).
-    const base = n.subnet.slice(0, -4);
-    const gateway = [254, 253, 252].map((d) => `${base}${d}`).find((g) => !n.ips.includes(g))!;
-    networks[net] = { internal: true, ipam: { config: [{ subnet: n.subnet, gateway }] } };
+    networks[net] = { internal: true, driver_opts: { [INHIBIT_IPV4]: 'true' }, ipam: { config: [{ subnet: n.subnet }] } };
     internalNets.push(net);
   }
   networks.prep = { driver: 'bridge' };
@@ -387,13 +398,22 @@ export function planSandbox(scan: SandboxScan, local: SandboxLocal, opts: Render
     const body = [...override].map(([k, v]) => [k, v] as const);
     files.set('overrides/application-sandbox.yml', `# Spring profile "sandbox" (goodboy sandbox-init): the app's stores and hosts point at the sandbox, secrets are dummies.\n${toYaml(Object.fromEntries(body), false)}`);
   } else if (stack !== 'jvm') {
-    files.set('overrides/sandbox.env', `# The sandbox's config override (goodboy sandbox-init): stores and hosts point at the sandbox, secrets are dummies.\n${[...override].map(([k, v]) => `${k}=${v}`).join('\n')}${override.size > 0 ? '\n' : ''}`);
+    // Compose interpolates `$` in an env_file, so a literal `$` is written `$$` (measured: A=pa$$word reaches the container as pa$word).
+    files.set('overrides/sandbox.env', `# The sandbox's config override (goodboy sandbox-init): stores and hosts point at the sandbox, secrets are dummies.\n${[...override].map(([k, v]) => `${k}=${v.replace(/\$/g, '$$$$')}`).join('\n')}${override.size > 0 ? '\n' : ''}`);
   } else notes.push('no config override: this JVM project is not a Spring Boot app; its config must reach the sandbox hosts by their names');
 
   // ---- app, runner, prep, probe ----
   const image = runtimeImage(stack, scan.build.runtimeVersion);
   const profile = stackProfile(scan);
   const jdkMajor = stack === 'jvm' ? image.replace(/^eclipse-temurin:(\d+)-jdk$/, '$1') : '';
+  // A project with no wrapper runs the bare `mvn` or `gradle`: prep and the runner then use the
+  // official build image of that tool. The app always keeps the plain JDK image.
+  const toolImage = (cmds: readonly (readonly string[])[]): string => {
+    const tool = stack === 'jvm' ? cmds.map(bareBuildTool).find((t) => t !== null) ?? null : null;
+    return tool === null ? image : buildImage(tool, Number(jdkMajor));
+  };
+  const prepImage = toolImage([scan.build.depsCommand, scan.build.buildCommand]);
+  const runnerImage = toolImage([scan.build.testCommand]);
   const caches = profile.caches.map((c) => c.vol);
   for (const c of caches) volumes[c] = {};
   volumes.build = {};
@@ -437,13 +457,13 @@ export function planSandbox(scan: SandboxScan, local: SandboxLocal, opts: Render
   const hasApp = scan.build.startCommand.length > 0;
   const ctx = scan.app.contextPath === '/' || scan.app.contextPath === '' ? '' : scan.app.contextPath.replace(/\/+$/, '');
   const hp = scan.app.healthPath.startsWith('/') ? scan.app.healthPath : `/${scan.app.healthPath}`;
-  const healthUrl = `http://app:${scan.app.port}${ctx !== '' && hp.startsWith(`${ctx}/`) ? '' : ctx}${hp}`;
+  const healthUrl = `http://app:${scan.app.port}${ctx !== '' && (hp === ctx || hp.startsWith(`${ctx}/`)) ? '' : ctx}${hp}`;
   if (hasApp) {
     services.app = {
       image,
       working_dir: '/build',
       entrypoint: ['sh', '/sandbox/entrypoint.sh'],
-      command: scan.build.startCommand,
+      command: startCommandOf(scan.build.startCommand),
       environment: { ...runtimeEnv, ...appCoverage, ...(stack === 'jvm' ? { SERVER_PORT: String(scan.app.port) } : { PORT: String(scan.app.port) }) },
       ...(envFile ? { env_file: envFile } : {}),
       volumes: ['build:/build', ...profile.runtimeVols('/build'), ...(stack === 'jvm' ? ['jacoco:/jacoco:ro'] : []), './out/live:/live', ...coverageFiles, ...trust],
@@ -453,7 +473,7 @@ export function planSandbox(scan: SandboxScan, local: SandboxLocal, opts: Render
   } else notes.push('the scan has no start command: no app service');
   if (scan.build.testCommand.length > 0) {
     services.runner = {
-      image,
+      image: runnerImage,
       profiles: ['tools'],
       working_dir: '/work',
       entrypoint: ['sh', '/sandbox/entrypoint.sh'],
@@ -498,17 +518,20 @@ export function planSandbox(scan: SandboxScan, local: SandboxLocal, opts: Render
       entrypoint: ['sh', '/sandbox/e2e-prep.sh'],
       environment: { E2E_PLAYWRIGHT_VERSION: pwVersion, PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1', npm_config_cache: '/tmp/npm-cache' },
       volumes: ['../..:/src:ro', 'e2edeps:/deps', './runtime/e2e-prep.sh:/sandbox/e2e-prep.sh:ro'],
+      // an empty tmpfs hides the sandbox's own dir (local.json, keys, run output) from the one service with network access
+      tmpfs: [PREP_MASK],
       networks: ['prep'],
     };
     if (scan.build.tool === 'poetry' || scan.build.tool === 'uv') notes.push('Python coverage: the hook is installed for the system Python; a poetry or uv environment does not load it');
   }
   services.prep = {
-    image,
+    image: prepImage,
     profiles: ['prep'],
     working_dir: '/build',
     entrypoint: ['sh', '/sandbox/prep.sh'],
     environment: { ...profile.env },
     volumes: ['../..:/src:ro', 'build:/build', ...cacheMounts, ...profile.runtimeVols('/build'), './runtime/prep.sh:/sandbox/prep.sh:ro'],
+    tmpfs: [PREP_MASK],
     networks: ['prep'],
   };
   services.probe = { image: IMAGES.probe, profiles: ['tools'], command: ['sleep', '3600'], networks: ['inner'] };
@@ -534,6 +557,7 @@ export function planSandbox(scan: SandboxScan, local: SandboxLocal, opts: Render
     internalNets,
     dummies,
     sans: { dns: dnsNames, ips: [...new Set([...ips, '127.0.0.1'])] },
+    innerGateway,
     healthUrl,
     hasE2e: hasApp,
     proxyHealthUrl: `http://proxy:${PROXY_PORT}${healthUrl.slice(`http://app:${scan.app.port}`.length)}`,

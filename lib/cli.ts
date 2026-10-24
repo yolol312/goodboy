@@ -77,6 +77,7 @@ import { readTopStart, topIdentity } from './start-pins';
 import { cmdCoverageCheck } from './coverage-check';
 import { cmdUiCheck } from './ui-check';
 import { cmdUiInventory } from './ui-inventory';
+import { readRunResult } from './sandbox-files';
 import { sandboxCommand } from './sandbox-run';
 
 // ---- 유틸 ----
@@ -414,7 +415,7 @@ function validateEvidenceInput(
 }
 
 /** TestResult 스키마 검증. 문제가 있으면 사람이 읽을 수 있는 오류 메시지 배열을 반환. */
-export function validateTestResultInput(parsed: unknown, bases: readonly string[] = [process.cwd()]): {
+export function validateTestResultInput(parsed: unknown, bases: readonly string[] = [process.cwd()], root?: string): {
   ok: boolean;
   errors: string[];
   value?: TestResult;
@@ -605,7 +606,7 @@ export function validateTestResultInput(parsed: unknown, bases: readonly string[
   }
 
   if (p.notes !== undefined && typeof p.notes !== 'string') errors.push('notes, when given, must be a string.');
-  if (p.sandbox !== undefined) validateSandboxInput(p.sandbox, errors);
+  const sandbox = p.sandbox === undefined ? undefined : sandboxFromRun(p.sandbox, root, errors);
 
   if (errors.length > 0) return { ok: false, errors };
 
@@ -628,7 +629,7 @@ export function validateTestResultInput(parsed: unknown, bases: readonly string[
   if (p.coverage !== undefined) value.coverage = p.coverage as TestResult['coverage'];
   // Kept, cut at 4000 characters (they were dropped without a word); no gate reads them.
   if (typeof p.notes === 'string' && p.notes.trim() !== '') value.notes = p.notes.slice(0, MAX_NOTES);
-  if (p.sandbox !== undefined) value.sandbox = pickSandbox(p.sandbox as Record<string, unknown>);
+  if (sandbox !== undefined) value.sandbox = sandbox;
   if (value.suites.length > 0) value.by_type = byTestType(value.suites);
   return { ok: true, errors: [], value };
 }
@@ -690,26 +691,31 @@ function validateChangedEntry(raw: unknown, label: string, errors: string[]): bo
   return true;
 }
 
-/** The sandbox check a record carries (track M): booleans for the checks, a string for the run. */
-function validateSandboxInput(raw: unknown, errors: string[]): void {
+/** The sandbox object of a record (track M): the agent passes `{run: "<ts>"}` only. The check
+ *  flags and the hash of the run's result.json are taken here from `.goodboy/sandbox/out/<ts>/`
+ *  under the repo top (lib/sandbox-files.ts readRunResult), so a record can not claim a check no
+ *  sandbox-run made. Flags the caller adds must match the result's. Undefined on errors. */
+function sandboxFromRun(raw: unknown, root: string | undefined, errors: string[]): NonNullable<TestResult['sandbox']> | undefined {
   const s = raw as Record<string, unknown> | null;
-  if (typeof s !== 'object' || s === null || Array.isArray(s)) {
-    errors.push('sandbox must be {inner_only, egress_blocked, hosts_to_dummies?, run?}: the sandbox-check booleans and the sandbox-run directory name.');
-    return;
+  if (typeof s !== 'object' || s === null || Array.isArray(s) || typeof s.run !== 'string') {
+    errors.push('sandbox must be {run: "<ts>"}: the directory name of the sandbox-run under .goodboy/sandbox/out/ (the check flags are copied from its result.json).');
+    return undefined;
   }
-  for (const k of ['inner_only', 'egress_blocked'] as const) {
-    if (typeof s[k] !== 'boolean') errors.push(`sandbox.${k} must be a boolean (the sandbox-check field of that name).`);
+  if (root === undefined) {
+    errors.push('sandbox: the repository root is needed to read the run\'s result.json.');
+    return undefined;
   }
-  if (s.hosts_to_dummies !== undefined && typeof s.hosts_to_dummies !== 'boolean') errors.push('sandbox.hosts_to_dummies must be a boolean.');
-  if (s.run !== undefined && (typeof s.run !== 'string' || s.run.trim() === '')) errors.push('sandbox.run must be the non-empty directory name of the sandbox-run result.');
-}
-
-/** Only the known sandbox fields are kept (the input was validated). */
-function pickSandbox(s: Record<string, unknown>): NonNullable<TestResult['sandbox']> {
-  const out: NonNullable<TestResult['sandbox']> = { inner_only: s.inner_only === true, egress_blocked: s.egress_blocked === true };
-  if (typeof s.hosts_to_dummies === 'boolean') out.hosts_to_dummies = s.hosts_to_dummies;
-  if (typeof s.run === 'string') out.run = s.run;
-  return out;
+  const proof = readRunResult(root, s.run);
+  if (proof instanceof Error) {
+    errors.push(`sandbox.run: ${proof.message}`);
+    return undefined;
+  }
+  for (const k of ['inner_only', 'egress_blocked', 'hosts_to_dummies'] as const) {
+    if (s[k] !== undefined && s[k] !== proof.check[k]) {
+      errors.push(`sandbox.${k} is ${String(s[k])} but the run's result.json says ${proof.check[k]}: pass only {run}, the flags are copied from it.`);
+    }
+  }
+  return { ...proof.check, run: proof.run, result_sha256: proof.sha256 };
 }
 
 function validateCoverageInput(raw: unknown, errors: string[]): void {
@@ -866,8 +872,9 @@ export async function cmdTestWrite(cwd: string, args: string[], shell: string = 
     fail(`JSON 파싱 실패: ${String(err)}`);
   }
 
-  // (#41) A worktree record's test files are the worktree's: they must exist there.
-  const validated = validateTestResultInput(parsed, wt !== null ? [wt.top] : [cwd, process.cwd()]);
+  // (#41) A worktree record's test files are the worktree's: they must exist there. (M) Its sandbox run is read
+  //   under the same top.
+  const validated = validateTestResultInput(parsed, wt !== null ? [wt.top] : [cwd, process.cwd()], wt !== null ? wt.top : repoTop(cwd));
   if (!validated.ok || !validated.value) {
     fail('TestResult 스키마 검증 실패:\n' + validated.errors.map((e) => `  - ${e}`).join('\n'));
   }
@@ -1539,7 +1546,7 @@ async function cmdCheckup(command: string, args: string[]): Promise<void> {
 
 const USAGE =
   '사용법: bun lib/cli.ts <command> [args...]\n' +
-  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | test-survey [--all | --dir <dir>] [--max N] | backfill-plan | backfill-next [--size N] [--pick a,b] | backfill-mark <file> --status done|skipped|suspect [--tests a,b] [--note text] | backfill-status | sandbox-scan | sandbox-init [--force] | sandbox-local --dump <abs path> [--format sql|custom] | sandbox-check | sandbox-prepare [--timeout-ms N] | sandbox-up [--wait-seconds N] | sandbox-run [--suite unit|e2e|all] [--timeout-ms N] [-- cmd...] | sandbox-down [--volumes] | coverage-check <report...> [--root-map from=to] | ui-inventory [--summary] | ui-check [--run <ts>] [--log f]... [--report f]... [--inventory f] | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text> | checkup-state | checkup-begin [--cli <v>] [--replace] | checkup-changelog [--from <v>|none] [--to <v>] [--ids a,b] [--changelog <path>] [--max-matched N] [--max-unmapped N] [--run <id>] | checkup-write --run <id> --name <file> | checkup-complete --run <id> | checkup-abort --run <id> | checkup-projects [--add <dir>|--remove <dir>] [--suggest] | checkup-inventory [--run <id>] (checkup-changelog --inventory adds its identifiers) | checkup-health [--run <id>] [--timeout-ms N] | checkup-smoke [--run <id>] | checkup-compare --run <id> | checkup-probe --run <id> (--estimate | --estimate-id <id>)';
+  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | test-survey [--all | --dir <dir>] [--max N] | backfill-plan | backfill-next [--size N] [--pick a,b] | backfill-mark <file> --status done|skipped|suspect [--tests a,b] [--note text] | backfill-status | sandbox-scan | sandbox-init [--force] | sandbox-local --dump <abs path> [--format sql|custom] | sandbox-check | sandbox-prepare [--timeout-ms N] | sandbox-up [--wait-seconds N] [--app-logs] | sandbox-run [--suite unit|e2e|all] [--timeout-ms N] [-- cmd...] | sandbox-down [--volumes] | coverage-check <report...> [--root-map from=to] | ui-inventory [--summary] | ui-check [--run <ts>] [--log f]... [--report f]... [--inventory f] | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text> | checkup-state | checkup-begin [--cli <v>] [--replace] | checkup-changelog [--from <v>|none] [--to <v>] [--ids a,b] [--changelog <path>] [--max-matched N] [--max-unmapped N] [--run <id>] | checkup-write --run <id> --name <file> | checkup-complete --run <id> | checkup-abort --run <id> | checkup-projects [--add <dir>|--remove <dir>] [--suggest] | checkup-inventory [--run <id>] (checkup-changelog --inventory adds its identifiers) | checkup-health [--run <id>] [--timeout-ms N] | checkup-smoke [--run <id>] | checkup-compare --run <id> | checkup-probe --run <id> (--estimate | --estimate-id <id>)';
 
 async function main(): Promise<void> {
   // The session's project dir, not the shell's dir after a `cd`: the records written here are

@@ -8,7 +8,7 @@
 // constants, and a path it cannot read is a note, never a guess.
 
 import { normRoute, toPattern } from './ui-types';
-import { type SrcFile, Sink, blankComments, findClose, idOf, lineAt, skipString, unquote } from './ui-scan-text';
+import { type SrcFile, Sink, blankComments, findClose, idOf, makeLineOf, skipString, unquote } from './ui-scan-text';
 
 interface Anno {
   name: string;
@@ -34,6 +34,14 @@ const MAPPING_METHOD: Record<string, string> = { GetMapping: 'GET', PostMapping:
 const MODIFIERS = /\b(?:public|protected|private|static|final|abstract|synchronized|default|native|open|override|suspend|internal)\b/g;
 const VIEW_TYPES = new Set(['String', 'ModelAndView', 'View', 'Rendering']);
 const HEADER_LIMIT = 3000;
+/** How deep a path expression or a route array may nest before it is left unread. */
+export const MAX_NESTING = 24;
+/** The longest string a constant or a path expression may stand for (a path is far shorter), and
+ *  the most characters all the constants together keep. */
+const MAX_CONSTANT_LENGTH = 4096;
+const MAX_CONSTANTS_TOTAL = 1_000_000;
+/** The most routes one handler method may map (path prefixes x paths x verbs). */
+const MAX_COMBINATIONS_PER_METHOD = 200;
 
 const lastSegment = (name: string): string => name.slice(name.lastIndexOf('.') + 1);
 
@@ -71,11 +79,15 @@ export function stringConstants(files: SrcFile[]): Map<string, string> {
     for (const m of code.matchAll(/\b(?:static\s+final|const\s+val|final\s+static)\s+(?:String\s+)?(\w+)\s*(?::\s*String\s*)?=\s*([^;\n]+)/g)) raw.set(`${cls}.${m[1]}`, { cls, expr: m[2]!.trim() });
   }
   const out = new Map<string, string>();
+  let kept = 0; // characters of the values kept so far
   for (let round = 0; round < 3; round++) {
     for (const [key, { cls, expr }] of raw) {
       if (out.has(key)) continue;
+      // A value longer than MAX_CONSTANT_LENGTH is no path: it is dropped (evalStrings gives null
+      //   for it), so `A1 = A0 + A0; A2 = A1 + A1; …` stops growing instead of doubling per line.
       const v = evalStrings(expr, out, cls);
-      if (v !== null && v.length === 1) {
+      if (v !== null && v.length === 1 && kept + v[0]!.length <= MAX_CONSTANTS_TOTAL) {
+        kept += v[0]!.length;
         out.set(key, v[0]!);
         if (!out.has(key.slice(key.indexOf('.') + 1))) out.set(key.slice(key.indexOf('.') + 1), v[0]!);
       }
@@ -86,13 +98,14 @@ export function stringConstants(files: SrcFile[]): Map<string, string> {
 
 /** The strings an expression stands for: literals, `+` of them, constants, `{ "a", "b" }` and
  *  `["a", "b"]`; null when something in it is not readable. */
-export function evalStrings(expr: string, consts: Map<string, string>, cls = ''): string[] | null {
+export function evalStrings(expr: string, consts: Map<string, string>, cls = '', depth = 0): string[] | null {
   const e = expr.trim();
   if (e === '') return [''];
   if ((e.startsWith('{') && e.endsWith('}')) || (e.startsWith('[') && e.endsWith(']'))) {
+    if (depth >= MAX_NESTING) return null; // `{{{{…` would recurse as deep as the text is long
     const all: string[] = [];
     for (const part of splitTop(e.slice(1, -1))) {
-      const v = evalStrings(part, consts, cls);
+      const v = evalStrings(part, consts, cls, depth + 1);
       if (v === null) return null;
       all.push(...v);
     }
@@ -107,6 +120,7 @@ export function evalStrings(expr: string, consts: Map<string, string>, cls = '')
       if (v === undefined) return null;
       acc += v;
     } else return null;
+    if (acc.length > MAX_CONSTANT_LENGTH) return null;
   }
   return [acc];
 }
@@ -226,17 +240,30 @@ export function springRoutes(files: SrcFile[], consts: Map<string, string>, sink
     const code = blankComments(f.text, 'c');
     const { classes, methods } = declarations(code);
     const cls = /\b(?:class|interface|object)\s+(\w+)/.exec(code)?.[1] ?? '';
+    const lineAt = makeLineOf(code);
     const pathsOf = (a: Anno): string[] | null => {
       const args = parseAnnoArgs(a.args);
       const expr = args.get('value') ?? args.get('path');
       if (expr === undefined) return [''];
       const v = evalStrings(expr, consts, cls);
-      if (v === null) sink.note(`${f.rel}:${lineAt(code, a.pos)} @${a.name} path is not a literal or a known constant: its routes are not listed`);
+      // (a mapping the app serves that cannot be listed: the inventory is incomplete, not merely noted)
+      if (v === null) sink.incomplete(`${f.rel}:${lineAt(a.pos)} @${a.name} path is not a literal or a known constant (or is over ${MAX_CONSTANT_LENGTH} characters): its routes are not listed`);
       return v;
     };
+    // The innermost class around each method, by one sweep: methods come in source order, and the
+    //   class spans nest (they are matched braces), so a class that ended before a method ended
+    //   before every later one too.
+    const open: ClassDecl[] = [];
+    let nextClass = 0;
     for (const m of methods) {
-      const owner = classes.filter((c) => c.open < m.pos && m.pos < c.close).sort((a, b) => b.open - a.open)[0];
-      if (!owner) continue;
+      while (nextClass < classes.length && classes[nextClass]!.open < m.pos) {
+        const c = classes[nextClass++]!;
+        while (open.length > 0 && open[open.length - 1]!.close <= c.open) open.pop();
+        open.push(c);
+      }
+      while (open.length > 0 && open[open.length - 1]!.close <= m.pos) open.pop();
+      const owner = open[open.length - 1];
+      if (!owner || !(owner.open < m.pos && m.pos < owner.close)) continue;
       const names = new Set(owner.annos.map((a) => a.name));
       if (!names.has('Controller') && !names.has('RestController')) continue;
       const mapping = m.annos.find((a) => a.name in MAPPING_METHOD || a.name === 'RequestMapping');
@@ -254,11 +281,21 @@ export function springRoutes(files: SrcFile[], consts: Map<string, string>, sink
       const body = names.has('RestController') || names.has('ResponseBody') || m.annos.some((a) => a.name === 'ResponseBody');
       const rt = baseType(m.ret);
       const isView = !body && VIEW_TYPES.has(rt);
-      const line = lineAt(code, mapping.pos);
+      const line = lineAt(mapping.pos);
+      // prefixes x paths x verbs, at most MAX_COMBINATIONS_PER_METHOD of them: `@RequestMapping({…3000
+      //   paths…})` over `@GetMapping({…3000 paths…})` is 9 million routes from 30 KB of text
+      const combinations = prefixes.length * own.length * verbs.length;
+      if (combinations > MAX_COMBINATIONS_PER_METHOD) {
+        sink.incomplete(`${f.rel}:${line} ${owner.name}.${m.name} maps ${combinations} path and method combinations: only the first ${MAX_COMBINATIONS_PER_METHOD} are listed`);
+      }
+      let left = MAX_COMBINATIONS_PER_METHOD;
       for (const prefix of prefixes) {
+        if (left <= 0) break;
         for (const p of own) {
+          if (left <= 0) break;
           const route = toPattern(normRoute(`${prefix}/${p}`));
           for (const verb of verbs) {
+            if (left-- <= 0) break;
             const handler = `${owner.name}.${m.name}`;
             if (isView && (verb === 'GET' || verb === 'ANY')) {
               const method = 'GET';

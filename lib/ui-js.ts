@@ -5,9 +5,15 @@
 
 import { posix } from 'node:path';
 import { BODY_METHODS, normRoute, toPattern } from './ui-types';
-import { type SrcFile, Sink, blankComments, findClose, idOf, makeLineOf, skipString, slug } from './ui-scan-text';
-import { splitTop } from './ui-spring';
-import { type Env, addCalls, jsCalls, urlPattern } from './ui-templates';
+import { type SrcFile, Sink, blankComments, bounded, fileIdOf, findClose, idOf, lowerBound, makeLineOf, skipString } from './ui-scan-text';
+import { MAX_NESTING, splitTop } from './ui-spring';
+import { type Env, JS_PLACEHOLDER, addCalls, jsCalls, urlPattern } from './ui-templates';
+
+// The quoted parts are bounded (see PLACEHOLDER_MAX): `[^'"]+` rescans to the end of the text from
+//   every unterminated opener.
+const EXPRESS_IMPORT = bounded(/import\s+(\w+)\s+from\s+['"]([^'"]{1,N})['"]|(?:const|let|var)\s+(\w+)\s*=\s*require\(\s*['"]([^'"]{1,N})['"]\s*\)/g);
+const EXPRESS_USE = bounded(/\b\w+\.use\(\s*(["'`])([^"'`]{1,N})\1\s*,\s*(\w+)\s*\)/g);
+const EXPRESS_ROUTE = bounded(/\b(\w+)\.(get|post|put|delete|patch|all)\(\s*(["'`])([^"'`]{1,N})\3/g);
 
 const HTTP_VERBS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'];
 const PAGE_EXT = /\.(?:tsx|ts|jsx|js|mdx?)$/;
@@ -148,7 +154,7 @@ function attrText(v: string | undefined): string | null {
   if (!v.startsWith('{')) return v;
   const inner = v.slice(1, -1).trim();
   const lit = /^(["'`])([\s\S]*)\1$/.exec(inner);
-  return lit ? (lit[1] === '`' ? lit[2]!.replace(/\$\{[^}]*\}/g, '{}') : lit[2]!) : null;
+  return lit ? (lit[1] === '`' ? lit[2]!.replace(JS_PLACEHOLDER, '{}') : lit[2]!) : null;
 }
 
 function jsxText(code: string, o: JsxOpen): string {
@@ -167,6 +173,9 @@ function handlerName(v: string | undefined): string {
 }
 
 const FIELD_JSX = /<(?:input|select|textarea)\b|<[A-Z]\w*(?:Input|Field|Select|TextArea|Textarea|Checkbox|Radio|Switch)\b/;
+/** How much of a form's body is read for its fields (a form is far shorter; unclosed forms would
+ *  each read the whole rest of the file). */
+const FORM_BODY_WINDOW = 20_000;
 
 /** The elements of a React file a user clicks, submits or follows. */
 export function jsxActions(f: SrcFile, sink: Sink, env: Env): void {
@@ -174,6 +183,16 @@ export function jsxActions(f: SrcFile, sink: Sink, env: Env): void {
   if (!/<[A-Za-z]/.test(code)) return;
   const lineOf = makeLineOf(code);
   const seen = new Map<string, number>();
+  // Where every `</form>` is, found once: a search from each `<form` ran to the end of the file
+  //   when there was none.
+  const formCloses: number[] = [];
+  for (let c = code.indexOf('</form>'); c >= 0; c = code.indexOf('</form>', c + 1)) formCloses.push(c);
+  /** The fields of the form whose open tag ends at `from`, in the text up to its close. */
+  const hasFieldsAfter = (from: number): boolean => {
+    const at = lowerBound(formCloses, from);
+    const end = at < formCloses.length ? Math.min(formCloses[at]!, from + FORM_BODY_WINDOW) : from + 4000;
+    return FIELD_JSX.test(code.slice(from, end));
+  };
   for (let i = code.indexOf('<'); i >= 0; i = code.indexOf('<', i + 1)) {
     const o = jsxOpen(code, i);
     if (!o) continue;
@@ -188,8 +207,7 @@ export function jsxActions(f: SrcFile, sink: Sink, env: Env): void {
     if (o.name === 'form') {
       const action = attrText(o.attrs.get('action'));
       const method = (attrText(o.attrs.get('method')) ?? 'GET').toUpperCase();
-      const close = code.indexOf('</form>', o.end);
-      const hasFields = FIELD_JSX.test(code.slice(o.end, close < 0 ? o.end + 4000 : close));
+      const hasFields = hasFieldsAfter(o.end);
       const route = action === null ? null : urlPattern(action, env.ctx);
       if (route !== null) {
         sink.add({ id: idOf('form', method, route), kind: 'action', method, route, file: f.rel, line, input: hasFields || BODY_METHODS.has(method), label: `form ${method} ${route}` });
@@ -203,11 +221,8 @@ export function jsxActions(f: SrcFile, sink: Sink, env: Env): void {
     const cls = (attrText(o.attrs.get('className')) ?? '').split(/\s+/).filter((c) => c !== '' && !/^btn(?:-|$)/.test(c)).join(' ');
     const label = [attrText(own) ?? '', jsxText(code, o), handler, cls, o.name].find((x) => x.trim() !== '' && !/[{}]/.test(x)) ?? o.name;
     let input = false;
-    if (submit) {
-      const close = code.indexOf('</form>', o.end);
-      input = FIELD_JSX.test(code.slice(o.end, close < 0 ? o.end + 4000 : close));
-    }
-    sink.addUnique({ id: `${submit ? 'submit' : 'click'}:${f.rel}#${slug(label)}`, kind: 'action', file: f.rel, line, input, label: `${submit ? 'submit' : 'click'} ${label}` }, seen);
+    if (submit) input = hasFieldsAfter(o.end);
+    sink.addUnique({ id: fileIdOf(submit ? 'submit' : 'click', f.rel, label), kind: 'action', file: f.rel, line, input, label: `${submit ? 'submit' : 'click'} ${label}` }, seen);
   }
   addCalls(jsCalls(code, true), f.rel, lineOf, sink, env);
 }
@@ -247,11 +262,12 @@ export function reactRoutes(f: SrcFile, sink: Sink): void {
   const arrays = [...code.matchAll(/(?:create(?:Browser|Hash|Memory)Router|useRoutes|createRoutesFromElements)\s*\(\s*\[|RouteObject\[\]\s*=\s*\[/g)];
   for (const a of arrays) {
     const open = a.index! + a[0].length - 1;
-    routeArray(code, open, '/', lineOf, emit);
+    routeArray(code, open, '/', lineOf, emit, 0);
   }
 }
 
-function routeArray(code: string, open: number, parent: string, lineOf: (p: number) => number, emit: (path: string, line: number) => void): void {
+function routeArray(code: string, open: number, parent: string, lineOf: (p: number) => number, emit: (path: string, line: number) => void, depth: number): void {
+  if (depth >= MAX_NESTING) return; // `children: [{ children: [{ …` as deep as the text is long
   const close = findClose(code, open);
   if (close < 0) return;
   const inner = code.slice(open + 1, close);
@@ -276,7 +292,7 @@ function routeArray(code: string, open: number, parent: string, lineOf: (p: numb
     }
     const full = path === null || path === '' || path === '*' ? parent : joinPath(parent, path);
     if (path !== '*' && (path !== null || isIndex)) emit(full, lineOf(open + 1 + at));
-    if (children) routeArray(code, children.at, full, lineOf, emit);
+    if (children) routeArray(code, children.at, full, lineOf, emit, depth + 1);
   }
 }
 
@@ -295,25 +311,27 @@ export function expressRoutes(files: SrcFile[], sink: Sink): void {
     return null;
   };
   const prefixes = new Map<string, string>();
+  // The text of each file without comments, once (the rounds and the route pass all read it).
+  const codes = new Map(express.map((f) => [f.rel, blankComments(f.text, 'c')]));
   for (let round = 0; round < 3; round++) {
     for (const f of express) {
-      const code = blankComments(f.text, 'c');
+      const code = codes.get(f.rel)!;
       const imports = new Map<string, string>();
-      for (const m of code.matchAll(/import\s+(\w+)\s+from\s+['"]([^'"]+)['"]|(?:const|let|var)\s+(\w+)\s*=\s*require\(\s*['"]([^'"]+)['"]\s*\)/g)) {
+      for (const m of code.matchAll(EXPRESS_IMPORT)) {
         const target = resolve(f.rel, m[2] ?? m[4]!);
         if (target) imports.set((m[1] ?? m[3])!, target);
       }
-      for (const m of code.matchAll(/\b\w+\.use\(\s*(["'`])([^"'`]+)\1\s*,\s*(\w+)\s*\)/g)) {
+      for (const m of code.matchAll(EXPRESS_USE)) {
         const target = imports.get(m[3]!);
         if (target) prefixes.set(target, concat(prefixes.get(f.rel) ?? '/', m[2]!));
       }
     }
   }
   for (const f of express) {
-    const code = blankComments(f.text, 'c');
+    const code = codes.get(f.rel)!;
     const lineOf = makeLineOf(code);
     const prefix = prefixes.get(f.rel) ?? '/';
-    for (const m of code.matchAll(/\b(\w+)\.(get|post|put|delete|patch|all)\(\s*(["'`])([^"'`]+)\3/g)) {
+    for (const m of code.matchAll(EXPRESS_ROUTE)) {
       if (!/^(?:app|router|\w*[rR]outer|\w*[rR]outes?|api|server)$/.test(m[1]!)) continue;
       if (!m[4]!.startsWith('/')) continue;
       const verb = m[2] === 'all' ? 'ANY' : m[2]!.toUpperCase();
@@ -331,6 +349,25 @@ interface PyRouter {
   prefix: string;
 }
 
+/** The most of a Python call's arguments that is read (the text up to its `)`). */
+const MAX_CALL_ARGS = 2000;
+
+/** Each match of `opener` (a global regex that ends inside a call, after its `(`) with the text from
+ *  there to the next `)`; a call whose `)` is more than MAX_CALL_ARGS away is left out. The next `)`
+ *  is looked up once and reused while it is still ahead, and when there is none the search ends:
+ *  a `[^)]{0,2000}\)` pattern rescanned up to 2000 characters from every unclosed opener. */
+function callsWithArgs(code: string, opener: RegExp): { m: RegExpExecArray; args: string }[] {
+  const out: { m: RegExpExecArray; args: string }[] = [];
+  let close = -2;
+  for (let m = opener.exec(code); m; m = opener.exec(code)) {
+    const from = m.index + m[0].length;
+    if (close === -2 || (close !== -1 && close < from)) close = code.indexOf(')', from);
+    if (close === -1) break; // no `)` anywhere after this: no later call is closed either
+    if (close - from <= MAX_CALL_ARGS) out.push({ m, args: code.slice(from, close) });
+  }
+  return out;
+}
+
 export function fastapiRoutes(files: SrcFile[], sink: Sink): void {
   const py = files.filter((f) => /\.py$/.test(f.rel) && /\bfastapi\b/i.test(f.text));
   if (py.length === 0) return;
@@ -340,10 +377,20 @@ export function fastapiRoutes(files: SrcFile[], sink: Sink): void {
   for (const f of py) {
     const code = blankComments(f.text, 'py');
     codes.set(f.rel, code);
-    for (const m of code.matchAll(/^(\w+)\s*=\s*APIRouter\(([^)]*)\)/gm)) routers.push({ file: f.rel, name: m[1]!, prefix: /prefix\s*=\s*["']([^"']*)["']/.exec(m[2]!)?.[1] ?? '' });
-    for (const m of code.matchAll(/\.include_router\(\s*([\w.]+)([^)]*)\)/g)) includes.push({ file: f.rel, arg: m[1]!, prefix: /prefix\s*=\s*["']([^"']*)["']/.exec(m[2]!)?.[1] ?? '' });
+    for (const { m, args } of callsWithArgs(code, /^(\w+)\s*=\s*APIRouter\(/gm)) routers.push({ file: f.rel, name: m[1]!, prefix: /prefix\s*=\s*["']([^"']*)["']/.exec(args)?.[1] ?? '' });
+    for (const { m, args } of callsWithArgs(code, /\.include_router\(\s*([\w.]+)/g)) includes.push({ file: f.rel, arg: m[1]!, prefix: /prefix\s*=\s*["']([^"']*)["']/.exec(args)?.[1] ?? '' });
   }
+  const routerBy = new Map<string, PyRouter>();
+  for (const r of routers) if (!routerBy.has(`${r.file}|${r.name}`)) routerBy.set(`${r.file}|${r.name}`, r);
+  const prefixOf = new Map<PyRouter, string>();
   const includePrefix = (r: PyRouter): string => {
+    const cached = prefixOf.get(r);
+    if (cached !== undefined) return cached;
+    const found = includePrefixOf(r);
+    prefixOf.set(r, found);
+    return found;
+  };
+  const includePrefixOf = (r: PyRouter): string => {
     const inc = includes.find((i) => {
       const parts = i.arg.split('.');
       const name = parts[parts.length - 1]!;
@@ -356,12 +403,14 @@ export function fastapiRoutes(files: SrcFile[], sink: Sink): void {
     const code = codes.get(f.rel)!;
     const lineOf = makeLineOf(code);
     for (const m of code.matchAll(/^[ \t]*@(\w+)\.(get|post|put|delete|patch|head|options)\(\s*(["'])([^"']*)\3([^\n]*)/gm)) {
-      const router = routers.find((r) => r.file === f.rel && r.name === m[1]!);
+      const router = routerBy.get(`${f.rel}|${m[1]!}`);
       const prefix = router ? concat(includePrefix(router), router.prefix) : '';
       const route = toPattern(concat(prefix, m[4]!));
       const verb = m[2]!.toUpperCase();
       // the function body: up to the next decorator or top-level statement
-      const rest = code.slice(m.index! + m[0].length);
+      // (looked for in the next 8000 characters: a search to the end of the file from every decorator
+      //   was quadratic, and a handler is far shorter)
+      const rest = code.slice(m.index! + m[0].length, m.index! + m[0].length + 8000);
       const def = /\n(?:async\s+)?def\s[^\n]*\n/.exec(rest);
       const afterDef = def ? def.index + def[0].length : 0;
       const next = rest.slice(afterDef).search(/\n(?=[@A-Za-z_])/);

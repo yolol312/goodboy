@@ -30,9 +30,15 @@ Run suites where nothing can leave the machine, and prove it in the record.
    `uiTest(['<id>:ok'], 'title', async ({ page }) => { … })`. Use the inventory's ids:
    `<id>:ok` for the normal path of each screen and action, and for an item with `input: true`
    also `<id>:error` (a rejected or invalid submit). One test may claim several ids it really
-   visits; a claim the test does not exercise covers nothing.
-4. Run every suite through `bun "$GB/lib/cli.ts" sandbox-run --suite unit|e2e|all` (a command
-   after `--` for one test file). Never run the project's own runner on the host for these
+   visits; a claim the test does not exercise covers nothing. The fixture tags each test's
+   requests with its own nonce, and `ui-check` counts a request for an id only when it carries
+   the nonce of a passing test that claims the id: a screen, form or link needs a page load of
+   its route in that test (`page.goto` or a click that navigates), not an API call alone.
+4. Run every suite through `bun "$GB/lib/cli.ts" sandbox-run --suite unit|e2e|all`. With
+   `unit` or `all`, a command after `--` replaces the unit command (for one test file, say);
+   `all` then runs the e2e tests too. With `e2e` give no `--`: the e2e service runs every test
+   in `e2e/` with the sandbox's Playwright config, and words after `--` would replace that
+   whole command (the binary is not on the PATH, and the config is lost). Never run the project's own runner on the host for these
    tests. The run checks the sandbox first, resets the database from the dump, and writes
    `.goodboy/sandbox/out/<ts>/result.json` with `check`, `exit`, `accessLog`,
    `playwrightReport` and `coverageReports`. A red suite is fixed in the tests (or reported as
@@ -41,12 +47,23 @@ Run suites where nothing can leave the machine, and prove it in the record.
    --root-map /work=.` and `bun "$GB/lib/cli.ts" ui-check --run <ts>`. Report the gaps (files,
    lines, branches, ids and what each lacks) to the main session, and write the tests that
    close the ones that can be reached.
-6. Record (record-tests): suites typed by what they run, and `sandbox: {inner_only,
-   egress_blocked, hosts_to_dummies, run: "<ts>"}` copied from that run's `check`. A record
-   without it does not count for a backfill target.
-7. Traces and screenshots: `sandbox-run` removes a passing run's (`artifacts: removed`) and
-   keeps a failing run's for analysis. If a passing run still shows `kept`, delete them. They
-   stay local in `.goodboy/sandbox/out/` and are never added to git.
+6. Record (record-tests): suites typed by what they run. The command of each suite is the
+   exact line you ran and nothing else on it (no `;` `&&` `|` `#` or substitution outside
+   quotes): `bun "$GB/lib/cli.ts" sandbox-run --suite unit -- <the test command>`, or for an e2e
+   run `bun "$GB/lib/cli.ts" sandbox-run --suite e2e` with no `--`. The part after `--` must
+   be the command the run recorded, word for word, and the run must have started after the
+   last edit of the target and its tests (edit, run, then record). A host run or a changed
+   command does not count; a refusal names the line it expects. Then `sandbox: {run: "<ts>"}`, the run's directory name and
+   nothing else: `test-write` reads `.goodboy/sandbox/out/<ts>/result.json` and copies the
+   check flags and its hash into the record. A record without a run, with a run that failed
+   its check or exited non-zero, or whose result.json changed afterwards, does not count for
+   a backfill target. Never write or edit anything under `.goodboy/sandbox/out/`.
+7. What you see is what the commands print: a passing step prints no output tail, a failing
+   one at most 2000 characters, and a failed restore only code and line. The full output, the
+   traces and the screenshots stay in `.goodboy/sandbox/out/<ts>/` (never added to git); do not
+   open them unless the user asks, they can hold rows of the database copy. Show the app's own
+   log (`sandbox-up --app-logs`) only when the user asks. `sandbox-run` removes a passing run's
+   traces and screenshots (`artifacts: removed`); if one still shows `kept`, delete them.
 
 ## Output
 - Per run: the result path, the exit code, and the two gate results with their gaps.
@@ -54,7 +71,7 @@ Run suites where nothing can leave the machine, and prove it in the record.
 
 ## Done when
 - [ ] `sandbox-check` was ok before the first suite and every suite ran through `sandbox-run`.
-- [ ] The record carries `sandbox` from the run's check, with the run's `ts`.
+- [ ] The record carries `sandbox: {run}` of a run whose check passed and whose exit was 0.
 - [ ] Each gap the gates report is closed or listed for the main session.
 
 ## Never

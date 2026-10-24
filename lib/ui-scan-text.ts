@@ -1,6 +1,7 @@
 // Text helpers of the UI inventory (track M, M3; plan §19): blanking comments without moving a
 // line, matching brackets around string literals, and the collector the scanners write into.
-// Every loop is linear in the text.
+// Every loop is linear in the text: a bracket is matched once per text (not scanned for from each
+// open one), a comment is closed by one search, and a line number is a binary search.
 
 import { createHash } from 'node:crypto';
 import { type UiItem, type UiKind, normRoute } from './ui-types';
@@ -21,12 +22,6 @@ export interface Route {
   kind: UiKind | 'handler';
 }
 
-export const lineAt = (text: string, pos: number): number => {
-  let n = 1;
-  for (let i = text.indexOf('\n'); i >= 0 && i < pos; i = text.indexOf('\n', i + 1)) n++;
-  return n;
-};
-
 /** Replaces comments with spaces, keeping every newline and every other character at its offset.
  *  `c`: `//` and block comments (Java, JS, TS); `py`: `#` comments and triple-quoted strings;
  *  `html`: `<!-- -->` and `<%-- --%>`. String literals are skipped, so `"http://x"` stays. */
@@ -36,7 +31,16 @@ export function blankComments(text: string, style: 'c' | 'py' | 'html'): string 
     for (let i = from; i < to && i < out.length; i++) if (out[i] !== '\n') out[i] = ' ';
   };
   if (style === 'html') {
-    for (const re of [/<!--[\s\S]*?-->/g, /<%--[\s\S]*?--%>/g]) for (const m of text.matchAll(re)) blank(m.index!, m.index! + m[0].length);
+    // By search, not by `<!--[\s\S]*?-->`: that scans to the end from every `<!--` that has no
+    //   `-->`. Once one search finds no close, no later start has one either.
+    for (const [open, close] of [['<!--', '-->'], ['<%--', '--%>']] as const) {
+      for (let i = text.indexOf(open); i >= 0; ) {
+        const e = text.indexOf(close, i + open.length);
+        if (e < 0) break;
+        blank(i, e + close.length);
+        i = text.indexOf(open, e + close.length);
+      }
+    }
     return out.join('');
   }
   let i = 0;
@@ -87,12 +91,51 @@ export function skipString(text: string, i: number): number {
   return text.length;
 }
 
-/** The offset of the bracket closing the one at `open` (`(`, `[` or `{`), skipping strings, or -1. */
-export function findClose(text: string, open: number): number {
+/** Below this length a bracket is looked for directly; above it the brackets of the text are
+ *  matched once (a scan from each unmatched open one ran to the end of the text each time). */
+const MATCH_FROM_LENGTH = 512;
+/** How far to look from an open bracket that the single pass read as part of a string (it is no
+ *  open bracket there, but a caller may ask about one: `"call fetch('/x') like this"`). */
+const IN_STRING_WINDOW = 4000;
+const BRACKETS = ['(', '[', '{'] as const;
+const PAIR_CACHE_MAX = 8;
+const pairCache = new Map<string, Map<number, number>[]>();
+
+/** Every bracket of one kind in the text, matched in a single pass (strings skipped, a stray close
+ *  ignored): open offset → close offset, -1 for an open that is never closed. */
+function pairsOf(text: string, kind: number): Map<number, number> {
+  let perKind = pairCache.get(text);
+  if (!perKind) {
+    if (pairCache.size >= PAIR_CACHE_MAX) pairCache.delete(pairCache.keys().next().value!);
+    pairCache.set(text, (perKind = []));
+  }
+  let pairs = perKind[kind];
+  if (pairs) return pairs;
+  pairs = new Map();
+  perKind[kind] = pairs;
+  const o = BRACKETS[kind];
+  const c = o === '(' ? ')' : o === '[' ? ']' : '}';
+  const stack: number[] = [];
+  for (let i = 0; i < text.length; ) {
+    const ch = text[i]!;
+    if (ch === '"' || ch === "'" || ch === '`') {
+      i = skipString(text, i);
+      continue;
+    }
+    if (ch === o) {
+      stack.push(i);
+      pairs.set(i, -1);
+    } else if (ch === c && stack.length > 0) pairs.set(stack.pop()!, i);
+    i++;
+  }
+  return pairs;
+}
+
+function findCloseFrom(text: string, open: number, limit: number): number {
   const o = text[open]!;
   const c = o === '(' ? ')' : o === '[' ? ']' : '}';
   let depth = 0;
-  for (let i = open; i < text.length; ) {
+  for (let i = open; i < limit; ) {
     const ch = text[i]!;
     if (ch === '"' || ch === "'" || ch === '`') {
       i = skipString(text, i);
@@ -103,6 +146,37 @@ export function findClose(text: string, open: number): number {
     i++;
   }
   return -1;
+}
+
+/** The offset of the bracket closing the one at `open` (`(`, `[` or `{`), skipping strings, or -1. */
+export function findClose(text: string, open: number): number {
+  if (text.length < MATCH_FROM_LENGTH) return findCloseFrom(text, open, text.length);
+  const hit = pairsOf(text, text[open] === '(' ? 0 : text[open] === '[' ? 1 : 2).get(open);
+  if (hit !== undefined) return hit;
+  return findCloseFrom(text, open, Math.min(text.length, open + IN_STRING_WINDOW));
+}
+
+/** The longest body of a placeholder, a quoted import path, a tag or the like that the scanners'
+ *  regexes look for. An unbounded `[^}]*` rescans to the end of the text from every opener that has
+ *  no closer (`${` repeated); no real one is this long. */
+export const PLACEHOLDER_MAX = 300;
+
+/** A regex whose `,N}` bounds are PLACEHOLDER_MAX: write `{0,N}` or `{1,N}` in the literal (there it
+ *  is plain text, not yet a quantifier), so the number is named in one place. */
+export function bounded(re: RegExp): RegExp {
+  return new RegExp(re.source.replaceAll(',N}', `,${PLACEHOLDER_MAX}}`), re.flags);
+}
+
+/** The index of the first element of the ascending `xs` that is `>= x` (`xs.length` when none). */
+export function lowerBound(xs: ArrayLike<number>, x: number): number {
+  let lo = 0;
+  let hi = xs.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (xs[mid]! < x) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
 }
 
 /** The text of a string literal, quotes and escapes of the simple kind removed. */
@@ -125,22 +199,46 @@ export function slug(label: string): string {
 /** A route as it goes into an id: ASCII only, no space, comma or semicolon. */
 export const routeForId = (route: string): string => route.replace(/[^\x21-\x7e]|[,;]/gu, (c) => encodeURIComponent(c));
 
+/** The most items (and the most routes) one inventory holds. Far above a real app; past it the rest
+ *  is dropped and `Sink.truncated` says so, so that a pathological file cannot make the inventory
+ *  as large as its text multiplied by itself. */
+export const MAX_INVENTORY_ITEMS = 50_000;
+
 /** Collects items by id: a second sighting of an id is dropped (the first by file order stays),
  *  but `input` is the OR of all, and a route is remembered for linking. */
 export class Sink {
   readonly items = new Map<string, UiItem>();
   readonly routes: Route[] = [];
   readonly notes: string[] = [];
+  /** Why the inventory is not complete (a cap dropped items, the time ran out): ui-check fails on any. */
+  readonly truncated: string[] = [];
+  private readonly routeKeys = new Set<string>();
+
+  /** Records that something was left out, once per reason (a note says it too). */
+  incomplete(reason: string): void {
+    if (!this.truncated.includes(reason) && this.truncated.length < 50) {
+      this.truncated.push(reason);
+      this.note(reason);
+    }
+  }
 
   add(item: UiItem): void {
     const prev = this.items.get(item.id);
     if (prev) prev.input = prev.input || item.input;
+    else if (this.items.size >= MAX_INVENTORY_ITEMS) this.incomplete(`the inventory holds ${MAX_INVENTORY_ITEMS} items and no more: the rest are not listed`);
     else this.items.set(item.id, item);
   }
 
   /** A route with no item of its own, or the route of an item just added. */
   route(r: Route): void {
-    if (!this.routes.some((x) => x.method === r.method && x.pattern === r.pattern)) this.routes.push(r);
+    const key = `${r.method} ${r.pattern}`;
+    if (this.routeKeys.has(key)) return;
+    if (this.routes.length >= MAX_INVENTORY_ITEMS) {
+      this.incomplete(`the inventory holds ${MAX_INVENTORY_ITEMS} routes and no more: the rest are not listed`);
+      return;
+    }
+    this.routeKeys.add(key);
+    this.routes.push(r);
   }
 
   note(text: string): void {
@@ -156,6 +254,11 @@ export class Sink {
 }
 
 export const idOf = (sub: string, method: string, route: string): string => `${sub}:${method}:${routeForId(normRoute(route))}`;
+
+/** The id of an element with no route: `<sub>:<file>#<label>`. The file part goes through
+ *  routeForId, so a path with a space or a non-ASCII character (`templates/주문/list.html`) still
+ *  makes an id a test can claim; an ASCII path without a space or comma is unchanged. */
+export const fileIdOf = (sub: string, file: string, label: string): string => `${sub}:${routeForId(file)}#${slug(label)}`;
 
 /** A function from a text offset to its 1-based line (binary search over the line starts). */
 export function makeLineOf(text: string): (pos: number) => number {

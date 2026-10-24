@@ -11,7 +11,7 @@ import { gitOut } from './git-run';
 import { readRegular } from './safe-read';
 import { TEST_FILE, testTypeOf } from './test-catalog';
 import { type ExtraType, JS_SPECIFIER, SATISFIED_BY, typeNeedOf } from './test-types';
-import { isTestFile } from './test-validator';
+import { isTestFile, JVM_TEST_SOURCE_SET } from './test-validator';
 import type { TestType } from './types';
 
 export type ToolKind = 'runner' | 'coverage' | 'integration' | 'e2e' | 'ui';
@@ -54,19 +54,34 @@ const CODE_EXT = new Set([
 const JS_EXT = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.mts', '.cts', '.vue', '.svelte']);
 /** Server-side and static page templates: UI targets of their own (I3b's UI files have no JSP). */
 const TEMPLATE_EXT = new Set(['.html', '.htm', '.jsp', '.ftl', '.mustache', '.hbs', '.ejs', '.pug', '.erb', '.twig']);
-/** Dirs whose files are not the project's own: dependencies, tool state and generated code.
- *  Neither code targets nor tests nor tool evidence. */
+/** Dirs whose files are not the project's own wherever they sit: dependencies, tool state and
+ *  generated code. Neither code targets nor tests nor tool evidence. A name here is no package
+ *  name of any real project (a leading dot, a dependency manager's dir, a virtualenv). */
 const SKIP_DIRS = new Set([
-  'node_modules', 'vendor', 'vendors', 'third_party', 'third-party', 'bower_components', '.next', '.nuxt',
+  'node_modules', 'bower_components', 'webjars', '.next', '.nuxt',
   '.svelte-kit', '.gradle', '__generated__', '.idea', '.vscode', '.goodboy', '.claude', '.github', '.storybook',
+  // virtualenvs, tool caches and git's own dir (the sandbox scan skipped these too)
+  '.git', 'venv', '.venv', 'site-packages', '__pycache__', '.tox', '.mypy_cache', '.pytest_cache',
 ]);
+/** Vendored third-party code at the top of a tree or of a module (`vendor/`, `server/vendor/`). These
+ *  are also package and template dir names (`com/acme/vendor/`, `templates/vendor/`), so a deeper one
+ *  counts for nothing. */
+const VENDOR_DIRS = new Set(['vendor', 'vendors', 'third_party', 'third-party']);
 /** Build outputs and docs, skipped only outside a `src` dir: inside one they are package
  *  names (`src/main/java/com/acme/build/`). */
 const OUTPUT_DIRS = new Set(['dist', 'build', 'out', 'target', 'coverage', 'generated', 'docs']);
 /** Under a static web root, these dirs hold copied libraries (`static/js/lib/jquery.js`). */
 const STATIC_ROOTS = new Set(['static', 'public', 'assets', 'webapp', 'www', 'wwwroot']);
 const STATIC_LIB_DIRS = new Set(['lib', 'libs', 'plugin', 'plugins', 'vendor', 'external', 'ext', 'dist', 'build']);
-const SKIP_NAME = /\.min\.[^.]+$|\.d\.[cm]?ts$|\.bundle\.[cm]?js$|(?:^|[./-])config\.[cm]?[jt]s$|\.stories\.[cm]?[jt]sx?$/;
+/** A copied library is script or style: a page or a class in a `lib` dir is the project's own. */
+const STATIC_LIB_FILE = /\.(?:[cm]?js|css|map)$/i;
+const MINIFIED_NAME = /\.min\.[^.]+$|\.d\.[cm]?ts$|\.bundle\.[cm]?js$/;
+const SKIP_NAME = new RegExp(`${MINIFIED_NAME.source}|(?:^|[./-])config\\.[cm]?[jt]s$|\\.stories\\.[cm]?[jt]sx?$`);
+/** Dirs of tests at the top of the tree or of a module (`test/`, `web/e2e/`): what the sandbox scan and
+ *  the UI inventory read leaves them out. Deeper, `test` and `spec` are package names. */
+const TEST_ROOT_DIRS = new Set(['test', 'tests', 'spec', 'specs', 'e2e', 'cypress', 'testdata']);
+/** JS test dirs by convention, wherever they sit. */
+const JS_TEST_DIRS = new Set(['__tests__', '__mocks__']);
 /** Cypress specs (`*.cy.ts`) are e2e tests the shared test-file pattern leaves out. */
 const CYPRESS_SPEC = /\.cy\.[cm]?[jt]sx?$/;
 /** Stems that name a module by its dir: a JS/TS index file is named by an import of its dir. */
@@ -165,7 +180,8 @@ export function listFiles(root: string): string[] | null {
   // null: not a repo, a failure, or no git at all.
   const out = gitOut(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], { timeoutMs: 30_000 });
   if (out === null) return null;
-  return [...new Set(out.split('\0'))].filter((f) => f !== '' && !f.includes('\n'));
+  // sorted: the files a cap keeps, and the order a scan reads them in, do not depend on git's
+  return [...new Set(out.split('\0'))].filter((f) => f !== '' && !f.includes('\n')).sort();
 }
 
 /** The repos one level below a dir that is no repo (separate FE and BE repos under one dir). */
@@ -180,20 +196,79 @@ function reposBelow(root: string): string[] {
   }
 }
 
-export function inSkippedDir(rel: string): boolean {
+/** The dirs of a path that are dirs, not the package part of a JVM source path:
+ *  `src/main/java/com/acme/vendor/A.java` → `src/main/java`. `vendor`, `lib`, `test` and `spec` below
+ *  a JVM source root are package names, and a class there is the project's own. */
+function pathDirs(rel: string): string[] {
   const dirs = rel.split('/').slice(0, -1);
+  const j = dirs.findIndex((d, i) => i >= 2 && dirs[i - 2] === 'src' && (d === 'java' || d === 'kotlin' || d === 'scala' || d === 'groovy'));
+  return j < 0 ? dirs : dirs.slice(0, j + 1);
+}
+
+/** Why a path is not the project's own by the dir it sits in, or null. */
+function skippedDirReason(rel: string): string | null {
+  const dirs = rel.split('/').slice(0, -1);
+  if (dirs.some((d) => SKIP_DIRS.has(d))) return 'dependency and tool dirs';
   const src = dirs.indexOf('src');
-  return dirs.some((d, i) => SKIP_DIRS.has(d) || (OUTPUT_DIRS.has(d) && (src < 0 || i < src)));
+  if (dirs.some((d, i) => OUTPUT_DIRS.has(d) && (src < 0 || i < src))) return 'build output';
+  if (dirs.slice(0, 2).some((d) => VENDOR_DIRS.has(d))) return 'vendored code';
+  return null;
+}
+
+export function inSkippedDir(rel: string): boolean {
+  return skippedDirReason(rel) !== null;
 }
 
 /** Not the project's own code: a skipped dir, a library copied under a static web root, a
  *  minified, declaration, bundle, config or story file. */
 export function notOwnCode(rel: string): boolean {
-  const segs = rel.split('/');
-  const dirs = segs.slice(0, -1);
+  return inStaticLib(rel) || SKIP_NAME.test(posix.basename(rel));
+}
+
+/** A library copied under a static web root (`static/js/lib/jquery.js`). */
+function inStaticLib(rel: string): boolean {
+  if (!STATIC_LIB_FILE.test(rel)) return false;
+  const dirs = pathDirs(rel);
   const s = dirs.findIndex((d) => STATIC_ROOTS.has(d));
-  if (s >= 0 && dirs.slice(s + 1).some((d) => STATIC_LIB_DIRS.has(d))) return true;
-  return SKIP_NAME.test(segs[segs.length - 1]!);
+  return s >= 0 && dirs.slice(s + 1).some((d) => STATIC_LIB_DIRS.has(d));
+}
+
+/** Test code by where it sits: a test source set, the top of the tree or of a module, a JS test dir. */
+function inTestRoot(rel: string): boolean {
+  const dirs = pathDirs(rel);
+  if (dirs.some((d) => JS_TEST_DIRS.has(d))) return true;
+  if (/(^|\/)src\/test\//.test(rel) || JVM_TEST_SOURCE_SET.test(rel)) return true;
+  return dirs.slice(0, 2).some((d) => TEST_ROOT_DIRS.has(d));
+}
+
+/** A test file by its name alone (the shared pattern, Cypress specs): no dir rule of its own. */
+const testNamed = (rel: string): boolean => TEST_FILE.test(rel) || CYPRESS_SPEC.test(rel);
+
+/** Whether a file sits under a static web root (`static/`, `public/`, `webapp/`, …): code a
+ *  browser loads, with no server-side call sites. */
+export function isBrowserAsset(rel: string): boolean {
+  return rel.split('/').slice(0, -1).some((d) => STATIC_ROOTS.has(d));
+}
+
+/** The project's own non-test file, for the tools that read source for what it says (the
+ *  sandbox scan, the UI inventory): `notOwnCode` without its config and story rule (a proxy
+ *  target in `vite.config.ts` is an outbound host), and with test code left out. */
+export function ownFile(rel: string): boolean {
+  return notOwnReason(rel) === null;
+}
+
+/** Why `ownFile` leaves a file out, or null when it keeps it. Only places that are unambiguous:
+ *  dependency and tool dirs, build output, vendored code at the top of a tree, a copied script or
+ *  style under a static web root, a minified or declaration file, test code in a test source set, at
+ *  the top of the tree or of a module, or named as a test. A `vendor`, `lib`, `test` or `spec` dir
+ *  inside the package part of a JVM source path is none of them: its classes are the project's own. */
+export function notOwnReason(rel: string): string | null {
+  const dir = skippedDirReason(rel);
+  if (dir !== null) return dir;
+  if (inStaticLib(rel)) return 'a library under a static web root';
+  if (MINIFIED_NAME.test(posix.basename(rel))) return 'minified and declaration files';
+  if (inTestRoot(rel) || testNamed(rel)) return 'test code';
+  return null;
 }
 
 /** A test file by its name (the shared pattern, Cypress specs), or code in a test dir. */

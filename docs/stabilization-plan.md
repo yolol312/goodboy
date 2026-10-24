@@ -4596,7 +4596,8 @@ Design:
 - M4 workflow: `/backfill-tests` and `setup-test-infra` use the sandbox when the user sets it
   up. The batch testers run their suites through `sandbox-run`, e2e included. The stop
   condition becomes `coverage-check` and `ui-check` both passing, after the user's exceptions.
-  The test records carry the sandbox check (`sandbox: {inner_only, egress_blocked}`).
+  The test records carry the sandbox check, bound to the run that made it (`sandbox: {run}`,
+  filled in by `test-write` from that run's result).
 - M5 trials: g2bsale with its real dump (JVM, Thymeleaf, LDAP, mail, external API), then one
   Node project.
 - M6 release v0.37.0 (M; L shipped as v0.36.0).
@@ -4624,10 +4625,94 @@ As built (M1-M4; M5 and M6 are open):
     testers' brief, and the goal "`coverage-check` and `ui-check` both ok", with a gap the code
     cannot reach becoming a `coverage-exempt:` entry only when the user approves. Its line cap
     in the g3 test is 90 (was 75). `setup-test-infra` points to the sandbox.
-  - `TestResult.sandbox` (`{inner_only, egress_blocked, hosts_to_dummies?, run?}`) is validated
-    by `test-write` (booleans, a non-empty run string). With `.goodboy/sandbox/compose.yml`
-    present, `backfill-mark` counts a record only when both flags are true. `backfill-status`
-    shows `goal: complete` with a sandbox, else `batches`.
+  - `TestResult.sandbox`: the tester passes only `{run: "<ts>"}`. `test-write` reads
+    `.goodboy/sandbox/out/<ts>/result.json` from the repo top without following links, and
+    copies its three check flags (`inner_only`, `egress_blocked`, `hosts_to_dummies`) and its
+    `result_sha256` into the record. With `.goodboy/sandbox/compose.yml` present,
+    `backfill-mark` (`evidenceProblem`) re-reads that result and counts a record only when the
+    hash matches, all three flags are true, the run exited 0 no later than the record and at or
+    after the last change of the target and of each counted test, and each counted suite is
+    the invocation `… cli.ts sandbox-run … -- <command>` from its first word, with the part
+    after `--` word for word the run's command (an e2e run: `… sandbox-run --suite e2e` with no
+    `--`; `--suite` must match the run's) and no unquoted shell separator, comment or any
+    substitution (a host run of the same command does not count; a refusal names the exact
+    line it expects). `backfill-status` shows
+    `goal: complete` with a sandbox, else `batches`.
+
+Fix round 1 (the three round-1 reviews: 3 high, 14 distinct medium), as built:
+- Runtime: a start command with a glob (`build/libs/*.jar`) runs through `sh -c` and needs
+  exactly one artifact; the health URL no longer doubles the context path; a bare `mvn` or
+  `gradle` builds in the official Maven or Gradle image (the app keeps the JDK image), and the
+  preparation step also fetches the test-phase plugins, so the offline run passes (measured on
+  Docker for both tools); the Gradle cache lives at `/gradle-home`. When the scan finds no
+  health route (a Spring app without actuator, a Node or Python app), it asks for one
+  (`app.healthPath`) and names the path the check will request.
+- Isolation: the internal networks set `com.docker.network.bridge.inhibit_ipv4` (`inner` also
+  reserves its first address), and `sandbox-check` probes `inner`'s gateway (ping and TCP 22, 80, 443, 2375,
+  2376, 8080); a missing probe mark counts as open (needs Docker 28 or later). The preparation
+  services mask `/src/.goodboy`; `sandbox-local` refuses a dump inside the repo, or outside
+  what the Docker runtime shares (Colima or unknown: `$HOME`; Docker Desktop on macOS:
+  `/Users`, `/Volumes`, `/private`, `/tmp`, `/var/folders`; native Linux: no limit); the static check refuses privileged services, added capabilities, devices, host
+  namespaces, `security_opt` unconfined, `network_mode` and published `ports`, top-level volumes
+  with `driver_opts`, another driver or `external`, and any bind whose source is not under the
+  repo or the dump file (lexically and after realpath); `sandbox-up` and `sandbox-prepare` run
+  it first. A non-local Docker daemon is refused before any container command, also by
+  `sandbox-check` and `sandbox-down`.
+- Run dir: the host writes `output.log`, `e2e-output.log`, `access.log` and `result.json` into
+  the run dir (mounted into root containers) through a temp name and a rename, so a link a
+  container plants is replaced, never followed; reports count only when no path component
+  below the run dir is a link.
+- Data: the restore fails closed (any error but a missing role on ownership and grant lines,
+  or no table loaded) and prints only `goodboy:` lines with an error code and a dump line; a
+  line counts only when the whole `psql:<file>:<n>: ERROR:  <SQLSTATE>` form matches with a
+  known class, anything else is withheld and counts as an error.
+  Output tails appear only for a failed step (2000 characters); app logs only with
+  `--app-logs` (a skill rule: the model can pass the flag itself).
+- Records: writes into `.goodboy/sandbox/out/`, a run dir or a run's `result.json` are denied
+  as for `.claude/tests`: Write and Edit (`hooks/pre-tool-use.ts`, real paths, case-insensitive
+  on macOS), shell redirects (`lib/bash-write.ts`) and the command families `cp`, `mv`, `ln`,
+  `tee`, `rm`, `python -c`, `bun -e`, `node -e` (`lib/result-dir.ts`). Removing a kept run's
+  trace dir stays allowed, and `sandbox-run` itself writes as a CLI process. Not prevented: a
+  same-user script that builds the path from pieces (the `.claude` guard's limit too).
+- UI gate: `uiTest` sends a random nonce per test (`x-goodboy-test`, also a `goodboy-test`
+  annotation), and `ui-check` counts a request for an id only when its nonce belongs to a passing
+  test that claims the id. A passing test with claims but no nonce, or a nonce two tests share,
+  is a problem. Screens, forms and links need a page navigation to their route
+  (`Upgrade-Insecure-Requests`, `Sec-Fetch-Mode: navigate`, `Sec-Fetch-Dest: document` or an
+  `Accept` of `text/html`); an action without a route needs a page load by its test; ajax and
+  API items need a request to their route. Ids built from file paths go through `routeForId`
+  (`fileIdOf`), so a non-ASCII path still gives an ASCII id. Not checked in a real browser yet
+  (M5): which navigation headers Chromium sends to `http://proxy:8080`.
+- Coverage gate: a run where nothing is required (no measurable file, or all exempt) fails
+  instead of passing.
+- Linear time: `tests/m-fix-b-perf.test.ts` has 45 pathological cases (18 scan or plan,
+  25 inventory, 2 `ui-check`; inputs around 200 KB, 100k requests, up to 60 config files); the
+  slowest takes about 1.5 s and the bounds are 1 to 6 s (plus RSS and heap bounds for two).
+  Before the fixes they took 2.2 s to over a minute, about 20 timing out at 30 s; 4 were
+  already fast and stay as guards. Both readers check a 60 s budget between files and say what
+  they left out (not inside the route phase or the scan's stack phases). Output is bounded too:
+  a constant's value at 4 KB (1 MB in all), a Spring method at 200 prefix × path × verb
+  combinations, the inventory at 50,000 items and routes. Any cut (these caps, the time budget,
+  the file limit, the source-text cap, a source file the reader refuses: over 512 KB, not a
+  regular file, unreadable; a Spring mapping whose path it cannot resolve; a file lister that
+  fails; a web framework the inventory does not read, found by fixed markers: Flask
+  `Blueprint(` or an `@x.route(` decorator, Django `urlpatterns` in urls.py, JAX-RS/Quarkus
+  `@Path(`, Micronaut, Ktor `routing {`, Spring WebFlux `RouterFunction`) goes into the
+  inventory's `truncated` list. Other spellings are not caught yet and still give `noUi` (Flask 2
+  `@app.get`, `add_url_rule`, `MethodView`, Vert.x `Router`, Kotlin `coRouter`, a fully
+  qualified `@jakarta.ws.rs.Path(`): to fix after M5 by keying on the framework imports. An inventory with
+  no items fails too, unless it states `noUi` (no templates, JS/TS UI files, routes or framework
+  markers at all, as in a plain library). What counts as the
+  project's own code is narrowed so real packages are read (a `vendor`, `lib`, `plugin`,
+  `test` or `e2e` dir inside a JVM package path is own code; vendored and test dirs count only
+  at the top of the tree or a module), and a note counts what is still left out. Hence a
+  project whose mapping constants live outside the repo fails the UI gate until the user
+  decides. `ui-check` fails on any `truncated` entry ("the inventory is incomplete"), so a cut
+  never passes the UI gate.
+  One file lister (`lib/test-survey.ts` `listFiles`, `ownFile`) serves the survey, the scan and
+  the inventory; `configKeyAt` uses the scan's own config parsers.
+- An existing sandbox needs `sandbox-init --force` (new e2e fixture), `sandbox-down` and a new
+  `sandbox-prepare` after this round.
 
 Not prevented, by design: stubs only answer as the test says, so compatibility with the real
 external systems is not proved. Characterization tests pin the current behavior, so 100%

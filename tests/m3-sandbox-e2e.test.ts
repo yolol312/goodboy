@@ -166,9 +166,12 @@ describe('the uiTest fixture and the Playwright config', () => {
     const f = p.files.get('e2e/goodboy-ui.ts')!;
     expect(f).toBe(uiFixture());
     expect(f).toContain("export const HEADER = 'x-goodboy-ui'");
-    expect(f).toContain('extraHTTPHeaders: { [HEADER]: ids.join(\',\') }');
-    expect(f).toContain("testInfo.annotations.push({ type: ANNOTATION, description: c })");
+    expect(f).toContain("extraHTTPHeaders: { [HEADER]: ids.join(','), [NONCE_HEADER]: nonce }");
+    expect(f).toContain('testInfo.annotations.push({ type: ANNOTATION, description: c })');
     expect(f).toContain("export const ANNOTATION = 'goodboy-ui'");
+    // a nonce per test joins its requests to it in ui-check (the behavior is run in tests/m-fix-b-e2e.test.ts)
+    expect(f).toContain("export const NONCE_HEADER = 'x-goodboy-test'");
+    expect(f).toContain("export const NONCE_ANNOTATION = 'goodboy-test'");
     expect(f).toContain('export function uiTest(ids: string[], title: string');
     // a claim is checked before the test runs: <id>:ok|error, ASCII, no comma
     expect(f).toContain('is not <id>:ok|error');
@@ -217,7 +220,7 @@ describe('coverage across the unit and the e2e run', () => {
   test('Node: c8 is installed in prep; the app writes V8 coverage and flushes it on SIGTERM; the report is lcov with repo-relative paths', () => {
     const p = plan(scan('node'));
     const c = compose(p);
-    expect(p.files.get('runtime/prep.sh')).toContain(`npm install --prefix /goodboy-tools --no-save --no-package-lock --ignore-scripts c8@${C8_VERSION}`);
+    expect(p.files.get('runtime/prep.sh')).toContain(`npm install --prefix /goodboy-tools --no-save --no-package-lock --ignore-scripts --no-audit --no-fund c8@${C8_VERSION}`);
     expect(c.services.app!.environment).toMatchObject({ NODE_V8_COVERAGE: '/live/v8-e2e', NODE_OPTIONS: '--require /sandbox/flush.cjs' });
     expect(c.services.app!.volumes).toContain('./runtime/flush.cjs:/sandbox/flush.cjs:ro');
     expect(c.services.runner!.environment).toMatchObject({ NODE_V8_COVERAGE: '/out/coverage-raw/unit/v8' });
@@ -259,7 +262,7 @@ describe('coverage across the unit and the e2e run', () => {
     const p = plan(scan('python'));
     const c = compose(p);
     const prep = p.files.get('runtime/prep.sh')!;
-    expect(prep).toContain(`pip install coverage==${COVERAGE_PY_VERSION}`);
+    expect(prep).toContain(`pip install --only-binary=:all: --no-deps coverage==${COVERAGE_PY_VERSION}`);
     expect(prep).toContain('goodboy-coverage.pth');
     expect(prep).toContain('coverage.process_startup()');
     expect(c.services.app!.environment).toMatchObject({ COVERAGE_PROCESS_START: '/sandbox/coveragerc', COVERAGE_FILE: '/live/py-e2e/.coverage' });
