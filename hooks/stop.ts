@@ -64,6 +64,7 @@ import {
   ranOutOfTime,
   repoOfFileFor,
   reviewEditsSince,
+  sandboxUsersOf,
   scopeFor,
   startProblem,
   testEditsByGroup,
@@ -76,6 +77,7 @@ import {
   type Judged,
   type LinesOf,
 } from '../lib/stop-groups';
+import { sandboxGapReason, sandboxGaps, sandboxTestEdits } from '../lib/sandbox-gate';
 import { documentChangeNote, isDocumentChange } from '../lib/doc-verification';
 import { frictionNotice } from '../lib/friction';
 import { productEvidenceProblems, sessionCriteria, startedBeforeVerification } from '../lib/session-criteria';
@@ -687,7 +689,8 @@ function acceptanceFor(cwd: string): AcceptanceReading {
 }
 
 // (층1) Whether a file needs a test (documents, test files, metadata and generated reports do not) is
-// `needsTestCoverageIn` (lib/stop-groups.ts), asked per group.
+// `needsTestCoverageIn` (lib/stop-groups.ts), asked per group. (Track M) A sandbox layout file no changed file
+// uses is left to the sandbox rule (`sandboxOwnFile`, `sandboxRule` below).
 
 /** (I3a) The classification root and the user's static-preview globs pinned at the session start, read
  *  once per Stop. Paths are classed relative to the project dir, as the coverage exemptions are
@@ -1227,6 +1230,31 @@ function testEditsSince(sessionId: string, cwd: string, cursorTurn: number): str
   return testEditsByGroup(sessionId, cwd, cursorTurn).flatMap((x) => x.files);
 }
 
+/** (Track M) The changed sandbox files a sandbox run tests (a net change of this session; `sandbox-run`'s
+ *  own output and the files a changed file uses left out), with their last edit times. Once per
+ *  Stop: both layer-1 paths ask. */
+const sandboxEditsMemo = new Map<string, { rel: string; lastEdit: number }[]>();
+function sandboxEditsSince(sessionId: string, cwd: string, cursorTurn: number): { rel: string; lastEdit: number }[] {
+  const key = `${sessionId}\0${cwd}\0${cursorTurn}`;
+  const known = sandboxEditsMemo.get(key);
+  if (known) return known;
+  const s = scopeOf(sessionId, cwd);
+  const own = sandboxTestEdits(getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd), s.top, () => sandboxUsersOf(sessionId, cwd));
+  const out = netChangedEdits(own, s.top, sessionCoverageStart(sessionId, cwd, s.top).head).map((e) => {
+    const lastEdit = Date.parse(e.lastEditTimestamp);
+    return { rel: e.rel, lastEdit: Number.isFinite(lastEdit) ? lastEdit : Date.now() };
+  });
+  sandboxEditsMemo.set(key, out);
+  return out;
+}
+
+/** The sandbox rule: the reason when a changed sandbox file has no passing sandbox run as its
+ *  test (lib/sandbox-gate.ts), else null. */
+function sandboxRule(sessionId: string, cwd: string, cursorTurn: number, results: readonly TestResult[]): string | null {
+  const gaps = sandboxGaps(scopeOf(sessionId, cwd).top, sandboxEditsSince(sessionId, cwd, cursorTurn), results);
+  return gaps.length > 0 ? sandboxGapReason(gaps, CLI_PATH) : null;
+}
+
 /** (#26) The review's version of `ReviewResult`'s coverage check over the edits since the cursor: each group checks
  *  the reviews as it sees them (a review's tree for its repo), and the answers are joined (#39). In a project dir
  *  that is a repo it is the one check there always was. The content check failing is a fail-closed answer: no
@@ -1266,11 +1294,18 @@ function tryAcceptPendingTest(sessionId: string, cwd: string): boolean {
     const cursor = readTestCursor(cwd, sessionId);
     const cursorTurn = cursor ? cursor.turn : 0;
     const recentEdits = testEditsSince(sessionId, cwd, cursorTurn);
-    if (recentEdits.length === 0) return false;
+    if (recentEdits.length === 0 && sandboxEditsSince(sessionId, cwd, cursorTurn).length === 0) return false;
     const acceptance = acceptanceFor(cwd);
     if (!testGateActive(cwd, acceptance, sessionId).active) return false;
     const results = findRecentTestFiles(resolvePath(cwd, '.claude', 'tests'), testWindowMinutes());
     if (results.length === 0) return false;
+    if (sandboxRule(sessionId, cwd, cursorTurn, results) !== null) return false;
+    if (recentEdits.length === 0) {
+      // Only sandbox files changed, and a verified run tests them: as the full Stop accepts it.
+      acceptTests(sessionId, cwd);
+      logGate(sessionId, 'test', 'warn', 'accept-on-stop-active');
+      return true;
+    }
     const ev = evaluateTestResults(results, acceptance, cwd, sessionId, cursorTurn);
     if (ev.kind === 'block') return false;
     if (ev.kind === 'accept-unverified') {
@@ -1310,7 +1345,8 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
     const cursorTurn = cursor ? cursor.turn : 0;
     // 문서·테스트 파일만 바뀐 턴은 층1의 관심사가 아니다 — 요구해도 해소할 방법이 없다.
     const recentEdits = testEditsSince(sessionId, cwd, cursorTurn);
-    if (recentEdits.length === 0) {
+    // Sandbox files are not in recentEdits: a sandbox run tests them (sandboxRule below).
+    if (recentEdits.length === 0 && sandboxEditsSince(sessionId, cwd, cursorTurn).length === 0) {
       statusSnapshot.testPending = false;
       return null;
     }
@@ -1351,7 +1387,7 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
     //   subdirectory has not judged this dir's edits.
     const habit = readHabitState(sessionId);
     const marks = { ...(habit.testGateTurns ?? {}) };
-    const changedThisTurn = testEditsSince(sessionId, cwd, marks[cwd] ?? 0).length > 0;
+    const changedThisTurn = testEditsSince(sessionId, cwd, marks[cwd] ?? 0).length > 0 || sandboxEditsSince(sessionId, cwd, marks[cwd] ?? 0).length > 0;
     marks[cwd] = getCurrentTurn(sessionId);
     habit.testGateTurns = marks;
     writeHabitState(sessionId, habit);
@@ -1390,19 +1426,28 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
       );
     };
 
+    // (Track M) Changed sandbox files are tested by a passing sandbox run (lib/sandbox-gate.ts).
+    const sandbox = sandboxRule(sessionId, cwd, cursorTurn, results);
+    if (recentEdits.length === 0) {
+      // Only sandbox files changed.
+      if (sandbox !== null) return block(sandbox);
+      acceptTests(sessionId, cwd);
+      return null;
+    }
     const startIssue = startProblem(sessionId, cwd, recentEdits);
     if (startIssue !== null) return block(startIssue, true);
     if (results.length === 0) {
       const preview = recentEdits.slice(0, 5).join(', ');
       const more = recentEdits.length > 5 ? ` and ${recentEdits.length - 5} more` : '';
       const note = branchNote(sessionId, cwd, recentEdits);
-      return block(`No test result covers the changed code. ${testerAdvice(recentEdits, cwd, sessionId)}: ${preview}${more}${note ? ` ${note}` : ''}`);
+      return block(`No test result covers the changed code. ${testerAdvice(recentEdits, cwd, sessionId)}: ${preview}${more}${note ? ` ${note}` : ''}${sandbox === null ? '' : ` ${sandbox}`}`);
     }
 
     // 테스트 파일 자체는 커버리지 요구 대상에서 뺀다 — 테스트를 테스트하라는 무한 후퇴가
     //   된다(라이브 실측: `tests/hello.test.ts` 가 "테스트되지 않은 변경 파일"로 잡혔다).
     //   문서도 같은 이유로 뺀다(라이브 실측: README.md 등 5개를 요구했다).
     const ev = evaluateTestResults(results, acceptance, cwd, sessionId, cursorTurn);
+    if (sandbox !== null) return block(ev.kind === 'block' ? `${ev.reason} ${sandbox}` : sandbox, ev.kind === 'block' && ev.start === true);
     if (ev.kind === 'block') return block(ev.reason, ev.start === true);
     if (ev.kind === 'accept-unverified') {
       acceptBlockedTests(sessionId, cwd, ev.blocked, 'blocked');

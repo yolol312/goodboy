@@ -77,7 +77,7 @@ import { readTopStart, topIdentity } from './start-pins';
 import { cmdCoverageCheck } from './coverage-check';
 import { cmdUiCheck } from './ui-check';
 import { cmdUiInventory } from './ui-inventory';
-import { readRunResult } from './sandbox-files';
+import { readRunResult } from './sandbox-proof';
 import { sandboxCommand } from './sandbox-run';
 
 // ---- 유틸 ----
@@ -693,7 +693,7 @@ function validateChangedEntry(raw: unknown, label: string, errors: string[]): bo
 
 /** The sandbox object of a record (track M): the agent passes `{run: "<ts>"}` only. The check
  *  flags and the hash of the run's result.json are taken here from `.goodboy/sandbox/out/<ts>/`
- *  under the repo top (lib/sandbox-files.ts readRunResult), so a record can not claim a check no
+ *  under the repo top (lib/sandbox-proof.ts readRunResult), so a record can not claim a check no
  *  sandbox-run made. Flags the caller adds must match the result's. Undefined on errors. */
 function sandboxFromRun(raw: unknown, root: string | undefined, errors: string[]): NonNullable<TestResult['sandbox']> | undefined {
   const s = raw as Record<string, unknown> | null;

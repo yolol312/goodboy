@@ -23,7 +23,7 @@ import { spawnGit } from './git-run';
 import type { ChangedFileEdit } from './review-validator';
 import { readRegular, readStateText } from './safe-read';
 import { JVM_CASE, TEST_FILE } from './test-catalog';
-import { JS_SPECIFIER, recordStandsAlone } from './test-types';
+import { JS_SPECIFIER, recordStandsAlone, typeOnlyImport, withoutComments } from './test-types';
 import { freshFor, stripLiteralsAndComments } from './test-validator';
 import { isTrustedTimestamp } from './trusted-time';
 import type { ReviewResult, TestResult } from './types';
@@ -181,13 +181,17 @@ const under = (dir: string, name: string) => (dir === '.' || dir === '' ? name :
 
 /** What a JS/TS test file at `testRel` loads by relative specifiers, as repo-relative keys: each
  *  target with and without its extension and as a dir's `index`. A changed file is loaded when
- *  its path or its path without the extension is a key (`.js` naming a `.ts` source too). */
-function jsLoads(text: string, testRel: string): Set<string> {
+ *  its path or its path without the extension is a key (`.js` naming a `.ts` source too). A
+ *  module named only by `import type … from` or `export type … from` is not loaded: the
+ *  statement is erased at run time (`import { type A }` still loads it). */
+export function jsLoads(text: string, testRel: string): Set<string> {
   const keys = new Set<string>();
   const base = posix.dirname(testRel);
+  const code = withoutComments(text);
   for (const m of text.matchAll(JS_SPECIFIER)) {
     const spec = m[2]!;
     if (!spec.startsWith('.')) continue;
+    if (typeOnlyImport(code, m)) continue;
     const target = posix.normalize(posix.join(base, spec)).replace(/\/$/, '');
     const targetNoExt = target.replace(/\.[cm]?[jt]sx?$/, '');
     for (const k of [target, targetNoExt, under(target, 'index'), under(targetNoExt, 'index')]) keys.add(k);

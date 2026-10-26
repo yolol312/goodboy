@@ -42,6 +42,7 @@ import { topIdentity } from './start-pins';
 import { detectTestInfrastructure, type TestInfraSignal } from './test-validator';
 import { isGeneratedLcov } from './lcov-report';
 import { MAX_MANIFEST_BYTES, needsTests } from './verification-scope';
+import { sandboxExemptRel, sandboxUsed, sandboxUsers, type SandboxUsers } from './sandbox-gate';
 import type { ChangedFileEdit } from './review-validator';
 import type { TestResult } from './types';
 
@@ -107,6 +108,7 @@ export function resetStopGroups(): void {
   globMemo.clear();
   infraMemo.clear();
   walkDownMemo.clear();
+  sandboxUsersMemo.clear();
   testEditsMemo.clear();
   weakenedMemo.clear();
   walkMemo = new Map();
@@ -303,6 +305,27 @@ export function needsTestCoverageIn(file: string, g: Group, scope: { top: string
 
 // ── The files layer 1 and the review ask about, per group ────────────────────────────────────────
 
+const sandboxUsersMemo = new Map<string, SandboxUsers>();
+
+/** (Track M) The sandbox layout files (`.goodboy/sandbox/` under the project dir's top) that the session's changed
+ *  files use, read once per Stop (lib/sandbox-gate.ts). */
+export function sandboxUsersOf(sessionId: string, cwd: string): SandboxUsers {
+  const key = `${sessionId}\0${cwd}`;
+  let users = sandboxUsersMemo.get(key);
+  if (users === undefined) {
+    users = sandboxUsers(projectTop(cwd), getEditHistory(sessionId).files);
+    sandboxUsersMemo.set(key, users);
+  }
+  return users;
+}
+
+/** (Track M) Whether a file is a sandbox layout file (or run output) no changed file of the project uses: a passing
+ *  sandbox run is its test (the Stop's sandbox rule), not the layer-1 rules. */
+export function sandboxOwnFile(sessionId: string, cwd: string, file: string, top: string): boolean {
+  const rel = sandboxExemptRel(file, top);
+  return rel !== null && !sandboxUsed(sandboxUsersOf(sessionId, cwd), rel);
+}
+
 const testEditsMemo = new Map<string, { g: Group; files: string[] }[]>();
 
 /** (#23) The code files edited since the cursor that layer 1 asks about, per group: a file whose content is
@@ -314,6 +337,8 @@ export function testEditsByGroup(sessionId: string, cwd: string, cursorTurn: num
   const known = testEditsMemo.get(key);
   if (known) return known;
   const scope = scopeFor(sessionId, cwd);
+  // (Track M) A sandbox layout file no changed file uses is tested by a sandbox run, not by layer 1.
+  const layer1 = (f: string, g: Group): boolean => !sandboxOwnFile(sessionId, cwd, f, scope.top) && needsTestCoverageIn(f, g, scope);
   // (v0.36.6) One evaluation: the net-change check, the build copies' `.gitignore` check and the
   //   change set's own net-change check hash the same files; each is hashed once (a hash batch).
   const out = withHashBatch(() => {
@@ -321,7 +346,7 @@ export function testEditsByGroup(sessionId: string, cwd: string, cursorTurn: num
     const history = groupsOf(sessionId, cwd);
     const res: { g: Group; files: string[] }[] = [];
     for (const g of groups) {
-      const files = g.edits.filter((f) => needsTestCoverageIn(f, g, scope));
+      const files = g.edits.filter((f) => layer1(f, g));
       const net = netChangedEdits(files.map((file) => ({ file })), g.top, g.head).map((e) => e.file);
       // (#32) A git-ignored build copy of a tested source file is no change of its own (the review
       //   edit set keeps it). Decided again each Stop; the pair is in the gate log.
@@ -329,7 +354,7 @@ export function testEditsByGroup(sessionId: string, cwd: string, cursorTurn: num
         // The session's change set: every file of this repo it edited (any turn) that is still subject to
         //   layer 1 and differs from its start blob.
         const mine = history.find((h) => h.realTop === g.realTop && h.kind === g.kind)?.edits ?? [];
-        return netChangedEdits(mine.filter((f) => needsTestCoverageIn(f, g, scope)).map((file) => ({ file })), g.top, g.head).map((e) => e.file);
+        return netChangedEdits(mine.filter((f) => layer1(f, g)).map((file) => ({ file })), g.top, g.head).map((e) => e.file);
       }, {
         // Past the cap or the time budget, the rest stay in the layer-1 set; the log says how many.
         onSkipped: (count, why) => logGate(sessionId, 'test', 'warn', `build-copy: ${count} candidate(s) kept in the test set (${why === 'cap' ? 'over the candidate cap' : why === 'bytes' ? 'over the byte cap' : why === 'git' ? 'git failed' : 'out of time'})`),

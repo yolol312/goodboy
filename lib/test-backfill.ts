@@ -8,7 +8,7 @@ import { closeSync, existsSync, lstatSync, mkdirSync, openSync, renameSync, stat
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { suiteRan } from './existing-tests';
 import { E2E_DIR } from './sandbox-e2e';
-import { readRunResult, type RunProof } from './sandbox-files';
+import { type RunProof, runStartsAfter, sandboxProof } from './sandbox-proof';
 import { MAX_STATE_BYTES, readRegular } from './safe-read';
 import { isTestCode, type SurveyTarget } from './test-survey';
 import { recordStandsAlone, testerFor } from './test-types';
@@ -236,29 +236,6 @@ function changedAt(abs: string): number {
   return Math.max(st.mtimeMs, st.ctimeMs);
 }
 
-/** The run a record's sandbox claim stands on, or why it does not hold: all three check flags
- *  true in the record, a run and the hash of its result.json, and that file read again now
- *  (no link) with the same hash, the same three flags true, exit 0, made before the record. */
-function sandboxProof(root: string, r: TestResult): RunProof | string {
-  const sb = r.sandbox;
-  if (!(sb?.inner_only === true && sb.egress_blocked === true && sb.hosts_to_dummies === true)) return 'the record lacks sandbox flags inner_only, egress_blocked and hosts_to_dummies all true';
-  if (typeof sb.run !== 'string' || typeof sb.result_sha256 !== 'string') return 'the record names no run or result hash (record with sandbox: {run})';
-  const proof = readRunResult(root, sb.run);
-  if (proof instanceof Error) return proof.message;
-  if (proof.sha256 !== sb.result_sha256) return `result.json of run ${sb.run} changed after the record`;
-  if (!proof.check.inner_only || !proof.check.egress_blocked || !proof.check.hosts_to_dummies) return `run ${sb.run} did not pass its sandbox check`;
-  if (proof.exit !== 0) return `run ${sb.run} did not exit 0`;
-  if (runStart(sb.run) > Date.parse(r.timestamp)) return `run ${sb.run} is later than the record`;
-  return proof;
-}
-
-/** The start of a sandbox run (its directory name is a UTC timestamp to the second). */
-function runStart(run: string): number {
-  const m = RUN_NAME_PARTS.exec(run)!;
-  return Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z`);
-}
-const RUN_NAME_PARTS = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/;
-
 /** The words of a command line, quotes taken off, or null when it holds shell syntax that is
  *  not data: unquoted `;` `&` `|` `#` `<` `>` or `\`, a backtick or `$(` (also inside double
  *  quotes), a newline anywhere, an unclosed quote. Inside quotes `#` `&` `;` `|` are text, so
@@ -386,7 +363,7 @@ export function evidenceProblem(projectDir: string, root: string, target: string
   /** The run started in or after the second of the change: a run before the last edit proves nothing about it. */
   const runAfter = (r: TestResult, changed: number): boolean => {
     const proof = proofs.get(r);
-    return proof === undefined || Math.floor(runStart(proof.run) / 1000) >= Math.floor(changed / 1000);
+    return proof === undefined || runStartsAfter(proof.run, changed);
   };
   let targetChanged = 0;
   try {

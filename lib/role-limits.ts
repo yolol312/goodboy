@@ -6,7 +6,8 @@
 // pass): `none` and `result` write nothing (results go through the goodboy CLI); `tests`
 // writes test files only; `docs` writes docs only; `code` writes anything.
 
-import { basename, relative, resolve as resolvePath, sep } from 'node:path';
+import { existsSync, lstatSync } from 'node:fs';
+import { basename, join, relative, resolve as resolvePath, sep } from 'node:path';
 import { openedPath, type RealpathMemo } from './file-tracker';
 import { commandSegments, dropRedirects, gitSubcommandAt, plainWord, readCommand, xargsCommandAt } from './outward-command';
 import { changesCommits } from './push-test';
@@ -31,8 +32,47 @@ export function isTestPath(rel: string): boolean {
   return isTestFile(rel) || TEST_DIR_EXTRA.test(rel) || TEST_FILE_EXTRA.test(rel) || TEST_RUNNER_CONFIG.test(rel);
 }
 
-/** Why the role may not write this file, or null when it may. */
-export function writeDenial(role: RoleSpec, absPath: string, projectRoot: string): string | null {
+/** Test output dirs a build tool fills and a test run replaces (Gradle and Maven reports, the
+ *  JaCoCo site): the dir itself or anything in it. Group 1 is the module dir above `build/` or
+ *  `target/`. */
+const TEST_OUTPUT = /^((?:[^/]+\/){0,2})(?:build\/(?:test-results|reports)|target\/(?:surefire-reports|failsafe-reports|site\/jacoco))(?:\/|$)/;
+/** What a module dir holds when a build tool runs there. */
+const BUILD_FILES = ['build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts', 'pom.xml', 'package.json'];
+
+/** Whether a project-relative path is in a test output dir: `build/…` or `target/…` at the repo
+ *  top, or in a module dir (up to two dirs deep) that holds a build file, never under
+ *  `node_modules` or any `src` dir (a Go package `internal/build/reports` is source). */
+export function isTestOutputPath(rel: string, projectRoot: string): boolean {
+  const m = TEST_OUTPUT.exec(rel);
+  if (m === null || rel.split('/').includes('..')) return false;
+  const module = m[1]!;
+  if (module === '') return true;
+  if (module.split('/').some((d) => d === 'node_modules' || d === 'src')) return false;
+  return BUILD_FILES.some((f) => existsSync(join(projectRoot, module, f)));
+}
+
+/** Whether no component of `rel` below `projectRoot` is a symlink (a missing tail is fine): the
+ *  path names what it says, so a lexical check of it is a check of the target. */
+function noLinkOnPath(projectRoot: string, rel: string): boolean {
+  let cur = resolvePath(projectRoot);
+  for (const part of rel.split('/')) {
+    cur = join(cur, part);
+    try {
+      if (lstatSync(cur).isSymbolicLink()) return false;
+    } catch {
+      return true; // the rest does not exist yet
+    }
+  }
+  return true;
+}
+
+/** Why the role may not write this file, or null when it may. With `removal` (the path is only
+ *  being deleted by a parsed `rm`, `rmdir` or `unlink`) a test role may clear the test output
+ *  dirs before a re-run: the path must be one of those dirs or inside one, with no symlink on
+ *  the way from the project root. Writing, copying or moving into them stays denied. With
+ *  `expanded` the path stands for an operand the shell expands or that climbs with `..`, so what
+ *  it deletes is not what it names: a test role may not, whatever the path is. */
+export function writeDenial(role: RoleSpec, absPath: string, projectRoot: string, opts: { removal?: boolean; expanded?: boolean } = {}): string | null {
   // The project root itself is inside (`tar -xf a.tgz` extracts into it).
   const rel = resolvePath(absPath) === resolvePath(projectRoot) ? '.' : projectRelative(absPath, projectRoot);
   if (rel === null) return null; // outside the project
@@ -40,6 +80,8 @@ export function writeDenial(role: RoleSpec, absPath: string, projectRoot: string
     case 'code':
       return null;
     case 'tests':
+      if (opts.expanded === true) return `${role.name} may not remove by a pattern, variable or \`..\` path (what it deletes is not what the command names): ${rel}. Name each path.`;
+      if (opts.removal === true && isTestOutputPath(rel, projectRoot) && noLinkOnPath(projectRoot, rel)) return null;
       return isTestPath(rel) ? null : `${role.name} writes test files only, not ${rel}. Report the needed change instead.`;
     case 'docs':
       // Documents and static previews (lib/verification-scope.ts), never code under docs/.
@@ -51,6 +93,8 @@ export function writeDenial(role: RoleSpec, absPath: string, projectRoot: string
   }
 }
 
+const REMOVERS = new Set(['rm', 'rmdir', 'unlink']);
+const UNREADABLE_OPERAND = /[{}*?[$`]|^~/;
 const FILE_MUTATORS = new Set(['cp', 'mv', 'rm', 'ln', 'install', 'patch', 'truncate', 'chmod', 'chown', 'touch', 'unlink', 'rmdir', 'shred', 'mkdir']);
 const COPY_LIKE = new Set(['cp', 'ln', 'install']);
 const CHMOD_MODE = /^(?:[0-7]{1,4}|[ugoa]*[-+=][rwxXstugo]*(?:,[ugoa]*[-+=][rwxXstugo]*)*)$/;
@@ -126,8 +170,12 @@ function optionTargets(prog: string, words: string[], base: string, opened: (bas
 /** Paths a shell command changes through file programs (cp/mv/rm/touch/chmod/…, perl or ruby
  *  -i) and a mutating git command (reported as the repo's `.git`), for role limits. The
  *  redirect-based writes come from classifyBashWrite. Arguments with `$`, globs or backticks
- *  are taken literally (a non-matching path is outside the project and passes). */
-export function bashChangedPaths(command: string, cwd: string, opts: { skip?: ReadonlySet<string> } = {}): string[] {
+ *  are taken literally (a non-matching path is outside the project and passes). With
+ *  `opts.removed`, the paths that `rm`, `rmdir` and `unlink` only delete are put there instead of
+ *  in the result (a role may delete what it may not write: writeDenial's `removal`); with
+ *  `opts.expanded` too, the operands of those programs that the shell expands or that climb with
+ *  `..` go there (writeDenial's `expanded`). */
+export function bashChangedPaths(command: string, cwd: string, opts: { skip?: ReadonlySet<string>; removed?: string[]; expanded?: string[] } = {}): string[] {
   const out: string[] = [];
   // Paths read like classifyBashWrite reads them: each segment from the dir it runs in
   //   (readCommand: subshell scopes, pushd/popd; layer-1 round: `(cd /tmp) && cp x src/a.ts`
@@ -151,7 +199,29 @@ export function bashChangedPaths(command: string, cwd: string, opts: { skip?: Re
       // chmod's mode is no path (trial 5: `chmod +x /tmp/x.sh` was read as `<project>/+x`).
       const files = prog === 'chmod' ? args.filter((a) => !CHMOD_MODE.test(a)) : args;
       const targets = COPY_LIKE.has(prog) ? files.slice(-1) : files;
-      for (const a of targets) if (literal(a)) out.push(opened(base, a));
+      // `rmdir -p` also removes the parents of what it names: judged as a write, not a removal.
+      const parents = prog === 'rmdir' && words.some((w) => w === '--parents' || /^-[a-zA-Z]*p/.test(w));
+      const removing = opts.removed !== undefined && REMOVERS.has(prog) && !parents;
+      for (const a of targets) {
+        // An operand the shell expands (braces, globs, variables, `~`) is no recognizable
+        //   removal: `rm tests/{x,../src/a.ts}` deletes what the text does not name. When the
+        //   text before the first such character is a path (`build/test-results/`, `tests/`,
+        //   `./`) the operand counts as expanded at that path (a `..` in it: at the cwd), whatever
+        //   the path is. When that prefix is empty (a pure variable, `~`, a leading wildcard:
+        //   `"$D"`, `$D/x`) nothing can be resolved and the operand is skipped, as before (a
+        //   tester's `rm -rf "$D"` of a mktemp dir stays allowed; the plan lists this limit).
+        //   A `..` in a plain operand counts as expanded too: the kernel follows a link before it
+        //   applies `..`, the text cannot know.
+        //   Paths are spelled as the OS opens them (`opened`, #31): a linked prefix counts where it leads.
+        const expands = removing ? UNREADABLE_OPERAND.exec(a) : null;
+        if (expands !== null) {
+          if (expands.index > 0) {
+            const prefix = a.slice(0, expands.index);
+            (opts.expanded ?? out).push(prefix.split('/').includes('..') ? resolvePath(base) : opened(base, prefix));
+          }
+        } else if (removing && a.split('/').includes('..')) (opts.expanded ?? out).push(opened(base, a));
+        else if (literal(a)) (removing ? opts.removed! : out).push(opened(base, a));
+      }
     } else if ((prog === 'perl' || prog === 'ruby') && words.some((w) => /^-[a-zA-Z]*i/.test(w))) {
       for (const a of args.slice(1)) if (literal(a)) out.push(opened(base, a)); // the first is the script
     } else if (prog === 'git') {

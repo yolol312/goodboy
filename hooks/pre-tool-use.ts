@@ -780,7 +780,8 @@ function main(): void {
               'To read a result, use the Read tool, `cat` or `jq`: interpreter code that names a result dir counts as a write (#13).'
             : null;
         if (denial) {
-          logGate(sessionId, 'result-guard', 'deny', `${kind} ${input.agent_type ?? 'main'}`);
+          // `kind` is null when the result-dir rule fired: the path then says what was written.
+          logGate(sessionId, 'result-guard', 'deny', `${kind ?? `dir-write ${(intoResults ?? '').slice(0, 120)}`} ${input.agent_type ?? 'main'}`);
           emit(deny(denial));
           return;
         }
@@ -1011,10 +1012,26 @@ function main(): void {
             // Redirects (no meta-dir exemptions unless the role writes code) plus file
             //   programs and mutating git commands (security review: cp/mv/rm, git checkout).
             const strict = role.writes !== 'code';
-            const changed = [...classifyBashWrite(toolInput.command, cwd, { strict }), ...bashChangedPaths(toolInput.command, cwd)];
+            // What is only deleted (rm, rmdir, unlink) is judged as a removal: a test role may
+            //   clear the test output dirs before a re-run.
+            const removed: string[] = [];
+            const expanded: string[] = [];
+            const changed = [...classifyBashWrite(toolInput.command, cwd, { strict }), ...bashChangedPaths(toolInput.command, cwd, { removed, expanded })];
             for (const f of changed) {
               denial = writeDenial(role, resolvePath(cwd, f), scopeRootOf(resolvePath(cwd, f)));
               if (denial) break;
+            }
+            if (!denial) {
+              for (const f of removed) {
+                denial = writeDenial(role, resolvePath(cwd, f), scopeRootOf(resolvePath(cwd, f)), { removal: true });
+                if (denial) break;
+              }
+            }
+            if (!denial) {
+              for (const f of expanded) {
+                denial = writeDenial(role, resolvePath(cwd, f), scopeRootOf(resolvePath(cwd, f)), { expanded: true });
+                if (denial) break;
+              }
             }
           } else if (toolName === 'Skill') {
             const s = strOrNull(toolInput.skill);

@@ -4718,6 +4718,88 @@ Not prevented, by design: stubs only answer as the test says, so compatibility w
 external systems is not proved. Characterization tests pin the current behavior, so 100%
 means everything ran and is pinned, not that it is right.
 
+M5 trial, session 1 (2026-10-24) and fixes:
+
+Findings (counts only; the session stopped early, the sandbox was down, no data is kept here):
+- The layer-1 test gate asked for tests of 4 files `sandbox-init` had just written under
+  `.goodboy/sandbox/` (a certificate, its SAN list, a DB reset script, a coverage script). The
+  Bash indirect-write sweep had recorded them as edits of the session.
+- 1 `tests`-role command was denied: `rm -rf build/test-results/test` before a re-run.
+- 1 result-guard log line read `null main`, because the result-dir rule has no `kind`.
+
+Design history. An outside review rejected the first design (exempting inert assets by
+extension and type-only TypeScript from tests, a ledger-hash "pristine" rule for sandbox files,
+provenance-only review). The second design stamped files a lone sandbox CLI call wrote, in a
+hook-owned record; its reviews found that the stamp cannot prove authorship: a time window
+catches files other processes wrote (3 high), `BUN_OPTIONS` and a bunfig preload run code in the
+call, brace expansion past `--` changes what a command names, and the containers write during
+`sandbox-run` and `sandbox-up` (2 medium). The user then chose to treat a passing sandbox run as
+the sandbox files' test. Deferred to #27: exempting assets by extension and type-only TS files.
+Removed: the stamp record, the `provenance` dimension, the `light` axis and the light review.
+
+As built:
+- Existing-tests rule (I5, `lib/existing-tests.ts` `jsLoads`): a test that names a module only in
+  `import type … from` or `export type … from` does not load it (erased at run time). Every
+  occurrence of the specifier is judged on its own, so a value import, `import { type A }`, a
+  dynamic `import()`, `require`, a bare `import '…'`, or `import type from '…'` / `import type,
+  { a } from '…'` (a default import whose binding is named `type`) of the same module keeps the
+  edge (`typeOnlyImport` in `lib/test-types.ts`, shared with the boundary check; comments are
+  blanked first, so `import type /* c */ from '…'` and a block comment that starts a line with
+  `import type` do not fake a type-only statement).
+- Role limit (`lib/role-limits.ts` `writeDenial` with `removal` and `expanded`,
+  `hooks/pre-tool-use.ts`): a `tests`-role agent may delete test output (`build/test-results`,
+  `build/reports`, `target/surefire-reports`, `target/failsafe-reports`, `target/site/jacoco`)
+  before a re-run, at the repo top or in a module dir (up to two dirs deep) that holds a build
+  file (`build.gradle(.kts)`, `settings.gradle(.kts)`, `pom.xml`, `package.json`), never under
+  `node_modules` or a `src` dir (a Go package `internal/build/reports` is source). Only parsed
+  `rm`, `rmdir` and `unlink` operands count, each must be one of the dirs or inside one with no
+  symlink between the repo and the target, and an operand with a `..` segment is refused (the
+  kernel follows a link before it applies `..`). An operand with `{ } * ? [ $` or a backtick, or
+  one that starts with `~`, is not a recognizable removal (the shell expands it into paths the
+  text does not name). The text before the first such character decides: a path that resolves in
+  the project is denied for a `tests` agent whatever it is (`build/test-results/{x,../../src/main}`,
+  `tests/{x,../src/a.ts}`, `tests/$X/../src/a.ts`, `src/*`, `./{a,b}`); an empty prefix (a pure
+  variable, `~`, a leading wildcard: `"$D"`, `$D/x`) cannot be resolved and is skipped as before,
+  so a tester's `rm -rf "$D"` of a `mktemp -d` dir stays allowed. Known limit: a pure-variable
+  operand is not resolved, so `D=src; rm -rf "$D"` passes (as before). `rmdir -p`, an ancestor
+  (`rm -rf build`), copy, move and every other write stay denied; one operand that fails makes
+  the command denied.
+- Log reason (`hooks/pre-tool-use.ts`): `dir-write <path, 120 chars> <agent>` when the result-dir
+  rule fired.
+- Sandbox files are tested by a sandbox run (`lib/sandbox-gate.ts`, loaded by the Stop hook
+  without the sandbox renderer; the run proof is `lib/sandbox-proof.ts`, shared with
+  `lib/test-backfill.ts`, including the rule that a run counts from the second of the edit).
+  Which files: only the layout the renderer writes (`compose.yml`, `.gitignore`, `scan.json`,
+  `local.json`, `.written.json`, `runtime/*`, `db/<svc>/restore.sh|reset.sh`, `overrides/*`,
+  `dummies/stubs/mappings/*.json`, `dummies/ldap/*.ldif`, `proxy/Caddyfile`,
+  `e2e/goodboy-ui.ts`, `e2e/playwright.config.ts`, `ca/*`); a test builds the plans of all three
+  stacks and checks every file against the list. Any other file under `.goodboy/sandbox/` is
+  ordinary code. `out/<run>/…` (`sandbox-run`'s own output) is neither tested nor asked about. The
+  path must be below the dir as spelled and as resolved: a link from outside into it, a link out
+  of it, and a hard link are ordinary code. A layout file that a changed file of the project
+  imports loses the exemption (`sandboxUsers`: relative JS/TS specifiers read as I5 reads them,
+  comments ignored; a changed non-test code file that names the dir in any other way, such as a
+  path in a string or a Python `sys.path` entry, takes it from all layout files); tests may import
+  `e2e/goodboy-ui`. A file that keeps the exemption leaves every other layer-1 rule: no
+  changed-line coverage, test type or existing-test edge (`needsTestCoverage`). The test gate
+  counts it as tested when a passing test record that stands alone, with a trusted timestamp and
+  a `sandbox: {run}` binding, verifies as backfill-mark's evidence does (`result.json` read with
+  no link, hash equal, the three check flags true, exit 0, run not later than the record) and the
+  run started at or after the second of the file's last edit. One such record covers every
+  sandbox file edited before its run: its `tested_files` need not list them. `e2e/`, `proxy/` and
+  `runtime/e2e-prep.sh` need a run whose result.json shows the e2e step ran, exited 0 within its
+  time and wrote its Playwright report (the requested suite alone is not evidence: `--suite all
+  -- true` has no e2e step). Without such a run the gate names the files and says how to get one
+  (`sandbox-run --suite all`, then record it per the run-sandbox skill). On the
+  `stop_hook_active` path a sandbox-only session with a verified run is accepted as the full Stop
+  accepts it. The review of these files is the normal review.
+- Known limit: the importer check covers ordinary use only. A path built from parts in code
+  (`join(root, '.goodboy', 'sandbox', 'x')`), or a JSON or YAML file that names a layout file,
+  keeps the exemption.
+  The users are read lazily, only when a layout file changed, once per Stop.
+- Known limit: a sandbox script a model changed that still passes a run (say a coverage script
+  that fakes its results) is caught only by the review.
+
 ## 21. Push by the test results gathered since the last push (proposed, 2026-11-12, #43)
 
 Status: proposed, planned at the user's request on 2026-11-12. §19 (track M) and §20 (track N)

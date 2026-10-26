@@ -1376,6 +1376,8 @@ v0.8.0까지의 환경변수는 `VCF_` 접두였고, v0.9.0부터 `GOODBOY_`로 
 - 조사·화면 목록·`ui-check`가 큰 입력에서도 선형 시간에 끝난다(병적 입력 45종이 모두 약 1.5초 이하, 수정 전에는 2.2초~1분 이상 걸렸고 약 20종은 30초를 넘겼다)
 - 두 게이트: `coverage-check`(화면이 아닌 모든 코드 줄·분기 100%, 승인한 `coverage-exempt:` 항목만 제외)와 `ui-check`(`ui-inventory`의 모든 화면·동작에 통과한 e2e `ok` 테스트, 입력을 받는 동작은 `error` 테스트도)
 - 도구 스킬 `run-sandbox`(28번째)를 test-unit·test-ui·test-spec이 쓴다. e2e는 `uiTest`(`.goodboy/sandbox/e2e/goodboy-ui.ts`)와 `ui-inventory`의 id로 쓴다. `setup-test-infra`는 실제 서비스가 필요한 앱에 샌드박스를 안내한다
+- 첫 시험 운행의 수정: `.goodboy/sandbox/`에 샌드박스 명령이 만드는 파일(compose, 런타임·DB 스크립트, 인증서 등. 그 밖의 파일은 일반 코드)은 단위 테스트를 요구하지 않고, 검증된 `sandbox-run` 통과 기록(`sandbox: {run}`)이 마지막 편집 뒤에 시작했으면 테스트한 것으로 센다. e2e 전용 파일(`e2e/`, `proxy/`, `runtime/e2e-prep.sh`)은 e2e 단계가 실제로 돌아 통과하고 Playwright 보고서를 남긴 실행이 필요하다(`--suite all -- true`는 안 됨). 바뀐 코드가 그 파일을 import하거나 경로로 가리키면 일반 코드로 돌아가고, 기록이 없으면 Stop이 `sandbox-run --suite all`로 받는 법을 알려 준다. 리뷰는 그대로다
+- 테스트가 `import type`으로만 가져오는 모듈은 그 테스트가 로드하는 것으로 보지 않는다(실행 시 지워지는 문장. 주석은 무시하고, `import type from`처럼 기본 import 이름이 `type`인 경우는 값 import라서 그대로 센다). `tests` 역할 에이전트는 다시 돌리기 전에 `build/test-results` 같은 테스트 출력 폴더를 `rm`으로 지울 수 있다(저장소 최상위, 또는 빌드 파일이 있는 모듈 폴더의 `build/`·`target/`만. `node_modules`·`src` 아래와 이름만 같은 폴더는 아님). `tests/{x,../src}`·`build/test-results/*`처럼 프로젝트 경로 뒤에 `{}`·`*`·`$`가 붙은 인자, `..`가 든 인자, 복사·이동·쓰기, `rmdir -p`는 막힌다. `rm -rf "$D"` 같은 임시 폴더 정리는 허용
 
 </details>
 

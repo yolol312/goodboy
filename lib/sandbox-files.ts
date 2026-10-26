@@ -3,21 +3,20 @@
 // sandbox CA with the host's openssl. Every write goes through a temp file and a rename, into a
 // directory that is a real directory (a linked `.goodboy` would send the write outside the repo).
 
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, type Stats, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { runBounded } from './bounded';
 import { KEYSTORE_PASSWORD, planSandbox, SANDBOX_DIR, SCAN_FILE, type SandboxPlan } from './sandbox-render';
 import { MAX_DOC_BYTES, readRegular } from './safe-read';
+import { isStrings, sha } from './sandbox-proof';
 import type { SandboxLocal, SandboxScan, SandboxStack } from './sandbox-types';
 
 export const LOCAL_FILE = `${SANDBOX_DIR}/local.json`;
 export const LEDGER_FILE = `${SANDBOX_DIR}/.written.json`;
 const STACKS: readonly SandboxStack[] = ['jvm', 'node', 'python'];
 
-const sha = (text: string | Buffer) => createHash('sha256').update(text).digest('hex');
-const isStrings = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === 'string');
 const isWhere = (v: unknown) => typeof v === 'object' && v !== null && typeof (v as { file?: unknown }).file === 'string' && typeof (v as { line?: unknown }).line === 'number';
 
 /** The scan `sandbox-scan` wrote, or an Error to show. */
@@ -71,75 +70,6 @@ export function realOrSelf(p: string): string {
 
 /** A repo root as the paths under it may spell it: lexical and real, once each. */
 export const repoTops = (root: string): string[] => [...new Set([root, realOrSelf(root)])];
-
-/** Whether `base/parts…` exists with no link on the way (each part below `base` is looked at with
- *  lstat) and the last part is a regular file, or a directory with `last: 'dir'`. */
-export function noLinksUnder(base: string, parts: readonly string[], last: 'file' | 'dir'): boolean {
-  if (parts.length === 0) return false;
-  try {
-    let cur = base;
-    for (const [i, part] of parts.entries()) {
-      cur = join(cur, part);
-      const st = lstatSync(cur);
-      if (st.isSymbolicLink() || (i < parts.length - 1 || last === 'dir' ? !st.isDirectory() : !st.isFile())) return false;
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** The name of a `sandbox-run` directory under `.goodboy/sandbox/out/` (its timestamp). */
-export const RUN_NAME = /^\d{8}T\d{6}Z$/;
-
-/** What a record needs from the result of one `sandbox-run`. */
-export interface RunProof {
-  /** The run's directory name, which is also the `ts` inside its result. */
-  run: string;
-  /** SHA-256 of `result.json` as read. */
-  sha256: string;
-  exit: number | null;
-  command: string[];
-  /** `unit`, `e2e` or `all`: what the run ran (null in a result that does not say). */
-  suite: string | null;
-  check: { inner_only: boolean; egress_blocked: boolean; hosts_to_dummies: boolean };
-}
-
-/** The result of a sandbox run (`out/<run>/result.json`), read from the repo top without
- *  following a link (not the file, not a directory above it), or an Error saying what is wrong.
- *  The check flags a record carries come from here, never from the agent. */
-export function readRunResult(root: string, run: string): RunProof | Error {
-  if (!RUN_NAME.test(run)) return new Error(`sandbox.run must be the run's directory name (like 20261022T031816Z), not ${JSON.stringify(run).slice(0, 60)}`);
-  const dirParts = ['.goodboy', 'sandbox', 'out', run];
-  const cur = join(root, ...dirParts);
-  if (!noLinksUnder(root, dirParts, 'dir')) return new Error(`${cur} does not exist, or it or a directory above it is a link: no sandbox-run wrote run ${run} in this repository`);
-  const p = join(cur, 'result.json');
-  const r = readRegular(p, MAX_DOC_BYTES, true);
-  if (r === 'absent') return new Error(`${p} does not exist: the run ${run} wrote no result`);
-  if (r === 'refused') return new Error(`${p} is not a regular file of at most ${MAX_DOC_BYTES} bytes`);
-  try {
-    const j = JSON.parse(r.text) as Record<string, unknown>;
-    const c = j.check as Record<string, unknown> | null | undefined;
-    const exit = j.exit;
-    if (
-      typeof j === 'object' &&
-      j !== null &&
-      j.ts === run &&
-      typeof c === 'object' &&
-      c !== null &&
-      typeof c.inner_only === 'boolean' &&
-      typeof c.egress_blocked === 'boolean' &&
-      typeof c.hosts_to_dummies === 'boolean' &&
-      (exit === null || typeof exit === 'number') &&
-      isStrings(j.command)
-    ) {
-      return { run, sha256: sha(r.text), exit: exit as number | null, command: j.command as string[], suite: typeof j.suite === 'string' ? j.suite : null, check: { inner_only: c.inner_only, egress_blocked: c.egress_blocked, hosts_to_dummies: c.hosts_to_dummies } };
-    }
-  } catch {
-    // below
-  }
-  return new Error(`${p} is not a result goodboy's sandbox-run wrote (it needs ts equal to the run, a check with three booleans, exit and command)`);
-}
 
 /** The local answers; empty ones when there is no local.json, an Error when it is unreadable. */
 export function readLocal(root: string): SandboxLocal | Error {

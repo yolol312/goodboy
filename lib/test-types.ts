@@ -106,27 +106,41 @@ function jsModule(spec: string): string {
  *  … from`): the nearest `import`/`export` before it starts a statement (only spaces back to a
  *  line start or `;`), is followed by `type`, and no `;` or quote lies between. Looks back at
  *  most 2000 characters, so many specifiers stay linear. */
-function typeOnlyStatement(text: string, at: number): boolean {
+export function typeOnlyStatement(text: string, at: number): boolean {
   const lo = Math.max(0, at - 2000);
   const win = text.slice(lo, at);
   const k = Math.max(win.lastIndexOf('import'), win.lastIndexOf('export'));
   if (k < 0) return false;
   const head = win.slice(k);
   if (!/^(?:import|export)\s+type\s/.test(head) || /[;'"`]/.test(head)) return false;
+  // `import type from 'm'` and `import type, { a } from 'm'` import a default named `type`: values.
+  if (/^import\s+type\s*(?:,|$)/.test(head)) return false;
   let i = lo + k - 1;
   while (i >= 0 && (text[i] === ' ' || text[i] === '\t')) i--;
   return i < 0 || text[i] === '\n' || text[i] === ';';
+}
+
+/** `text` with its comments blanked and its strings kept (the same length, so an index into one is
+ *  an index into the other): a comment must not hide or fake an import statement. */
+export const withoutComments = (text: string): string => stripLiteralsAndComments(text, false, true);
+
+/** Whether the specifier a JS_SPECIFIER match `m` found in `text` (its `code` is `withoutComments`)
+ *  is named only by a types-only statement: `import type … from '…'` or `export type … from '…'`.
+ *  Such a statement is erased at run time, so it loads nothing. */
+export function typeOnlyImport(code: string, m: RegExpMatchArray): boolean {
+  return m[0].startsWith('from') && typeOnlyStatement(code, m.index!);
 }
 
 /** Why the content makes boundary code, or null. */
 export function boundaryInContent(text: string, ext: string): string | null {
   if (JS_EXT.has(ext)) {
     let n = 0;
+    const code = withoutComments(text);
     for (const m of text.matchAll(JS_SPECIFIER)) {
       if (++n > MAX_SPECIFIERS) return `over ${MAX_SPECIFIERS} module specifiers`;
       const mod = jsModule(m[2]!);
       // A types-only import (`import type … from 'node:fs'`) does no IO.
-      if (JS_IO_MODULES.has(mod) && !(m[0].startsWith('from') && typeOnlyStatement(text, m.index))) return `imports \`${mod}\``;
+      if (JS_IO_MODULES.has(mod) && !typeOnlyImport(code, m)) return `imports \`${mod}\``;
     }
     for (const m of text.matchAll(BUN_NAMED_IMPORT)) {
       const names = m[1]!.split(',').map((x) => x.trim().split(/\s+as\s+/)[0]!.replace(/^type\s+/, ''));
