@@ -1984,6 +1984,29 @@ advice still counts every edit (it never blocks); net change and tree freshness 
 so a change of file mode alone (`chmod +x`) or of type with the same bytes (a symlink made a
 regular file holding its target) counts as no change, as in the test gate since #23.
 
+### 15.19 v0.36.3: testkit harness files need no layer-1 test (#28)
+
+Seen on a real project: 50 of the 66 files under `testkit/` (the user's regression-verification
+harness: flows and SQL, a driver library, a dummy server, Dockerfiles, sandbox scripts, its
+config) were asked for tests, and the Stop test gate blocked. They are the means of testing, like
+`tests/`, `e2e/` and a test runner config, which `needsTests` already leaves out.
+
+Rule (`isTestkitHarness`, used first in `needsTests`): a file below `<root>/testkit/` or
+`<root>/.testkit-run/` needs no test when `<root>/testkit/testkit.config.json` is a regular file
+(lstat; a symlink does not count, nor does a `testkit/` dir that is a link out of the harness).
+Judged like the test-name trust: the spelled path and the real path are both inside the harness,
+a symlink is judged by its target, a hard-linked file is code. `src/testkit/` and a `testkit/`
+without the marker are judged as before. The Stop gate's untested-file list, test types (I3b),
+changed-line coverage (I1) and existing tests (I5) all take their files from `needsTests`
+(`testEditsSince`), so this one rule removes the files from all of them. The review gate, review
+dimensions and role limits are unchanged: the harness is still reviewed.
+
+Known limits: the push check asks a passing record for the exact tree, with no file rule of its
+own (only the prose-only exception of `docsOnlyBases`), so a hand-off whose change is harness
+files only still needs a passing record for its tree. `lib/test-survey.ts` (`/backfill-tests`)
+has its own file rules and still lists code under `testkit/` (`.ts`, `.mjs`) as untested targets.
+The marker is the user's own file, so a project can mark any top-level `testkit/` as harness.
+
 ## 16. J — Field reports (v0.34.0)
 
 Asked by the user on 2026-10-16: improvements and bugs found while using goodboy elsewhere

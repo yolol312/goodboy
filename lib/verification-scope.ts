@@ -309,10 +309,33 @@ export function classifyFile(abs: string, root: string, previewGlobs: readonly s
   return scope;
 }
 
+/** (#28) The user's regression-verification harness is a test means, like tests/: `testkit/`
+ *  at the repo top (not `src/testkit/`) and its run output `.testkit-run/`, when
+ *  `testkit/testkit.config.json` is a regular file of the repo (not a link). Judged as the
+ *  test-name trust below: the spelled path and the real path are both inside the harness, a
+ *  link is judged by its target, a hard link may share content with code. */
+export function isTestkitHarness(abs: string, root: string): boolean {
+  const inside = (p: string | null) => p !== null && /^(?:testkit|\.testkit-run)\//.test(p);
+  if (!inside(relativeInside(resolvePath(abs), resolvePath(root)))) return false;
+  const marker = join(root, 'testkit', 'testkit.config.json');
+  try {
+    if (!lstatSync(marker).isFile() || realRelative(marker, root) !== 'testkit/testkit.config.json') return false;
+  } catch {
+    return false; // no marker: judged as any other path
+  }
+  try {
+    if (statSync(abs).nlink > 1) return false;
+  } catch {
+    // deleted: nothing to run
+  }
+  return inside(realRelative(abs, root));
+}
+
 /** Layer 1: does this changed file need a test? Code does; test files, test runner configs
- *  (track L review), documents and static previews do not. A test-named link into code is
- *  code. */
+ *  (track L review), the testkit harness (#28), documents and static previews do not. A
+ *  test-named link into code is code. */
 export function needsTests(abs: string, root: string, previewGlobs: readonly string[] = []): boolean {
+  if (isTestkitHarness(abs, root)) return false;
   // Seen below the root only: a repo under a tests/ dir would make every file a test file.
   const spelled = relativeInside(resolvePath(abs), resolvePath(root)) ?? slashes(abs);
   const testTool = (p: string) => isTestFile(p) || TEST_RUNNER_CONFIG.test(p);
