@@ -11,7 +11,8 @@
 //   (3) 수용 기준 커버리지 — dev-cycle 산출물이 요구한 항목을 실제로 커버했는가.
 
 import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
+import { recordPath } from './record-paths';
 import { MAX_STATE_BYTES, readRegular } from './safe-read';
 import { canonicalTimestamp, isTrustedTimestamp } from './trusted-time';
 import type { AcceptanceCoverage, TestResult, TestVerdict } from './types';
@@ -37,12 +38,10 @@ export function isEvidencedBlocked(r: TestResult): boolean {
   );
 }
 
+/** A record's or an edit's path, absolute: a relative record path resolves against the project
+ *  dir the Stop pinned, not the hook process's cwd (issue #32, lib/record-paths.ts). */
 function normalizePath(p: string): string {
-  try {
-    return resolve(p);
-  } catch {
-    return p;
-  }
+  return recordPath(p);
 }
 
 function safeReadTest(path: string): TestResult | null {
@@ -450,7 +449,7 @@ export function missingTestFiles(results: TestResult[]): string | null {
   for (const r of results) {
     for (const f of r.test_files ?? []) {
       if (typeof f !== 'string' || f.trim() === '') continue;
-      if (!existsSync(f)) missing.push(f);
+      if (!existsSync(recordPath(f))) missing.push(f);
     }
   }
   if (missing.length === 0) return null;
@@ -624,7 +623,7 @@ export function scanForbiddenPatterns(testFiles: string[], linesOf?: (file: stri
     const lines = linesOf ? linesOf(f) : null;
     if (lines !== null && lines.size === 0) continue;
     // A FIFO or a device would hang the hook (#23 security review): only a regular file is read.
-    const read = readRegular(f, MAX_STATE_BYTES);
+    const read = readRegular(recordPath(f), MAX_STATE_BYTES);
     if (typeof read === 'string') continue;
     const content = read.text;
     // 문자열·주석은 실행되지 않는다 — 픽스처를 위반으로 세지 않는다.

@@ -23,6 +23,7 @@ import type {
 } from './types';
 import { topOf, treeDiff, workTreeState } from './push-test';
 import { cliProjectDir } from './project-dir';
+import { openedPath } from './file-tracker';
 import { DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, outputSummary, type RegressionRecord, regressionCommands, runCommands, writeRegressionRecord } from './regression';
 import { diffCoverageOf } from './diff-coverage';
 import { criteriaNow } from './session-criteria';
@@ -292,7 +293,7 @@ function failOutsideRepo(cmd: string, file: string): never {
   );
 }
 
-async function cmdReviewWrite(cwd: string, args: string[]): Promise<void> {
+export async function cmdReviewWrite(cwd: string, args: string[]): Promise<void> {
   const raw = await readInput(args[0], 'ReviewResult');
 
   let parsed: unknown;
@@ -310,6 +311,9 @@ async function cmdReviewWrite(cwd: string, args: string[]): Promise<void> {
   const result = validated.value;
   const outside = recordOutsideRepo(cwd, result.reviewed_files ?? []);
   if (outside !== null) failOutsideRepo('review-write', outside);
+  // (#32) Absolute paths, resolved against the project dir here, so the Stop never resolves a
+  //   relative name against its own process dir (which follows a model's `cd`).
+  result.reviewed_files = (result.reviewed_files ?? []).map((f) => openedPath(cwd, f));
   // (#26) The reviewed content, taken here and never from the agent, as test-write does.
   result.tree = workTreeState(cwd).tree;
   const reviewsDir = join(cwd, '.claude', 'reviews');
@@ -357,7 +361,7 @@ function validateEvidenceInput(
 }
 
 /** TestResult 스키마 검증. 문제가 있으면 사람이 읽을 수 있는 오류 메시지 배열을 반환. */
-export function validateTestResultInput(parsed: unknown): {
+export function validateTestResultInput(parsed: unknown, bases: readonly string[] = [process.cwd()]): {
   ok: boolean;
   errors: string[];
   value?: TestResult;
@@ -415,7 +419,8 @@ export function validateTestResultInput(parsed: unknown): {
         errors.push(`test_files[${i}]는 비어 있지 않은 문자열이어야 합니다.`);
         return;
       }
-      if (!existsSync(f)) {
+      // (#32) Relative to the project dir or the shell's dir: either is where the agent can mean it.
+      if (!bases.some((b) => existsSync(resolve(b, f)))) {
         errors.push(`test_files[${i}] 파일이 존재하지 않습니다: ${f}`);
       }
     });
@@ -644,7 +649,7 @@ function validateCoverageInput(raw: unknown, errors: string[]): void {
   }
 }
 
-async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
+export async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
   const raw = await readInput(args[0], 'TestResult');
   let parsed: unknown;
   try {
@@ -653,7 +658,7 @@ async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
     fail(`JSON 파싱 실패: ${String(err)}`);
   }
 
-  const validated = validateTestResultInput(parsed);
+  const validated = validateTestResultInput(parsed, [cwd, process.cwd()]);
   if (!validated.ok || !validated.value) {
     fail('TestResult 스키마 검증 실패:\n' + validated.errors.map((e) => `  - ${e}`).join('\n'));
   }
@@ -661,6 +666,18 @@ async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
   const result = validated.value;
   const outside = recordOutsideRepo(cwd, result.tested_files ?? []);
   if (outside !== null) failOutsideRepo('test-write', outside);
+  // The tested files as the agent spelled them (repo-relative, like the coverage report's keys):
+  //   the idle-file warning below compares against them.
+  const spelledTested = [...(result.tested_files ?? [])];
+  // (#32) Absolute paths, resolved against the project dir here, so the Stop never resolves a
+  //   relative name against its own process dir (which follows a model's `cd`).
+  result.tested_files = spelledTested.map((f) => openedPath(cwd, f));
+  //   A test file is found from the project dir first, then from the shell's dir.
+  result.test_files = (result.test_files ?? []).map((f) => {
+    if (typeof f !== 'string' || f.trim() === '') return f;
+    const at = openedPath(cwd, f);
+    return existsSync(at) ? at : openedPath(process.cwd(), f);
+  });
   // The tested content, taken here and never from the agent (lib/push-test.ts): the push
   //   test check matches a hand-off against `tree`.
   const state = workTreeState(cwd);
@@ -682,7 +699,7 @@ async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
     JSON.stringify({ ok: true, path: outPath, timestamp: result.timestamp }) + '\n',
   );
   // A warning here; the test gate blocks on unrun changed lines (track I, lib/changed-coverage.ts).
-  const idle = (result.coverage?.changed?.files_without_executed_changes ?? []).filter((f) => result.tested_files.includes(f));
+  const idle = (result.coverage?.changed?.files_without_executed_changes ?? []).filter((f) => spelledTested.includes(f));
   if (idle.length > 0) {
     process.stderr.write(`warning: no changed line of these tested files ran in the tests: ${idle.join(', ')}\n`);
   }

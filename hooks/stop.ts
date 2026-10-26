@@ -31,6 +31,8 @@ import {
 } from '../lib/changed-coverage';
 import { changedLines } from '../lib/diff-coverage';
 import { projectDir } from '../lib/project-dir';
+import { setRecordBase } from '../lib/record-paths';
+import { buildCopies } from '../lib/build-copies';
 import {
   affectedGaps,
   affectedReason,
@@ -1031,11 +1033,27 @@ function testEditsSince(sessionId: string, cwd: string, cursorTurn: number): str
   if (known) return known;
   const s = scopeOf(sessionId, cwd);
   const files = getEditsSince(sessionId, cursorTurn, cwd).filter((f) => needsTestCoverage(f, cwd, sessionId));
-  const out = netChangedEdits(
+  const head = sessionCoverageStart(sessionId, cwd, s.top).head;
+  const net = netChangedEdits(
     files.map((file) => ({ file })),
     s.top,
-    sessionCoverageStart(sessionId, cwd, s.top).head,
+    head,
   ).map((e) => e.file);
+  // (#32) A git-ignored build copy of a tested source file is no change of its own (the review
+  //   edit set keeps it). Decided again each Stop; the pair is in the gate log.
+  const copies = buildCopies(net, s.top, head, () => {
+    // The session's change set: every file it edited (any turn) that is still subject to layer 1
+    //   and differs from its start blob.
+    const all = getEditHistory(sessionId).files.filter((f) => needsTestCoverage(f, cwd, sessionId));
+    return netChangedEdits(all.map((file) => ({ file })), s.top, head).map((e) => e.file);
+  }, {
+    // Past the cap or the time budget, the rest stay in the layer-1 set; the log says how many.
+    onSkipped: (count, why) => logGate(sessionId, 'test', 'warn', `build-copy: ${count} candidate(s) kept in the test set (${why === 'cap' ? 'over the candidate cap' : 'out of time'})`),
+  });
+  for (const [copy, source] of copies) {
+    logGate(sessionId, 'test', 'warn', `build-copy: ${relative(s.top, copy)} -> ${relative(s.top, source)}`);
+  }
+  const out = copies.size === 0 ? net : net.filter((f) => !copies.has(f));
   testEditsMemo.set(key, out);
   return out;
 }
@@ -1451,6 +1469,9 @@ function main(): void {
       //   passed a change outside it with no test or review). Citations also resolve from it.
       const shellCwd = input.cwd ?? process.cwd();
       const cwd = projectDir(shellCwd, process.env, input.session_id);
+      // (#32) A record's relative file names resolve against the project dir, not the process
+      //   dir (the shell's, which follows a model's `cd`).
+      setRecordBase(cwd);
       stopShellCwd = shellCwd;
       const sessionId = input.session_id ?? 'unknown';
       snapshotSessionId = sessionId;

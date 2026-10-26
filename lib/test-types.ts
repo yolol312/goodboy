@@ -7,6 +7,7 @@
 
 import { existsSync, statSync } from 'node:fs';
 import { extname, isAbsolute, relative, resolve as resolvePath, sep } from 'node:path';
+import { recordPath } from './record-paths';
 import { isFrontendFile } from './review-dimensions';
 import type { ChangedFileEdit } from './review-validator';
 import { readRegular } from './safe-read';
@@ -264,7 +265,7 @@ export function missingTestTypes(args: {
     if (!need || seen.has(need.abs)) continue;
     seen.add(need.abs);
     needs.push(need);
-    const fresh = passing.filter((r) => freshFor(r, edit) && (r.tested_files ?? []).some((f) => resolvePath(f) === need.abs));
+    const fresh = passing.filter((r) => freshFor(r, edit) && (r.tested_files ?? []).some((f) => recordPath(f) === need.abs));
     const missing = need.types.filter(
       (t) =>
         !fresh.some(

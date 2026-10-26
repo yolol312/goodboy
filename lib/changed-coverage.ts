@@ -26,6 +26,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve as reso
 import { ensureSessionDir } from './file-tracker';
 import { filterOffArgs, HOOK_GIT_ARGS, HOOK_GIT_ENV, NO_GRAFTS } from './hook-git';
 import { knowledgeRoot, parsePolicyEntries, POLICY_FILE } from './project-knowledge';
+import { recordPath } from './record-paths';
 import { readRegular } from './safe-read';
 import { freshFor, stripLiteralsAndComments } from './test-validator';
 import type { ChangedFileEdit } from './review-validator';
@@ -68,14 +69,17 @@ const JS_EXT = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.
 /** git with no replace refs and no grafts (either would show another commit's tree or make a
  *  later commit an ancestor). Exit -1: git did not run or timed out; 128: not a repo (or a bad
  *  object). */
-function git(cwd: string, args: string[]): { code: number; out: string } {
+function git(cwd: string, args: string[], input?: string, timeoutMs = 5_000): { code: number; out: string } {
   try {
-    const r = Bun.spawnSync(['git', '--no-replace-objects', ...HOOK_GIT_ARGS, ...args], { cwd, env: { ...process.env, ...HOOK_GIT_ENV, ...NO_GRAFTS }, stdout: 'pipe', stderr: 'pipe', timeout: 5_000 });
+    const r = Bun.spawnSync(['git', '--no-replace-objects', ...HOOK_GIT_ARGS, ...args], { cwd, env: { ...process.env, ...HOOK_GIT_ENV, ...NO_GRAFTS }, ...(input === undefined ? {} : { stdin: Buffer.from(input) }), stdout: 'pipe', stderr: 'pipe', timeout: timeoutMs });
     return { code: r.exitCode ?? -1, out: r.stdout.toString() };
   } catch {
     return { code: -1, out: '' };
   }
 }
+
+/** The hook's git (no fsmonitor, no lazy fetch, no grafts), for other lib modules (#32). */
+export const hookGit = git;
 
 /** The empty tree's id in this repo's hash (sha1 or sha256), or null outside a repo. */
 export function emptyTree(cwd: string): string | null {
@@ -480,7 +484,7 @@ export function withSameContent<T extends ChangedFileEdit, R extends Pick<TestRe
   const newest = results
     .filter((t) => typeof t.tree === 'string' && TREE_ID.test(t.tree))
     .sort((a, b) => (a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0))
-    .map((t) => ({ t, tested: new Set((filesOf(t) ?? []).filter((f): f is string => typeof f === 'string').map((f) => resolvePath(f))) }));
+    .map((t) => ({ t, tested: new Set((filesOf(t) ?? []).filter((f): f is string => typeof f === 'string').map((f) => recordPath(f))) }));
   for (const e of edits) {
     const last = e.lastEditTimestamp;
     if (typeof last !== 'string' || last === '') continue;
@@ -580,7 +584,7 @@ export function changedLineGaps(args: { results: TestResult[]; edits: ChangedFil
     return ok;
   });
   if (usable.length === 0) return { measured: false, gaps: [], ...(lateBase ? { lateBase } : {}) };
-  const tested = new Map(usable.map((t) => [t, new Set((t.tested_files ?? []).map((f) => resolvePath(f)))]));
+  const tested = new Map(usable.map((t) => [t, new Set((t.tested_files ?? []).map((f) => recordPath(f)))]));
 
   const gaps: CoverageGap[] = [];
   const subprocess: string[] = [];

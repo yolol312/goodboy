@@ -16,17 +16,18 @@
 // a mutation probe names the product file it broke (a check of the requirements proves the
 // file, not the app).
 
-import { existsSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve as resolvePath } from 'node:path';
 import { findDevCycleArtifacts, isPlaceholderCell, readCurrentStage, VERIFY_STAGE, type AcceptanceCriterion } from './acceptance';
-import { repoTop } from './changed-coverage';
+import { hookGit, repoTop } from './changed-coverage';
 import { isDocumentFile } from './doc-verification';
 import { ensureSessionDir } from './file-tracker';
 import { knowledgeRoot, parsePolicyEntries, POLICY_FILE } from './project-knowledge';
 import { projectRelative } from './role-limits';
 import { MAX_DOC_BYTES, MAX_STATE_BYTES, readRegular } from './safe-read';
-import { requiresMutationProbe } from './test-validator';
-import type { TestResult } from './types';
+import { evidenceProblems, isTestFile, requiresMutationProbe, TEST_RUNNER_CONFIG } from './test-validator';
+import { classifyFile, isTestkitHarness, needsTests } from './verification-scope';
+import type { AcceptanceCoverage, TestResult } from './types';
 
 export type RequirementStatus = 'implemented' | 'in-progress' | 'not-started';
 
@@ -371,6 +372,60 @@ function isProductDoc(rel: string): boolean {
   return isDocumentFile(rel) || /^docs\/(?:versions\/|cycle\.md$)/i.test(rel);
 }
 
+/** A test file under `docs/versions/<version>/` that runs the product (#32): a browser test of the
+ *  product script kept next to the version's documents was rejected as a document. Only when the
+ *  file is a test by its name, no document or static preview by its class, an existing regular
+ *  single-link file of the repo, and THIS acceptance entry holds valid red and green and a
+ *  detected mutation of an existing product file (a code file that needs tests: no document, no
+ *  test, no harness or runner config, no scratch or git-ignored copy). Any read or git error is
+ *  a no. `isProductDoc` itself stays as it was.
+ *
+ *  `mutation.detected: true` is the testing agent's attestation, as it is for every UIUX- and PT-
+ *  criterion (`requiresMutationProbe`); the gate does not re-run the mutation, so it is not proven
+ *  causality. What the gate checks is the shape: this entry names a mutation command, a product
+ *  file that exists, valid red and green, and a test that is code by its class. */
+const VERSION_DIR_TEST = /^docs\/versions\/[^/]+\//i;
+export function devCycleTestIsProductEvidence(testRel: string, cov: AcceptanceCoverage, root: string): boolean {
+  try {
+    if (!VERSION_DIR_TEST.test(testRel) || !isTestFile(testRel)) return false;
+    const abs = join(root, testRel);
+    if (!regularInRepo(abs, root) || classifyFile(abs, root) !== 'code') return false;
+    if (evidenceProblems(cov).length > 0) return false;
+    const m = cov.mutation;
+    if (!m || typeof m.command !== 'string' || m.command.trim() === '' || m.detected !== true) return false;
+    return typeof m.file === 'string' && isProductFile(m.file, root);
+  } catch {
+    return false;
+  }
+}
+
+/** An existing regular file with one link, whose real path is inside `root`. */
+function regularInRepo(abs: string, root: string): boolean {
+  try {
+    const st = lstatSync(abs);
+    if (!st.isFile() || st.nlink !== 1) return false;
+    return projectRelative(realpathSync(abs), realpathSync(root)) !== null;
+  } catch {
+    return false;
+  }
+}
+
+/** A path segment that marks a scratch or build copy, never the product itself. */
+const SCRATCH_SEGMENT = /(?:^|\/)(?:target|build|dist|node_modules|\.git|\.claude|\.testkit-run|tmp|temp|scratch)\//i;
+
+/** The file a mutation broke is an existing product file of the repo (#32). */
+function isProductFile(value: string, root: string): boolean {
+  const rel = evidencePath(value, root);
+  if (rel === null || rel === 'outside' || rel === '') return false;
+  const abs = join(root, rel);
+  if (!regularInRepo(abs, root)) return false;
+  if (isProductDoc(rel) || isTestFile(rel) || TEST_RUNNER_CONFIG.test(rel) || isTestkitHarness(abs, root)) return false;
+  if (SCRATCH_SEGMENT.test(rel) || /(?:^|\/)__probe[^/]*$/.test(rel)) return false;
+  if (!needsTests(abs, root)) return false;
+  // A git-ignored file is a copy, not the product (exit 0: ignored; 1: not; else unknown = no).
+  return hookGit(root, ['check-ignore', '-q', '--', rel]).code === 1;
+}
+
 /** A path-like value as repo-relative (symlinks resolved when the file exists), 'outside' when
  *  it is not in the repo, null when it is no path (a test name). */
 function evidencePath(value: string, root: string): string | 'outside' | null {
@@ -400,7 +455,16 @@ export function productEvidenceProblems(results: TestResult[], root: string): st
       const test = typeof cov.test === 'string' ? evidencePath(cov.test, root) : null;
       if (test === 'outside') out.push(`${id}: its test (${short(cov.test)}) is not in this repo.`);
       else if (test !== null && isProductDoc(test)) {
-        out.push(`${id}: its test is a document (${short(cov.test)}); a product criterion needs a test of the product code.`);
+        if (isDocumentFile(test)) {
+          out.push(`${id}: its test is a document (${short(cov.test)}); a product criterion needs a test of the product code.`);
+        } else if (!devCycleTestIsProductEvidence(test, cov, root)) {
+          // (#32) Code in the dev-cycle folder: product evidence only with a mutation of the product.
+          out.push(
+            `${id}: its test (${short(cov.test)}) is in the dev-cycle folder, where it counts as a document. Move the test out ` +
+              'of docs/versions, or give a detected mutation of the product file for this criterion (this entry\'s mutation: ' +
+              'a command, detected true, and file = the repo path of the product file it broke), with valid red and green.',
+          );
+        }
       }
       const file = cov.mutation?.file;
       if (requiresMutationProbe(id) && cov.mutation && (typeof file !== 'string' || file.trim() === '')) {

@@ -2077,6 +2077,144 @@ file moved to `LICENSE` is exempt); product code that reads `.gitignore` at runt
 packager) has its behavior changed without a test, and npm packaging falls back to `.gitignore`
 without `.npmignore`; a manifest that was only reformatted counts as no change, by design.
 
+### 15.21 v0.36.5: records resolve paths against the project, build copies, dev-cycle tests (#32)
+
+One field session saw the Stop test gate block ten times with the same reasons while the assistant
+waited for the user (a coverage exemption that only counts from the next session, and approval to
+move test files out of a dev-cycle folder). The reproduction with the real v0.36.4 hook is a scratch
+script, `repro.ts`. It found three bugs of the gate, fixed here (causes 1-3), and one missing
+feature, a waiting state (cause 4), which was built, rated high by the security review and dropped
+from this release (see "What was dropped").
+
+Causes:
+
+1. A record's relative `tested_files` (also `test_files`, and a review's `reviewed_files` and a
+   finding's `file`) were resolved with one-argument `resolve()`, against the hook process's cwd. That
+   dir follows the model's `cd`; the pinned project dir is a separate value (I10, `projectDir`). A
+   record written from the project root named other files from a Stop run in `docs/ui`: "untested
+   changed files" for files the record names, and on alternating stops, because the next Stop ran from
+   another dir. `cmdTestWrite` stored the paths as given.
+2. A git-ignored copy under `target/` written by `cp` is recorded by the write sweep
+   (`placedFiles`), kept by `netChangedEdits`, and missing from every record tree (an ignored file is
+   not in `git add -A`), so the changed-line check always reported it, though its bytes were the
+   tested source's.
+3. `isProductDoc` rejects any test under `docs/versions/`, so a browser test there that runs the
+   product script failed UIUX criteria as "its test is a document".
+4. No waiting state: each Stop re-blocked with the same reasons while the user decided. Not fixed in
+   this release.
+
+What ships:
+
+1. Paths (`lib/record-paths.ts`). One helper, `recordPath(p, base?)`, resolves a record's relative path
+   against the dir the Stop pinned with `setRecordBase(cwd)` (the project dir; the process cwd when
+   nothing is pinned, as before), with `openedPath` (lib/file-tracker.ts) rather than a lexical
+   `resolve`, so a link is followed before each `..` as the OS opens it (`lnk/../f` is not `f`). It replaces the one-argument `resolve` at the sites that resolved a
+   record's path against the process cwd: `normalizePath` in lib/test-validator.ts and
+   lib/review-validator.ts (so records, findings and edits meet in one spelling), `missingTestFiles`,
+   `scanForbiddenPatterns`, `withSameContent` and `changedLineGaps` (the `tested_files` of
+   lib/changed-coverage.ts), and `missingTestTypes` (lib/test-types.ts). Other record-path sites
+   already resolve against the repo top, which is not the process cwd, so they are correct and
+   unchanged: `changedLineGaps`' `test_files` and `test` paths (lib/changed-coverage.ts), lib/existing-tests.ts
+   and lib/test-backfill.ts. `test-write` and `review-write` store absolute paths (`openedPath(cwd, f)`,
+   the project dir as the base, so `..` after a link agrees with the edit log); a relative `test_files`
+   entry is also accepted when it exists from the shell's dir (the schema check looked only there
+   before). An old record with relative paths now resolves against the project dir: one written from the
+   project root reads correctly, but one written from a subdirectory shell with paths relative to that
+   subdirectory is not covered (the file is looked up under the project dir, where it is not). The push
+   check (PreToolUse) pins nothing and behaves as before.
+2. Product evidence (`devCycleTestIsProductEvidence`, lib/session-criteria.ts; `isProductDoc` is
+   unchanged). A test file under `^docs/versions/[^/]+/` counts only when `isTestFile(path)` is true,
+   its class is code (no document, no static preview), it is an existing regular single-link file
+   inside the repo, AND that same acceptance entry has valid red and green (`evidenceProblems` is
+   empty), a non-empty mutation command, `detected === true`, and `mutation.file` is an existing
+   product file: a regular single-link file in the repo that needs tests (`needsTests`), no document,
+   no test or runner config, no testkit harness file, no scratch or build copy (a `target`, `build`,
+   `dist`, `tmp`, `.claude`, ... segment, a `__probe*` name) and not git-ignored. This applies to
+   `REQ-*` too. Any error or git failure is a no. The rejection names both ways out: move the test out
+   of the dev-cycle folder, or give a detected mutation of the product file for this criterion.
+   `mutation.detected: true` is the testing agent's attestation, as it is for every UIUX- and PT-
+   criterion; the gate does not re-run the mutation, so it is not proven causality. The checks make the
+   entry's file real and the entry complete, not its run honest.
+3. Build copies (`buildCopies`, lib/build-copies.ts, called in `testEditsSince`). An edited file leaves
+   the layer-1 TEST edit set (the review set keeps it) only when all hold:
+   - a directory segment of its path is `target` or `build`;
+   - neither it nor its source is a `.env`, `.env.*` or `*.env` file;
+   - it is a regular single-link file below the repo top with no symbolic link on its path, and it is
+     untracked;
+   - `git -c core.excludesFile=/dev/null check-ignore -z -v --stdin` (normal, not `--no-index`; the
+     NUL-separated fields source, line, pattern, path are taken apart, never split on `:`) says it is
+     ignored, and the rule that decides
+     it qualifies. The rule's source file must be a relative path that resolves inside the canonical repo
+     top, named `.gitignore`, a regular single-link file with no symlink on its path, tracked at the
+     session-start HEAD with a regular blob mode (`blobAtCommit`), with its bytes still equal to that
+     blob (`differFromBase`); the pattern must not start with `!`. No `core.excludesFile` (global or
+     relative, even one that names a tracked `.gitignore`) decides, because the check runs with it
+     emptied; `.git/info/exclude`, a new or untracked `.gitignore`, and an edited one never qualify. This replaces the earlier "no `.gitignore` of the repo changed" scan: the one file
+     that decided the copy is what is checked, so an unrelated `.gitignore` edit no longer disqualifies
+     a copy and no repo-wide listing is needed;
+   - the source is tracked (`ls-files` with `--literal-pathspecs`), is in the session's change set
+     (every file the session edited in any turn that still needs tests and differs from its start blob:
+     the red/green run copies the source again in a later turn, after the Stop that accepted its test)
+     and its bytes now equal the copy's (read as buffers, size first, at most 16 MB).
+
+   The checks are batched, because a git spawn costs about 60 ms and the Stop hook's 15 s timeout
+   skips the test and review gates (a probe with 500 ignored files took 60.9 s with two spawns per
+   file): one `ls-files` for all candidates, one `check-ignore` for all of them, one `.gitignore`
+   verdict per deciding file, and one `ls-files` for the byte-equal sources. At most
+   `MAX_BUILD_COPY_CANDIDATES` (200) candidates are examined and the whole call has a wall-clock budget,
+   `BUILD_COPY_BUDGET_MS` (3 s; each git call gets the time that is left as its timeout). A candidate
+   past the cap or the budget stays in the layer-1 set (fail closed) and the Stop logs
+   `test warn build-copy: <n> candidate(s) kept in the test set (over the candidate cap | out of time)`.
+   The cheap per-copy checks (plain file, untracked, ignored by a pristine `.gitignore`) run before the
+   change set is listed or any bytes are read, so a tracked file under `build/` or `target/` costs one
+   listing and no more. Decided again each Stop; any read, git or compare error keeps the obligation;
+   each pair is logged (`test warn build-copy: <copy> -> <source>`). A name that starts with `:` is
+   never a copy (`check-ignore` refuses `--literal-pathspecs`, and git would read it as pathspec
+   magic).
+
+What was dropped (D, the waiting state, planned for v0.36.6):
+
+D was built in full (`await-decision` CLI command, a pending-decision file with edit, record and agent
+cursors, a `deferred` gate decision, a deferral on every test and review block and on the
+`stop_hook_active` path) and the v0.36.5 security review rated it HIGH: it is a self-service,
+evidence-free Stop pass. The model records its own question and the Stop then ends unverified. Probes
+showed a Stop passed with no test record or no review at all, and that re-arming after every edit
+makes the pass permanent. The gates' rule is that they pass on evidence or on the user's decision, never
+on the model's own call. Codex agreed and set the minimum for the day: ship without self-service
+deferral, ship causes 1-3 with the build-copy rule hardened. The code is kept outside the repo for the
+v0.36.6 work.
+
+Design conditions for D in v0.36.6 (Codex round 5). D becomes a user-authorized design:
+
+- Authorization. A deferral needs a user-authored authorization: a user marker like the existing
+  approval marker (a file only the user creates), never the model's CLI call. The hook binds it to the
+  session, the project and the complete obligation snapshot, so it covers exactly the obligations the
+  user saw.
+- Snapshot. A complete, side-effect-free evaluation of every open obligation, not the first blocking
+  gate. The Stop evaluates gate by gate and answers at the first block; the snapshot needs an
+  evaluator that reports every open obligation and changes nothing.
+- The question. It is shown verbatim in the Stop payload's `last_assistant_message`, so the user's
+  authorization is for the question they read, not a text the model supplies afterwards.
+- Identities. Hook-owned activity generations and evidence content identities replace log sizes,
+  counts and mtimes as the "something changed" test.
+- A user prompt invalidates the authorization.
+- A high-severity finding's identity includes the finding itself, not only `file:line`.
+- The message lists the deferred rule ids and items.
+- `--session` is bound to the protected pin (the session id the hook pinned), never a value the model
+  passes.
+- The `stop_hook_active` silent pass. Codex also questioned it: that path ends silently whenever it
+  accepted nothing. It predates #32 and is the deliberate deadlock-avoidance path (v0.26.7-8), so
+  v0.36.5 leaves it exactly as it was (`emit(acceptMsg ? { systemMessage: acceptMsg } : {})`), and
+  v0.36.6 must weigh it.
+
+Known limits:
+
+- The build-copy rule needs the start HEAD (no start commit: no drops), compares the whole files (a
+  copy that differs by one byte stays an obligation), and does not look at `dist/`, `out/` or other
+  build dirs (only `target` and `build`, by the issue's field case).
+- A dev-cycle test is accepted on a mutation entry the agent writes, like every other mutation probe
+  (see rule 2).
+
 ## 16. J — Field reports (v0.34.0)
 
 Asked by the user on 2026-10-16: improvements and bugs found while using goodboy elsewhere

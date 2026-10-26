@@ -1,7 +1,8 @@
 // 리뷰 결과 JSON 파일 검증 (Stop hook에서 사용)
 
 import { readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
+import { recordPath } from './record-paths';
 import { axesOfDimensions } from './review-dimensions';
 import { freshFor } from './test-validator';
 import { canonicalTimestamp, isTrustedTimestamp, MAX_CLOCK_SKEW_MS } from './trusted-time';
@@ -212,12 +213,10 @@ export function validateReview(
   return { ok: true };
 }
 
+/** A record's, a finding's or an edit's path, absolute: a relative one resolves against the
+ *  project dir the Stop pinned, not the hook process's cwd (issue #32, lib/record-paths.ts). */
 function normalizePath(p: string): string {
-  try {
-    return resolve(p);
-  } catch {
-    return p;
-  }
+  return recordPath(p);
 }
 
 // ── 파일별 누적 커버리지 검증 (v0.26.5) ────────────────────────────────────
