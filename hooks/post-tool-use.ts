@@ -6,6 +6,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, resolve as resolvePath } from 'node:path';
 import {
   agentCallRecord,
+  openedPath,
   appendDispatchLog,
   hookError,
   bareSkillName,
@@ -362,7 +363,7 @@ function main(): void {
         if (toolName === 'Read') {
           const fp = (toolInput.file_path as string | undefined) ?? '';
           if (fp) {
-            const absFp = resolvePath(cwd, fp);
+            const absFp = openedPath(cwd, fp);
             // H2-01: Read 시점의 파일 mtime을 함께 기록해 재-Read 게이트가
             // "그 사이 파일이 바뀌었는지"를 판정할 수 있게 한다. stat 실패는 무시(mtime 생략).
             let mtime: number | undefined;
@@ -390,14 +391,14 @@ function main(): void {
           //   someone else (another agent, the user, a formatter).
           const fp = (toolInput.file_path as string | undefined) ?? '';
           if (fp) {
-            const abs = resolvePath(cwd, fp);
+            const abs = openedPath(cwd, fp);
             recordEdit(sessionId, abs, turn, agentId, safeMtime(abs));
           }
         } else if (toolName === 'MultiEdit') {
           // MultiEdit는 file_path가 단일 (edits 배열)이거나, 일부 클라이언트에서 다중일 수 있음.
           const fp = (toolInput.file_path as string | undefined) ?? '';
           if (fp) {
-            const abs = resolvePath(cwd, fp);
+            const abs = openedPath(cwd, fp);
             recordEdit(sessionId, abs, turn, agentId, safeMtime(abs));
           }
           const edits = (toolInput.edits as unknown[] | undefined) ?? [];
@@ -406,7 +407,7 @@ function main(): void {
               if (e && typeof e === 'object') {
                 const fp2 = (e as Record<string, unknown>).file_path as string | undefined;
                 if (fp2) {
-                  const abs2 = resolvePath(cwd, fp2);
+                  const abs2 = openedPath(cwd, fp2);
                   recordEdit(sessionId, abs2, turn, agentId, safeMtime(abs2));
                 }
               }

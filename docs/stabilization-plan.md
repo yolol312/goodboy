@@ -2006,6 +2006,76 @@ own (only the prose-only exception of `docsOnlyBases`), so a hand-off whose chan
 files only still needs a passing record for its tree. `lib/test-survey.ts` (`/backfill-tests`)
 has its own file rules and still lists code under `testkit/` (`.ts`, `.mjs`) as untested targets.
 The marker is the user's own file, so a project can mark any top-level `testkit/` as harness.
+A `..` after a link in a recorded path used to escape this rule (#29); fixed in §15.20.
+
+### 15.20 v0.36.4: repository metadata needs no layer-1 test record (#30), `..` after a link (#29)
+
+Seen on a real project: the Stop test gate blocked a turn on `.gitignore` (lines appended by a
+test-harness setup), and a release commit needed a test record for a `version`-only change of
+`package.json` and `.claude-plugin/plugin.json`. For a file outside the coverage tool's
+languages the gate only needs a passing record that names the file, so the agent ran some suite
+and listed it: the record proved nothing.
+
+Rule (`isMetadataNoTest`, called in `needsTests` before the classifier fallback; `classifyPath`,
+`isTestFile` and the review rules are unchanged):
+
+- By name, on the repo-relative path, case-sensitive: `.gitignore`, `.mailmap`, `.editorconfig`,
+  `LICENSE`/`COPYING`/`NOTICE`/`AUTHORS` (no extension or a prose one), `.github/ISSUE_TEMPLATE/**`
+  (`.md`, `.yml`, `.yaml`), `.github/PULL_REQUEST_TEMPLATE*` and `.github/pull_request_template*`
+  (`.md`), `.github/FUNDING.yml`.
+- An empty `.gitkeep`/`.keep` (a regular, single-link, zero-byte file).
+- The top-level `package.json` and `.claude-plugin/plugin.json` when, parsed as JSON, they equal
+  their blob at the session's pinned start HEAD (`sessionCoverageStart(...).head`, the commit the
+  net-change checks use) except for the top-level `version` string. Formatting is ignored; object
+  key order and array order are kept (conditions in `exports`/`imports` are tried in order, so a
+  reorder is a behavior change). A parse failure, a duplicate key in either text
+  (`JSON.parse` keeps the last one silently), a missing or non-string `version` on either side,
+  no baseline, a read failure or a file over 1 MB means a test is needed. Only `hooks/stop.ts`
+  passes the baseline reader (`needsTestCoverage`); other callers keep the manifest rule off. The
+  blob is read (`blobAtCommit`: `git ls-tree -z` for the mode, then two `git cat-file` calls)
+  only for those two paths. Only a regular blob (100644 or 100755) is a baseline; a symlink
+  (120000) or a gitlink (160000) at the start HEAD means no baseline, so the manifest needs a
+  test. A missing, unborn or foreign start HEAD means no baseline too (a Stop test covers it).
+- Identity is as the test-name trust: the spelled path is repo-relative and the real path is
+  inside the repo, both match the same rule; a link is judged by its target; a hard link is code;
+  a file that cannot be inspected needs a test. A path that does not exist has no exemption at
+  all: a deleted housekeeping file needs a test record like other code (the first round kept a
+  fixed-name exemption for it, which let a recorded path that was not the file the OS opened pass,
+  see #29 below).
+
+Also fixed: a test-named path was trusted as a test file when its real path was outside the repo
+(`real === null` in `needsTests`), so a `tests/x.test.ts` link to outside, or a test-named path
+outside the root, needed no test. The trust now needs a spelled path below the root and a real
+path inside it, and a dangling test-named symlink (lstat says link, stat fails) is not trusted
+either (`needsTests`, and the testkit harness rule). `isTestkitHarness` already rejected a null real path (`inside(null)` is false), so
+it needed no change.
+
+#29, a `..` after a symlinked dir (fixed here for every rule at once). `path.resolve` collapses
+`a/lnk/../b` to `a/b` before the link is followed, but the OS opens `<target of lnk>/../b`. The
+recorders stored the collapsed path, so with `tests/self -> .` an edit of `tests/self/../src/a.ts`
+was recorded as the test-named `tests/src/a.ts`, and `.github/ISSUE_TEMPLATE/lnk/../workflows/ci.yml`
+as a nonexistent path that the first round of the metadata rule exempted (found in its security
+review). The fix is at the source, one helper (`openedPath(cwd, filePath)` in `lib/file-tracker.ts`):
+a path with a `..` segment is walked segment by segment, and at each `..` the prefix so far is made
+real (`realpath`, when it exists) before going up; a path without `..` is plain `resolve`, with no
+file system call. It is used by every place that records or looks up a tool's file path: PostToolUse
+(Read, Edit, Write, MultiEdit), the PreToolUse read-before-edit and re-Read lookups, the Bash read
+classification, and the tracker's own `normalize`, so reads and edits agree and a recorded path
+never hides a link behind a collapsed `..`. Test names, the testkit harness and the metadata rule
+then judge the real path with no change of their own. Gate rules that look at a tool path for
+other reasons (write denials, the hosts and policy-file checks, the reasoning gate's document
+exemption) still use `resolve`; they are not tracking and were left as they are.
+
+Still needing tests, as the issue settled: message bundles, CSS, server templates, SQL and mapper
+XML, app settings, and tool configs (`.gitattributes`, `.dockerignore`, `.npmignore`, CODEOWNERS,
+CI workflows, linters, `tsconfig.json`, `.vscode/`, `.idea/`). Those change what a tool or a
+running system does, so a name alone is no evidence. A separate kind of evidence for tool configs
+stays with #27 (deferred).
+
+Known limits: a file a session renames into an exempt name is judged by its new name (a code
+file moved to `LICENSE` is exempt); product code that reads `.gitignore` at runtime (a linter or
+packager) has its behavior changed without a test, and npm packaging falls back to `.gitignore`
+without `.npmignore`; a manifest that was only reformatted counts as no change, by design.
 
 ## 16. J — Field reports (v0.34.0)
 

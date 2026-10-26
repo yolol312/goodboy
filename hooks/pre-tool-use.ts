@@ -11,6 +11,7 @@ import { testTypesMode } from '../lib/test-types';
 import { classifyPath } from '../lib/verification-scope';
 import {
   appendDispatchLog,
+  openedPath,
   approvalMarkerPath,
   approvalMarkerShown,
   assistantEntriesAfterLastText,
@@ -1189,7 +1190,7 @@ function main(): void {
             '(pages for PDFs) — partial reads are allowed. (re-Read gate, H2-01)';
           const blockReread = (() => {
             try {
-              const absPath = resolvePath(cwd, filePath);
+              const absPath = openedPath(cwd, filePath);
               const turn = getCurrentTurn(sessionId);
               // 윈도우 기본 30턴(D2 개정): "읽은 내용이 아직 컨텍스트에 살아있는가"의 근사치.
               //   mtime 비교가 파일 변경 오탐을 막고, 압축(/compact) 감지 시 Stop hook이
@@ -1294,7 +1295,7 @@ function main(): void {
       if (isEditTool) {
         const filePath = (toolInput.file_path as string | undefined) ?? '';
         if (filePath) {
-          const absPath = resolvePath(cwd, filePath);
+          const absPath = openedPath(cwd, filePath);
           const fileExists = (() => {
             try {
               return existsSync(absPath);

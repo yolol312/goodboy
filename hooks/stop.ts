@@ -18,6 +18,7 @@ import { projectMode } from '../lib/project-mode';
 import { knowledgeRoot, readDocMap } from '../lib/project-knowledge';
 import { staleDocs, staleDocsReason, type StaleDoc } from '../lib/doc-map';
 import {
+  blobAtCommit,
   changedLineGaps,
   changedLineReason,
   diffCoverageMode,
@@ -42,7 +43,7 @@ import {
   weakenedWarning,
 } from '../lib/existing-tests';
 import { missingTestTypes, recordStandsAlone, testerFor, testTypesMode, type TypeNeed, typeGapReason, typeGapWarning, typeNeedOf } from '../lib/test-types';
-import { needsTests } from '../lib/verification-scope';
+import { MAX_MANIFEST_BYTES, needsTests } from '../lib/verification-scope';
 import { documentChangeNote, isDocumentChange } from '../lib/doc-verification';
 import { frictionNotice } from '../lib/friction';
 import { productEvidenceProblems, sessionCriteria, startedBeforeVerification } from '../lib/session-criteria';
@@ -638,7 +639,13 @@ function acceptanceFor(cwd: string): AcceptanceReading {
  */
 function needsTestCoverage(file: string, cwd: string, sessionId: string): boolean {
   const s = scopeOf(sessionId, cwd);
-  return needsTests(file, s.top, s.previews);
+  // (#30) The content at the session's start HEAD, read only for a top-level package.json or
+  //   .claude-plugin/plugin.json (a version-only change needs no test); null when unknown.
+  const baseline = (rel: string): string | null => {
+    const head = sessionCoverageStart(sessionId, cwd, s.top).head;
+    return typeof head === 'string' ? blobAtCommit(s.top, head, rel, MAX_MANIFEST_BYTES) : null;
+  };
+  return needsTests(file, s.top, s.previews, baseline);
 }
 
 /** (I3a) The repo top and the user's static-preview globs pinned at the session start, read

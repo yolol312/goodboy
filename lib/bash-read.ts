@@ -21,6 +21,7 @@
 import { existsSync, statSync } from 'node:fs';
 import { resolve as resolvePath, sep } from 'node:path';
 import { OP_TOKEN, stripHeredocs, tokenizeSegments } from './bash-write';
+import { openedPath } from './file-tracker';
 
 /** 파일 내용을 그대로 보여주는 명령들. */
 const CONTENT_READERS = new Set(['cat', 'bat', 'head', 'tail', 'less', 'more', 'view', 'nl']);
@@ -122,7 +123,7 @@ export function classifyBashReadDetailed(command: string, cwd: string): { path: 
   for (const { t, partial } of targets) {
     let abs: string;
     try {
-      abs = resolvePath(cwdAbs, t);
+      abs = openedPath(cwdAbs, t);
     } catch {
       continue;
     }

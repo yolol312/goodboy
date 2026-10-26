@@ -17,7 +17,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 
 interface TrackRecord {
   file: string;
@@ -102,12 +102,41 @@ export function ensureSessionDir(sessionId: string): string {
   return dir;
 }
 
-function normalize(filePath: string): string {
+/** The path the OS opens for a tool's file path, spelled without any `..` (issue #29).
+ *  `path.resolve` collapses `a/lnk/../b` to `a/b` before a link is followed, while the OS goes
+ *  through `lnk` first: the real file is `<target of lnk>/../b`. A path with a `..` segment is
+ *  therefore walked segment by segment, and at each `..` the prefix so far is made real (when it
+ *  exists) before going up. Without a `..` this is plain `resolve(cwd, filePath)`, with no file
+ *  system call. One helper for every place that records or looks up a tool's file path, so
+ *  reads and edits agree and a recorded path never hides a link behind a collapsed `..`. */
+export function openedPath(cwd: string, filePath: string): string {
   try {
-    return resolve(filePath);
+    const split = sep === '\\' ? /[\\/]/ : /\//;
+    if (!filePath.split(split).includes('..')) return resolve(cwd, filePath);
+    const start = isAbsolute(filePath) ? filePath : resolve(cwd) + sep + filePath;
+    const root = parse(start).root;
+    let cur = root;
+    for (const seg of start.slice(root.length).split(split)) {
+      if (seg === '' || seg === '.') continue;
+      if (seg !== '..') {
+        cur = join(cur, seg);
+        continue;
+      }
+      try {
+        cur = realpathSync(cur);
+      } catch {
+        // a prefix that does not exist (or is no dir) cannot be opened through; go up by name
+      }
+      cur = dirname(cur);
+    }
+    return cur;
   } catch {
     return filePath;
   }
+}
+
+function normalize(filePath: string): string {
+  return openedPath(process.cwd(), filePath);
 }
 
 function appendRecord(dir: string, fileName: string, record: TrackRecord): void {

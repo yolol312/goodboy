@@ -393,6 +393,23 @@ function treeBlobs(top: string, tree: string, rels: string[]): Map<string, strin
   return out;
 }
 
+/** (#30) A file's content at a commit (a blob, as stored: no filters), or null when the commit
+ *  or the path is unknown, the path is no regular file (a symlink 120000 or a gitlink is no
+ *  baseline), the blob is over `maxBytes`, or git fails. Three short git calls: the mode first,
+ *  then the size, so a huge blob is never read. */
+export function blobAtCommit(top: string, commit: string, rel: string, maxBytes: number): string | null {
+  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(commit) || rel === '' || rel.includes('\n')) return null;
+  const entry = git(top, ['ls-tree', '-z', '--end-of-options', commit, '--', rel]);
+  // Exactly one entry, `<mode> blob <id>\t<rel>\0`, of a regular file.
+  const tab = entry.out.indexOf('\t');
+  if (entry.code !== 0 || tab < 0 || entry.out.slice(tab + 1) !== `${rel}\0` || !/^(?:100644|100755) blob [0-9a-f]+$/.test(entry.out.slice(0, tab))) return null;
+  const spec = `${commit}:${rel}`;
+  const size = git(top, ['cat-file', '-s', '--end-of-options', spec]);
+  if (size.code !== 0 || !/^\d+$/.test(size.out.trim()) || Number(size.out.trim()) > maxBytes) return null;
+  const blob = git(top, ['cat-file', 'blob', '--end-of-options', spec]);
+  return blob.code === 0 ? blob.out : null;
+}
+
 /** The repo-relative path of an edited file inside `top`, or null. */
 function relInside(top: string, file: string): string | null {
   const r = relative(top, resolvePath(file));

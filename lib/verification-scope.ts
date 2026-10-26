@@ -309,6 +309,22 @@ export function classifyFile(abs: string, root: string, previewGlobs: readonly s
   return scope;
 }
 
+/** A symlink whose target cannot be reached (lstat says link, stat fails): there is no file of
+ *  its own to trust by name, whatever the path looks like. */
+function isDanglingLink(abs: string): boolean {
+  try {
+    if (!lstatSync(abs).isSymbolicLink()) return false;
+  } catch {
+    return false;
+  }
+  try {
+    statSync(abs);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 /** (#28) The user's regression-verification harness is a test means, like tests/: `testkit/`
  *  at the repo top (not `src/testkit/`) and its run output `.testkit-run/`, when
  *  `testkit/testkit.config.json` is a regular file of the repo (not a link). Judged as the
@@ -323,6 +339,7 @@ export function isTestkitHarness(abs: string, root: string): boolean {
   } catch {
     return false; // no marker: judged as any other path
   }
+  if (isDanglingLink(abs)) return false;
   try {
     if (statSync(abs).nlink > 1) return false;
   } catch {
@@ -331,26 +348,151 @@ export function isTestkitHarness(abs: string, root: string): boolean {
   return inside(realRelative(abs, root));
 }
 
+/** (#30) Repository housekeeping that no test proves: judged by name, on the repo-relative path
+ *  (case-sensitive), at any depth unless the pattern is anchored. Configs that tools read
+ *  (`.gitattributes`, `.dockerignore`, `.npmignore`, CODEOWNERS, CI, linters) stay code: #27. */
+const METADATA_NO_TEST_RECORD = [
+  /(?:^|\/)\.gitignore$/, // Housekeeping; accepted packaging fallback risk (npm uses it without .npmignore).
+  /(?:^|\/)\.mailmap$/, // Attribution.
+  /(?:^|\/)\.editorconfig$/, // Editor formatting.
+  /(?:^|\/)(?:LICENSE|COPYING|NOTICE|AUTHORS)(?:\.(?:md|markdown|txt|rst|adoc|asciidoc))?$/, // Legal and attribution prose.
+  /^\.github\/ISSUE_TEMPLATE\/(?:[^/]+\/)*[^/]+\.(?:md|yml|yaml)$/, // Contribution forms.
+  /^\.github\/(?:PULL_REQUEST_TEMPLATE|pull_request_template)(?:\.md)?$/, // Contribution text.
+  /^\.github\/(?:PULL_REQUEST_TEMPLATE|pull_request_template)\/(?:[^/]+\/)*[^/]+\.md$/, // Contribution text.
+  /^\.github\/FUNDING\.yml$/, // Sponsorship metadata.
+];
+const EMPTY_PLACEHOLDER = /(?:^|\/)(?:\.gitkeep|\.keep)$/; // only a regular, single-link, zero-byte file
+const VERSION_ONLY_MANIFEST = /^(?:package\.json|\.claude-plugin\/plugin\.json)$/;
+
+/** The largest manifest (current or at the session start) compared for a version-only change. */
+export const MAX_MANIFEST_BYTES = 1_000_000;
+
+/** A JSON text with an object that repeats a key (JSON.parse keeps the last one silently, so a
+ *  changed script could hide behind a duplicate). Valid JSON only; iterative, so depth is no limit. */
+function hasDuplicateKeys(text: string): boolean {
+  const stack: Array<Set<string> | null> = []; // an object's keys so far, or null for an array
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i]!;
+    if (c === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
+      const lit = text.slice(i, j + 1);
+      i = j + 1;
+      const keys = stack[stack.length - 1];
+      if (keys) {
+        let k = i;
+        while (k < text.length && /\s/.test(text[k]!)) k++;
+        if (text[k] === ':') {
+          const key = JSON.parse(lit) as string;
+          if (keys.has(key)) return true;
+          keys.add(key);
+        }
+      }
+      continue;
+    }
+    if (c === '{') stack.push(new Set());
+    else if (c === '[') stack.push(null);
+    else if (c === '}' || c === ']') stack.pop();
+    i++;
+  }
+  return false;
+}
+
+/** JSON values equal with key order significant (conditions in `exports`/`imports` are tried in
+ *  order, so a reorder is a behavior change) and array order kept. Formatting is not compared. */
+function sameJson(a: unknown, b: unknown): boolean {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => sameJson(v, b[i]));
+  }
+  if (a !== null && b !== null && typeof a === 'object' && typeof b === 'object') {
+    const ka = Object.keys(a);
+    const kb = Object.keys(b);
+    if (ka.length !== kb.length) return false;
+    return ka.every((k, i) => k === kb[i] && sameJson((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]));
+  }
+  return Object.is(a, b);
+}
+
+/** Both texts are JSON objects with an own top-level string `version`, and are equal without it.
+ *  A duplicate key, a parse failure or anything not an object is a no. */
+function versionOnlyChange(before: string, after: string): boolean {
+  try {
+    if (hasDuplicateKeys(before) || hasDuplicateKeys(after)) return false;
+    const a: unknown = JSON.parse(before);
+    const b: unknown = JSON.parse(after);
+    const plain = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
+    if (!plain(a) || !plain(b)) return false;
+    if (!Object.hasOwn(a, 'version') || typeof a.version !== 'string' || !Object.hasOwn(b, 'version') || typeof b.version !== 'string') return false;
+    const { version: _a, ...restA } = a;
+    const { version: _b, ...restB } = b;
+    return sameJson(restA, restB);
+  } catch {
+    return false; // not JSON, or nested past what the runtime parses
+  }
+}
+
+/** (#30) Does this changed file need no test record because it is repository metadata: a fixed
+ *  housekeeping name, an empty `.gitkeep`/`.keep`, or (with a `baseline` reader: the repo-
+ *  relative path's content at the session's start, null when unknown) a top-level
+ *  `package.json`/`.claude-plugin/plugin.json` that differs from it only in `version`?
+ *  Identity as the test-name trust: the spelled path is repo-relative, the real path is inside
+ *  the repo, both match the same rule, a link is judged by its target, a hard link is code, and
+ *  a file that cannot be inspected needs a test. A path that does not exist (a deleted file, or a
+ *  recorded path that is not the file the OS opened) has no exemption at all. Paths that match no
+ *  rule cost only the regexes. */
+export function isMetadataNoTest(abs: string, root: string, baseline?: (rel: string) => string | null): boolean {
+  const spelled = relativeInside(resolvePath(abs), resolvePath(root));
+  if (spelled === null) return false;
+  const manifest = baseline !== undefined && VERSION_ONLY_MANIFEST.test(spelled);
+  const placeholder = EMPTY_PLACEHOLDER.test(spelled);
+  const fixed = METADATA_NO_TEST_RECORD.some((re) => re.test(spelled));
+  if (!manifest && !placeholder && !fixed) return false;
+  const real = realRelative(abs, root);
+  if (real === null) return false;
+  // The rule the spelled and the real path both match.
+  const sameFixed = fixed && METADATA_NO_TEST_RECORD.some((re) => re.test(spelled) && re.test(real));
+  const samePlaceholder = placeholder && EMPTY_PLACEHOLDER.test(real);
+  const sameManifest = manifest && VERSION_ONLY_MANIFEST.test(real);
+  if (!sameFixed && !samePlaceholder && !sameManifest) return false;
+  try {
+    const st = statSync(abs); // a link: its target
+    if (!st.isFile() || st.nlink !== 1) return false;
+    if (sameFixed) return true;
+    if (samePlaceholder) return st.size === 0;
+    const read = readRegular(abs, MAX_MANIFEST_BYTES);
+    if (read === 'absent' || read === 'refused') return false;
+    const before = baseline!(real);
+    return before !== null && versionOnlyChange(before, read.text);
+  } catch {
+    return false; // could not be inspected
+  }
+}
+
 /** Layer 1: does this changed file need a test? Code does; test files, test runner configs
- *  (track L review), the testkit harness (#28), documents and static previews do not. A
- *  test-named link into code is code. */
-export function needsTests(abs: string, root: string, previewGlobs: readonly string[] = []): boolean {
+ *  (track L review), the testkit harness (#28), repository metadata (#30), documents and static
+ *  previews do not. A test-named link into code, or out of the repo, is code. `baseline` reads a
+ *  repo-relative path's content at the session's start (isMetadataNoTest); without it a
+ *  manifest is always code. */
+export function needsTests(abs: string, root: string, previewGlobs: readonly string[] = [], baseline?: (rel: string) => string | null): boolean {
   if (isTestkitHarness(abs, root)) return false;
   // Seen below the root only: a repo under a tests/ dir would make every file a test file.
-  const spelled = relativeInside(resolvePath(abs), resolvePath(root)) ?? slashes(abs);
+  const spelled = relativeInside(resolvePath(abs), resolvePath(root));
   const testTool = (p: string) => isTestFile(p) || TEST_RUNNER_CONFIG.test(p);
-  if (testTool(spelled)) {
+  if (spelled !== null && testTool(spelled)) {
     const real = realRelative(abs, root);
-    // A test name is trusted only for a file of its own: a symlink is judged by its target,
-    //   and a hard link may share its content with code.
-    let shared = false;
+    // A test name is trusted only for a file of its own inside the repo: a symlink is judged by
+    //   its target (one pointing out of the repo is no test), and a hard link may share its
+    //   content with code.
+    let shared = isDanglingLink(abs); // a link to nothing is no file of its own
     try {
-      shared = statSync(abs).nlink > 1;
+      shared = shared || statSync(abs).nlink > 1;
     } catch {
       // deleted: nothing to run
     }
-    if (!shared && (real === null || testTool(real))) return false;
+    if (!shared && real !== null && testTool(real)) return false;
   }
+  if (isMetadataNoTest(abs, root, baseline)) return false;
   return classifyFile(abs, root, previewGlobs) === 'code';
 }
 
