@@ -48,8 +48,12 @@ so work is released in batches:
 | v0.35.0 | track K (update checkups, §17; issue #10 for K1, the later steps are proposals), with the fixes of the fourth real-use trial (§15.12, §15.13) and of a Codex review (§15.14). Released 2026-10-21 (d3df5f2): v0.31.0–v0.35.0 went out together in one push to `main` |
 | v0.36.0 | track L (test backfill for existing projects, §18; #18), with the fixes of the fifth real-use trial (§18 "Trial 5") and of the field reports #20–#22 (§15.15, §15.16). Released 2026-10-22; track M moved to v0.37.0 |
 | v0.36.1 | the test-gate fixes of #23 (§15.17). Released 2026-10-22 |
+| v0.36.2 | the review gate judges net change and content (#26, §15.18). Released 2026-10-22 |
+| v0.36.3 | testkit harness files need no layer-1 test (#28, §15.19). Released 2026-10-26 |
+| v0.36.4 | repository metadata and version-only manifests need no test record (#30), `..` after a link is recorded as opened (#29), §15.20. Released 2026-10-26 |
+| v0.36.5–v0.36.19 | gate fixes from field reports and reviews, one release each (§15.21–§15.35; #25, #31–#42). Released 2026-10-26 to 2026-11-12. The 2026-10-26 proposal to ship N1–N8 (§20.3) as v0.36.5 did not happen: v0.36.5 shipped §15.21 instead |
 | v0.37.0 | track M (full tests in an isolated container sandbox: a real database copy, dummy external services, no egress; 100% line and branch coverage, every screen and action in e2e), §19 |
-| v0.38.0 | proposed: track N (§20, on `feat/m-sandbox` until M rebases), with a push judged by the test results gathered since the last push (§21, N24–N29, #43); its order against v0.37.0 is the user's decision |
+| v0.38.0 | proposed: track N (fewer repeated runs, a project test inventory, task criteria, §20.4–§20.6), with a push judged by the test results gathered since the last push (§21, N24–N29, #43); its order against v0.37.0 is the user's decision |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
 
 ## 4. A — Fix silent failures and deadlocks
@@ -4800,10 +4804,264 @@ As built:
 - Known limit: a sandbox script a model changed that still passes a run (say a coverage script
   that fakes its results) is caught only by the review.
 
+## 20. N — Fewer repeated runs, a project test inventory, task criteria (proposed, 2026-10-26)
+
+Status: proposed. The user asked for these to be planned (2026-10-26). What ships first and
+whether track N comes before or after track M (v0.37.0) is still the user's decision; the §3
+rows only reserve version numbers. N1, N2, N5, N7 and N11 repair existing rules or close
+detection gaps, and N18 (an eval set) and N21 (an audit) change no behavior by themselves.
+Every other item adds or changes gate, role or CLI behavior, so under the feature freeze (§2,
+principle 1) it needs the user's exception, as tracks G–L had; §2 does not list one for M or N
+yet.
+
+### 20.1 Sources
+- **Field report, 2026-10-26.** A Java/JSP/MyBatis web app ran goodboy 0.36.3. One requirement
+  took 20 agent runs (16 reviews and 4 test runs) and 26 gate blocks, and every block was
+  passed with evidence. The blocks were: skill rule 3, read-before-edit 1, test gate 3, review
+  gate 4, concurrency cap 3, role limit 3, result guard 7, R2 1 and Bash write 1. The test
+  gate blocked once for a CSS file without a ui/e2e suite, once for a record gone stale after a
+  file was edited again, and once for a record gone stale after a comment edit.
+- **The user's points on that report:**
+  1. Per-file freshness is too tight: one comment line forces a whole new test run.
+  2. Merge the `ui` test type into `e2e`.
+  3. What each review axis covers.
+  4. Test assets should be managed per project: before a push the whole project suite runs,
+     after a task only the tests that task needs.
+  5. Review the gaps the report lists.
+- **The user's questions, same day:**
+  - Are existing tests kept up to date, or rebuilt and flagged again each time?
+  - Are the documents written before a task used as the acceptance criteria (the answer key),
+    including for small tasks without dev-cycle?
+  - Is forcing a workflow skill for every code edit right?
+- **Codex, round 3 (2026-10-26)** reviewed points 1–5 against the code. Its positions are
+  marked "Codex" below.
+- **Article, "Building agents: when to fold subagents into your main agent loop"**
+  (claude.com, published 2026-10-22, read 2026-10-26). Keep a subagent only when one of three
+  holds:
+  - one loop degrades from context bloat;
+  - parallel tasks need fresh, discardable context;
+  - tool choice is hard or the instructions conflict.
+
+  Verification, parallel work and modular permissions suit subagents. Splitting by problem
+  type loses detail at every handoff ("telephone game"). Fold one subagent at a time, and keep
+  it only when a small end-to-end eval says the folded version is worse. Run each task more
+  than once. Tool choice degrades past 30–50 tool definitions.
+
+### 20.2 Answers to the review-axis and existing-test questions (no change needed to answer)
+- **Review axes:**
+
+  | Axis | Covers |
+  |---|---|
+  | hallucination | Claims in comments, docs and the rationale are checked against code and measurements, and assumptions are judged. Always runs |
+  | refactoring | `refactoring-quality`: duplication, cohesion, complexity, dead code, names |
+  | security | `security-secrets`, `security-injection`, `security-authz`, `dependency-risk`, `web-hardening`, `error-path`, `proto-pollution` |
+  | performance | Hot paths, with measurements |
+  | ui | `ui-ux-accessibility` (states, names, focus) and `plan-completeness` (what the requirements imply) |
+- **Existing tests:**
+  - Already in place:
+    - tests stay in the repo;
+    - the existing tests that load a changed file run with it (I5);
+    - a failing existing test is updated to the new behavior, never dropped or skipped;
+    - weakening a test needs a review finding.
+  - Missing:
+    - no rule says to extend the existing test of a target before adding a new file, so a
+      new test file per change is common;
+    - I5 finds JS/TS, Python and Go edges only, not Java or MyBatis (N11).
+- **Acceptance criteria:**
+  - With dev-cycle, criteria come from:
+    - UIUX.md: `UIUX-NEW-n`, `UIUX-CHG-n`, `UIUX-COMP-n`, `UIUX-STATE-n`;
+    - the prototype: `PT-STRUCT`, `PT-CTRL-*`, `PT-REGRESSION`;
+    - REQUIREMENTS.md rows in progress or newly implemented: `REQ-<rank>`.
+
+    With or without dev-cycle, the policy file's `test:` lines add `POL-*`.
+
+    Only the `REQ-*` rows and the policy `test:` lines are pinned at the session start
+    (`pinSessionCriteria`); `POL-*` counts only `test:` lines new or changed since then.
+    `UIUX-*` and `PT-*` are read from the current documents, and are pending, not blocking,
+    when the session started before the verification stage. Each criterion needs an acceptance
+    entry with red and green; `PT-*` and `UIUX-*` also need a mutation probe of a product file
+    (`requiresMutationProbe`), `REQ-*` do not.
+  - What is not checked:
+    - whether that test asserts what the document states, since only the id is matched (N16);
+    - criteria finer than a requirement row, since `REQ-<rank>` is one table row (N17).
+  - Without dev-cycle, only the policy `test:` lines (`POL-*`) can be pinned, and only when a
+    policy file has them. The workflow skills ask for the expected
+    behavior or scenario, but the answer stays in the conversation. The test agent numbers its
+    own `AC-n` entries, and no gate checks that the scenario is covered (N15).
+
+### 20.3 v0.36.5: quick fixes (proposed)
+- **N1, Codex second opinion.** The review run must pass `GOODBOY_CODEX_MODEL` every time,
+  preflight the model once per session and record a skip with its reason.
+  - Seen: every run fell back to `~/.codex/config.toml`, which pins a model the account cannot
+    use (HTTP 400).
+  - The local config itself is the user's to change.
+- **N2, push check pattern scan.** Scan only the lines the Stop scan uses (the session's added
+  lines, #23), and name the real pattern.
+  - Seen: the push check scanned whole test files, so an existing `test.todo` in a listed
+    existing test refused a record the Stop had accepted.
+  - The message said "always-true pattern" for a todo.
+- **N3, harness output cleanup.** The tests role may remove output only inside the testkit
+  harness's run dir `.testkit-run/` (marker as in §15.19), with containment and link checks.
+  No general `rm -rf`. Seen: 3 denies in the field report.
+  - M's removal rule (§19, `lib/role-limits.ts` on `feat/m-sandbox`) is not on `main`, so
+    v0.36.5 builds a small rule for `.testkit-run/` alone. M's general removal rule absorbs it
+    when M merges.
+- **N4, result reading.** Add a read-only `cli.ts results show|query` with bounded JSON
+  selection. Writes stay protected. Seen: 7 denies for reading result JSON with scripts.
+- **N5, server templates are UI.** `.jsp`, `.jspf` and the template dirs of server-side
+  rendering count as UI files for test types and review. Today `isFrontendFile` and `UI_EXT`
+  miss JSP.
+- **N6, review plan.**
+  - Up to 200 substantive changed lines: one reviewer for every axis. The 200 is today's
+    `SMALL_DIFF_LINES`, which counts every added and removed line; counting substantive lines
+    only is the new part.
+  - Larger or unknown: at most three assignments.
+    1. Evidence, refactoring and performance.
+    2. Security.
+    3. UI and requirements.
+  - A small delta: one reviewer, plus a security reviewer when the delta is
+    security-sensitive.
+  - Size against the session-start HEAD, not the current HEAD, so a mid-session commit does
+    not make the size unknown.
+  - Schedule against the free concurrency slots, including agents already running.
+  - Codex: test, SQL, template, style and config lines count as substantive; prose does not
+    inflate the split.
+- **N7, #31.** Use `openedPath` at every guard that judges a tool path: the result-write
+  gate, role write limits, the skill gate, the reasoning-gate document exemption, the hosts,
+  policy and state guards, and the knowledge re-read check.
+- **N8, one block lists everything.** A blocked Stop names every known unmet obligation at
+  once, with stable ids and the smallest rerun plan. Today the gates report one rule per
+  block in places, which is how one requirement reached 26 blocks.
+
+### 20.4 Track N part 1: tests (proposed)
+- **N9, project test inventory.** A committed `.goodboy/tests.json` lists the project's
+  suites. Each suite has: `id`, `type`, `capabilities`, `argv`, `cwd`, `inputs` (path
+  selectors), `testFiles`, `report` (adapter and format), `sandbox` (a named provision and
+  cleanup profile) and `timeout`.
+  - Created with the user's approval, since it names commands that run. Pinned at the session
+    start. Changes are reviewed like code, and removing a suite or narrowing a selector needs
+    approval before it takes effect.
+  - **Push:** goodboy runs every declared suite on the exact tree. A missing sandbox, a
+    timeout, no report, zero tests or all skipped means the regression is incomplete, not
+    passed. The over-one-hour shortcut does not apply to declared suites.
+  - **Stop:** run the changed tests, plus the suites whose `inputs` match the changed files,
+    plus the I5 affected tests. Unknown impact runs all plausible suites. A change to shared
+    build config, or to the inventory, runs everything. `inputs` never exempts a file.
+  - Without an inventory, auto-detection stays, reported as "detected suites", not as a
+    complete inventory. A malformed inventory fails; it does not fall back.
+  - Gaming: goodboy launches the commands itself and binds each structured report to its
+    suite, tree and run. A suite such as `true` produces no report and fails. A script that
+    fakes reports is caught only by review (known limit).
+  - In the field project this would put the node tests, the integration SQL scenario and the
+    testkit e2e flows into the push regression (today only `mvn test` runs).
+- **N10, existing tests first.** A test agent first looks for the target's existing tests:
+  the inventory's `testFiles`, naming conventions, I5. It extends them, and adds a new file
+  only when none fits. The record says which tests it extended or added.
+- **N11, Java and MyBatis edges for I5.** Match test classes by name and package (`FooTest`,
+  `FooIT`, `FooTests`), and mapper XML to its mapper interface and that interface's tests.
+- **N12, comment-only edits.** When the diff since an accepted record is comments and
+  whitespace only, by a lexer goodboy trusts for that language, goodboy re-runs the record's
+  suite commands itself (`cli.ts rerun`). It then writes a new record on the current tree,
+  with no agent and no new red/green.
+  - Any doubt about the lexer means the full procedure.
+  - Codex rejected comment-normalized freshness: comments can carry compiler, coverage and test
+    directives, and Java unicode escapes run before tokenizing. Re-running the suites on the
+    new content addresses that.
+  - Review freshness stays exact, since comments are reviewable claims.
+- **N13, review approvals per file × dimension × content** (with #27).
+  - Keep every approval whose file content is unchanged. Reopen only the changed files'
+    dimensions.
+  - Check each file's required dimensions against the reviews that cover that file, not the
+    union of all reviews.
+  - A classification error yields conservative obligations, not none.
+- **N14, test types.** Users see `unit`, `integration` and `e2e` only.
+  - UI evidence becomes a capability, `renders-ui`, with an environment (`jsdom` or
+    `browser`).
+  - CSS and layout need a browser environment.
+  - An e2e suite counts for a UI file only when it exercises that UI.
+  - This keeps component tests valid without forcing a full e2e for every UI change. Codex
+    chose this over a plain merge.
+
+### 20.5 Track N part 2: acceptance criteria (proposed)
+- **N15, a task answer key without dev-cycle.** The answers a workflow skill collects
+  (expected behavior, scenario, inputs and outputs) are pinned as `TASK-1..n` criteria, the
+  way `REQ-*` are pinned.
+  - Each needs an acceptance entry with red and green. The session cannot remove a criterion.
+  - A refactor's criterion is "behavior unchanged": the existing tests pass and the outputs
+    are the same.
+  - If N23 relaxes the skill rule, a lighter `criteria` step (a CLI call or a hook prompt)
+    pins them without a whole workflow skill.
+- **N16, criteria fidelity.** When criteria exist, the review checks that each acceptance
+  entry's test asserts the statement of its criterion, not only that the id is present. This
+  is a new dimension run with the spec review.
+- **N17, finer dev-cycle criteria.** The detail items of a requirement (behaviors and
+  exceptions listed in the planning document) become `REQ-<rank>.<n>`, so one test cannot
+  claim a whole requirement.
+
+### 20.6 Track N part 3: structure (proposed, from the article)
+- **N18, an eval set first.** Ten golden end-to-end tasks: a bug fix, a small feature, a UI
+  change, a doc change, a refactor and so on, in a scratch project. Measure gate passes,
+  blocks, agent runs, tokens and time, and run each task at least twice. Gate logs carry
+  timestamps, so real sessions can be replayed as targeted evals. Every change in this
+  section is judged by this set before and after.
+- **N19, fold the build roles.** The five build roles (backend, frontend, docs, data, infra)
+  split work by problem type, and their briefs and results cross the main session twice.
+  Fold them into the main loop as skills, one at a time. Keep a role only if N18 says the
+  folded version is worse.
+  - Keep as subagents: reviewers (verification), test agents (verification and the test-only
+    write limit), build-run (long, discardable runs) and research-web.
+- **N20, WebFetch out of forced delegation.** WebFetch already returns a small model's
+  answer, not the page. Forcing a subagent on top summarizes twice: the 2026-10-26 research
+  agent reported its quotes as clipped fragments. WebSearch, Grep and Glob stay delegated.
+- **N21, audit the per-turn hook text.** Check the UserPromptSubmit and SessionStart
+  additions (B2, R2, H5 and the others) for conflicts and duplication.
+  - B2 should ask only when a fact is really missing.
+  - On 2026-10-26 the user rejected option menus twice and asked for decisions settled from
+    evidence and an outside review.
+- **N22, catalog size.** 24 agents and 36 skills (37 with track M's `run-sandbox`) are listed
+  in every session, while the article puts the limit for good tool choice at 30–50
+  definitions. Trim after N19.
+- **N23, the workflow-skill rule.** Today a code edit in the main session needs a workflow
+  skill, or a recorded reason.
+  - Evidence: `~/.claude/goodboy/logs/skill-gaps.jsonl` holds 8 records of work no workflow
+    fit well (one names `add-feature` as fitting but heavier than the task, one an existing
+    skill of the user's). Five come from goodboy's own scratch probes and live checks (config
+    tuning, a one-line test cleanup, trivial files). Three are real work: a test-infra script and a task
+    run under the user's own `/testkit-init` skill, both in the field project, and a rebase
+    conflict in this repo. The field report had 3 skill-rule denies.
+  - The Stop gates already enforce what the skills lead to: tests, review, rationale and
+    criteria.
+  - The article: "limit hard preconditions, and move any needed ones into the tools".
+  - Proposal: the rule becomes advice, shown once per session, with the skills kept as
+    guides. The risk gate still holds risky commands (migrations, `rm -rf`, `--force`). N15
+    then pins task criteria without needing a skill.
+  - Decide with N18: run the eval set with the rule as a block and as advice, and compare
+    quality, blocks and time.
+
+### 20.7 Project setup advice (not goodboy changes)
+These come from the gaps the field report lists, with Codex's split.
+- **`.goodboy/policy.md` and `docs.json`:** create them (keep-project-knowledge). They are
+  needed to record exemptions and decisions; goodboy works without them.
+- **`.goodboy/hosts`:** list the production hosts, or declare none, so that R2 denies
+  instead of only advising. goodboy should show protection as "not configured" until then
+  (with N8).
+- **The testkit harness:** commit it, without dumps, certificates and run output as its
+  `.gitignore` says, so the e2e flows can run elsewhere, and declare it in the inventory (N9).
+- **31% line coverage of old code:** accept it for task gates and track it as debt. Raise it
+  with `/backfill-tests`.
+
+### 20.8 Order (proposed)
+The user decides this order. v0.36.5 is proposed to ship first, from `main`, since it fixes
+blocks seen in real use; where track N proper goes against M (v0.37.0) is open.
+1. v0.36.5: N1–N8.
+2. N18 (the eval set), so that N19–N23 are measured.
+3. N9–N14 (tests), then N15–N17 (criteria).
+4. N19–N23 (structure), each judged by N18.
+
 ## 21. Push by the test results gathered since the last push (proposed, 2026-11-12, #43)
 
 Status: proposed, planned at the user's request on 2026-11-12. §19 (track M) and §20 (track N)
-live on `feat/m-sandbox` until M rebases onto `main`; this section continues track N's numbering
+came from `feat/m-sandbox`, rebased onto this plan on 2026-11-13; this section continues track N's numbering
 (N24–N29). It changes the push check, so it waits for its place in the order like the rest of N.
 It also changes N9's push rule: the user's 2026-10-26 point "before a push the whole project suite
 runs" becomes "before a push every change is covered by the results gathered since the last push;
