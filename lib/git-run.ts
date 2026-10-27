@@ -33,6 +33,8 @@ export interface GitResult {
   /** The exit code; -1 when git did not run, was cut off or was killed. */
   code: number;
   out: string;
+  /** What git wrote to stderr (a caller that must tell "not a git repository" from other failures). */
+  err: string;
   raw: Buffer;
   /** Cut off at its time limit, or killed (a time limit, `maxBuffer`): the answer is unknown. */
   stalled: boolean;
@@ -61,6 +63,9 @@ export interface GitOptions {
   /** The caller needs the repo's clean filters (the work-tree hash of lib/push-test.ts must be
    *  the tree a commit stores). */
   keepFilters?: boolean;
+  /** git's messages in English (`LC_ALL=C`, `LANGUAGE` unset): a caller that tells a failure by its
+   *  text ("not a git repository", lib/start-pins.ts) must not read a translation (#33). */
+  cLocale?: boolean;
 }
 
 /** Environment a caller may set for git: where the index and the objects are, and which user
@@ -71,7 +76,7 @@ export interface GitOptions {
 const OPERATIONAL_ENV: ReadonlySet<string> = new Set(['GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM']);
 
 const DEFAULT_TIMEOUT_MS = 5_000;
-const NOT_RUN: GitResult = { code: -1, out: '', raw: Buffer.alloc(0), stalled: false, ran: false };
+const NOT_RUN: GitResult = { code: -1, out: '', err: '', raw: Buffer.alloc(0), stalled: false, ran: false };
 
 // ── Arguments ───────────────────────────────────────────────────────────────────────────────
 
@@ -256,9 +261,13 @@ export function spawnGit(cwd: string, args: readonly string[], opts: GitOptions 
   const env: Record<string, string> = { ...(process.env as Record<string, string>) };
   for (const [k, v] of Object.entries(opts.env ?? {})) if (OPERATIONAL_ENV.has(k)) env[k] = v;
   Object.assign(env, HOOK_GIT_ENV, NO_GRAFTS);
+  if (opts.cLocale) {
+    env.LC_ALL = 'C';
+    delete env.LANGUAGE;
+  }
 
   const bin = resolveGitBinary(env, cwd);
-  const overridden = Object.keys(opts.env ?? {}).length > 0 || opts.maxBuffer !== undefined || opts.honorReplace === true || opts.noMemo === true;
+  const overridden = Object.keys(opts.env ?? {}).length > 0 || opts.cLocale === true || opts.maxBuffer !== undefined || opts.honorReplace === true || opts.noMemo === true;
   // The kind is the subcommand's; the caller's global options (`-c core.quotePath=false`, `-C`) are
   //   part of the key below, so the same question asked with other options is another entry.
   const kept = snapshot !== null && !overridden ? memoCodes(args.slice(at), opts.input) : null;
@@ -279,7 +288,7 @@ export function spawnGit(cwd: string, args: readonly string[], opts: GitOptions 
       ...(opts.maxBuffer === undefined ? {} : { maxBuffer: opts.maxBuffer }),
     });
     const stalled = r.exitedDueToTimeout === true || (r.signalCode ?? null) !== null;
-    const result: GitResult = { code: r.exitCode ?? -1, out: r.stdout.toString(), raw: r.stdout, stalled, ran: true };
+    const result: GitResult = { code: r.exitCode ?? -1, out: r.stdout.toString(), err: r.stderr.toString(), raw: r.stdout, stalled, ran: true };
     if (kept !== null && !stalled && kept.includes(result.code)) snapshot?.results.set(key, result);
     return result;
   } catch {

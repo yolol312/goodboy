@@ -748,13 +748,17 @@ describe('exemptions', () => {
     pinCoverageStart(s, d);
     writeFileSync(join(d, '.goodboy', 'policy.md'), policy('hooks/**, src/**')); // added during the session
     expect(sessionCoverageStart(s, d, d)).toEqual({ exempt: ['hooks/**'], head });
-    // A resume keeps the start HEAD and takes the globs as they are then.
+    // A resume keeps the start HEAD and the grants of the first start: it may take a grant away (the
+    // intersection with the policy file now), never add one (#33 rule 6, v0.36.7: the old test here
+    // expected the resume to refresh the pin and so to take `src/**` in).
     writeFileSync(join(d, 'a.ts'), 'export const a = 2;\n');
     sh(d, "git commit -qam 'ABC-1 two'");
     pinCoverageStart(s, d);
-    expect(sessionCoverageStart(s, d, d)).toEqual({ exempt: ['hooks/**', 'src/**'], head });
-    writeFileSync(join(d, '.goodboy', 'policy.md'), policy('src/**')); // the user removed one
-    expect(sessionCoverageStart(s, d, d).exempt).toEqual(['src/**']);
+    expect(sessionCoverageStart(s, d, d)).toEqual({ exempt: ['hooks/**'], head });
+    writeFileSync(join(d, '.goodboy', 'policy.md'), policy('src/**')); // the user removed one and added another
+    expect(sessionCoverageStart(s, d, d).exempt).toEqual([]);
+    pinCoverageStart(s, d); // and a resume after that does not bring the added one in
+    expect(sessionCoverageStart(s, d, d).exempt).toEqual([]);
     // A pin of the wrong shape is no pin.
     writeFileSync(join(ensureSessionDir(s), 'coverage-pin.json'), JSON.stringify({ top: d, head: 5, exemptions: ['**'] }));
     expect(sessionCoverageStart(s, d, d).head).toBeUndefined();

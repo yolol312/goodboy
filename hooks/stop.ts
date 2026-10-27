@@ -25,7 +25,9 @@ import {
   diffCoverageMode,
   differFromBase,
   divergedFromStart,
+  incompleteStart,
   netChangedEdits,
+  noteSessionTop,
   repoTop,
   sessionCoverageStart,
   sessionUserGlobs,
@@ -33,7 +35,8 @@ import {
 } from '../lib/changed-coverage';
 import { changedLines } from '../lib/diff-coverage';
 import { beginGitSnapshot, withHashBatch } from '../lib/git-run';
-import { projectDir } from '../lib/project-dir';
+import { projectDir, resolvedAsProject } from '../lib/project-dir';
+import { nestedWorktreeStarts, sameStart, START_PIN_BUDGET_MS, startPinDeadline, type StartRef } from '../lib/start-pins';
 import { setRecordBase } from '../lib/record-paths';
 import { buildCopies } from '../lib/build-copies';
 import { isGeneratedLcov } from '../lib/lcov-report';
@@ -197,12 +200,14 @@ function acceptReview(sessionId: string, cwd: string): void {
 
 /** A blocking gate's output: the model is told that only the user can let it pass; after
  *  NOTICE_AFTER_BLOCKS blocks in a row the user sees how (marker or env switch). */
-function blockOutput(sessionId: string, cwd: string, reason: string, gate: string, envSwitch: string, count: number): HookOutput {
+function blockOutput(sessionId: string, cwd: string, reason: string, gate: string, envSwitch: string, count: number, ownText = false): HookOutput {
   const out: HookOutput = {
     decision: 'block',
-    reason:
-      `${reason} (block ${count}) This gate passes only on its evidence. If you cannot provide it, ` +
-      'tell the user what is missing and why; only the user can let this Stop pass.',
+    // `ownText`: the reason already says what can end the block (the start gates: no evidence can).
+    reason: ownText
+      ? `${reason} (block ${count})`
+      : `${reason} (block ${count}) This gate passes only on its evidence. If you cannot provide it, ` +
+        'tell the user what is missing and why; only the user can let this Stop pass.',
   };
   if (count >= NOTICE_AFTER_BLOCKS) {
     ensureApprovalDir(cwd);
@@ -239,6 +244,9 @@ const VALIDATION_COUNT_FILE = '.goodboy-validation-retry-count.txt';
 // (D) review validation and "no review at all". Until v0.25.0 this gate had no way out and
 //   deadlocked on ghost files (deleted probes and review artifacts); the user's marker is it now.
 const REVIEW_VALIDATE_COUNT_FILE = '.goodboy-review-validate-retry-count.txt';
+
+// (#33) the start gate: a checkout whose changes before its first sight are not known.
+const START_COUNT_FILE = '.goodboy-start-retry-count.txt';
 
 // (layer 1) the test gate, apart from the review counter.
 const TEST_COUNT_FILE = '.goodboy-test-retry-count.txt';
@@ -709,10 +717,86 @@ function warnAcceptanceProblem(sessionId: string, cwd: string, problem: Acceptan
   }
 }
 
+/** (#33) Why neither layer 1 nor the review can judge the edits against the session's start, or null.
+ *  The start of this checkout is unknown (a worktree whose history no rule relates to the start, a
+ *  session from before the start snapshot, a git error): nothing is judged against a guessed one and
+ *  nothing passes on it. And edits under a linked worktree nested in this checkout that the hooks do
+ *  not take as a project of its own (made mid-session, outside `.claude/worktrees`) are judged here
+ *  with this checkout's start: that stands only when it is the worktree's start too. A session with
+ *  no pin at all (SessionStart never ran) keeps the old behavior: the base checks are skipped. Any
+ *  error is a block. */
+function startProblem(sessionId: string, cwd: string, files: readonly string[]): string | null {
+  try {
+    const top = scopeOf(sessionId, cwd).top;
+    const start = sessionCoverageStart(sessionId, cwd, top);
+    if (start.unknown !== undefined) {
+      return (
+        `The session's start for ${top} is unknown (${start.unknown}), so the gates cannot tell which changes there are this session's. ` +
+        'No test result or review is accepted for changes judged against a guessed start, and none you could record changes that. ' +
+        'Start a new session inside that checkout so its start is pinned, or ask the user to let this Stop pass once with their Stop approval marker.'
+      );
+    }
+    if (start.head === undefined) return null;
+    const mine: StartRef = start.head === null ? { kind: 'empty' } : { kind: 'commit', head: start.head };
+    const odd = nestedWorktreeStarts(sessionId, top, files, (wt) => resolvedAsProject(wt, cwd, sessionId)).find((n) => !sameStart(n.start, mine));
+    if (odd === undefined) return null;
+    const of = (s: StartRef) => (s.kind === 'commit' ? s.head.slice(0, 12) : s.kind === 'empty' ? 'the empty tree' : `unknown (${s.reason})`);
+    return (
+      `Edits under ${odd.dir} are in a linked worktree nested in ${top} that was made after the session started and is not under .claude/worktrees: ` +
+      `this Stop judges them with ${top}'s start (${of(mine)}), but that worktree's start is ${of(odd.start)}. ` +
+      'Work in a worktree under .claude/worktrees or outside the project dir (the hooks take those as their own checkout), or start a ' +
+      'new session inside it, or ask the user to let this Stop pass once with their Stop approval marker.'
+    );
+  } catch (err) {
+    return `The session's start could not be determined (${String(err).slice(0, 160)}), so the changes cannot be judged against it. Start a new session in this checkout, or ask the user to let this Stop pass once with their Stop approval marker.`;
+  }
+}
+
+/** (#33) Why every full Stop judged in this checkout blocks whatever its edit list holds, or null: the
+ *  first sight of the checkout could not list what changed in it before a hook saw it (more files
+ *  than the cap, a git error, no HEAD in a repository that has history), so a change made by a
+ *  shell command or a commit is in no list. Only the user's marker passes it, once per Stop; the
+ *  stop_hook_active Stop ends the turn unverified with a warning (`unresolvedBaseline`). An error is
+ *  a block, as in `startProblem`. */
+function incompleteStartProblem(sessionId: string, cwd: string): string | null {
+  const text = (where: string, why: string) =>
+    `What changed in ${where} before the session's hooks first saw it could not be established (${why}), so no list of this session's ` +
+    'changes there can be trusted, and every full Stop in it is blocked, whether or not you edited anything. No test result or review changes that. ' +
+    'Start a new session inside that checkout so its start is pinned, or ask the user to let this Stop pass once with their Stop approval marker.';
+  try {
+    const top = scopeOf(sessionId, cwd).top;
+    const why = incompleteStart(sessionId, top);
+    return why === null ? null : text(top, why);
+  } catch (err) {
+    return text(cwd, `it could not be read: ${String(err).slice(0, 160)}`);
+  }
+}
+
+/** (#33, round 10) Why the stop_hook_active Stop cannot accept verification, or null: the start of the
+ *  checkout is unresolved, by the incomplete-start rule (every full Stop) or by the start rule (when
+ *  edits are pending for the test or the review gate). The start rule is judged on the pending paths,
+ *  the ones the full Stop would judge: a superset (the raw edit paths) could flag a nested worktree
+ *  whose files are not pending. */
+function unresolvedBaseline(sessionId: string, cwd: string): string | null {
+  const incomplete = incompleteStartProblem(sessionId, cwd);
+  if (incomplete !== null) return incomplete;
+  let pending: string[];
+  try {
+    pending = [
+      ...testEditsSince(sessionId, cwd, readTestCursor(cwd, sessionId)?.turn ?? 0),
+      ...reviewEditsSince(sessionId, cwd, readReviewCursor(cwd, sessionId)?.turn ?? 0).map((e) => e.file),
+    ];
+  } catch {
+    return null; // the accepts below judge it, and they refuse an unknown start
+  }
+  return pending.length === 0 ? null : startProblem(sessionId, cwd, pending);
+}
+
 type TestEvaluation =
   | { kind: 'accept' }
   | { kind: 'accept-unverified'; blocked: TestResult }
-  | { kind: 'block'; reason: string };
+  /** `start`: the reason is the start gate's own (no evidence ends it). */
+  | { kind: 'block'; reason: string; start?: true };
 
 /**
  * The one layer-1 decision, shared by the gate and the stop_hook_active accept so the two
@@ -727,6 +811,9 @@ function evaluateTestResults(
   cwd: string,
   sessionId: string,
 ): TestEvaluation {
+  // (#33) No start, no verdict: the rules below all compare with it.
+  const startIssue = startProblem(sessionId, cwd, changedEdits.map((e) => e.file));
+  if (startIssue !== null) return { kind: 'block', reason: startIssue, start: true };
   // (#23) Every rule runs and the block names all their gaps at once: stopping at the first one
   //   made each fix uncover the next, one Stop each. A rule that throws ends the evaluation:
   //   the reasons found before it still block; with none, the gate fails open as before.
@@ -829,7 +916,7 @@ function runTestRules(
   //   have no product code yet, and only a test of product code proves one. They are listed,
   //   not blocking; the requirement rows and policy entries still block. The stage at the
   //   session's start counts too, so setting it back mid-session relaxes nothing.
-  const uiPending = acceptance.uiPending === true && startedBeforeVerification(sessionId);
+  const uiPending = acceptance.uiPending === true && startedBeforeVerification(sessionId, top);
   const pendingUi = uiPending ? uncoveredCriteria(ran, acceptance.criteria) : [];
   if (pendingUi.length > 0) {
     logGate(sessionId, 'test', 'warn', `ui-pending(${pendingUi.length})`);
@@ -1235,7 +1322,9 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
     const testsDir = resolvePath(cwd, '.claude', 'tests');
     const results = findRecentTestFiles(testsDir, testWindowMinutes());
 
-    const block = (reason: string): HookOutput | null => {
+    // `start`: the start gate's block (#33). It counts, so the user's marker notice appears, but it
+    //   carries no "record a blocked result" advice: no record, blocked or not, is accepted there.
+    const block = (reason: string, start = false): HookOutput | null => {
       // The user's override (track G) passes as the old escape did: cursor moves, counter resets.
       if (userPass(sessionId, cwd, 'test')) {
         acceptTests(sessionId, cwd);
@@ -1246,6 +1335,7 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
       // 자르지 않는다 — gate-log가 자체 상한(300자)으로 다듬는다. 80자로 잘랐더니
       //   라이브 로그에서 어떤 파일이 문제인지 보이지 않았다(경로가 `/pr` 에서 끊김).
       logGate(sessionId, 'test', 'deny', reason);
+      if (start) return blockOutput(sessionId, cwd, reason, 'test', 'GOODBOY_TEST_GATE=off', count, true);
       return blockOutput(
         sessionId,
         cwd,
@@ -1257,6 +1347,8 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
       );
     };
 
+    const startIssue = startProblem(sessionId, cwd, recentEdits);
+    if (startIssue !== null) return block(startIssue, true);
     if (results.length === 0) {
       const preview = recentEdits.slice(0, 5).join(', ');
       const more = recentEdits.length > 5 ? ` and ${recentEdits.length - 5} more` : '';
@@ -1269,7 +1361,7 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
     //   문서도 같은 이유로 뺀다(라이브 실측: README.md 등 5개를 요구했다).
     const changedEdits = testChangedEdits(sessionId, cwd, cursorTurn, results);
     const ev = evaluateTestResults(results, changedEdits, acceptance, cwd, sessionId);
-    if (ev.kind === 'block') return block(ev.reason);
+    if (ev.kind === 'block') return block(ev.reason, ev.start === true);
     if (ev.kind === 'accept-unverified') {
       acceptBlockedTests(sessionId, cwd, ev.blocked, 'blocked');
       return null;
@@ -1471,6 +1563,7 @@ function tryAcceptPendingReview(
     const netEdits = reviewEditsSince(sessionId, cwd, cursorTurn);
     const recentEdits = netEdits.map((e) => e.file);
     if (recentEdits.length === 0) return null;
+    if (startProblem(sessionId, cwd, recentEdits) !== null) return null; // (#33)
     const reviewsDir = resolvePath(cwd, '.claude', 'reviews');
     const reviews = findRecentReviewFiles(reviewsDir, reviewWindowMinutes());
     if (reviews.length === 0) return null;
@@ -1538,6 +1631,8 @@ function main(): void {
       //   (object reads by full id, the repo top, the filter list) are asked once
       //   (lib/git-run.ts). The process ends with the Stop.
       beginGitSnapshot();
+      // (#33) One deadline for the start-pin git calls of this Stop (lib/start-pins.ts).
+      startPinDeadline(START_PIN_BUDGET_MS.stop);
       const sessionId = input.session_id ?? 'unknown';
       snapshotSessionId = sessionId;
       frictionCwd = cwd;
@@ -1575,6 +1670,15 @@ function main(): void {
         }
       } catch {
         // best-effort
+      }
+
+      // (#33) A checkout the session did not start in is pinned the first time a hook sees it, before any
+      //   gate reads the edit log: the changes already in it are recorded as the session's own now
+      //   (lib/start-pins.ts). After the state guard's restore above.
+      try {
+        noteSessionTop(sessionId, cwd);
+      } catch (err) {
+        hookError(sessionId, 'stop', 'start pin error', err);
       }
 
       // (A0.5, v0.27.5) 리뷰 파일 위생 — 실사용 보고: .claude/reviews/*.json이 무한정
@@ -1661,6 +1765,25 @@ function main(): void {
           }
         } catch {
           // fail-open
+        }
+        // (#33, round 10) A start that is unresolved leaves nothing to accept against: no test result,
+        //   no review, no docs step runs here, so every pending flag, obligation and cursor stays, and
+        //   the next full Stop blocks again. The turn may end (loop prevention, as for every gate), but
+        //   not silently: the user is told it ended unverified, and the log says so.
+        try {
+          const unresolved = unresolvedBaseline(sessionId, cwd);
+          if (unresolved !== null) {
+            logGate(sessionId, 'start', 'warn', `unverified-on-stop-active: ${unresolved}`);
+            emit({
+              systemMessage:
+                `[goodboy] 이 세션의 시작 지점을 확인하지 못해(${scopeOf(sessionId, cwd).top}) 이 턴은 검증 없이 끝났습니다. ` +
+                '테스트 결과와 리뷰는 수락되지 않았고 대기 중인 항목은 그대로 남아 있어, 다음 Stop에서 다시 차단됩니다. ' +
+                '해당 체크아웃에서 새 세션을 시작하거나, 한 번만 통과시키려면 승인 마커를 만드세요.',
+            });
+            return;
+          }
+        } catch {
+          // fail-open: a warning only; the accepts below refuse an unknown start themselves
         }
         // 층1도 같은 이유로 여기서 수락을 시도한다 — 표준 경로("차단 → 테스트 실행 →
         //   턴 종료")의 종료가 항상 stop_hook_active라, 여기서 수락하지 않으면 결과가
@@ -1874,6 +1997,24 @@ function main(): void {
         return;
       }
 
+      // (B5.9) (#33) A checkout whose first sight could not list what changed in it blocks every full
+      //   Stop, whatever its edit list holds: a shell edit or a commit made before the hooks saw it is
+      //   in no list. Counted like the other gates, so the user's marker notice appears; only that
+      //   marker passes it, and then this Stop's later gates pass with it. (The stop_hook_active Stop
+      //   accepts nothing there and ends the turn unverified with a warning, above.)
+      const incompleteReason = incompleteStartProblem(sessionId, cwd);
+      if (incompleteReason !== null) {
+        if (!userPass(sessionId, cwd, 'start')) {
+          const count = readRetryCount(sessionId, START_COUNT_FILE) + 1;
+          writeRetryCount(sessionId, count, START_COUNT_FILE);
+          logGate(sessionId, 'start', 'deny', 'start-incomplete');
+          emit(blockOutput(sessionId, cwd, incompleteReason, 'start', '', count, true));
+          return;
+        }
+      } else {
+        resetRetryCount(sessionId, START_COUNT_FILE);
+      }
+
       // (B6) 층1 — 테스트 게이트. 리뷰보다 **먼저** 동작을 검증한다.
       //   리뷰(리팩토링·성능·보안)는 "동작은 맞다"를 전제로 하는 검토라, 테스트가
       //   통과하지 않은 코드를 리뷰하는 것은 순서가 뒤집힌 것이다.
@@ -1914,6 +2055,22 @@ function main(): void {
         return;
       }
       statusSnapshot.reviewPending = true;
+
+      // (#33) A review of changes judged against an unknown or an ambiguous start is no acceptance.
+      const startIssue = startProblem(sessionId, cwd, recentEdits);
+      if (startIssue !== null) {
+        if (userPass(sessionId, cwd, 'review')) {
+          acceptReview(sessionId, cwd);
+          statusSnapshot.reviewPending = false;
+          emit({});
+          return;
+        }
+        const count = readRetryCount(sessionId, REVIEW_VALIDATE_COUNT_FILE) + 1;
+        writeRetryCount(sessionId, count, REVIEW_VALIDATE_COUNT_FILE);
+        logGate(sessionId, 'review', 'deny', 'start-unknown');
+        emit(blockOutput(sessionId, cwd, startIssue, 'review', '', count, true));
+        return;
+      }
 
       // (D) 리뷰 검사 — 30분 유효창 내 모든 리뷰 파일(v0.26.5: 리뷰 누적 인정).
       //   최신 1개만 보면 부분 리뷰 2개가 서로를 무효화하는 두더지잡기가 된다(실측).

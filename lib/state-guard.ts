@@ -1,6 +1,6 @@
 // Gate state guard (track G security review): the Stop gates read state from the session dir
 // in $TMPDIR (edit log, review/test cursors, dispatch log, skill evidence, validation
-// failure, the commit issue, project mode, coverage and criteria pins, the criteria a Stop
+// failure, the commit issue, project mode, coverage and criteria pins, the per-checkout start pins, the criteria a Stop
 // required, the weakened tests a review judged), outside the project, where the Bash write gate allows writes. One
 // `rm "$TMPDIR"/goodboy-session-*/edits.jsonl` would end a turn with neither tests nor review.
 //
@@ -19,7 +19,7 @@ import { segmentChanging } from './outward-command';
 import { safeToolUseId } from './approval-marker';
 import { MAX_STATE_BYTES } from './safe-read';
 
-const GUARDED = /^(?:edits\.jsonl|dispatch-log\.jsonl|skill-evidence\.jsonl|commit-issue-pins\.json|marker-evidence\.jsonl|project-mode-pin\.json|coverage-pin\.json|criteria-pin\.json|criteria-seen\.json|judged-weakened\.json|worktrees\.txt|\.goodboy-last-(?:review|test)-[0-9a-f]+\.json|\.goodboy-validation-failed\.json)$/;
+const GUARDED = /^(?:edits\.jsonl|dispatch-log\.jsonl|skill-evidence\.jsonl|commit-issue-pins\.json|marker-evidence\.jsonl|project-mode-pin\.json|coverage-pin\.json|criteria-pin\.json|criteria-seen\.json|judged-weakened\.json|worktrees\.txt|start-tips\.json|(?:start-pin|criteria-pin|criteria-seen)-[0-9a-f]{16}\.json|\.goodboy-last-(?:review|test)-[0-9a-f]+\.json|\.goodboy-validation-failed\.json)$/;
 const CURSOR = /^\.goodboy-last-(?:review|test)-[0-9a-f]+\.json$/;
 /** Evidence logs: a line added during a model Bash call would be forged evidence (a skill run,
  *  the user's non-project answer), so these keep only their old lines, and one the call
@@ -31,8 +31,10 @@ const EVIDENCE = /^(?:skill-evidence|marker-evidence)\.jsonl$/;
  *  tests a review judged): one a Bash call created would set the session's start or criteria
  *  (I2 security review round 2: a crafted seen list failed the gate open). The worktree pin
  *  (#21) too: a line a Bash call added would make a worktree the model created mid-session
- *  its own project and narrow the gates' scope. */
-const HOOK_ONLY = /^(?:(?:project-mode-pin|coverage-pin|criteria-pin|criteria-seen|judged-weakened)\.json|worktrees\.txt)$/;
+ *  its own project and narrow the gates' scope. The start pins of v0.36.7 (#33: the frozen ref tips,
+ *  one start pin and one criteria baseline per checkout, the criteria a Stop required there) are
+ *  the same kind: a forged one would set a checkout's start. */
+const HOOK_ONLY = /^(?:(?:project-mode-pin|coverage-pin|criteria-pin|criteria-seen|judged-weakened)\.json|worktrees\.txt|start-tips\.json|(?:start-pin|criteria-pin|criteria-seen)-[0-9a-f]{16}\.json)$/;
 
 function keptEvidenceLine(name: string, line: string): boolean {
   if (name !== 'skill-evidence.jsonl') return false;

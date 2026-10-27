@@ -16,7 +16,8 @@
 // repo's policy file. SessionStart pins them with the HEAD the session started from (like the
 // project mode, lib/project-mode.ts; the state guard restores the pin after a Bash call): a
 // glob added during the session counts from the next one, so whatever writes it, the model
-// cannot exempt its own change. PreToolUse also denies an Edit/Write that adds one, as an early
+// cannot exempt its own change. The start is per checkout (#33, lib/start-pins.ts): the pin is the
+// first checkout's, and a linked worktree has a start of its own, never the first one's. PreToolUse also denies an Edit/Write that adds one, as an early
 // explanation. A record measured against a base other than the start HEAD would hide the
 // changes made since, so for a file it counts only where the file is the same at that base and
 // at the start (R2, v0.36.6); a session that started with no commit counts a base where the file
@@ -25,12 +26,14 @@
 
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
-import { ensureSessionDir } from './file-tracker';
+import { ensureSessionDir, getEditHistory } from './file-tracker';
 import { currentHashBatch, spawnGit } from './git-run';
 import { knowledgeRoot, parsePolicyEntries, POLICY_FILE } from './project-knowledge';
 import { hasSpelling, sameFileSpelling } from './path-spelling';
+import { realDeep } from './private-files';
 import { recordPath } from './record-paths';
 import { readRegular } from './safe-read';
+import { commonDirOf, hasStartPin, nearestGitTop, sessionStartRan, takeStartSnapshot, topIdentity, topStart } from './start-pins';
 import { freshFor, stripLiteralsAndComments } from './test-validator';
 import type { ChangedFileEdit } from './review-validator';
 import { isTrustedTimestamp } from './trusted-time';
@@ -171,6 +174,11 @@ export function repoTop(cwd: string): string {
 
 interface CoveragePin {
   top: string;
+  /** The first top's identity (lib/start-pins.ts topIdentity key: the top and its git dir). A repo
+   *  recreated at `top` has another one: it keeps the original start only under the continuity rule
+   *  of lib/start-pins.ts (#33). Absent in a pin from before v0.36.7, and for a first top outside a
+   *  repo: those match by path. */
+  identity?: string;
   /** HEAD when the session started; null: no commit, or no repo; absent: git could not say. */
   head?: string | null;
   exemptions: string[];
@@ -200,40 +208,140 @@ function startHeadNow(top: string): string | null | undefined {
   return dir.code === 0 || dir.code === 128 ? null : undefined;
 }
 
-/** SessionStart (startup, resume, clear): the exemptions as they are now, and the HEAD the
- *  session started from (kept from the first start, so a resume does not move it past commits
- *  made earlier in the session). */
+/** Whether `top` is the checkout `pin` was made for: the same path and, when the pin recorded the
+ *  checkout's identity, the same git dir. A repo recreated at the path, or one git cannot name, is
+ *  not: its start comes from lib/start-pins.ts, which keeps the original start only when continuity
+ *  holds (the same repository, the start commit readable) and otherwise has none (#33, round 10). */
+function isPinTop(pin: CoveragePin, top: string): boolean {
+  if (pin.top !== top) return false;
+  if (pin.identity === undefined) return true;
+  const who = topIdentity(top);
+  return who.unknown === undefined && who.key === pin.identity;
+}
+
+/** SessionStart (startup, resume, clear): the exemptions and the HEAD the session starts from,
+ *  pinned once. A later start (a resume, a compact) keeps the pin and may only take grants away:
+ *  the exemptions and globs it keeps are those it had that the policy file still has, never one the
+ *  file gained since, so nothing the model writes mid-session is granted by a restart (#33 rule 6).
+ *  The HEAD is kept too, so a resume does not move it past commits made earlier in the session. A
+ *  resume from another top leaves the pin as it is: the start and the exemptions belong to the
+ *  checkout the session started in. A pin that is missing while SessionStart evidently ran (its
+ *  tip snapshot or a start pin is there) is not made again: it stays missing, which is unknown.
+ *  The session's first start also freezes the ref tips and pins the worktrees that exist
+ *  (lib/start-pins.ts). */
 export function pinCoverageStart(sessionId: string, cwd: string): void {
   try {
     const top = repoTop(cwd);
     const old = readPin(sessionId);
-    const head = old && old.top === top && old.head !== undefined ? old.head : startHeadNow(top);
+    if (old && !isPinTop(old, top)) return;
+    if (!old && sessionStartRan(sessionId)) return;
+    const head = old && old.head !== undefined ? old.head : startHeadNow(top);
+    const who = old ? null : topIdentity(top);
+    const identity = old ? old.identity : who!.unknown === undefined && who!.id !== 'nogit' ? who!.key : undefined;
+    const exemptions = coverageExemptions(cwd, top);
+    const globs = Object.fromEntries(
+      USER_GLOB_KEYS.filter((k) => k !== 'coverage-exempt').map((k) => {
+        const current = policyGlobs(cwd, top, k);
+        return [k, old ? (old.globs?.[k] ?? []).filter((g) => current.includes(g)) : current];
+      }),
+    );
     const pin: CoveragePin = {
       top,
+      ...(identity !== undefined ? { identity } : {}),
       ...(head !== undefined ? { head } : {}),
-      exemptions: coverageExemptions(cwd, top),
-      globs: Object.fromEntries(USER_GLOB_KEYS.filter((k) => k !== 'coverage-exempt').map((k) => [k, policyGlobs(cwd, top, k)])),
+      exemptions: old ? old.exemptions.filter((g) => exemptions.includes(g)) : exemptions,
+      globs,
     };
     writeFileSync(join(ensureSessionDir(sessionId), PIN_FILE), JSON.stringify(pin), 'utf8');
+    if (!old) takeStartSnapshot(sessionId, top);
   } catch {
     // best-effort: without a pin, the policy file counts only when older than the session
   }
 }
 
+/** A start the gates cannot use: `unknown` says why (never a missing `head` read as "no check"). */
+export interface CoverageStart {
+  exempt: string[];
+  /** The start commit; null: no commit then; absent: no pin at all (a session that never ran
+   *  SessionStart: the checks that need a base are skipped, as before), or `unknown` is set. */
+  head?: string | null;
+  /** Why the start of this top is unknown: the layer-1 and review gates refuse it (#33). */
+  unknown?: string;
+  /** With `unknown`: what changed in this top before a hook first saw it is not known either, so
+   *  every full Stop judged in it blocks, whatever its edit list holds (hooks/stop.ts); a
+   *  stop_hook_active Stop accepts nothing there and ends the turn unverified with a warning. */
+  incomplete?: boolean;
+}
+
 /** What the gate may use this session: the exemptions pinned at its start that the policy
  *  file still has (without a pin: the file's, when it is older than the session dir), and the
- *  start HEAD (undefined: unknown, no base check). A pin for another top (a repo made during
- *  the session, a linked worktree) exempts nothing (its globs meant other paths) and keeps its
- *  HEAD only when that commit is in this repo; otherwise only the empty tree counts. */
-export function sessionCoverageStart(sessionId: string, cwd: string, top: string): { exempt: string[]; head?: string | null } {
+ *  start HEAD of this top. The pin is for the checkout the session started in; any other top
+ *  (a linked worktree, a repo made later, the first top made again at its path) has its start
+ *  from lib/start-pins.ts, pinned per top (#33): its own, or the original one when the checkout
+ *  was made again there (round 10). It exempts nothing (its globs meant other paths). A pin with
+ *  no HEAD, a top whose start no rule can establish, and a missing pin in a session whose
+ *  SessionStart ran (the pin was lost or removed: the other start files show it) are unknown,
+ *  never "no base". With no pin and no sign of a SessionStart the checks that need a base are
+ *  skipped, as before (a plugin installed mid-session, a test). */
+export function sessionCoverageStart(sessionId: string, cwd: string, top: string): CoverageStart {
   const pin = readPin(sessionId);
   const exempt = sessionUserGlobs(sessionId, cwd, top, 'coverage-exempt', pin);
-  if (pin && pin.top === top) return { exempt, ...(pin.head !== undefined ? { head: pin.head } : {}) };
-  if (pin) {
-    const known = typeof pin.head === 'string' && git(top, ['cat-file', '-e', '--end-of-options', `${pin.head}^{commit}`]).code === 0;
-    return { exempt, head: known ? pin.head! : null };
+  if (pin && isPinTop(pin, top)) {
+    return pin.head !== undefined ? { exempt, head: pin.head } : { exempt, unknown: 'git could not resolve HEAD when the session started' };
   }
+  if (pin) {
+    const s = topStart(sessionId, top);
+    if (s.kind === 'unknown') return { exempt, unknown: s.reason, ...(s.incomplete ? { incomplete: true } : {}) };
+    return s.kind === 'commit' ? { exempt, head: s.head } : { exempt, head: null };
+  }
+  if (sessionStartRan(sessionId)) return { exempt, unknown: 'the session\'s coverage pin is missing or unreadable although its SessionStart ran, so what it started from is not known' };
   return { exempt };
+}
+
+/** Why `top` is a checkout whose changes before its first sight are not known (its start is unknown
+ *  and marked incomplete), or null. Only for a top other than the session's first. */
+export function incompleteStart(sessionId: string, top: string): string | null {
+  const pin = readPin(sessionId);
+  if (!pin || isPinTop(pin, top)) return null;
+  const s = topStart(sessionId, top);
+  return s.kind === 'unknown' && s.incomplete === true ? s.reason : null;
+}
+
+/** Whether the session's edit log holds a file inside `dir` (in either spelling of the path). `history` is
+ *  the log's reader (a seam for the test of the branch that cannot read it). */
+export function editedInside(sessionId: string, dir: string, history: typeof getEditHistory = getEditHistory): boolean {
+  const roots = [...new Set([resolvePath(dir), realDeep(dir)])].map((d) => d + sep);
+  try {
+    return history(sessionId).files.some((f) => roots.some((r) => f.startsWith(r)));
+  } catch {
+    return true; // the log cannot be read: no proof of a pass-through
+  }
+}
+
+/** A hook saw `cwd`: a checkout that is not the session's first is pinned now if it is new to the
+ *  session (lib/start-pins.ts), so the changes already in it count from here. No git call unless
+ *  that is needed: the first top and a top with a start pin are recognized from the files alone
+ *  (PostToolUse runs this on every tool call), and so is a checkout whose common git dir, read from
+ *  its files, differs from the first top's and that the session has recorded no edit in: another
+ *  repository that a read or a command passed through is no part of the session's work (a Stop that
+ *  judges it still resolves its start). A repository the session works in (made inside the project, a
+ *  worktree) has an edit there, so its first sight is the first hook that records one. A `.git` that
+ *  cannot be read proves nothing, so discovery goes ahead. */
+export function noteSessionTop(sessionId: string, cwd: string): void {
+  const pin = readPin(sessionId);
+  if (!pin) return;
+  const near = nearestGitTop(cwd);
+  if (near === null) return; // no `.git` above: no repo to pin (a Stop pins one when it judges it)
+  const who = topIdentity(near);
+  if (who.unknown === undefined) {
+    if ((near === pin.top || realDeep(near) === realDeep(pin.top)) && (pin.identity === undefined || pin.identity === who.key)) return;
+    if (hasStartPin(sessionId, who)) return;
+    const theirs = commonDirOf(near);
+    const first = commonDirOf(pin.top);
+    if (theirs !== null && first !== null && theirs !== first && !editedInside(sessionId, near)) return;
+  }
+  const top = repoTop(cwd);
+  if (!isPinTop(pin, top)) topStart(sessionId, top);
 }
 
 /** A user glob key's globs this session may use: those pinned at its start that the policy
@@ -242,11 +350,11 @@ export function sessionCoverageStart(sessionId: string, cwd: string, top: string
 export function sessionUserGlobs(sessionId: string, cwd: string, top: string, key: UserGlobKey, pin: CoveragePin | null = readPin(sessionId)): string[] {
   const current = policyGlobs(cwd, top, key);
   if (pin) {
-    if (pin.top !== top) return [];
+    if (!isPinTop(pin, top)) return [];
     const pinned = key === 'coverage-exempt' ? pin.exemptions : (pin.globs?.[key] ?? []);
     return current.filter((g) => pinned.includes(g));
   }
-  if (current.length === 0) return [];
+  if (current.length === 0 || sessionStartRan(sessionId)) return []; // a lost pin grants nothing
   try {
     const born = statSync(ensureSessionDir(sessionId)).birthtimeMs;
     const changed = statSync(join(knowledgeRoot(cwd).root, POLICY_FILE)).mtimeMs;
@@ -427,22 +535,37 @@ function treeBlobs(top: string, tree: string, rels: string[], left?: () => numbe
   return out;
 }
 
-/** (#30) A file's content at a commit (a blob, as stored: no filters), or null when the commit
- *  or the path is unknown, the path is no regular file (a symlink 120000 or a gitlink is no
- *  baseline), the blob is over `maxBytes`, or git fails. Three short git calls: the mode first,
- *  then the size, so a huge blob is never read. `left`: the time left of a shared deadline (null
- *  when it runs out). */
-export function blobAtCommit(top: string, commit: string, rel: string, maxBytes: number, left?: () => number): string | null {
-  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(commit) || rel === '' || rel.includes('\n')) return null;
+/** What `blobAtCommitResult` found: the text, or why there is none. `absent`: the commit has no entry
+ *  at the path; `refused`: an entry that is no regular file (a symlink 120000, a gitlink, a tree) or
+ *  a blob over the size limit; `error`: the commit is malformed or unknown, or git failed or ran out
+ *  of time (the answer is not known). */
+export type BlobAtCommit = { kind: 'text'; text: string } | { kind: 'absent' } | { kind: 'refused' } | { kind: 'error' };
+
+/** (#30) A file's content at a commit (a blob, as stored: no filters), told apart by why there is
+ *  none: see `BlobAtCommit`. Three short git calls: the mode first, then the size, so a huge blob is
+ *  never read. `left`: the time left of a shared deadline (`error` when it runs out). */
+export function blobAtCommitResult(top: string, commit: string, rel: string, maxBytes: number, left?: () => number): BlobAtCommit {
+  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(commit) || rel === '' || rel.includes('\n')) return { kind: 'error' };
   const entry = git(top, ['ls-tree', '-z', '--end-of-options', commit, '--', rel], undefined, 5_000, left);
+  if (entry.code !== 0) return { kind: 'error' };
+  if (entry.out === '') return { kind: 'absent' };
   // Exactly one entry, `<mode> blob <id>\t<rel>\0`, of a regular file.
   const tab = entry.out.indexOf('\t');
-  if (entry.code !== 0 || tab < 0 || entry.out.slice(tab + 1) !== `${rel}\0` || !/^(?:100644|100755) blob [0-9a-f]+$/.test(entry.out.slice(0, tab))) return null;
+  if (tab < 0 || entry.out.slice(tab + 1) !== `${rel}\0` || !/^(?:100644|100755) blob [0-9a-f]+$/.test(entry.out.slice(0, tab))) return { kind: 'refused' };
   const spec = `${commit}:${rel}`;
   const size = git(top, ['cat-file', '-s', '--end-of-options', spec], undefined, 5_000, left);
-  if (size.code !== 0 || !/^\d+$/.test(size.out.trim()) || Number(size.out.trim()) > maxBytes) return null;
+  if (size.code !== 0 || !/^\d+$/.test(size.out.trim())) return { kind: 'error' };
+  if (Number(size.out.trim()) > maxBytes) return { kind: 'refused' };
   const blob = git(top, ['cat-file', 'blob', '--end-of-options', spec], undefined, 5_000, left);
-  return blob.code === 0 ? blob.out : null;
+  return blob.code === 0 ? { kind: 'text', text: blob.out } : { kind: 'error' };
+}
+
+/** (#30) A file's content at a commit, or null when the commit or the path is unknown, the path is
+ *  no regular file (a symlink 120000 or a gitlink is no baseline), the blob is over `maxBytes`, or
+ *  git fails. */
+export function blobAtCommit(top: string, commit: string, rel: string, maxBytes: number, left?: () => number): string | null {
+  const r = blobAtCommitResult(top, commit, rel, maxBytes, left);
+  return r.kind === 'text' ? r.text : null;
 }
 
 /** The repo-relative path (with `/`) of a file inside `top`, or null. */

@@ -5,8 +5,9 @@
 // file contents read or edited before it left the context. In a project it also sends the
 // knowledge files to read first (H2), the decision authority (H3), the user's CLAUDE.md
 // notice (H4) and the test tier advice (H6). It pins the coverage exemptions and the start
-// HEAD (I1). In goodboy's own repo it says when field reports wait in the inbox (J2). Never
-// blocks.
+// HEAD (I1); a session's first start also freezes the ref tips and pins every existing worktree,
+// each with a start of its own (#33, lib/start-pins.ts). In goodboy's own repo it says when
+// field reports wait in the inbox (J2). Never blocks.
 
 import { pinCommitIssueSettings } from '../lib/commit-issue';
 import { pinProjectMode, projectMode } from '../lib/project-mode';
@@ -19,6 +20,7 @@ import { decisionAuthorityContext } from '../lib/decision-authority';
 import { clearReadRecords } from '../lib/file-tracker';
 import { pinCoverageStart } from '../lib/changed-coverage';
 import { pinSessionCriteria } from '../lib/session-criteria';
+import { START_PIN_BUDGET_MS, startPinDeadline, withSharedWorktreeList } from '../lib/start-pins';
 import { inboxNotice } from '../lib/field-report';
 import { hookError } from '../lib/gate-log';
 
@@ -77,22 +79,27 @@ if (import.meta.main) {
       // A new, resumed or cleared session uses the commit issue settings on disk now
       //   (lib/commit-issue.ts; `/clear` starts a new session id).
       if ((source === 'startup' || source === 'resume' || source === 'clear') && sessionId) {
-        // (#21) The worktrees that exist now: one nested elsewhere than .claude/worktrees is
-        //   its own project only when noted here, so the pins below follow it too.
-        pinWorktrees(sessionId);
-        try {
-          pinCommitIssueSettings(sessionId, projectDir(input.cwd ?? process.cwd(), process.env, sessionId));
-        } catch {
-          // best-effort: without pins, a later file counts only when unchanged since the session dir was made
-        }
-        // …and the project mode its cwd has now (lib/project-mode.ts; not on compact, which
-        //   would trust a marker written during the session).
-        pinProjectMode(sessionId, projectDir(input.cwd ?? process.cwd(), process.env, sessionId ?? undefined));
-        // …and the user's policy globs with the start HEAD (I1, lib/changed-coverage.ts). Pinned
-        //   whatever the changed-line mode: the static previews (I3a) count without it.
-        pinCoverageStart(sessionId, projectDir(input.cwd ?? process.cwd(), process.env, sessionId ?? undefined));
-        // …and the requirement rows and policy `test:` lines it starts from (I2).
-        pinSessionCriteria(sessionId, projectDir(input.cwd ?? process.cwd(), process.env, sessionId ?? undefined));
+        // (#33) One deadline for the start-pin git calls (the hook's own timeout is 15 s; past it
+        //   no snapshot is taken), and one `git worktree list` for the note below and the snapshot.
+        startPinDeadline(START_PIN_BUDGET_MS.sessionStart);
+        withSharedWorktreeList(() => {
+          // (#21) The worktrees that exist now: one nested elsewhere than .claude/worktrees is
+          //   its own project only when noted here, so the pins below follow it too.
+          pinWorktrees(sessionId);
+          try {
+            pinCommitIssueSettings(sessionId, projectDir(input.cwd ?? process.cwd(), process.env, sessionId));
+          } catch {
+            // best-effort: without pins, a later file counts only when unchanged since the session dir was made
+          }
+          // …and the project mode its cwd has now (lib/project-mode.ts; not on compact, which
+          //   would trust a marker written during the session).
+          pinProjectMode(sessionId, projectDir(input.cwd ?? process.cwd(), process.env, sessionId ?? undefined));
+          // …and the user's policy globs with the start HEAD (I1, lib/changed-coverage.ts). Pinned
+          //   whatever the changed-line mode: the static previews (I3a) count without it.
+          pinCoverageStart(sessionId, projectDir(input.cwd ?? process.cwd(), process.env, sessionId ?? undefined));
+          // …and the requirement rows and policy `test:` lines it starts from (I2).
+          pinSessionCriteria(sessionId, projectDir(input.cwd ?? process.cwd(), process.env, sessionId ?? undefined));
+        });
       }
       const warnings = source === 'startup' || source === 'resume' ? configWarnings(process.env) : [];
       // (H2) Every source, project mode: the project's knowledge files to read first, or the

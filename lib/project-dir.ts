@@ -10,6 +10,7 @@ import { ensureSessionDir, sessionDir } from './file-tracker';
 import { spawnGit } from './git-run';
 import { isUnder, isDir, realDeep } from './private-files';
 import { readRegular } from './safe-read';
+import { listWorktrees } from './start-pins';
 
 const PROJECT_FILE = 'project-dir.txt';
 
@@ -62,6 +63,14 @@ function pinnedWorktrees(sessionId: string | undefined): Set<string> {
   return new Set(typeof r === 'object' ? r.text.split('\n').filter((l) => isAbsolute(l)) : []);
 }
 
+/** Whether the hooks take the worktree `wt` below the project dir `dir` as a project of its own for
+ *  this session: one under `.claude/worktrees`, or one noted at the session's start (#21). The
+ *  others stay part of `dir` (#33: a Stop run in `dir` judges their files with `dir`'s start). */
+export function resolvedAsProject(wt: string, dir: string, sessionId: string): boolean {
+  const parts = relative(realDeep(dir), realDeep(wt)).split(sep);
+  return (parts[0] === '.claude' && parts[1] === 'worktrees') || pinnedWorktrees(sessionId).has(realDeep(wt));
+}
+
 /** SessionStart: notes the project repository's worktrees as they are now, kept for a resumed
  *  session. Best-effort; only with CLAUDE_PROJECT_DIR. */
 export function pinWorktrees(sessionId: string, env: NodeJS.ProcessEnv = process.env): void {
@@ -70,7 +79,7 @@ export function pinWorktrees(sessionId: string, env: NodeJS.ProcessEnv = process
   try {
     const dir = ensureSessionDir(sessionId);
     if (existsSync(join(dir, WORKTREES_FILE))) return;
-    const r = spawnGit(resolve(p), ['worktree', 'list', '--porcelain']);
+    const r = listWorktrees(resolve(p)); // shared with the tip snapshot of the same SessionStart
     if (r.code !== 0) return;
     const list = r.out
       .split('\n')

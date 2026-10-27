@@ -39,6 +39,8 @@ import {
   readShownRange,
   recordMarkerEvidence,
 } from '../lib';
+import { noteSessionTop } from '../lib/changed-coverage';
+import { START_PIN_BUDGET_MS, startPinDeadline } from '../lib/start-pins';
 
 interface PostToolInput {
   session_id?: string;
@@ -178,6 +180,17 @@ function detectFailureFromResponse(response: unknown): boolean {
   if (r.is_error === true) return true;
   if (r.error) return true;
   return false;
+}
+
+/** The directories of the files this call wrote with a file tool (Edit, Write, MultiEdit, NotebookEdit), as
+ *  the edit log spells them: the checkouts a hook should pin when the shell is elsewhere (#33). */
+function editedDirs(toolName: string | undefined, toolInput: Record<string, unknown>, cwd: string): string[] {
+  if (toolName !== 'Edit' && toolName !== 'Write' && toolName !== 'MultiEdit' && toolName !== 'NotebookEdit') return [];
+  const paths: unknown[] = [toolInput.file_path, toolInput.notebook_path];
+  if (Array.isArray(toolInput.edits)) for (const e of toolInput.edits) paths.push(e && typeof e === 'object' ? (e as Record<string, unknown>).file_path : undefined);
+  const dirs = new Set<string>();
+  for (const p of paths) if (typeof p === 'string' && p !== '') dirs.add(dirname(openedPath(cwd, p)));
+  return [...dirs];
 }
 
 // autoValidate 총 실행 예산. hooks.json PostToolUse 타임아웃(60s)보다 작게 잡아,
@@ -534,6 +547,22 @@ function main(): void {
         const after = afterBash(sessionId, input.tool_use_id, cwd, toolInput.command, agentId);
         if (after.context) additionalContext = additionalContext ? `${additionalContext}\n${after.context}` : after.context;
         markerNotice = after.notice;
+      }
+
+      // (#33) A checkout the session did not start in is pinned the first time a hook sees it, so the
+      //   changes already in it count from here (lib/start-pins.ts). After the state guard's restore
+      //   above, which removes a pin file a Bash call created. The hook's own cwd, not the project
+      //   dir: a checkout already pinned (and the first one) is known from the files alone, with no
+      //   git call (this runs on every tool call); git is asked only on a miss.
+      try {
+        startPinDeadline(START_PIN_BUDGET_MS.postToolUse);
+        noteSessionTop(sessionId, cwd);
+        // A write by absolute path into a checkout the shell is not in (a repository made inside the
+        //   project, a worktree) is the hook that first sees it too: the edited file's directory. A file
+        //   in the first top or a pinned one costs no git call (the files alone answer).
+        for (const dir of editedDirs(toolName, toolInput, cwd)) if (dir !== resolvePath(cwd)) noteSessionTop(sessionId, dir);
+      } catch (err) {
+        hookError(sessionId, 'post-tool-use', 'start pin error', err);
       }
 
       const out: HookOutput = {};

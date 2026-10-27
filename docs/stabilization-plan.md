@@ -2175,7 +2175,7 @@ What ships:
    never a copy (`check-ignore` refuses `--literal-pathspecs`, and git would read it as pathspec
    magic).
 
-What was dropped (D, the waiting state, planned for v0.36.7):
+What was dropped (D, the waiting state, planned for v0.36.7, moved to v0.36.8 by §15.23):
 
 D was built in full (`await-decision` CLI command, a pending-decision file with edit, record and agent
 cursors, a `deferred` gate decision, a deferral on every test and review block and on the
@@ -2187,7 +2187,7 @@ on the model's own call. Codex agreed and set the minimum for the day: ship with
 deferral, ship causes 1-3 with the build-copy rule hardened. The code is kept outside the repo, in
 `~/goodboy-trials/i32-deferral/`, for later work.
 
-Design conditions for D in v0.36.7 (Codex round 5). D becomes a user-authorized design:
+Design conditions for D in v0.36.8 (Codex round 5; planned for v0.36.7 until #33 took that number, §15.23). D becomes a user-authorized design:
 
 - Authorization. A deferral needs a user-authored authorization: a user marker like the existing
   approval marker (a file only the user creates), never the model's CLI call. The hook binds it to the
@@ -2208,7 +2208,7 @@ Design conditions for D in v0.36.7 (Codex round 5). D becomes a user-authorized 
 - The `stop_hook_active` silent pass. Codex also questioned it: that path ends silently whenever it
   accepted nothing. It predates #32 and is the deliberate deadlock-avoidance path (v0.26.7-8), so
   v0.36.5 leaves it exactly as it was (`emit(acceptMsg ? { systemMessage: acceptMsg } : {})`), and
-  v0.36.7 must weigh it.
+  v0.36.8 must weigh it.
 
 Known limits:
 
@@ -2441,7 +2441,7 @@ Later (plan only):
 - R1: a branch-aware comparison base, with suspended (not deleted) obligations persisted by path and
   content identity; the immutable start HEAD stays for policy, version-only checks, build-copy trust and
   the original test inventory.
-- The user-authorized waiting state (#32), v0.36.7.
+- The user-authorized waiting state (#32), v0.36.8 (v0.36.7 went to #33, §15.23).
 - A runner-owned artifact registry for other tool outputs (`.pyc` is executable bytecode; `junit*.xml`
   can be application input).
 - The outer Stop hook timeout must not turn "verification unfinished" into a silent pass.
@@ -2455,6 +2455,305 @@ Later (plan only):
   repo top and another cwd runs `xcrun --find git` again on each switch (15-17 ms each, about 340 ms for
   20 switches), which eats part of the saving; the key needs the cwd only when PATH has a relative
   entry.
+
+### 15.23 v0.36.7: the session's start is per checkout (#33, Codex round 8)
+
+The cause (reproduced on v0.36.6 with the real hooks). `pinCoverageStart` stored one `{top, head}` and
+`sessionCoverageStart` kept that head for any other top whose object store has the commit, which is every
+linked worktree of the repository. In a worktree B (made after the session started, under or outside the
+project dir) the gates compared B's work tree with A's start commit X: I5 listed tests only A has as
+deleted and missed the real deletion of a B-only test (fail open); the changed-line check refused B's HEAD
+as a base and counted lines the session never wrote; an edit that copied X's content passed with no test
+and no review (fail open); `existing-tests` never required B-only tests; the version-only and lcov
+exemptions compared with X; the branch note misfired. A resume from B overwrote the pin. The criteria pin
+was single-top too: B's policy criteria were dropped. Sites: `hooks/stop.ts` (the nine reads of
+`sessionCoverageStart`), `lib/changed-coverage.ts`, `lib/session-criteria.ts`.
+
+The design (Codex round 8, `~/goodboy-trials/v0367/decisions.md`; new module `lib/start-pins.ts`):
+
+1. SessionStart, the session's first only, freezes the full commit ids of every ref tip (annotated tags
+   peeled) and of every existing worktree's HEAD, detached ones too, keyed by the repository's canonical
+   common git dir, and pins every existing worktree (up to 64) by canonical top plus the identity of its git
+   dir (`start-tips.json`, `start-pin-<key>.json`). A failure, a truncation (over 100 000 tips), a tag of a
+   tag (its commit is not listed, so the set would not be complete) or the hook's deadline (below) writes no
+   tips file, never a partial one; the pins are written first, the tips last. A resume never overwrites a pin
+   or refreshes the tips (`pinCoverageStart` returns when the pin is for another top; the tips and every
+   pin are written once). The first checkout's `coverage-pin.json` keeps its format and gains the first top's
+   identity (12).
+2. A top first seen later is pinned the first time a hook resolves it (`noteSessionTop` in PostToolUse and
+   at the start of every Stop; also `sessionCoverageStart` itself), and the pin is never overwritten:
+   `rev-list --boundary <HEAD> --not <frozen tips>` (the tips by stdin): nothing new, so HEAD is the start;
+   new commits and exactly one boundary, so that boundary is; several boundaries, none (unrelated or orphan
+   history), another repository with history, no snapshot, a missing object, any git error: unknown. The
+   empty tree is for a checkout with no commit behind it, and only so: in the session's repository when the
+   whole frozen tip set (detached worktree HEADs included) is empty and HEAD does not resolve now (refs
+   deleted while a detached HEAD holds history is unknown); in another repository when its object store
+   holds no commit object (`cat-file --batch-all-objects`; alternates, a failure or a cut list: unknown).
+   A directory that git says is no repo ("not a git repository", with no `.git` there) is the empty tree as
+   before and is never pinned. Commit times are never read. A git error or a timeout (the deadline, 9) is
+   unknown for that call and is not pinned (it is asked again); a definite answer, unknown included, is
+   pinned. What a checkout is comes from `.git` read without git; only when that read fails (a `.git`
+   symlink, a file git reads and this does not) git is asked (`rev-parse --show-toplevel
+   --absolute-git-dir --git-common-dir`). A timeout, a corrupt `.git`, a permission error or git placing
+   the checkout elsewhere is unknown (`TopIdentity.unknown`), never "no repo".
+3. At first sight every path that differs is recorded in the edit log as a session edit (`recordEdit`,
+   the file's mtime): a Bash edit or a commit made before the first hook is not hidden. Three sets are
+   listed apart and joined, so they cannot cancel: the index against the start (`diff --cached`), the work
+   tree against the index (`diff`), and the untracked files that are not ignored. A staged edit reverted in
+   the work tree is in the first two. A start that is unknown lists the same sets against HEAD. When the
+   listing cannot be made (more than 20 000 paths, a git error, no HEAD in a repository with history) the
+   start is unknown and marked `incomplete`; a git error is not pinned. The Stop's start gate (B5.9) blocks
+   each full Stop judged in an `incomplete` top, whatever its edit list holds: a shell edit or a commit made
+   before the hooks saw the checkout is in no list. Only the user's one-shot Stop approval marker passes a
+   full Stop (and that Stop's later gates with it); it counts, so the marker notice appears. What cannot
+   happen is the acceptance of verification there: the claim is "verification cannot be accepted", not "the
+   turn cannot end". A `stop_hook_active` Stop ends the turn like every other gate's (loop prevention), but
+   unverified and with a warning, and accepts nothing (17); the next full Stop blocks again.
+4. `sessionCoverageStart` still returns `{exempt, head?}` and adds `unknown` (a reason) when the start
+   of that top is unknown (`incomplete` when 3 applies); a pin with no HEAD (git could not say) is unknown
+   too. The block's own text names a new session started in that checkout or the user's existing marker and
+   carries no "record a `blocked` result ... ends the turn as unverified" advice (no record is accepted
+   there); it keeps counting, so the marker notice of `blockOutput` appears. In `hooks/stop.ts`,
+   `startProblem` turns an unknown start into a block with the reason and the way out: in `testGate`
+   before the no-result check, in `evaluateTestResults` (so the `stop_hook_active` accept declines), in
+   the review gate (the user's marker moves the cursor as on its other review blocks) and in
+   `tryAcceptPendingReview`. An unknown start never borrows another top's, never uses the empty tree and
+   never exempts (`sessionUserGlobs` gives other tops none).
+5. Criteria: the first checkout keeps `criteria-pin.json` and `criteria-seen.json`. Every other top has
+   `criteria-pin-<key>.json` and `criteria-seen-<key>.json`: the worktrees that exist at the start are pinned
+   from their work trees then (`pinSessionCriteria`); a later one is read from its start commit
+   (`docs/CYCLE.md`, the version's `REQUIREMENTS.md`, `.goodboy/policy.md` by `ls-tree` and `cat-file`), never
+   from its documents now, and pinned. An unknown start, an unreadable document or a failed read is a
+   `problem`, which the Stop turns into a block, instead of dropped policy criteria. The starting stage
+   (`startedBeforeVerification(sessionId, top)`) is per top. The documents at a commit are read with one
+   commit reader, `blobAtCommitResult` (a tri-state: text, absent, refused, error), with the work-tree
+   read's rules: an unreadable `docs/CYCLE.md` is no cycle, an unreadable requirements table or policy file
+   (a symlink, over the size limit) and any git error are problems.
+6. The exemptions are the first checkout's only and frozen at the initial pin. A resume or a compact in
+   the first top (the checkout the coverage pin was made for: its path and its git dir identity) may only
+   take grants away (the intersection of the pin with the current policy file), never add one. A resume from
+   any other top leaves the pin as it is, a first top made again at its path included (12): nothing added,
+   nothing removed, the pin bytes unchanged. That checkout exempts nothing, also when its original start
+   stands (a known limit: strict, never a grant). This is rule 6 of the decisions file in full. (Until round
+   9 a resume in the first top refreshed the pin: that was a deviation, now removed.
+   `tests/i1-changed-lines.test.ts` asserted the refresh and was changed.)
+7. Every pin and the tips are made with a temp file and a hard link, so concurrent hooks never overwrite
+   each other: one wins, the others read its file.
+8. The key includes the git dir's identity (path, inode, birth time), read from `.git` with no git call
+   (git only when the read fails, 2), so a checkout made again at the same path has another key and its own
+   pin file. It is not another baseline: its start is the original one or none (12).
+9. The test and review cursors were already one file per project dir; they are unchanged. Accepting in A
+   does not advance B's cursor, and a Stop run in A does not accept edits that lie in a nested worktree
+   with another start (10).
+10. A session from before v0.36.7 (a pin, no tips file): its pin stands for its own checkout, nothing is
+    snapshotted on a resume, every other checkout is unknown.
+11. A linked worktree of the repository nested inside the Stop's checkout that the hooks do not take as a
+    project (`resolvedAsProject`: not under `.claude/worktrees`, not noted at the start) stays deferred, but
+    when edits lie in it and its start (computed by the same first-sight rule) is not the checkout's start,
+    the Stop blocks with the two starts named instead of using the checkout's silently.
+12. (Rounds 9 and 10) `coverage-pin.json` stores the first top's identity (the `topIdentity` key). Round 9
+    made a checkout with another identity at that path (or at any pinned top's path) a new top under the
+    first-sight rules. Round 10 replaced that: an identity change at a pinned path never moves its
+    baseline, forward or back. A session commit made before the git dir was recreated would launder a
+    deletion if the new HEAD were read (a start taken from the new HEAD), and `git reset` after it would move
+    the baseline to an older commit (`q8`: a test deleted since the start became invisible). `topStart` finds
+    what the session registered at the path under another identity (the coverage pin's identity, every
+    `start-pin-*.json` with that top, the snapshot's worktree list) and `carryOver` decides, never reading the
+    new HEAD:
+    - the registered starts agree (one commit, or all empty), none is unknown and none is lost (a worktree
+      the snapshot lists whose pin file is missing or unreadable), the checkout's canonical common git dir is
+      the snapshot's, and the original start commit is readable (`rev-parse --verify <commit>^{commit}`): the
+      original start stands and the changes are judged against it. The files in which the checkout's commits
+      differ from it (`diff --name-only -z <start> HEAD`, renames off, through `lib/git-run.ts`; for an empty
+      start, the files of HEAD) are recorded as the session's edits (a commit made before the git dir was made
+      again, a worktree added at a newer commit), then it is pinned for the new identity. The index, the work
+      tree and untracked files are not listed: the session's hooks followed the checkout, and for the first
+      top the user's work in progress from before the session was there already (`r15`: an honest `.git`
+      copy blocked on an untracked `src/wip.ts`); what the session wrote is in the edit log, and the
+      net-change judge compares it with the kept start. A listing that fails leaves the start unknown and
+      `incomplete` and is not pinned (asked again); one over 20 000 paths is unknown and `incomplete`, pinned;
+      a git that does not answer pins nothing;
+    - anything else (another repository at the path, the commit gone, no snapshot, disagreeing or unknown
+      earlier starts): unknown and `incomplete` (the edit list cannot be trusted), pinned.
+    Criteria stay: `criteria-pin.json` and `criteria-seen.json` remain the first top's by path, and a worktree
+    made again uses the criteria files of its earlier identity (`criteriaKey`). The edit log and the cursors
+    are session-wide, so every pending obligation stays. A legacy pin with no identity, and a first top
+    outside a repo, match by path (10). `recreatedFirstTop` is gone.
+13. (Round 9) A missing or unreadable `coverage-pin.json` is unknown when the session dir shows that
+    SessionStart ran (a tips file or any start pin); a resume does not make it again (it would heal at a later
+    HEAD), and no exemption is granted. With none of those the old skip stays (see the deviations).
+14. (Round 9) One deadline per hook for the start-pin git calls (`startPinDeadline`: SessionStart 8 s, PostToolUse
+    8 s, Stop 6 s, one table `START_PIN_BUDGET_MS` in `lib/start-pins.ts`; each call gets what is left, at
+    most 5 s). Past it there is no snapshot (SessionStart) and a transient unknown (first sight).
+    SessionStart lists the worktrees once for the note (`pinWorktrees`) and the snapshot
+    (`withSharedWorktreeList`). PostToolUse resolves the pin by `topIdentity(nearestGitTop(cwd))` from files
+    alone and runs git only on a miss (a top not yet pinned). Git calls per hook, measured with a recording
+    git against v0.36.6 (`git archive 902f2c6`, the same fixture) and re-measured after round 10:
+
+    | hook | v0.36.6 | v0.36.7 |
+    |---|---|---|
+    | SessionStart | 4 | 5 (the snapshot's `for-each-ref`) |
+    | plain Stop, one checkout (the i36 fixture, `tests/setup.ts` loaded) | 19 | 19 |
+    | PostToolUse in the first top | 0 | 0 |
+    | a later PostToolUse in a pinned worktree | 0 | 0 |
+    | the first PostToolUse in a new top | 0 | 8, once per new top (`rev-parse` 2, `rev-list`, `config` 2, `diff` 2, `ls-files`) |
+    | Stop in a worktree under `.claude/worktrees` / outside the project | 9 / 6 | 8 / 5 |
+    | `stop_hook_active` Stop, one checkout, an edit pending and test and review records present | 7 | 7 (re-measured twice per tree, same recording git and fixture) |
+
+    (Counts against the pre-round-9 working copy, "from 1 or 4 to 0" and "6 to 5", were not against the
+    release and are withdrawn.)
+15. (Round 10) No git at a path the session pinned is unknown and `incomplete`, never the empty start: a hidden
+    or removed `.git` (`q9`: records made in a no-git state validated, and the gates passed with I5 off). The
+    registrations are those of 12; a no-git checkout at or below a registered path counts (git finds the
+    repository from a subdirectory, so one under a pinned top that has none lost its `.git`). A worktree the
+    snapshot lists whose pin file is missing or unreadable is unknown too, never rediscovered from today's HEAD.
+    A plain directory the session never pinned is still the empty tree, never pinned.
+16. (Round 10) A hook that merely passes through another repository pins nothing (`noteSessionTop`; a PostToolUse
+    whose cwd is in a nested repository the session never worked in recorded that repository's dirt as the
+    session's edits and blocked the Stop). The cheap checks first (the first top, a top with a pin); then, when
+    the common git dir of the cwd's checkout and of the first top, both read from `.git` files, differ and the
+    session's edit log holds no file inside that checkout, the hook returns. A hook call that records an edit
+    there (Write, Edit, MultiEdit, a Bash write the tracker records) runs first sight as usual: for a file tool
+    the hook also resolves the edited file's directory (`editedDirs` in `hooks/post-tool-use.ts`), so an
+    absolute-path Write into a nested repository from the project cwd is the hook that first sees it, not
+    only a Write with the shell inside it (a file in the first top or a pinned top costs no git call). So a
+    repository the session makes inside the project is pinned at its first edit (empty, as before round 10),
+    and a model cannot defer the first sight of a worktree it writes in by pointing its `.git` at a decoy
+    common dir. Write tracking is unchanged, and a Stop that judges the other repository still resolves its
+    start (unknown: it blocks an edit there). Metadata that cannot be read proves nothing, so discovery goes
+    ahead: a `.git` symlink, an unreadable `commondir`, a linked worktree's admin dir with no `commondir`
+    (`fsDirs` reads those as unknown, not as a repository of its own; git is asked). The first top and a pinned
+    top still cost 0 git calls.
+17. (Round 10) The `stop_hook_active` Stop with an unresolved baseline (`unresolvedBaseline`: the incomplete-start
+    rule, or the start rule when test or review edits are pending) does not return a silent `{}` and runs no
+    acceptance: it returns a pass with a Korean `systemMessage` (the session's start could not be confirmed, so
+    the turn ended unverified) and logs `start warn unverified-on-stop-active` to the gate log. It runs before
+    the docs step and the test and review accepts (`tryAcceptPendingTest`, `tryAcceptPendingReview`, which
+    also refuse an unknown start themselves), so every pending flag, obligation and cursor stays and the next
+    full Stop blocks again. Nothing pending and a known start: unchanged. The claim is "verification cannot be
+    accepted", not "the turn cannot end"; the push is enforced on its own.
+18. (Round 10) `incompleteStartProblem` fails closed on an exception (a block saying it could not be read), as
+    `startProblem` does. The "not a git repository" probe (`probeDirs`) runs with `LC_ALL=C` and `LANGUAGE`
+    unset (`cLocale` in `spawnGit`): git translates the message, and a translation would read as unknown (a
+    block, fail closed, but wrong). Exit 128 alone is never evidence: the text and the missing `.git` are.
+
+Deviations from the decisions file, and why:
+
+- `merge-base --independent` is not used. It is only an optimization; the whole tip list goes to
+  `rev-list` by stdin.
+- Missing pin (decisions round 9, rule 9). A session with no coverage pin and no sign that SessionStart ran
+  (no tips file, no start pin) keeps the v0.36.6 behavior: no base checks, no block. By a grep of the test
+  sources, 38 of the 54 test files that spawn the Stop neither run SessionStart nor call `pinCoverageStart`;
+  they hand-write records and rely on this. A missing pin where SessionStart evidently ran is unknown
+  (13). This differs from "always unknown on absence" on purpose: a writer that outlives the state guard
+  (a detached process) can forge any pin file, and such a write also survives for `coverage-pin.json`
+  itself, so failing closed on absence alone does not close that class. An unknown start that comes from a
+  pin, a snapshot or a git error blocks.
+- Rule 9 needed no code: the cursor key is the project dir already. It is covered by tests, and the
+  nested-worktree block of rule 11 keeps A's cursor from moving past edits it cannot judge.
+- Rule 11 blocks only when the nested worktree's start differs from the checkout's (or is unknown); at the
+  same commit nothing changes.
+- A first-seen top that is no git repo is the empty tree, as the old pin gave it (never one at or below a
+  path the session pinned, 15).
+- Round 10, `LC_ALL=C` (item 5 of the round): `spawnGit`'s `env` option passes only the names in
+  `OPERATIONAL_ENV` and cannot unset `LANGUAGE`, so a minimal option `cLocale` was added instead of widening
+  that list.
+- Round 10, forward laundering: with the frozen tips, a session commit before a recreation gives the boundary
+  rule the original start anyway, so that regression test (like the honest git-dir copy that changes nothing)
+  guards the rule; the cases that fail without the continuity rule are the reset after a recreation, a
+  worktree made again at another commit, and a recreation after the session merged two pre-session lines.
+- The sites that read `head` keep their `undefined` (no base) handling for an unknown start; the gate
+  stops before they matter (accepting needs the start), and the no-edit turns do not read it.
+
+Existing tests changed: one. `tests/i1-changed-lines.test.ts` ("the gate uses the globs pinned at the
+session start") asserted that a resume refreshes the exemptions (`['hooks/**', 'src/**']` after the policy
+file gained `src/**`); it now asserts that a resume only removes grants (`['hooks/**']`, and `[]` after the
+user removed one and the session's addition stayed out). (`tests/i33-worktree-start.test.ts` is new in this
+release; its rule-8 test was rewritten for round 10: a worktree made again keeps the original start.)
+
+Tests: tests/i33-worktree-start.test.ts (the research's repro modes in / out / nestpin / control through the
+real SessionStart, PostToolUse and Stop hooks, and the nested case; rules 1-5 and 7-11, concurrent pin
+writes, a recreated path, a legacy session, the state guard; round 9: a symlinked `.git`, git that cannot
+answer, the empty-start rules, three-set dirt, an incomplete first sight blocking with no edits, the cap, a
+git error, a clone, the start block's text, frozen grants, a recreated first top, a missing pin, the
+deadline, a cut or failed snapshot, git call counts, the tri-state commit reader and the other-direction
+cursor; round 10: a reset and a worktree made again after the admin dir was recreated, a recreation after a
+merge of two pre-session lines, an honest git-dir copy, a hidden `.git`, a lost registration, an unrelated
+dirty sub-repository, unreadable metadata, the active Stop keeping every obligation and warning, the
+incomplete-start gate failing closed, the `LC_ALL=C` probe and the budget table).
+
+Known limits:
+
+- The git dir identity uses the birth time where the file system reports one and the inode otherwise; on a
+  file system with neither, a recreated worktree that gets the same inode is taken for the old one.
+- `worktrees.txt` (#21) is still keyed by path; a worktree at the same path made again after the start is
+  not resolved as a project by `projectDir` unless it is under `.claude/worktrees` (unchanged).
+- A Stop run in the first checkout while the model edits files of a worktree under `.claude/worktrees` by
+  absolute path judges them with the first checkout's start, as before; the hooks resolve such a worktree
+  only from a shell that is in it (the normal case).
+- A pin a Bash call's post hook restores away (a pin created between the PreToolUse snapshot and the
+  restore by another hook) is made again by the next hook from the same commits; the first-sight edits are
+  recorded again, which is harmless.
+- Uncommitted changes in the first checkout when the session starts are not part of its start (unchanged).
+- Commits that reached the repository after the start (a `git fetch`, a pull) and are not in the frozen tips
+  look like the session's own: a worktree made from such a commit starts at the one boundary below it, and
+  the files those commits changed count as the session's changes (decided: fail closed; commit times are
+  never read). Merging two pre-session lines in a new worktree makes its start unknown.
+- The tips are what `git for-each-ref` lists. A ref git cannot read (a broken ref, an unreadable refs
+  directory) is not listed and git still exits 0, so the snapshot cannot tell; a commit reachable only
+  through such a ref looks new to a later worktree, whose start is then an older boundary (more is
+  counted, never less).
+- R1 (a branch switch within one top, with suspended obligations) can reuse the tips and the boundary rule.
+- Round 9 limits and behavior changes:
+  - Ancestry-based scope, not provenance authentication. A commit made on purpose with an old parent and a
+    new tree (`git commit-tree -p Y <tree>`) puts the boundary rule's start at Y; an honest worktree at Y
+    reaches the same state and passes the same way, so this is no bypass of what the rule claims. Accepting
+    in B never clears A's obligations or authorizes a push of another tree.
+  - Behavior change from v0.36.6: another repository with history (a clone or a sibling repo made or
+    entered mid-session, or any repo when the session started outside git, or a resume from a different
+    repo) was compared with the empty tree and required tests; its start is now unknown and the test and
+    review gates block it. The ways out are a new session rooted in that checkout and the user's existing
+    one-shot Stop approval marker (the notice appears after the second block).
+  - Pre-discovery commits under a clean tree in an unknown top: the first-sight lists compare the index and
+    work tree with HEAD (or the start), so a commit made in such a top before any hook saw it, with a clean
+    work tree after, is in no list. A known start covers this with the boundary; an unknown one cannot.
+  - The outliving writer. The state guard puts guarded files back after a Bash call and removes one the call
+    created; a process that outlives the call (`( sleep; printf > file ) &`) can write after the post hook
+    ran. That forges `coverage-pin.json`, `start-pin-<key>.json` and the other guarded state alike (it did
+    before this version for the coverage pin); a start pin forged for a worktree chooses its start. Not
+    closed here; a hardening would sign hook-written pins with a key outside the session dir.
+  - The missing-pin rule is a deviation from "always unknown" (see the deviations).
+  - Rule 6 (frozen grants) is met: the resume refresh that v0.36.7's working copy had is removed (6).
+  - A repository recreated at the first top's path with unrelated history (the original start commit is not
+    in it) is unknown and incomplete (12); with an unborn HEAD and a non-empty tip set too.
+- Round 10 limits and behavior changes:
+  - A worktree made again at a pinned path (removed and added with another commit) is judged against the
+    original start, not the new HEAD (round 9 re-baselined it): the files in which the new checkout's commits
+    differ from the original start are recorded as the session's edits when the start is carried over (the
+    index, work tree and untracked files are not: the user's work in progress is not the session's); a
+    listing that fails or is cut (over 20 000 paths) makes the start unknown and incomplete. A checkout made
+    again in another repository, or without the start commit, is unknown and incomplete.
+  - A first sight in a huge repository stays unknown and incomplete: its `rev-list`, `diff` and `ls-files`
+    do not finish within the hook's deadline (PostToolUse 8 s, Stop 6 s), the unknown is transient (not
+    pinned, asked again at each hook), so every full Stop judged there blocks until a new session is rooted in
+    that checkout or the user's marker passes one.
+  - A first top made again at its path exempts nothing, also when the original start stands (6: strict).
+  - The `stop_hook_active` Stop in an unresolved top ends the turn unverified with a warning. Only the next
+    full Stop blocks again; a session that never makes another full Stop is not stopped by this gate (as for
+    every gate; the push is enforced on its own).
+- Found, not in this release (both pre-existing, the same on v0.36.6):
+  - A FIFO at `.goodboy/policy.md` hangs the Stop hook past 20 s (a hook timeout may read as a pass). Still
+    open, not triaged.
+  - A file edited through a symlink alias of the project, or through a case-variant path on macOS (a
+    case-insensitive file system), falls outside the Stop's scope: `recordEdit` stores the literal path
+    (`lib/file-tracker.ts` :464) and `isWithin` (:562) compares it with the top by string prefix, with no
+    realpath and no case folding, so no test, review or existing-tests check runs for it and the Stop passes
+    with no record. The start pin itself holds; the edit list is what is bypassed. High, security review of
+    round 10. Planned as its own hotfix right after v0.36.7; not fixed here.
+
+Later (plan only):
+
+- The user-authorized waiting state (#32) moves to v0.36.8.
 
 ## 16. J — Field reports (v0.34.0)
 

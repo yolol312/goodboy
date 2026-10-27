@@ -12,19 +12,27 @@
 // by a rename. With no pin the start is unknown: only the rows in progress now count, and no
 // policy entry.
 //
+// The pin is for the checkout the session started in. Every other checkout (a linked worktree of
+// the repository, #33) has a baseline and a seen list of its own, keyed like its start pin
+// (lib/start-pins.ts): the worktrees that existed at the session's start are pinned then, from
+// their work trees; a later one is read from its start commit, never from its documents now. A
+// baseline that cannot be read or is unknown blocks (its criteria are not dropped).
+//
 // A product criterion (PT-*, UIUX-*, REQ-*) is about the product: its test is no document, and
 // a mutation probe names the product file it broke (a check of the requirements proves the
 // file, not the app).
 
 import { existsSync, lstatSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve as resolvePath } from 'node:path';
-import { findDevCycleArtifacts, isPlaceholderCell, readCurrentStage, VERIFY_STAGE, type AcceptanceCriterion } from './acceptance';
-import { hookGit, repoTop } from './changed-coverage';
+import { findDevCycleArtifacts, isPlaceholderCell, parseCurrentStage, parseCurrentVersion, readCurrentStage, VERIFY_STAGE, type AcceptanceCriterion } from './acceptance';
+import { blobAtCommitResult, hookGit, repoTop } from './changed-coverage';
 import { isDocumentFile } from './doc-verification';
 import { ensureSessionDir } from './file-tracker';
 import { knowledgeRoot, parsePolicyEntries, POLICY_FILE } from './project-knowledge';
+import { realDeep } from './private-files';
 import { projectRelative } from './role-limits';
 import { MAX_DOC_BYTES, MAX_STATE_BYTES, readRegular } from './safe-read';
+import { earlierKeys, topIdentity, topStart, worktreesAtStart, writeOnce, type TopIdentity } from './start-pins';
 import { evidenceProblems, isTestFile, requiresMutationProbe, TEST_RUNNER_CONFIG } from './test-validator';
 import { classifyFile, isTestkitHarness, needsTests } from './verification-scope';
 import type { AcceptanceCoverage, TestResult } from './types';
@@ -263,24 +271,42 @@ function writeState(sessionId: string, name: string, value: unknown): void {
   }
 }
 
-/** SessionStart: the rows and `test:` lines the session starts from. A pin of the same repo is
- *  kept (a resumed session keeps its start). Never throws. */
+/** SessionStart: the rows and `test:` lines the session starts from. A pin is kept (a resumed
+ *  session keeps its start, also when it resumes in another checkout: #33). The session's first
+ *  start also pins the criteria of the other worktrees that exist. Never throws. */
 export function pinSessionCriteria(sessionId: string, cwd: string): void {
   try {
     const top = repoTop(cwd);
-    const prev = readPin(sessionId);
-    if (prev && prev.top === top) return;
+    if (readPin(sessionId)) return;
     const docs = currentDocs(cwd, top);
     const pin: CriteriaPin = { top, rows: docs.rows, policy: docs.policy, stage: readCurrentStage(cwd) };
     writeState(sessionId, PIN, pin);
+    pinOtherTops(sessionId, top);
   } catch {
     // no pin: the start counts as unknown
   }
 }
 
-function readPin(sessionId: string): CriteriaPin | null {
+/** The criteria of the worktrees that exist at the session's start, other than the first: from their
+ *  work trees as they are now. A document that cannot be read pins an unknown baseline, which blocks. */
+function pinOtherTops(sessionId: string, startTop: string): void {
+  const mine = realDeep(startTop);
+  for (const w of worktreesAtStart(sessionId)) {
+    if (w.top === mine) continue;
+    try {
+      const who = topIdentity(w.top);
+      if (who.key !== w.key) continue;
+      const docs = currentDocs(w.top, w.top);
+      const body = docs.problems.length > 0 ? { unknown: docs.problems.join('; ') } : ({ top: who.top, rows: docs.rows, policy: docs.policy, stage: readCurrentStage(w.top) } satisfies CriteriaPin);
+      writeOnce(join(ensureSessionDir(sessionId), `criteria-pin-${w.key}.json`), JSON.stringify(body));
+    } catch {
+      // not pinned: it is read from its start commit when first seen
+    }
+  }
+}
+
+function parsePin(p: Partial<CriteriaPin> | null): CriteriaPin | null {
   try {
-    const p = readState(sessionId, PIN) as Partial<CriteriaPin> | null;
     if (!p || typeof p.top !== 'string') return null;
     const rowsOk = p.rows === null || (Array.isArray(p.rows) && p.rows.every((r) => r && typeof r.rank === 'string' && PIN_RANK.test(r.rank) && typeof r.title === 'string' && typeof r.status === 'string'));
     const policyOk = p.policy === null || (typeof p.policy === 'object' && p.policy !== undefined && !Array.isArray(p.policy));
@@ -292,10 +318,90 @@ function readPin(sessionId: string): CriteriaPin | null {
   }
 }
 
+function readPin(sessionId: string): CriteriaPin | null {
+  return parsePin(readState(sessionId, PIN) as Partial<CriteriaPin> | null);
+}
+
+/** A document at a commit read as the work-tree read does (`readDoc`): its text; null when the commit
+ *  has none; 'refused' when the entry is no regular file (a symlink) or over the size limit, which the
+ *  work tree's read refuses too; 'error' when git fails (the answer is not known). */
+function docAtCommit(top: string, head: string, rel: string): string | null | 'refused' | 'error' {
+  const r = blobAtCommitResult(top, head, rel, MAX_DOC_BYTES);
+  return r.kind === 'text' ? r.text : r.kind === 'absent' ? null : r.kind;
+}
+
+/** The criteria baseline of a commit: what `currentDocs` reads, from the commit's blobs, with its
+ *  rules: an unreadable `docs/CYCLE.md` is no cycle (`readCycleMd`: no rows, no stage), an unreadable
+ *  requirements table or policy file is a problem, and so is any git failure. */
+function docsAtCommit(top: string, head: string): Omit<CriteriaPin, 'top'> | { problem: string } {
+  const at = head.slice(0, 12);
+  const cycleRead = docAtCommit(top, head, 'docs/CYCLE.md');
+  if (cycleRead === 'error') return { problem: `docs/CYCLE.md at ${at} cannot be read` };
+  const cycle = cycleRead === 'refused' ? null : cycleRead;
+  const version = cycle === null ? null : parseCurrentVersion(cycle);
+  let rows: RequirementRow[] | null = null;
+  if (version && /^[A-Za-z0-9][\w.-]*$/.test(version) && !version.includes('..')) {
+    const req = docAtCommit(top, head, `docs/versions/${version}/REQUIREMENTS.md`);
+    if (req === 'error' || req === 'refused') return { problem: `docs/versions/${version}/REQUIREMENTS.md at ${at} cannot be read` };
+    rows = req === null ? null : requirementRows(req);
+  }
+  const text = docAtCommit(top, head, POLICY_FILE);
+  if (text === 'error' || text === 'refused') return { problem: `${POLICY_FILE} at ${at} cannot be read` };
+  return { rows, policy: text === null ? null : policyTests(text), stage: cycle === null ? null : parseCurrentStage(cycle) };
+}
+
+/** The key of the criteria files (pin, seen list) of a checkout that is not the session's first: its own
+ *  identity's, unless it has none yet and an earlier identity registered at its path has a criteria pin
+ *  (the checkout was made again there: its criteria stay, #33 round 10). */
+function criteriaKey(sessionId: string, who: TopIdentity): string {
+  try {
+    const dir = ensureSessionDir(sessionId);
+    if (existsSync(join(dir, `criteria-pin-${who.key}.json`))) return who.key;
+    return earlierKeys(sessionId, who).find((k) => existsSync(join(dir, `criteria-pin-${k}.json`))) ?? who.key;
+  } catch {
+    return who.key;
+  }
+}
+
+/** The baseline of a checkout that is not the session's first (#33): its pin of the session's start,
+ *  or (first sight) the documents of its start commit, pinned now. */
+function otherTopBaseline(sessionId: string, top: string, who: TopIdentity): { pin: CriteriaPin } | { problem: string } {
+  const name = `criteria-pin-${criteriaKey(sessionId, who)}.json`;
+  const lost = (why: string) => ({ problem: `The criteria ${top} started from cannot be established (${why}). Start a new session in it, or ask the user.` });
+  const raw = readState(sessionId, name) as (Partial<CriteriaPin> & { unknown?: unknown }) | null;
+  if (raw && typeof raw.unknown === 'string') return lost(raw.unknown);
+  const pinned = parsePin(raw);
+  if (pinned) return { pin: pinned };
+  if (existsSync(join(ensureSessionDir(sessionId), name))) return lost('its pin is unreadable');
+  if (who.unknown !== undefined) return lost(`it could not be told what the checkout is: ${who.unknown}`);
+  const start = topStart(sessionId, top);
+  if (start.kind === 'unknown') return lost(`its start is unknown: ${start.reason}`);
+  let pin: CriteriaPin;
+  if (start.kind === 'empty') pin = { top: who.top, rows: null, policy: null, stage: null };
+  else {
+    const d = docsAtCommit(top, start.head);
+    if ('problem' in d) return lost(d.problem);
+    pin = { top: who.top, ...d };
+  }
+  try {
+    if (who.id !== 'nogit') writeOnce(join(ensureSessionDir(sessionId), name), JSON.stringify(pin)); // a no-git identity is never kept
+  } catch {
+    // read again from the commit next time
+  }
+  return { pin };
+}
+
 /** (I11) Whether the session started before the verification stage: its pin names a stage
- *  below it. No pin, an older pin or an unknown stage: false (UI criteria block). */
-export function startedBeforeVerification(sessionId: string): boolean {
-  const stage = readPin(sessionId)?.stage;
+ *  below it. No pin, an older pin or an unknown stage: false (UI criteria block). `top`: the
+ *  checkout asked about, when it is not the one the session started in (#33): its own pin, which
+ *  the criteria check made. */
+export function startedBeforeVerification(sessionId: string, top?: string): boolean {
+  let pin = readPin(sessionId);
+  if (pin && top !== undefined && pin.top !== top) {
+    const raw = readState(sessionId, `criteria-pin-${criteriaKey(sessionId, topIdentity(top))}.json`) as Partial<CriteriaPin> | null;
+    pin = parsePin(raw);
+  }
+  const stage = pin?.stage;
   return typeof stage === 'number' && stage < VERIFY_STAGE;
 }
 
@@ -304,9 +410,9 @@ const SEEN_ID = new RegExp(`^(?:REQ-\\d{1,${RANK_DIGITS}}|POL-\\S{0,${POLICY_ID_
 /** The criteria earlier Stops required, rebuilt from their string fields only, so formatting
  *  one cannot throw: an entry whose id the Stop could not have written (another type, a long
  *  id) is dropped, a description that is no string is left empty. */
-function readSeen(sessionId: string): AcceptanceCriterion[] {
+function readSeen(sessionId: string, name = SEEN): AcceptanceCriterion[] {
   try {
-    const v = readState(sessionId, SEEN);
+    const v = readState(sessionId, name);
     if (!Array.isArray(v)) return [];
     const out: AcceptanceCriterion[] = [];
     for (const c of v.slice(0, MAX_SEEN)) {
@@ -329,27 +435,39 @@ export interface SessionCriteria {
 /** The criteria this session works on: against its pinned start, plus every criterion an
  *  earlier Stop of the session required (remembered, so a document edited since keeps it). */
 export function sessionCriteria(sessionId: string, cwd: string): SessionCriteria {
+  let seenName = SEEN;
   try {
     const top = repoTop(cwd);
     const pin = readPin(sessionId);
-    const start = pin && pin.top === top ? pin : undefined;
+    // The first top's path keeps the first pin and seen list when its checkout was made again: its
+    //   criteria stay (#33 round 10); its start is lib/start-pins.ts's.
+    const first = pin !== null && pin.top === top;
+    let start: CriteriaPin | undefined = first ? pin! : undefined;
+    if (pin && !first) {
+      // (#33) Another checkout: its own baseline and its own list of what Stops required there.
+      const who = topIdentity(top);
+      seenName = `criteria-seen-${criteriaKey(sessionId, who)}.json`;
+      const base = otherTopBaseline(sessionId, top, who);
+      if ('problem' in base) return { criteria: readSeen(sessionId, seenName), problem: base.problem };
+      start = base.pin;
+    }
     const docs = currentDocs(cwd, top);
     const found = [
       ...requirementsInScope(docs.rows ?? [], start ? start.rows : undefined),
       ...(docs.policy !== null ? policyInScope(docs.policy, start ? start.policy : undefined) : []),
     ];
     const byId = new Map<string, AcceptanceCriterion>();
-    for (const c of readSeen(sessionId)) byId.set(c.id, c);
+    for (const c of readSeen(sessionId, seenName)) byId.set(c.id, c);
     for (const c of found) byId.set(c.id, c);
     const criteria = [...byId.values()];
     // The gate's list is never cut; past MAX_SEEN the store drops remembered criteria, never
     //   those found now.
     const now = new Set(found.map((c) => c.id));
     const stored = [...criteria.filter((c) => now.has(c.id)), ...criteria.filter((c) => !now.has(c.id))].slice(0, MAX_SEEN);
-    if (stored.length > 0) writeState(sessionId, SEEN, stored);
+    if (stored.length > 0) writeState(sessionId, seenName, stored);
     return { criteria, ...(docs.problems.length > 0 ? { problem: `The acceptance criteria cannot be read: ${docs.problems.join('; ')}.` } : {}) };
   } catch (err) {
-    return { criteria: readSeen(sessionId), problem: `The acceptance criteria cannot be read (${String(err).slice(0, 200)}).` };
+    return { criteria: readSeen(sessionId, seenName), problem: `The acceptance criteria cannot be read (${String(err).slice(0, 200)}).` };
   }
 }
 
