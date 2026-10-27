@@ -7,7 +7,7 @@
 import { existsSync, lstatSync, readdirSync } from 'node:fs';
 import { extname, join, posix } from 'node:path';
 import { policyGlobs } from './changed-coverage';
-import { HOOK_GIT_ARGS, HOOK_GIT_ENV } from './hook-git';
+import { gitOut } from './git-run';
 import { readRegular } from './safe-read';
 import { TEST_FILE, testTypeOf } from './test-catalog';
 import { type ExtraType, JS_SPECIFIER, SATISFIED_BY, typeNeedOf } from './test-types';
@@ -162,19 +162,10 @@ const FRAMEWORK_RULES: { name: string; dep?: RegExp; text?: Partial<Record<Eco, 
 ];
 
 function listFiles(root: string): string[] | null {
-  try {
-    const r = Bun.spawnSync(['git', ...HOOK_GIT_ARGS, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
-      cwd: root,
-      env: { ...process.env, ...HOOK_GIT_ENV },
-      stdout: 'pipe',
-      stderr: 'pipe',
-      timeout: 30_000,
-    });
-    if (r.exitCode !== 0) return null;
-    return [...new Set(r.stdout.toString().split('\0'))].filter((f) => f !== '' && !f.includes('\n'));
-  } catch {
-    return null; // no git at all
-  }
+  // null: not a repo, a failure, or no git at all.
+  const out = gitOut(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], { timeoutMs: 30_000 });
+  if (out === null) return null;
+  return [...new Set(out.split('\0'))].filter((f) => f !== '' && !f.includes('\n'));
 }
 
 /** The repos one level below a dir that is no repo (separate FE and BE repos under one dir). */

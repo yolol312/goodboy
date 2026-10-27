@@ -107,7 +107,11 @@ describe('delta reviews', () => {
     const old = new Date(Date.now() - 60_000).toISOString();
     const reviews = join(d, '.claude', 'reviews');
     sh(d, `mkdir -p ${reviews}`);
-    writeFileSync(join(reviews, 'r.json'), JSON.stringify({ ...review([join(d, 'a.ts')], old), unknown_assumptions_checked: [] }));
+    // As review-write stores it: the tree the review ran on (v0.36.6, R4: a review counts by the
+    //   content it saw, and one with no tree and no checkout to trust is not evidence at all).
+    const tree = Bun.spawnSync(['git', 'rev-parse', 'HEAD^{tree}'], { cwd: d, stdout: 'pipe' }).stdout.toString().trim();
+    writeFileSync(join(reviews, 'r.json'), JSON.stringify({ ...review([join(d, 'a.ts')], old), tree, unknown_assumptions_checked: [] }));
+    writeFileSync(join(d, 'a.ts'), 'export const a = 2;\nexport const b = 2;\n'); // edited after the review
     recordEdit(s, join(d, 'a.ts'), 0, undefined, Date.now());
     const p = Bun.spawn(['bun', join(ROOT, 'hooks', 'stop.ts')], {
       cwd: d,

@@ -5,7 +5,7 @@
 
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { HOOK_GIT_ARGS, HOOK_GIT_ENV } from './hook-git';
+import { gitOut } from './git-run';
 import { JVM_TEST_SOURCE_SET, stripLiteralsAndComments } from './test-validator';
 import type { TestType } from './types';
 
@@ -65,15 +65,9 @@ export function testTypeOf(rel: string, text: string): TestType {
 /** The project's test files as git sees them (tracked and untracked, not ignored), or null when
  *  git cannot list them (no repo, no git, a timeout): that is not "no tests" (H4 review). */
 function testFiles(root: string): string[] | null {
-  const r = Bun.spawnSync(['git', ...HOOK_GIT_ARGS, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
-    cwd: root,
-    env: { ...process.env, ...HOOK_GIT_ENV },
-    stdout: 'pipe',
-    stderr: 'pipe',
-    timeout: 10_000,
-  });
-  if (r.exitCode !== 0) return null;
-  return [...new Set(r.stdout.toString().split('\0'))].filter((f) => f !== '' && TEST_FILE.test(f)).sort();
+  const out = gitOut(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], { timeoutMs: 10_000 });
+  if (out === null) return null;
+  return [...new Set(out.split('\0'))].filter((f) => f !== '' && TEST_FILE.test(f)).sort();
 }
 
 function featuresOf(rel: string, text: string): string[] {

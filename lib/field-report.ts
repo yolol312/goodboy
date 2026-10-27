@@ -12,6 +12,7 @@ import { homedir, hostname, tmpdir, userInfo } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
 import { type GateDecision, type GateEvent, readGateLog } from './gate-log';
+import { spawnGit } from './git-run';
 import { checkDir, checkedPrivateDir, claudeConfigDir, createNew, isUnder, processAlive, realDeep } from './private-files';
 import { readRegular } from './safe-read';
 import { secretRe } from './secret-patterns';
@@ -270,8 +271,8 @@ const HOST_LABELS = /^(?:com|net|org|io|co|kr|jp|de|uk|ai|dev|cloud|local|intern
  *  user.email; the login name and the host name. A first or a last name alone is not one. */
 export function privateTerms(cwd: string): string[] {
   const run = (args: string[]): string => {
-    const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'] });
-    return r.status === 0 ? r.stdout.trim() : '';
+    const r = spawnGit(cwd, args);
+    return r.code === 0 ? r.out.trim() : '';
   };
   const terms = new Set<string>();
   const add = (s: string | undefined) => {

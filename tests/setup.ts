@@ -6,6 +6,9 @@
 // review). It runs before the first test file, not before each: a test that sets one of
 // these variables in process.env restores it itself.
 
+import { delimiter, dirname, isAbsolute } from 'node:path';
+import { resolveGitBinary } from '../lib/git-binary';
+
 // GOODBOY_DOCKER_IT is an opt-in switch for the real-docker test of track M
 // (tests/m1-sandbox.test.ts), not a gate setting: it stays.
 for (const key of Object.keys(process.env)) {
@@ -56,3 +59,12 @@ process.env.GOODBOY_CLAUDE_BIN = '/nonexistent/goodboy-tests/claude';
 // The hooks read the project dir from CLAUDE_PROJECT_DIR (I10). A suite run inside a Claude Code
 // session inherits that session's; tests set it themselves (tests/i10-project-dir.test.ts).
 delete process.env.CLAUDE_PROJECT_DIR;
+
+// On macOS `git` on PATH is /usr/bin/git, a shim that asks xcode-select for the real binary on
+// every call (20-40 ms; v0.36.6). The tests spawn git thousands of times, so the real tool's
+// directory goes first on PATH for every spawn that passes `{ ...process.env }`. The hooks pick
+// the same binary themselves (lib/git-binary.ts); a spawn that passes no env keeps the shim. No
+// monkeypatch of Bun.spawn: an explicit env stays as the test wrote it. Elsewhere, or when the
+// lookup fails, nothing changes.
+const gitBin = resolveGitBinary(process.env, process.cwd());
+if (isAbsolute(gitBin)) process.env.PATH = `${dirname(gitBin)}${delimiter}${process.env.PATH ?? ''}`;

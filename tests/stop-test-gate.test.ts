@@ -289,7 +289,10 @@ describe('Stop hook — 층1 테스트 게이트', () => {
 
     const out = await runStop(tmp, cwd, sessionId);
     expect(out.decision).toBe('block');
-    expect(out.reason).toContain('존재하지 않습니다');
+    // (v0.36.6, R3) The record is no evidence (filtered once, with a note naming it and the path):
+    //   the changed file is still unverified, so the gate still blocks.
+    expect(out.reason).toContain('/nowhere/probe.test.ts is not in the working tree');
+    expect(out.reason).toContain('테스트 검증 실패');
   });
 
   test('red 증거가 성공(exit 0)이면 BLOCK — 되돌려도 통과하는 테스트는 무효', async () => {

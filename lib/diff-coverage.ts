@@ -6,21 +6,17 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve as resolvePath } from 'node:path';
-import { HOOK_GIT_ARGS, HOOK_GIT_ENV, NO_GRAFTS } from './hook-git';
+import { gitOut } from './git-run';
 
 /** Per file (repo-relative): line → executed (true) or not (false), for executable lines. */
 export type LineHits = Map<string, Map<number, boolean>>;
 
 export type ReportFormat = 'lcov' | 'cobertura' | 'jacoco' | 'go';
 
+/** No replace refs: `git replace` would show the diff of another commit (I1 security review);
+ *  and no filter driver: the diff of a work tree file runs its clean filter (lib/git-run.ts). */
 function git(cwd: string, args: string[]): string | null {
-  try {
-    // No replace refs: `git replace` would show the diff of another commit (I1 security review).
-    const p = Bun.spawnSync(['git', '--no-replace-objects', ...HOOK_GIT_ARGS, ...args], { cwd, env: { ...process.env, ...HOOK_GIT_ENV, ...NO_GRAFTS }, stdout: 'pipe', stderr: 'pipe', timeout: 30_000 });
-    return p.exitCode === 0 ? p.stdout.toString() : null;
-  } catch {
-    return null;
-  }
+  return gitOut(cwd, args, { timeoutMs: 30_000 });
 }
 
 /** A path from a diff header: C-quoted when git quotes it (`"b/caf\303\251.ts"`), with the

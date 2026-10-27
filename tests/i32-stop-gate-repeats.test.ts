@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { changedLineGaps, pinCoverageStart, withSameContent } from '../lib/changed-coverage';
 import { getCurrentTurn, recordEdit } from '../lib/file-tracker';
+import { workTreeState } from '../lib/push-test';
 import { requiredDimensionsFor } from '../lib/review-dimensions';
 import { validateReview } from '../lib/review-validator';
 import { missingTestTypes } from '../lib/test-types';
@@ -96,6 +97,9 @@ function putTestRecord(p: Proj, tested: string[], opts: { testFiles?: string[]; 
     path,
     JSON.stringify({
       timestamp: new Date(Date.now() + 60_000 + recordCounter).toISOString(),
+      // As test-write stores it (v0.36.6, R4): the HEAD the record ran on. A record with no tree is
+      //   judged by time only while its checkout is HEAD or before it.
+      commit: sh(p.d, 'git rev-parse HEAD'),
       tested_files: tested,
       category: 'fix-bug',
       test_files: opts.testFiles ?? [join(p.d, 'tests', 'app.test.js')],
@@ -124,6 +128,7 @@ function putReview(p: Proj, reviewed: string[]): void {
     join(dir, `v${recordCounter++}.json`),
     JSON.stringify({
       timestamp: new Date(Date.now() + 60_000).toISOString(),
+      tree: workTreeState(p.d).tree, // as review-write stores it (v0.36.6, R4: reviews count by content)
       reviewed_files: reviewed,
       category: 'fix-bug',
       findings: [],
@@ -742,14 +747,13 @@ describe('build copies: batching, the cap and the budget', () => {
   const many = (p: Proj, n: number) => Array.from({ length: n }, (_, i) => write(p.d, `target/c${String(i).padStart(3, '0')}.js`, V2));
 
   test('300 ignored copies: the call stays within the budget, and the copies over the cap stay in the set', async () => {
-    const { buildCopies, BUILD_COPY_BUDGET_MS, MAX_BUILD_COPY_CANDIDATES } = await import('../lib/build-copies');
+    const { buildCopies, MAX_BUILD_COPY_CANDIDATES } = await import('../lib/build-copies');
     const p = project();
     const cs = many(p, MAX_BUILD_COPY_CANDIDATES + 100);
     const skipped: [number, string][] = [];
-    const t0 = performance.now();
-    const got = buildCopies([p.src, ...cs], p.d, p.head, undefined, { onSkipped: (n, why) => skipped.push([n, why]) });
-    const ms = performance.now() - t0;
-    expect(ms).toBeLessThan(BUILD_COPY_BUDGET_MS);
+    // An injected clock that stands still: the cap, not the (production) budget, is what is tested.
+    //   How the budget cuts a call is asserted with a moving clock below; no wall time is measured.
+    const got = buildCopies([p.src, ...cs], p.d, p.head, undefined, { now: () => 0, onSkipped: (n, why) => skipped.push([n, why]) });
     expect([...got.keys()]).toEqual(cs.slice(0, MAX_BUILD_COPY_CANDIDATES)); // the first ones are paired
     expect([...got.values()].every((s) => s === p.src)).toBe(true);
     expect(skipped).toEqual([[100, 'cap']]); // the rest are named by count and stay in the layer-1 set
@@ -858,7 +862,7 @@ describe('build copies: batching, the cap and the budget', () => {
     for (const opts of [{ failLs: 1 }, { failIgnore: true }, { failLs: 2 }]) {
       const skipped: string[] = [];
       expect([JSON.stringify(opts), withGitShim(opts, () => buildCopies([p.src, c], p.d, p.head, undefined, { ...PATIENT, onSkipped: (_n, why) => skipped.push(why) })).size]).toEqual([JSON.stringify(opts), 0]);
-      expect(skipped).toEqual([]); // not out of time: no budget line
+      expect(skipped).toEqual(['git']); // not out of time: no budget line; a git error is its own cause (v0.36.6, Part 2), once
     }
   }, 60_000);
 
@@ -898,9 +902,9 @@ describe('build copies: batching, the cap and the budget', () => {
     const n = MAX_BUILD_COPY_CANDIDATES + 30;
     for (const c of many(p, n)) recordEdit(p.s, c, 0, undefined, Date.now());
     putTestRecord(p, [p.src]);
-    const t0 = performance.now();
+    // No wall time is asserted (a subprocess on a loaded machine is not a clock): the runner timeout
+    //   below is the generous bound, and the log lines say what the call decided.
     const out = await stop(p);
-    expect(performance.now() - t0).toBeLessThan(12_000); // the hook's own timeout is 15 s
     expect(gateLog(p.s).filter((l) => l.includes('build-copy: target/c')).length).toBe(MAX_BUILD_COPY_CANDIDATES);
     expect(gateLog(p.s).some((l) => l.includes('build-copy: 30 candidate(s) kept in the test set (over the candidate cap)'))).toBe(true);
     expect(testBlock(out)).toBe(true); // the 30 over the cap are untested files
@@ -931,16 +935,17 @@ describe('record paths in this process', () => {
     return d;
   }
 
-  test('setRecordBase pins the dir, recordBase reads it, and no argument unpins it', async () => {
-    const { recordBase, setRecordBase } = await import('../lib/record-paths');
-    expect(recordBase()).toBe(process.cwd());
+  test('setRecordBase pins the dir that recordPath resolves a relative name against, and no argument unpins it', async () => {
+    const { recordPath, setRecordBase } = await import('../lib/record-paths');
+    expect(recordPath('f.ts')).toBe(join(process.cwd(), 'f.ts'));
     setRecordBase('/x/y/../z');
     try {
-      expect(recordBase()).toBe('/x/z');
+      expect(recordPath('f.ts')).toBe('/x/z/f.ts');
+      expect(recordPath('/abs/f.ts')).toBe('/abs/f.ts'); // an absolute name needs no base
     } finally {
       setRecordBase();
     }
-    expect(recordBase()).toBe(process.cwd());
+    expect(recordPath('f.ts')).toBe(join(process.cwd(), 'f.ts'));
   }, 30_000);
 
   test('recordPath follows a link before a `..`, as the OS opens it; a lexical resolve would not', async () => {

@@ -7,7 +7,7 @@
 // the layer-1 edit set when every condition holds; the review edit set keeps it. Any read or
 // compare error keeps the obligation, and every Stop decides again.
 //
-//   - a path segment of the copy is `target` or `build`;
+//   - a directory segment of the copy's path (not its file name) is `target` or `build`;
 //   - the copy is untracked and git-ignored, and the ignore rule that decides it comes from a
 //     `.gitignore` the session did not write: a relative path inside the canonical repo top, named
 //     `.gitignore`, a regular single-link file with no link on its path, tracked at the session's
@@ -22,16 +22,24 @@
 //     after the Stop that accepted its test), and its bytes now equal the copy's;
 //   - neither is a `.env`, `.env.*` or `*.env` file.
 //
-// Cost. A git spawn is about 60 ms, and the Stop hook's 15 s timeout skips the test and review
+// Cost. A git spawn is 6 ms with the real binary and 22-39 ms through the macOS /usr/bin/git shim
+// (measured in v0.36.6, plan §15.22), and the Stop hook's 15 s timeout skips the test and review
 // gates when it fires. So the checks are batched (one `ls-files` for all candidates, one
 // `check-ignore` for all of them, one `ls-files` for the candidate sources), at most
 // MAX_BUILD_COPY_CANDIDATES candidates are examined, and the whole call has a wall-clock budget
-// (BUILD_COPY_BUDGET_MS). A candidate past the cap or the budget stays in the layer-1 set (fail
-// closed) and `onSkipped` says how many, for the gate log.
+// (BUILD_COPY_BUDGET_MS) that every step shares as one deadline: each git spawn gets only what is
+// left of it (none when nothing is), and the file system scans and the source loop check it. A
+// candidate's sources are found by size before any file is read, so a file no source can equal is
+// never read; the bytes read and the bytes kept are capped (MAX_BUILD_COPY_READ_BYTES,
+// MAX_BUILD_COPY_CACHED_BYTES), and so is the number of sources looked at
+// (MAX_BUILD_COPY_SOURCES). A candidate past a cap, the budget or a git failure stays in the layer-1
+// set (fail closed), and `onSkipped` says how many and why, for the gate log: every candidate left
+// undecided is counted once, under the one cause that stopped it (the candidate cap, the byte
+// budget, the time budget, or a git error), however far along it was when the call stopped.
 
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';
-import { basename, join, relative, resolve, sep } from 'node:path';
-import { blobAtCommit, differFromBase, hookGit } from './changed-coverage';
+import { basename, join, resolve } from 'node:path';
+import { blobAtCommit, differFromBase, hookGit, relInside } from './changed-coverage';
 
 /** The largest file whose bytes are compared. */
 const MAX_COPY_BYTES = 16 * 1024 * 1024;
@@ -45,35 +53,46 @@ export const BUILD_COPY_BUDGET_MS = 3_000;
 /** Byte-equal sources kept per copy for the tracked check (many identical small files). */
 const MAX_EQUAL_SOURCES = 8;
 
+/** Bytes read from files in one call (copies and sources), and bytes of sources kept for the
+ *  copies after the first one that has the same size. */
+const MAX_BUILD_COPY_READ_BYTES = 64 * 1024 * 1024;
+const MAX_BUILD_COPY_CACHED_BYTES = 32 * 1024 * 1024;
+
+/** Files of the session's change set looked at for a source; a source past it is not found, and
+ *  its copy stays in the layer-1 set. */
+const MAX_BUILD_COPY_SOURCES = 2_000;
+
 const BUILD_SEGMENTS = new Set(['target', 'build']);
+
+/** Why candidates were left undecided: over the candidate cap, over the byte cap, out of time, or
+ *  a git call that failed (not for want of time). */
+export type SkipReason = 'cap' | 'bytes' | 'budget' | 'git';
 
 export interface BuildCopyLimits {
   maxCandidates?: number;
   budgetMs?: number;
+  /** Bytes read from files in all, and bytes of sources kept (a test's; the defaults are the
+   *  MAX_BUILD_COPY_ constants). */
+  maxReadBytes?: number;
+  maxCachedBytes?: number;
   /** The clock in ms (a test's). */
   now?: () => number;
-  /** Called with the number of candidates left undecided, and why: over the cap, or out of time. */
-  onSkipped?: (count: number, reason: 'cap' | 'budget') => void;
+  /** Called with the number of candidates left undecided, and why. Each undecided candidate is
+   *  counted in exactly one call. */
+  onSkipped?: (count: number, reason: SkipReason) => void;
 }
 
 /** `.env`, `.env.*` and `*.env`: secrets, never treated as a build copy or its source. */
-export function isEnvName(rel: string): boolean {
+function isEnvName(rel: string): boolean {
   const b = basename(rel);
   return b === '.env' || b.startsWith('.env.') || b.endsWith('.env');
-}
-
-/** The repo-relative path (with `/`) of a file inside `top`, or null. */
-function relIn(top: string, file: string): string | null {
-  const r = relative(top, resolve(file));
-  if (r === '' || r === '..' || r.startsWith(`..${sep}`) || resolve(top, r) !== resolve(file)) return null;
-  return r.split(sep).join('/');
 }
 
 /** The files of `files` that are inside `top`: abs -> rel. */
 function relsOf(top: string, files: readonly string[]): Map<string, string> {
   const m = new Map<string, string>();
   for (const f of files) {
-    const rel = relIn(top, f);
+    const rel = relInside(top, f);
     if (rel !== null) m.set(f, rel);
   }
   return m;
@@ -81,7 +100,7 @@ function relsOf(top: string, files: readonly string[]): Map<string, string> {
 
 /** The size of a regular file with one link, below `top`, with no symbolic link on its path
  *  (checked from the top down); null for anything else and on any error. */
-function plainSize(top: string, rel: string): number | null {
+export function plainSize(top: string, rel: string): number | null {
   try {
     const dirs = rel.split('/');
     const leaf = dirs.pop()!;
@@ -111,17 +130,18 @@ const MAX_GITIGNORE_BYTES = 1024 * 1024;
 
 /** Whether a `.gitignore` named by git (a path relative to `top`) is one the session did not
  *  write: inside the canonical top, a plain file, tracked at `head` as a regular blob, and its
- *  bytes still that blob's. Anything else is a no. */
-function pristineGitignore(canon: string, top: string, head: string, source: string): boolean {
+ *  bytes still that blob's. Anything else is a no (also when `left`, the time left of the call's
+ *  deadline, runs out: no git call is started then). */
+function pristineGitignore(canon: string, top: string, head: string, source: string, left: () => number): boolean {
   if (basename(source) !== '.gitignore') return false;
   // A relative, normalized path inside the canonical top: an absolute name (a global file), a
   //   `..` or `.` segment or a doubled slash does not survive the round trip.
-  if (relIn(canon, join(canon, source)) !== source) return false;
+  if (relInside(canon, join(canon, source)) !== source) return false;
   if (plainSize(canon, source) === null) return false;
   // Tracked at HEAD as a regular file (blobAtCommit refuses a symlink or a gitlink mode).
-  if (blobAtCommit(top, head, source, MAX_GITIGNORE_BYTES) === null) return false;
+  if (blobAtCommit(top, head, source, MAX_GITIGNORE_BYTES, left) === null) return false;
   // Its content now is that blob's: differFromBase hashes the file as git would store it.
-  return differFromBase(top, head, [source]).size === 0;
+  return differFromBase(top, head, [source], left).size === 0;
 }
 
 interface IgnoreRow {
@@ -146,6 +166,179 @@ function ignoreRules(git: Git, rels: readonly string[]): Map<string, IgnoreRow> 
   return rows;
 }
 
+
+type Pair = [abs: string, rel: string];
+
+/** What every step of one call shares: the repo, the start HEAD, git under the call's deadline, and
+ *  the candidates not yet decided (by repo-relative path), so that whatever stops the call counts
+ *  each of them once. */
+interface Call {
+  top: string;
+  canon: string;
+  head: string;
+  git: Git;
+  left: () => number;
+  undecided: Set<string>;
+  limits: BuildCopyLimits;
+}
+
+/** Stops the call: the candidates still undecided are reported once, under `reason`. */
+function abandon(c: Call, reason: SkipReason): null {
+  if (c.undecided.size > 0) c.limits.onSkipped?.(c.undecided.size, reason);
+  c.undecided.clear();
+  return null;
+}
+
+/** True, the call stopped, when the budget is gone. */
+function spent(c: Call): boolean {
+  if (c.left() > 0) return false;
+  abandon(c, 'budget');
+  return true;
+}
+
+/** A batch git call returned nothing: out of time (it was cut off at what was left), or a git error. */
+function gitFailed(c: Call): null {
+  return abandon(c, c.left() > 0 ? 'git' : 'budget');
+}
+
+/** The cheap file system checks, under the deadline, then the candidate cap (so a deleted file takes
+ *  no slot): the candidates that are plain files, with the size of each (no file is read before the
+ *  sizes are compared). */
+function plainCandidates(c: Call, candidates: readonly Pair[]): { pending: Pair[]; size: Map<string, number> } | null {
+  const size = new Map<string, number>();
+  const pending: Pair[] = [];
+  for (const cand of candidates) {
+    if (spent(c)) return null;
+    const n = plainSize(c.top, cand[1]);
+    if (n === null) {
+      c.undecided.delete(cand[1]);
+      continue;
+    }
+    size.set(cand[1], n);
+    pending.push(cand);
+  }
+  const cap = c.limits.maxCandidates ?? MAX_BUILD_COPY_CANDIDATES;
+  if (pending.length > cap) {
+    const over = pending.slice(cap);
+    for (const [, rel] of over) c.undecided.delete(rel);
+    c.limits.onSkipped?.(over.length, 'cap');
+  }
+  return { pending: pending.slice(0, cap), size };
+}
+
+/** One listing for every candidate: a tracked file under build/ or target/ is no copy. */
+function untrackedAmong(c: Call, pending: readonly Pair[]): Pair[] | null {
+  if (pending.length === 0 || spent(c)) return null;
+  const tracked = trackedAmong(c.git, pending.map(([, rel]) => rel));
+  if (tracked === null) return gitFailed(c);
+  for (const rel of tracked) c.undecided.delete(rel);
+  return pending.filter(([, rel]) => !tracked.has(rel));
+}
+
+/** One ignore check for every candidate, then one verdict per deciding `.gitignore`: the candidates
+ *  an unchanged, committed `.gitignore` ignores. */
+function ignoredByPristine(c: Call, pending: readonly Pair[]): Pair[] | null {
+  if (pending.length === 0 || spent(c)) return null;
+  const rules = ignoreRules(c.git, pending.map(([, rel]) => rel));
+  if (rules === null) return gitFailed(c);
+  const verdicts = new Map<string, boolean>();
+  const qualifying: Pair[] = [];
+  for (const [abs, rel] of pending) {
+    const row = rules.get(rel);
+    if (row !== undefined && /^\d+$/.test(row.line) && row.pattern !== '' && !row.pattern.startsWith('!')) {
+      let ok = verdicts.get(row.source);
+      if (ok === undefined) {
+        if (spent(c)) return null;
+        ok = pristineGitignore(c.canon, c.top, c.head, row.source, c.left);
+        // A verdict that ran out of time is no verdict: the candidates are undecided, not refused.
+        if (!ok && c.left() <= 0) return abandon(c, 'budget');
+        verdicts.set(row.source, ok);
+      }
+      if (ok) {
+        qualifying.push([abs, rel]);
+        continue;
+      }
+    }
+    c.undecided.delete(rel);
+  }
+  return qualifying.length === 0 ? null : qualifying;
+}
+
+/** The session's change set, bucketed by file size, and only by the sizes a qualifying copy has: a
+ *  source of another size is never read (`plainSize` says the path is a regular file: never a FIFO
+ *  or a device). */
+function sourcesBySize(c: Call, wanted: ReadonlySet<number>, files: readonly string[]): Map<number, Pair[]> | null {
+  const bySize = new Map<number, Pair[]>();
+  const sources = [...relsOf(c.top, files)].filter(([, rel]) => !isEnvName(rel)).slice(0, MAX_BUILD_COPY_SOURCES);
+  for (const [source, sourceRel] of sources) {
+    if (spent(c)) return null;
+    const size = plainSize(c.top, sourceRel);
+    if (size === null || !wanted.has(size)) continue;
+    const bucket = bySize.get(size) ?? [];
+    bucket.push([source, sourceRel]);
+    bySize.set(size, bucket);
+  }
+  return bySize;
+}
+
+/** Reads files under the call's byte caps, keeping sources for the next copy of their size. `over`
+ *  turns true when a read was refused for the byte cap (the call stops then). */
+function byteReader(limits: BuildCopyLimits): { read: (abs: string, size: number, keep: boolean) => Buffer | null; over: () => boolean } {
+  const maxRead = limits.maxReadBytes ?? MAX_BUILD_COPY_READ_BYTES;
+  const maxCached = limits.maxCachedBytes ?? MAX_BUILD_COPY_CACHED_BYTES;
+  let readBytes = 0;
+  let cachedBytes = 0;
+  let over = false;
+  const kept = new Map<string, Buffer>();
+  const read = (abs: string, size: number, keep: boolean): Buffer | null => {
+    const known = kept.get(abs);
+    if (known) return known;
+    if (size > MAX_COPY_BYTES) return null;
+    if (readBytes + size > maxRead) {
+      over = true;
+      return null;
+    }
+    try {
+      const b = readFileSync(abs);
+      readBytes += b.length;
+      if (keep && cachedBytes + b.length <= maxCached) {
+        kept.set(abs, b);
+        cachedBytes += b.length;
+      }
+      return b;
+    } catch {
+      return null;
+    }
+  };
+  return { read, over: () => over };
+}
+
+/** For each qualifying copy, the sources of the same size whose bytes equal its own (at most
+ *  MAX_EQUAL_SOURCES). A copy with none is decided (no copy); one with some waits for the tracked
+ *  check of its sources. Stops for the budget or the byte cap. */
+function byteEqualSources(c: Call, qualifying: readonly Pair[], size: ReadonlyMap<string, number>, bySize: ReadonlyMap<number, Pair[]>): Map<string, { copy: string; found: Pair[] }> | null {
+  const { read, over } = byteReader(c.limits);
+  const equal = new Map<string, { copy: string; found: Pair[] }>(); // by the copy's rel
+  for (const [copy, copyRel] of qualifying) {
+    if (spent(c)) return null;
+    const n = size.get(copyRel)!;
+    const sameSize = (bySize.get(n) ?? []).filter(([source, sourceRel]) => source !== copy && sourceRel !== copyRel);
+    const mine = sameSize.length === 0 ? null : read(copy, n, false);
+    if (mine === null && over()) return abandon(c, 'bytes');
+    const found: Pair[] = [];
+    for (const [source, sourceRel] of mine === null ? [] : sameSize) {
+      if (found.length >= MAX_EQUAL_SOURCES) break;
+      if (spent(c)) return null;
+      const theirs = read(source, n, true);
+      if (theirs === null && over()) return abandon(c, 'bytes');
+      if (theirs !== null && mine!.equals(theirs)) found.push([source, sourceRel]);
+    }
+    if (found.length > 0) equal.set(copyRel, { copy, found });
+    else c.undecided.delete(copyRel); // no source of its size, unreadable, or no equal one: no copy
+  }
+  return equal;
+}
+
 /** The copy -> source pairs (absolute paths) among `edits` (absolute files of the layer-1 edit
  *  set). `changeSet` lists the session's change set the source must be in (absolute files; read
  *  only when a copy qualifies by its path); it defaults to `edits`. Empty when `head` (the
@@ -154,104 +347,35 @@ export function buildCopies(edits: readonly string[], top: string, head: string 
   const out = new Map<string, string>();
   try {
     if (typeof head !== 'string' || edits.length === 0) return out;
-    const underBuild = ([, rel]: [string, string]) => rel.split('/').slice(0, -1).some((s) => BUILD_SEGMENTS.has(s)) && !isEnvName(rel) && !rel.startsWith(':');
-    const candidates = [...relsOf(top, edits)].filter(underBuild);
-    if (candidates.length === 0) return out;
-    const canon = realpathSync(top);
-    // Cheap file system checks first; then the cap, so a deleted file takes no slot.
-    let pending = candidates.filter(([, rel]) => plainSize(top, rel) !== null);
-    const cap = limits.maxCandidates ?? MAX_BUILD_COPY_CANDIDATES;
-    if (pending.length > cap) limits.onSkipped?.(pending.length - cap, 'cap');
-    pending = pending.slice(0, cap);
     const now = limits.now ?? Date.now;
     const t0 = now();
-    const left = (): number => (limits.budgetMs ?? BUILD_COPY_BUDGET_MS) - (now() - t0);
-    /** True, with the undecided count reported, once the budget is gone. */
-    const spent = (undecided: number): boolean => {
-      if (left() > 0) return false;
-      limits.onSkipped?.(undecided, 'budget');
-      return true;
-    };
-    const git: Git = (args, input) => hookGit(top, args, input, Math.max(1, left()));
+    const budget = limits.budgetMs ?? BUILD_COPY_BUDGET_MS;
+    // One deadline for every step: git spawns, file system scans and the source loop.
+    const left = (): number => budget - (now() - t0);
+    const underBuild = ([, rel]: Pair) => rel.split('/').slice(0, -1).some((s) => BUILD_SEGMENTS.has(s)) && !isEnvName(rel) && !rel.startsWith(':');
+    const candidates = [...relsOf(top, edits)].filter(underBuild);
+    if (candidates.length === 0) return out;
+    const c: Call = { top, canon: realpathSync(top), head, git: (args, input) => hookGit(top, args, input, budget, left), left, undecided: new Set(candidates.map(([, rel]) => rel)), limits };
 
-    // One listing for every candidate: a tracked file under build/ or target/ is no copy.
-    if (pending.length === 0 || spent(pending.length)) return out;
-    const tracked = trackedAmong(git, pending.map(([, rel]) => rel));
-    if (tracked === null) {
-      spent(pending.length); // a timed-out git is the budget
-      return out;
-    }
-    pending = pending.filter(([, rel]) => !tracked.has(rel));
-    if (pending.length === 0 || spent(pending.length)) return out;
-
-    // One ignore check for every candidate, then one verdict per deciding `.gitignore`.
-    const rules = ignoreRules(git, pending.map(([, rel]) => rel));
-    if (rules === null) {
-      spent(pending.length);
-      return out;
-    }
-    const verdicts = new Map<string, boolean>();
-    const qualifying: [string, string][] = [];
-    for (const [i, [abs, rel]] of pending.entries()) {
-      const row = rules.get(rel);
-      if (row === undefined || !/^\d+$/.test(row.line) || row.pattern === '' || row.pattern.startsWith('!')) continue;
-      let ok = verdicts.get(row.source);
-      if (ok === undefined) {
-        if (spent(pending.length - i)) return out;
-        ok = pristineGitignore(canon, top, head, row.source);
-        verdicts.set(row.source, ok);
-      }
-      if (ok) qualifying.push([abs, rel]);
-    }
-    if (qualifying.length === 0) return out;
-
-    // Read only after `plainSize` said the path is a regular file (never a FIFO or a device).
-    const bytes = new Map<string, Buffer | null>();
-    const read = (abs: string): Buffer | null => {
-      if (!bytes.has(abs)) {
-        let b: Buffer | null = null;
-        try {
-          if (lstatSync(abs).size <= MAX_COPY_BYTES) b = readFileSync(abs);
-        } catch {
-          b = null;
-        }
-        bytes.set(abs, b);
-      }
-      return bytes.get(abs) ?? null;
-    };
-    // The session's change set is listed once, and only for a copy that passed the checks above.
-    const sources = [...relsOf(top, changeSet ? changeSet() : edits)].filter(([, rel]) => !isEnvName(rel));
-    const sizes = new Map<string, number | null>();
-    const sizeOf = (rel: string): number | null => {
-      if (!sizes.has(rel)) sizes.set(rel, plainSize(top, rel));
-      return sizes.get(rel) ?? null;
-    };
-    const equal = new Map<string, [string, string][]>(); // copy -> byte-equal sources (abs, rel)
-    for (const [i, [copy, copyRel]] of qualifying.entries()) {
-      if (spent(qualifying.length - i)) return out;
-      const mine = read(copy);
-      if (mine === null) continue;
-      const found: [string, string][] = [];
-      for (const [source, sourceRel] of sources) {
-        if (found.length >= MAX_EQUAL_SOURCES) break;
-        if (source === copy || sourceRel === copyRel || sizeOf(sourceRel) !== mine.length) continue; // no read of a file of another size
-        const theirs = read(source);
-        if (theirs !== null && mine.equals(theirs)) found.push([source, sourceRel]);
-      }
-      if (found.length > 0) equal.set(copy, found);
-    }
+    const plain = plainCandidates(c, candidates);
+    const untracked = plain && untrackedAmong(c, plain.pending);
+    const qualifying = untracked && ignoredByPristine(c, untracked);
+    if (!plain || !qualifying) return out;
+    const wanted = new Set(qualifying.map(([, rel]) => plain.size.get(rel)!));
+    const bySize = sourcesBySize(c, wanted, changeSet ? changeSet() : edits);
+    const equal = bySize && byteEqualSources(c, qualifying, plain.size, bySize);
+    if (!equal || equal.size === 0 || spent(c)) return out;
 
     // One listing for the candidate sources: the source must be tracked.
-    const rels = [...new Set([...equal.values()].flatMap((l) => l.map(([, rel]) => rel)))];
-    if (rels.length === 0 || spent(equal.size)) return out;
-    const trackedSources = trackedAmong(git, rels);
+    const trackedSources = trackedAmong(c.git, [...new Set([...equal.values()].flatMap((e) => e.found.map(([, rel]) => rel)))]);
     if (trackedSources === null) {
-      spent(equal.size);
+      gitFailed(c);
       return out;
     }
-    for (const [copy, list] of equal) {
-      const hit = list.find(([, rel]) => trackedSources.has(rel));
+    for (const [copyRel, { copy, found }] of equal) {
+      const hit = found.find(([, rel]) => trackedSources.has(rel));
       if (hit) out.set(copy, hit[0]);
+      c.undecided.delete(copyRel);
     }
   } catch {
     return new Map();

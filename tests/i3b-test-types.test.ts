@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { addedUserGlobs, pinCoverageStart, repoTop, sessionUserGlobs } from '../lib/changed-coverage';
 import { ensureSessionDir } from '../lib/file-tracker';
+import { workTreeState } from '../lib/push-test';
 import {
   boundaryInContent,
   boundaryReason,
@@ -298,12 +299,17 @@ describe('the user globs', () => {
     await hook(x, 'post-tool-use.ts', { hook_event_name: 'PostToolUse', tool_name: 'Write', tool_input: { file_path: file } });
     if (opts.record !== false) {
       const testFile = write(x.cwd, 'tests/server.test.ts', 'test("x", () => { expect(1).toBe(1); });\n');
+      // The commit and work-tree tree `cli.ts test-write` stores (v0.36.6, R4: a record with no tree is
+      //   not trusted by time in a repo whose HEAD does not resolve).
+      const state = workTreeState(x.cwd);
       // One record per type, the first one oldest (a test-lead run: one record per member).
       (opts.types ?? ['unit']).forEach((type, i) => write(
         x.cwd,
         `.claude/tests/result-${i}.json`,
         JSON.stringify({
           timestamp: new Date(Date.now() + 1_000 + i * 1_000).toISOString(),
+          commit: state.commit,
+          tree: state.tree,
           tested_files: [file],
           category: 'add-feature',
           test_files: [testFile],

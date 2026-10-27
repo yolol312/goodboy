@@ -7,6 +7,7 @@
 import { existsSync, lstatSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { ensureSessionDir, sessionDir } from './file-tracker';
+import { spawnGit } from './git-run';
 import { isUnder, isDir, realDeep } from './private-files';
 import { readRegular } from './safe-read';
 
@@ -69,10 +70,9 @@ export function pinWorktrees(sessionId: string, env: NodeJS.ProcessEnv = process
   try {
     const dir = ensureSessionDir(sessionId);
     if (existsSync(join(dir, WORKTREES_FILE))) return;
-    const r = Bun.spawnSync(['git', 'worktree', 'list', '--porcelain'], { cwd: resolve(p), stdout: 'pipe', stderr: 'ignore', timeout: 5_000 });
-    if (r.exitCode !== 0) return;
-    const list = r.stdout
-      .toString()
+    const r = spawnGit(resolve(p), ['worktree', 'list', '--porcelain']);
+    if (r.code !== 0) return;
+    const list = r.out
       .split('\n')
       .filter((l) => l.startsWith('worktree '))
       .map((l) => realDeep(l.slice('worktree '.length)));
@@ -91,26 +91,19 @@ export function pinWorktrees(sessionId: string, env: NodeJS.ProcessEnv = process
  *  `.git` file pointing at the project's own git dir passed the first two). */
 function sharesRepo(wt: string, dir: string): boolean {
   if (!existsSync(join(wt, '.git'))) return false;
-  // With no git on PATH spawnSync throws: then it is no worktree, and the hook goes on (review).
-  const git = (d: string, args: string[]): { exitCode: number | null; stdout: Buffer } => {
-    try {
-      return Bun.spawnSync(['git', ...args], { cwd: d, stdout: 'pipe', stderr: 'ignore', timeout: 5_000 });
-    } catch {
-      return { exitCode: 1, stdout: Buffer.from('') };
-    }
-  };
+  // With no git on PATH nothing runs (code -1): then it is no worktree, and the hook goes on (review).
+  const git = (d: string, args: string[]) => spawnGit(d, args);
   const ask = (d: string): [string, string] | null => {
     const r = git(d, ['rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir']);
-    const lines = r.stdout.toString().trim().split('\n');
-    return r.exitCode === 0 && lines.length === 2 ? [realDeep(lines[0]!), realDeep(lines[1]!)] : null;
+    const lines = r.out.trim().split('\n');
+    return r.code === 0 && lines.length === 2 ? [realDeep(lines[0]!), realDeep(lines[1]!)] : null;
   };
   const a = ask(wt);
   const b = ask(dir);
   if (a === null || b === null || a[0] !== realDeep(wt) || a[1] !== b[1] || a[0] === b[0]) return false;
   const list = git(dir, ['worktree', 'list', '--porcelain']);
-  if (list.exitCode !== 0) return false;
-  return list.stdout
-    .toString()
+  if (list.code !== 0) return false;
+  return list.out
     .split('\n')
     .some((l) => l.startsWith('worktree ') && realDeep(l.slice('worktree '.length)) === a[0]);
 }

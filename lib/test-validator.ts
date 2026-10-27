@@ -12,6 +12,7 @@
 
 import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
+import { hasSpelling } from './path-spelling';
 import { recordPath } from './record-paths';
 import { MAX_STATE_BYTES, readRegular } from './safe-read';
 import { canonicalTimestamp, isTrustedTimestamp } from './trusted-time';
@@ -42,6 +43,13 @@ export function isEvidencedBlocked(r: TestResult): boolean {
  *  dir the Stop pinned, not the hook process's cwd (issue #32, lib/record-paths.ts). */
 function normalizePath(p: string): string {
   return recordPath(p);
+}
+
+/** Whether a record's file list names `key` (an absolute path): the same spelling, or (v0.36.6)
+ *  the Unicode twin of it that is the same file on disk (lib/path-spelling.ts). */
+export function listsFile(files: readonly unknown[] | undefined, key: string): boolean {
+  const paths = (files ?? []).map((f) => normalizePath(f as string));
+  return paths.includes(key) || hasSpelling('', key, paths);
 }
 
 function safeReadTest(path: string): TestResult | null {
@@ -254,14 +262,43 @@ function hasTrustedTimestamp(r: TestResult, nowMs: number): boolean {
   return isTrustedTimestamp(r.timestamp, nowMs);
 }
 
-/** (#23) A record counts for an edited file when it was made after the file's last edit, or when
- *  its tree holds the file's current content (an edit since then was undone, or the file came
- *  back with a branch switch). The one freshness rule of every layer-1 check, and (#26) of the
- *  review coverage. */
-export function freshFor(r: Pick<TestResult, 'timestamp' | 'tree'>, edit: ChangedFileEdit): boolean {
+/** How a record stands for an edited file (v0.36.6, R4): `fresh` counts as evidence; `stale` is a
+ *  record that tested other content (or an older edit); `unverified` is one whose identity could
+ *  not be checked (a tree that cannot be read, a record with no tree whose checkout changed). */
+export type Freshness = 'fresh' | 'stale' | 'unverified';
+
+/** The cause named in a block when a covering record has `tree: null` (R4). */
+export const NULL_TREE_NOTE =
+  'A record with `tree: null` is one whose work-tree hash failed when it was written (an unreadable file, or a git that stalled): it names no content, so it is not evidence. ';
+
+/** (#23, R4) A record counts for an edited file by content, not by time. A record with a tree
+ *  counts only when the file's content and kind in that tree are the file's now (withSameContent
+ *  lists such trees in `sameContentTrees`): a checkout changes a file with no edit in the log, so
+ *  "made after the last edit" proves nothing about what the record ran. A tree that cannot be read
+ *  or is malformed, and a read that ran out of time, never fall back to the time. A record with
+ *  `tree: null` is one whose work-tree hash failed when test-write or review-write took it (an
+ *  unreadable file, a git that stalled): it names no content, so it is unverified, never judged by
+ *  time (outside a git repo, where no tree can be taken, withSameContent lists it in
+ *  `timeTrustedRecords`). Only a record with no `tree` key at all (written before the trees) is
+ *  judged by time, and only while its checkout is not known to have changed (`distrustedRecords`).
+ *  The one freshness rule of every layer-1 check, and (#26) of the review coverage. */
+export function freshness(r: Pick<TestResult, 'timestamp' | 'tree'>, edit: ChangedFileEdit): Freshness {
+  const tree: unknown = r.tree;
+  if (tree === null) {
+    if (edit.timeTrustedRecords?.has(r) !== true) return 'unverified';
+  } else if (tree !== undefined) {
+    if (typeof tree !== 'string' || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(tree)) return 'unverified';
+    if (edit.sameContentTrees?.has(tree) === true) return 'fresh';
+    if (edit.extraBlobRecords?.has(r) === true) return 'fresh'; // an ignored file: the id the record took
+    return edit.unverifiedTrees?.has(tree) === true ? 'unverified' : 'stale';
+  } else if (edit.distrustedRecords?.has(r) === true) return 'unverified';
   const last = edit.lastEditTimestamp;
-  if (typeof last !== 'string' || last === '' || r.timestamp > last) return true;
-  return typeof r.tree === 'string' && edit.sameContentTrees?.has(r.tree) === true;
+  return typeof last !== 'string' || last === '' || r.timestamp > last ? 'fresh' : 'stale';
+}
+
+/** `freshness` is `fresh`. */
+export function freshFor(r: Pick<TestResult, 'timestamp' | 'tree'>, edit: ChangedFileEdit): boolean {
+  return freshness(r, edit) === 'fresh';
 }
 
 /**
@@ -297,22 +334,30 @@ export function validateTestCoverage(
   );
   const missing: string[] = [];
   const stale: string[] = [];
+  const unverified: string[] = [];
   const failed: string[] = [];
   const effective = new Set<TestResult>();
+  let unhashed = false; // a covering record had `tree: null`
   for (const edit of changedEdits) {
     const key = normalizePath(edit.file);
     let coveredStale = false;
+    let coveredUnverified = false;
     let chosen: TestResult | null = null;
     for (const r of sorted) {
-      if (!(r.tested_files ?? []).some((f) => normalizePath(f) === key)) continue;
-      if (freshFor(r, edit)) {
+      if (!listsFile(r.tested_files, key)) continue;
+      const how = freshness(r, edit);
+      if (how === 'fresh') {
         chosen = r;
         break;
       }
-      coveredStale = true;
+      if (how === 'unverified') {
+        coveredUnverified = true;
+        if (r.tree === null) unhashed = true;
+      } else coveredStale = true;
     }
     if (chosen === null) {
-      if (coveredStale) stale.push(edit.file);
+      if (coveredUnverified) unverified.push(edit.file);
+      else if (coveredStale) stale.push(edit.file);
       else missing.push(edit.file);
       continue;
     }
@@ -335,6 +380,16 @@ export function validateTestCoverage(
     return {
       ok: false,
       reason: `테스트가 마지막 편집보다 오래된 파일 ${stale.length}개: ${stale.slice(0, 3).join(', ')}${stale.length > 3 ? ' …' : ''}. 해당 파일을 다시 테스트하세요.${futureNote}`,
+      effective: Array.from(effective),
+    };
+  }
+  if (unverified.length > 0) {
+    return {
+      ok: false,
+      reason:
+        `Could not verify what the test records ran for ${unverified.length} file(s): ${unverified.slice(0, 3).join(', ')}${unverified.length > 3 ? ' …' : ''}. ` +
+        "A record's tree could not be read or compared with the file's content now (a missing or malformed tree, or the check ran out of time), " +
+        `or an older record's checkout has changed since: this is not "the tests never ran". ${unhashed ? NULL_TREE_NOTE : ''}Run the tests again so a new record is written${futureNote}`,
       effective: Array.from(effective),
     };
   }
@@ -458,6 +513,28 @@ export function missingTestFiles(results: TestResult[]): string | null {
     `${missing.length > 3 ? ` 외 ${missing.length - 3}개` : ''}. ` +
     `층1 테스트는 repo에 남는 자산이어야 합니다(임시 프로브가 아님).`
   );
+}
+
+/** (v0.36.6, R3) The records that can be evidence, and a note for each one that cannot: a passing
+ *  record whose `test_files` names a file that is not on disk now proves nothing (a probe passed
+ *  off as a test, a test moved or deleted since), so it is filtered out once, before every check
+ *  that reads the results. A failing or blocked record stays: its failure is not erased by a
+ *  missing file. When nothing remains for a changed file, the file is unverified, as before: the
+ *  filter never suppresses an obligation, and the notes go in the block that says so. The
+ *  deletion and weakening checks of existing tests (lib/existing-tests.ts) read the repo, not
+ *  these records, and stay apart. */
+export function withoutAbsentTests(results: readonly TestResult[]): { kept: TestResult[]; notes: string[] } {
+  const kept: TestResult[] = [];
+  const notes: string[] = [];
+  for (const r of results) {
+    const absent = r.verdict === 'pass' ? (r.test_files ?? []).find((f) => typeof f === 'string' && f.trim() !== '' && !existsSync(recordPath(f))) : undefined;
+    if (absent === undefined) {
+      kept.push(r);
+      continue;
+    }
+    notes.push(`The ${r.category} test record of ${r.timestamp} is not counted: its test file ${absent} is not in the working tree.`);
+  }
+  return { kept, notes };
 }
 
 /** 수용 기준 중 커버되지 않은 것. required가 비면 빈 배열(= 강제 없음). */

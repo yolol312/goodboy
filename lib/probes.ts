@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { type Bounded, onInterrupt, runBounded } from './bounded';
 import { claudeBin } from './checkup';
+import { spawnGit } from './git-run';
 import { nestedEnv, parseStartupLog } from './health';
 import { type Component, type Inventory, pinnedModels } from './inventory';
 import { claudeConfigDir } from './private-files';
@@ -272,7 +273,7 @@ function makeProject(): { dir: string; project: string; tmp: string } {
     mkdirSync(tmp, { mode: 0o700 });
     writeFileSync(join(project, 'README.md'), '# probe\nA tiny project for a goodboy checkup probe.\n');
     try {
-      Bun.spawnSync(['git', 'init', '-q'], { cwd: project, stdout: 'ignore', stderr: 'ignore', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+      spawnGit(project, ['init', '-q'], { env: { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
     } catch {
       // no git: the session still runs
     }

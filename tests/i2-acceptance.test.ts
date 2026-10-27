@@ -388,6 +388,9 @@ function rig(d: string) {
         join(d, '.claude', 'tests', 'r.json'),
         JSON.stringify({
           timestamp: new Date(Date.now() + 1_000).toISOString(),
+          // As test-write stores it (v0.36.6, R4): the HEAD the record ran on. With no tree, a record is
+          //   judged by time only while its checkout is HEAD or before it.
+          commit: sh(d, 'git rev-parse HEAD'),
           tested_files: [join(d, 'src', 'a.ts')],
           category: 'add-feature',
           test_files: [join(d, 'tests', 'a.test.ts')],

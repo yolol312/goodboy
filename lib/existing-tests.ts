@@ -19,7 +19,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, extname, isAbsolute, join, posix, relative, resolve as resolvePath, sep } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
-import { filterOffArgs, HOOK_GIT_ARGS, HOOK_GIT_ENV } from './hook-git';
+import { spawnGit } from './git-run';
 import type { ChangedFileEdit } from './review-validator';
 import { MAX_STATE_BYTES, readRegular } from './safe-read';
 import { JVM_CASE, TEST_FILE } from './test-catalog';
@@ -46,19 +46,8 @@ const MAX_READ_BYTES = 64_000_000;
 const JS_EXT = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.mts', '.cts'];
 
 function git(cwd: string, args: string[], timeout = 5_000, stdin?: Buffer): { code: number; out: string; raw: Buffer } {
-  try {
-    const r = Bun.spawnSync(['git', '--no-replace-objects', ...HOOK_GIT_ARGS, ...args], {
-      cwd,
-      env: { ...process.env, ...HOOK_GIT_ENV },
-      stdin: stdin ?? 'ignore',
-      stdout: 'pipe',
-      stderr: 'pipe',
-      timeout,
-    });
-    return { code: r.exitCode ?? -1, out: r.stdout.toString(), raw: r.stdout };
-  } catch {
-    return { code: -1, out: '', raw: Buffer.alloc(0) };
-  }
+  const r = spawnGit(cwd, args, { timeoutMs: timeout, ...(stdin === undefined ? {} : { input: stdin }) });
+  return { code: r.code, out: r.out, raw: r.raw };
 }
 
 const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
@@ -134,10 +123,10 @@ export interface StartTestChange {
 export function changedStartTests(top: string, head: string | null | undefined): Map<string, StartTestChange> {
   const out = new Map<string, StartTestChange>();
   if (!validHead(head)) return out;
-  const filters = filterOffArgs(git(top, ['config', '--name-only', '--get-regexp', '^filter\\.']).out);
+  // (lib/git-run.ts empties the repo's filter drivers for a diff: no program from its config runs.)
   const r = git(
     top,
-    [...filters, 'diff', '--raw', '--no-abbrev', '-M', '-z', '--no-ext-diff', '--no-textconv', '--ignore-submodules', '--end-of-options', head, '--'],
+    ['diff', '--raw', '--no-abbrev', '-M', '-z', '--no-ext-diff', '--no-textconv', '--ignore-submodules', '--end-of-options', head, '--'],
     10_000,
   );
   if (r.code !== 0) return out;

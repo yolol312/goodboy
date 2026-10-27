@@ -47,6 +47,10 @@ export interface ReviewResult {
   /** (#26) Set by `cli.ts review-write`, never by the agent: the working tree it ran on as a git
    *  tree hash, so a file edited since and brought back to this content is still reviewed. */
   tree?: string | null;
+  /** (v0.36.6) Set by `cli.ts review-write`, never by the agent: the content ids (git blob ids,
+   *  keyed by absolute path) of reviewed files that `tree` lacks (git-ignored, or left out of the
+   *  work-tree hash), so a file the tree cannot show is still judged by content. See `TestResult`. */
+  extra_blobs?: Record<string, string>;
 }
 
 // ---- 층1 테스트 게이트 ----
@@ -175,6 +179,11 @@ export interface TestResult {
    *  git tree hash (lib/push-test.ts workTreeState). The push test check matches `tree`. */
   commit?: string | null;
   tree?: string | null;
+  /** (v0.36.6) Set by `cli.ts test-write`, never by the agent: the content ids (git blob ids, keyed
+   *  by absolute path) of tested files that `tree` lacks (git-ignored, or left out of the work-tree
+   *  hash). The Stop compares one with the file's content now, so an edited ignored code file can
+   *  be evidenced by a record (bounded in count and bytes: lib/changed-coverage.ts extraBlobsFor). */
+  extra_blobs?: Record<string, string>;
 }
 
 /** A layer-1 test verdict: a review verdict, or `blocked` when the tests could not run. */

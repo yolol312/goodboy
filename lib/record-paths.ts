@@ -1,14 +1,18 @@
 // The one place a test or review record's relative path is resolved (issue #32, plan §15.21).
 //
-// A record names files (`tested_files`, `test_files`, `reviewed_files`, a finding's `file`). A
-// relative name used to be resolved with `path.resolve(name)`, that is against the hook
-// process's current dir, which follows the model's `cd` (I10: the Stop's `cwd` is the shell's
-// dir; the project dir is pinned apart). A record written from the project's root then named
-// other files from a Stop run in `docs/ui`, and the gate reported files the record names as
-// untested. A relative name now resolves against the project dir the Stop pinned
-// (`setRecordBase`, called once by the Stop), and `test-write` and `review-write` store absolute
-// paths, so a new record never depends on it. Without a pinned dir (a unit test, another
-// caller) the process cwd is the base, as before.
+// A record names files: `tested_files`, `test_files` and `reviewed_files` (resolved here, by
+// `recordPath`), and a finding's `file`. A relative name used to be resolved with
+// `path.resolve(name)`, that is against the hook process's current dir, which follows the model's
+// `cd` (I10: the Stop's `cwd` is the shell's dir; the project dir is pinned apart). A record
+// written from the project's root then named other files from a Stop run in `docs/ui`, and the
+// gate reported files the record names as untested. A relative name now resolves against the
+// project dir the Stop pinned (`setRecordBase`, called once by the Stop). `test-write` and
+// `review-write` store `tested_files`, `test_files` and `reviewed_files` as absolute paths, so a
+// new record does not depend on the base; a finding's `file` is stored as written (relative
+// stays relative) and is resolved by the Stop itself against the same project dir
+// (`resolvePath(cwd, f)` in hooks/stop.ts: the findings' ownership and supersession checks, the
+// type advice and the forbidden-pattern lines), not through `recordPath`. Without a pinned dir
+// (a unit test, another caller) the process cwd is the base, as before.
 
 import { resolve } from 'node:path';
 import { openedPath } from './file-tracker';
@@ -21,7 +25,7 @@ export function setRecordBase(dir?: string): void {
 }
 
 /** The dir relative record paths resolve against now. */
-export function recordBase(): string {
+function recordBase(): string {
   return pinned ?? process.cwd();
 }
 

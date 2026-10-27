@@ -4,7 +4,7 @@ import { readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { recordPath } from './record-paths';
 import { axesOfDimensions } from './review-dimensions';
-import { freshFor } from './test-validator';
+import { freshness, listsFile, NULL_TREE_NOTE } from './test-validator';
 import { canonicalTimestamp, isTrustedTimestamp, MAX_CLOCK_SKEW_MS } from './trusted-time';
 import type { ReviewFinding, ReviewResult, Verdict } from './types';
 
@@ -227,8 +227,27 @@ export interface ChangedFileEdit {
   lastEditTimestamp: string | null;
   /** (#23) The record trees (`TestResult.tree` and, #26, `ReviewResult.tree`, set by test-write and
    *  review-write) that hold this file's current
-   *  content: a record made on one tested what is there now, whenever it was made. */
+   *  content: a record made on one tested what is there now, whenever it was made. (v0.36.6, R4)
+   *  The only way a record with a tree counts for the file: its time says nothing, since a
+   *  checkout changes a file without an edit in the log. */
   sameContentTrees?: ReadonlySet<string>;
+  /** (v0.36.6, R4) Record trees that list this file and could not be compared with it: the tree
+   *  object is missing or unreadable, or the Stop ran out of reads or time. Such a record is not
+   *  evidence, and the message says its identity could not be verified. */
+  unverifiedTrees?: ReadonlySet<string>;
+  /** (v0.36.6, R4) Records with no `tree` key (written before the trees) whose time is not trusted:
+   *  the checkout has changed since they were made, or its history is unknown
+   *  (lib/changed-coverage.ts withSameContent). Without the set, such a record is judged by time. */
+  distrustedRecords?: ReadonlySet<object>;
+  /** (v0.36.6, R4) Records with `tree: null` that are judged by time anyway: outside a git repo no
+   *  tree can be taken (lib/changed-coverage.ts withSameContent). A record with `tree: null` that is
+   *  not in the set is unverified: its work-tree hash failed. */
+  timeTrustedRecords?: ReadonlySet<object>;
+  /** (v0.36.6) Records with a tree that lacks this file (git-ignored, or left out of the work-tree
+   *  hash) whose own `extra_blobs` entry for it is the file's content now. The tree cannot show such
+   *  a file, so the id the record took (test-write, review-write; never the agent) counts, for that
+   *  record only. Set by lib/changed-coverage.ts withSameContent. */
+  extraBlobRecords?: ReadonlySet<object>;
 }
 
 export interface CoverageResult extends ValidationResult {
@@ -237,6 +256,10 @@ export interface CoverageResult extends ValidationResult {
   /** Changed files whose reviews are all older than their last edit: a delta review of just
    *  these is enough (H7). */
   stale?: string[];
+  /** (v0.36.6, R4) Changed files whose covering reviews could not be compared with their content
+   *  (see ChangedFileEdit.unverifiedTrees): not "never reviewed", and no delta review can start
+   *  from a review that cannot be read. */
+  unverified?: string[];
   /** 커버리지를 구성한 리뷰들 — 각 변경 파일을 커버하면서 그 파일의 마지막 편집보다
    *  나중인(fresh) 리뷰 **전부**의 합집합. 후속 검사(가정 검증/차원 커버리지)가 이 집합을 쓴다.
    *
@@ -292,29 +315,37 @@ export function validateReviewCoverage(
   );
   const missing: string[] = [];
   const stale: string[] = [];
+  const unverified: string[] = [];
   const failed: string[] = [];
   const effective = new Set<ReviewResult>();
+  let unhashed = false; // a covering review had `tree: null`
   for (const edit of changedEdits) {
     const key = normalizePath(edit.file);
     // 파일별 최신 커버 리뷰(fresh 우선). fresh가 없고 stale 커버만 있으면 stale로 분류.
     let coveredStale = false;
+    let coveredUnverified = false;
     let chosen: ReviewResult | null = null;
     // fresh 커버 리뷰를 전부 모은다(병렬 축 리뷰 지원). chosen = 그중 최신 —
     //   verdict=fail 판정은 "가장 최근 판단"만 따라야 하므로 최신 1개로 한다.
     const freshCovering: ReviewResult[] = [];
     for (const r of sorted) {
-      if (!(r.reviewed_files ?? []).some((f) => normalizePath(f) === key)) continue;
-      // (#26) Newer than the last edit, or its tree holds the file's current content.
-      const isFresh = freshFor(r, edit);
-      if (isFresh) {
+      if (!listsFile(r.reviewed_files, key)) continue;
+      // (#26, v0.36.6 R4) Its tree holds the file's current content, by content and not by time
+      //   (a review with no tree: by time while its checkout is unchanged).
+      const how = freshness(r, edit);
+      if (how === 'fresh') {
         if (chosen === null) chosen = r; // 최신순이므로 첫 fresh가 파일별 최신 커버 리뷰
         freshCovering.push(r);
         continue;
       }
-      coveredStale = true;
+      if (how === 'unverified') {
+        coveredUnverified = true;
+        if (r.tree === null) unhashed = true;
+      } else coveredStale = true;
     }
     if (chosen === null) {
-      if (coveredStale) stale.push(edit.file);
+      if (coveredUnverified) unverified.push(edit.file);
+      else if (coveredStale) stale.push(edit.file);
       else missing.push(edit.file);
       continue;
     }
@@ -340,6 +371,17 @@ export function validateReviewCoverage(
       reason: `리뷰가 마지막 편집보다 오래된 파일 ${stale.length}개: ${stale.slice(0, 3).join(', ')}${stale.length > 3 ? ' …' : ''}. 해당 파일을 다시 리뷰하세요.${futureNote}`,
       effective: Array.from(effective),
       stale,
+    };
+  }
+  if (unverified.length > 0) {
+    return {
+      ok: false,
+      reason:
+        `Could not verify what the reviews covered for ${unverified.length} file(s): ${unverified.slice(0, 3).join(', ')}${unverified.length > 3 ? ' …' : ''}. ` +
+        "A review's tree could not be read or compared with the file's content now (a missing or malformed tree, or the check ran out of time), " +
+        `or an older review's checkout has changed since: this is not "never reviewed". ${unhashed ? NULL_TREE_NOTE : ''}Run the review again so a new result is written${futureNote}`,
+      effective: Array.from(effective),
+      unverified,
     };
   }
   if (failed.length > 0) {

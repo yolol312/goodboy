@@ -18,6 +18,7 @@ import {
   weakenedTests,
 } from '../lib/existing-tests';
 import { ensureSessionDir } from '../lib/file-tracker';
+import { workTreeState } from '../lib/push-test';
 import { restoreGateState, snapshotGateState } from '../lib/state-guard';
 import type { ReviewResult, TestResult } from '../lib/types';
 
@@ -431,6 +432,7 @@ describe('the Stop', () => {
       `.claude/reviews/${name}.json`,
       JSON.stringify({
         timestamp: new Date().toISOString(),
+        tree: workTreeState(top).tree, // as review-write stores it
         reviewed_files: files,
         category: 'fix-bug',
         findings: findingFile ? [{ file: findingFile, issue: 'the zero case was dropped on purpose: add(0, 0) is covered elsewhere', severity: 'low', probe: 'read the diff' }] : [],
@@ -446,6 +448,8 @@ describe('the Stop', () => {
       '.claude/tests/result.json',
       JSON.stringify({
         timestamp: new Date(Date.now() + 1_000).toISOString(),
+        // As test-write stores them (v0.36.6, R4): the HEAD and the work tree the record ran on.
+        ...workTreeState(top),
         tested_files: [join(top, 'src/calc.ts')],
         category: 'fix-bug',
         test_files: testFiles.map((t) => join(top, t)),
@@ -498,6 +502,7 @@ describe('the Stop', () => {
         '.claude/reviews/review.json',
         JSON.stringify({
           timestamp: new Date(Date.now() + 1_000).toISOString(),
+          tree: workTreeState(s.top).tree, // as review-write stores it
           reviewed_files: [s.file],
           category: 'fix-bug',
           findings: findingFile ? [{ file: findingFile, issue: 'the zero case was dropped on purpose: add(0, 0) is covered elsewhere', severity: 'low', probe: 'read the diff' }] : [],

@@ -2,6 +2,7 @@
 // git runs outside any model Bash call, so a program the repo's config names would make files
 // the guards take as the user's (a Stop approval marker): fsmonitor, gpg.program behind
 // log.showSignature, the upload-pack of a partial clone's lazy fetch, a clean filter.
+// Every site runs git through lib/git-run.ts, which applies the settings below.
 
 /** No fsmonitor, no signature check. */
 export const HOOK_GIT_ARGS: readonly string[] = ['-c', 'core.fsmonitor=false', '-c', 'log.showSignature=false'];

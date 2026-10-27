@@ -53,6 +53,9 @@ const edited = (s: string, file: string) => recordEdit(s, file, 0, undefined, Da
 function record(d: string, over: Record<string, unknown> = {}) {
   return {
     timestamp: new Date(Date.now() + 60_000).toISOString(),
+    // As test-write stores it (v0.36.6, R4): the HEAD the record ran on. With no tree, a record is
+    //   judged by time only while its checkout is HEAD or before it.
+    commit: sh(d, 'git rev-parse HEAD'),
     tested_files: [join(d, 'src', 'calc.ts')],
     category: 'fix-bug',
     test_files: [join(d, 'tests', 'a.test.ts')],

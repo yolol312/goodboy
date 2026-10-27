@@ -18,11 +18,13 @@ import { projectMode } from '../lib/project-mode';
 import { knowledgeRoot, readDocMap } from '../lib/project-knowledge';
 import { staleDocs, staleDocsReason, type StaleDoc } from '../lib/doc-map';
 import {
+  allUnverified,
   blobAtCommit,
   changedLineGaps,
   changedLineReason,
   diffCoverageMode,
   differFromBase,
+  divergedFromStart,
   netChangedEdits,
   repoTop,
   sessionCoverageStart,
@@ -30,9 +32,12 @@ import {
   withSameContent,
 } from '../lib/changed-coverage';
 import { changedLines } from '../lib/diff-coverage';
+import { beginGitSnapshot, withHashBatch } from '../lib/git-run';
 import { projectDir } from '../lib/project-dir';
 import { setRecordBase } from '../lib/record-paths';
 import { buildCopies } from '../lib/build-copies';
+import { isGeneratedLcov } from '../lib/lcov-report';
+import { withoutAbsentTests } from '../lib/test-validator';
 import {
   affectedGaps,
   affectedReason,
@@ -647,6 +652,10 @@ function needsTestCoverage(file: string, cwd: string, sessionId: string): boolea
     const head = sessionCoverageStart(sessionId, cwd, s.top).head;
     return typeof head === 'string' ? blobAtCommit(s.top, head, rel, MAX_MANIFEST_BYTES) : null;
   };
+  // (v0.36.6) A coverage report the test run wrote (`coverage/lcov.info`, or its temp file: complete,
+  //   untracked, not in the start HEAD) is output, not code. Layer-1 scope only: the review keeps it,
+  //   and `classifyPath` still calls everything under `coverage/` code (lib/lcov-report.ts).
+  if (isGeneratedLcov(file, s.top, () => sessionCoverageStart(sessionId, cwd, s.top).head)) return false;
   return needsTests(file, s.top, s.previews, baseline);
 }
 
@@ -723,13 +732,19 @@ function evaluateTestResults(
   //   the reasons found before it still block; with none, the gate fails open as before.
   const reasons: string[] = [];
   let unverified: TestResult | null = null;
+  // (v0.36.6, R3) A passing record whose test files are gone is no evidence: dropped once, here, for
+  //   every rule below; the notes go in the block that says a file is still unverified.
+  const { kept, notes } = withoutAbsentTests(results);
+  for (const n of notes) logGate(sessionId, 'test', 'warn', n);
   try {
-    unverified = runTestRules(results, changedEdits, acceptance, cwd, sessionId, reasons);
+    unverified = runTestRules(kept, changedEdits, acceptance, cwd, sessionId, reasons, notes);
   } catch (err) {
     if (reasons.length === 0) throw err;
     logGate(sessionId, 'test', 'warn', `rule error after ${reasons.length} reason(s): ${String(err).slice(0, 200)}`);
   }
   if (reasons.length > 0) {
+    const note = branchNote(sessionId, cwd, changedEdits.map((e) => e.file));
+    if (note) reasons.push(note);
     return { kind: 'block', reason: reasons.length === 1 ? reasons[0]! : reasons.map((r, i) => `(${i + 1}/${reasons.length}) ${r}`).join(' ') };
   }
   return unverified ? { kind: 'accept-unverified', blocked: unverified } : { kind: 'accept' };
@@ -744,12 +759,13 @@ function runTestRules(
   cwd: string,
   sessionId: string,
   reasons: string[],
+  notes: readonly string[] = [],
 ): TestResult | null {
   const block = (reason: string): void => {
     reasons.push(reason);
   };
   const cov = validateTestCoverage(results, changedEdits);
-  if (!cov.ok) block(`테스트 검증 실패: ${cov.reason ?? '알 수 없는 이유'}.`);
+  if (!cov.ok) block(`테스트 검증 실패: ${cov.reason ?? '알 수 없는 이유'}.${notes.length > 0 ? ` ${notes.slice(0, 3).join(' ')}${notes.length > 3 ? ` (${notes.length - 3} more)` : ''}` : ''}`);
   // No record covers any changed file: the rules below would only judge an unrelated record.
   if (!cov.ok && cov.effective.length === 0) return null;
   const effective = cov.effective.length > 0 ? cov.effective : results.slice(0, 1);
@@ -878,13 +894,16 @@ function runTestRules(
   }
   // (I1, plan §15) Every changed code line ran in a test of the recorded tree; a file no run
   //   loaded counts as not run (lib/changed-coverage.ts). Only the records the checks above
-  //   accepted (`ran`), and per file those made after its last edit. Exemptions: the user's
+  //   accepted (`ran`, and the others that pass on their own), and per file those that hold its
+  //   current content. Exemptions: the user's
   //   policy globs pinned at the session start, which also pins the HEAD no record's base may
   //   be after.
   const mode = diffCoverageMode();
   if (mode !== 'off') {
     const start = sessionCoverageStart(sessionId, cwd, top);
-    const out = changedLineGaps({ results: ran, edits: changedEdits, top, exempt: start.exempt, startHead: start.head });
+    // (R2) Every record that passes the checks above on its own, not only the one each file's time
+    //   picked: a content-matching record that measured the file counts wherever it stands.
+    const out = changedLineGaps({ results: otherwiseValid(results, ran, linesOf), edits: changedEdits, top, exempt: start.exempt, startHead: start.head });
     if (!out.measured || out.gaps.length > 0) {
       if (mode === 'on') block(changedLineReason(out, CLI_PATH));
       else {
@@ -902,6 +921,43 @@ function runTestRules(
     }
   }
   return null;
+}
+
+/** (R2) `ran` (the records the coverage check picked) and every other record that passes the
+ *  per-record checks on its own: a pass with no failing suite, valid evidence, and no forbidden
+ *  pattern in its test files. A record the earlier rules reject never reaches the line check. */
+function otherwiseValid(results: readonly TestResult[], ran: readonly TestResult[], linesOf: ReturnType<typeof addedTestLines>): TestResult[] {
+  const picked = new Set(ran);
+  const extra = results.filter(
+    (r) =>
+      !picked.has(r) &&
+      r.verdict === 'pass' &&
+      failingSuites([r]) === null &&
+      validateEvidence([r]) === null &&
+      scanForbiddenPatterns(r.test_files ?? [], linesOf).length === 0,
+  );
+  return [...ran, ...extra];
+}
+
+/** (v0.36.6) The note a layer-1 block adds when some of its files differ from the session's start
+ *  only because HEAD is on another line than the start (each equals its blob at the merge base): the
+ *  block stands, and a session started on this branch does not count them. Empty when none, or on
+ *  any error. */
+function branchNote(sessionId: string, cwd: string, files: readonly string[]): string {
+  try {
+    const top = scopeOf(sessionId, cwd).top;
+    const rels = files.map((f) => relative(top, resolvePath(f))).filter((r) => r !== '' && r !== '..' && !r.startsWith(`..${sep}`) && !isAbsolute(r)).map((r) => r.split(sep).join('/'));
+    const d = divergedFromStart(top, sessionCoverageStart(sessionId, cwd, top).head, rels);
+    if (d === null) return '';
+    const list = d.files.slice(0, 5).join(', ') + (d.files.length > 5 ? ` and ${d.files.length - 5} more` : '');
+    return (
+      `Note: ${list} ${d.files.length === 1 ? 'is' : 'are'} an obligation only because HEAD (${d.head.slice(0, 12)}) is no longer on the line this session started from ` +
+      `(${d.mergeBase.slice(0, 12)} is where they part): ${d.files.length === 1 ? 'it equals its' : 'they equal their'} version there, so the session did not change ` +
+      `${d.files.length === 1 ? 'it' : 'them'}. This still blocks. A new session started on this branch does not count ${d.files.length === 1 ? 'it' : 'them'}.`
+    );
+  } catch {
+    return '';
+  }
 }
 
 /** (#23) The forbidden-pattern scan's lines: per test file of the records, the lines added since
@@ -1032,28 +1088,32 @@ function testEditsSince(sessionId: string, cwd: string, cursorTurn: number): str
   const known = testEditsMemo.get(key);
   if (known) return known;
   const s = scopeOf(sessionId, cwd);
-  const files = getEditsSince(sessionId, cursorTurn, cwd).filter((f) => needsTestCoverage(f, cwd, sessionId));
-  const head = sessionCoverageStart(sessionId, cwd, s.top).head;
-  const net = netChangedEdits(
-    files.map((file) => ({ file })),
-    s.top,
-    head,
-  ).map((e) => e.file);
-  // (#32) A git-ignored build copy of a tested source file is no change of its own (the review
-  //   edit set keeps it). Decided again each Stop; the pair is in the gate log.
-  const copies = buildCopies(net, s.top, head, () => {
-    // The session's change set: every file it edited (any turn) that is still subject to layer 1
-    //   and differs from its start blob.
-    const all = getEditHistory(sessionId).files.filter((f) => needsTestCoverage(f, cwd, sessionId));
-    return netChangedEdits(all.map((file) => ({ file })), s.top, head).map((e) => e.file);
-  }, {
-    // Past the cap or the time budget, the rest stay in the layer-1 set; the log says how many.
-    onSkipped: (count, why) => logGate(sessionId, 'test', 'warn', `build-copy: ${count} candidate(s) kept in the test set (${why === 'cap' ? 'over the candidate cap' : 'out of time'})`),
+  // (v0.36.6) One evaluation: the net-change check, the build copies' `.gitignore` check and the
+  //   change set's own net-change check hash the same files; each is hashed once (a hash batch).
+  const out = withHashBatch(() => {
+    const files = getEditsSince(sessionId, cursorTurn, cwd).filter((f) => needsTestCoverage(f, cwd, sessionId));
+    const head = sessionCoverageStart(sessionId, cwd, s.top).head;
+    const net = netChangedEdits(
+      files.map((file) => ({ file })),
+      s.top,
+      head,
+    ).map((e) => e.file);
+    // (#32) A git-ignored build copy of a tested source file is no change of its own (the review
+    //   edit set keeps it). Decided again each Stop; the pair is in the gate log.
+    const copies = buildCopies(net, s.top, head, () => {
+      // The session's change set: every file it edited (any turn) that is still subject to layer 1
+      //   and differs from its start blob.
+      const all = getEditHistory(sessionId).files.filter((f) => needsTestCoverage(f, cwd, sessionId));
+      return netChangedEdits(all.map((file) => ({ file })), s.top, head).map((e) => e.file);
+    }, {
+      // Past the cap or the time budget, the rest stay in the layer-1 set; the log says how many.
+      onSkipped: (count, why) => logGate(sessionId, 'test', 'warn', `build-copy: ${count} candidate(s) kept in the test set (${why === 'cap' ? 'over the candidate cap' : why === 'bytes' ? 'over the byte cap' : why === 'git' ? 'git failed' : 'out of time'})`),
+    });
+    for (const [copy, source] of copies) {
+      logGate(sessionId, 'test', 'warn', `build-copy: ${relative(s.top, copy)} -> ${relative(s.top, source)}`);
+    }
+    return copies.size === 0 ? net : net.filter((f) => !copies.has(f));
   });
-  for (const [copy, source] of copies) {
-    logGate(sessionId, 'test', 'warn', `build-copy: ${relative(s.top, copy)} -> ${relative(s.top, source)}`);
-  }
-  const out = copies.size === 0 ? net : net.filter((f) => !copies.has(f));
   testEditsMemo.set(key, out);
   return out;
 }
@@ -1086,7 +1146,7 @@ function reviewChangedEdits(sessionId: string, cwd: string, edits: ReturnType<ty
   try {
     return withSameContent(edits, reviews, scopeOf(sessionId, cwd).top, (r) => r.reviewed_files);
   } catch {
-    return edits;
+    return allUnverified(edits, reviews); // fail closed: no review is compared with the content
   }
 }
 
@@ -1200,7 +1260,8 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
     if (results.length === 0) {
       const preview = recentEdits.slice(0, 5).join(', ');
       const more = recentEdits.length > 5 ? ` and ${recentEdits.length - 5} more` : '';
-      return block(`No test result covers the changed code. ${testerAdvice(recentEdits, cwd, sessionId)}: ${preview}${more}`);
+      const note = branchNote(sessionId, cwd, recentEdits);
+      return block(`No test result covers the changed code. ${testerAdvice(recentEdits, cwd, sessionId)}: ${preview}${more}${note ? ` ${note}` : ''}`);
     }
 
     // 테스트 파일 자체는 커버리지 요구 대상에서 뺀다 — 테스트를 테스트하라는 무한 후퇴가
@@ -1473,6 +1534,10 @@ function main(): void {
       //   dir (the shell's, which follows a model's `cd`).
       setRecordBase(cwd);
       stopShellCwd = shellCwd;
+      // (v0.36.6) One snapshot for this Stop: the git answers that cannot change while it runs
+      //   (object reads by full id, the repo top, the filter list) are asked once
+      //   (lib/git-run.ts). The process ends with the Stop.
+      beginGitSnapshot();
       const sessionId = input.session_id ?? 'unknown';
       snapshotSessionId = sessionId;
       frictionCwd = cwd;

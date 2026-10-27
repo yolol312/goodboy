@@ -14,7 +14,7 @@ import { bashChangedPaths } from './role-limits';
 import { restoreGateState, snapshotGateState } from './state-guard';
 import { getCurrentTurn, isGoodboyArtifact, recordEdit } from './file-tracker';
 import { hookError, logGate } from './gate-log';
-import { filterOffArgs, HOOK_GIT_ARGS, HOOK_GIT_ENV } from './hook-git';
+import { gitOut } from './git-run';
 import { commandSegments, gitSubcommandAt } from './outward-command';
 import { envStr } from './token-habits';
 import { safeMtime } from './bash-read';
@@ -196,20 +196,9 @@ export function placedFiles(command: string, cwd: string, top: string = cwd): st
 /** git without optional locks (a `status` refresh must not hold the user's index.lock while a
  *  parallel `git add` runs: performance review, 71 of 112 concurrent adds failed) and with a
  *  time limit below the post hooks' timeouts. It starts no program from the repo's config
- *  (lib/hook-git.ts). */
+ *  (lib/git-run.ts). */
 function git(cwd: string, args: string[], timeoutMs: number): string | null {
-  try {
-    const p = Bun.spawnSync(['git', '--no-optional-locks', ...HOOK_GIT_ARGS, ...args], {
-      cwd,
-      env: { ...process.env, ...HOOK_GIT_ENV },
-      stdout: 'pipe',
-      stderr: 'pipe',
-      timeout: timeoutMs,
-    });
-    return p.exitCode === 0 ? p.stdout.toString() : null;
-  } catch {
-    return null;
-  }
+  return gitOut(cwd, args, { timeoutMs, noOptionalLocks: true });
 }
 
 /** The project files (absolute) git sees as modified, added, renamed or untracked, with the
@@ -221,10 +210,10 @@ export function statusFiles(cwd: string, timeoutMs = 30_000): { top: string; fil
   const cdup = git(cwd, ['rev-parse', '--show-cdup'], timeoutMs);
   if (cdup === null) return null;
   const top = resolvePath(cwd, cdup.trim() || '.');
-  // Every filter driver emptied: status runs a clean filter to hash a touched file (final G1
-  //   test round). The sweep only needs names, so a filtered file reading as changed is fine.
-  const filters = filterOffArgs(git(top, ['config', '--name-only', '--get-regexp', '^filter\\.'], timeoutMs) ?? '');
-  const out = git(top, [...filters, 'status', '--porcelain=v1', '-z', '--untracked-files=all'], timeoutMs);
+  // Every filter driver is emptied for `status` (it runs a clean filter to hash a touched file:
+  //   final G1 test round; lib/git-run.ts). The sweep only needs names, so a filtered file
+  //   reading as changed is fine.
+  const out = git(top, ['status', '--porcelain=v1', '-z', '--untracked-files=all'], timeoutMs);
   if (out === null) return null;
   const parts = out.split('\0');
   const files: string[] = [];

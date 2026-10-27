@@ -14,7 +14,7 @@ import { changedLineGaps, differFromBase, netChangedEdits, subprocessEvidence, w
 import { affectedGaps } from '../lib/existing-tests';
 import type { ChangedFileEdit } from '../lib/review-validator';
 import { missingTestTypes, recordStandsAlone } from '../lib/test-types';
-import { freshFor, scanForbiddenPatterns, stripLiteralsAndComments, validateTestCoverage } from '../lib/test-validator';
+import { freshFor, freshness, scanForbiddenPatterns, stripLiteralsAndComments, validateTestCoverage } from '../lib/test-validator';
 import type { TestResult } from '../lib/types';
 
 const ROOT = resolve(import.meta.dir, '..');
@@ -238,17 +238,37 @@ describe('net change: a file that vanished', () => {
 });
 
 describe('content freshness: freshFor', () => {
-  test('a record is fresh when newer than the last edit, when there is no edit time, or when its tree holds the content', () => {
-    const r = record(['x'], { timestamp: iso(10_000), tree: 'a'.repeat(40) });
+  test('a record with a tree is fresh only by content (v0.36.6, R4); a record with no tree, by time', () => {
+    const T = 'a'.repeat(40);
+    const r = record(['x'], { timestamp: iso(10_000), tree: T });
     const edit = (over: Partial<ChangedFileEdit>): ChangedFileEdit => ({ file: '/x', lastEditTimestamp: iso(5_000), ...over });
-    expect(freshFor(r, edit({ lastEditTimestamp: iso(20_000) }))).toBe(true); // record is newer
-    expect(freshFor(r, edit({ lastEditTimestamp: null }))).toBe(true);
-    expect(freshFor(r, edit({ lastEditTimestamp: '' }))).toBe(true);
+    // Time says nothing about a record with a tree: a checkout changes a file with no edit in the log.
+    expect(freshFor(r, edit({ lastEditTimestamp: iso(20_000) }))).toBe(false); // the record is newer than the edit: still no
+    expect(freshFor(r, edit({ lastEditTimestamp: null }))).toBe(false);
+    expect(freshFor(r, edit({ lastEditTimestamp: '' }))).toBe(false);
     expect(freshFor(r, edit({}))).toBe(false); // older, no trees
-    expect(freshFor(r, edit({ sameContentTrees: new Set(['a'.repeat(40)]) }))).toBe(true); // older, same content
+    expect(freshFor(r, edit({ sameContentTrees: new Set([T]) }))).toBe(true); // older, same content
+    expect(freshFor(r, edit({ lastEditTimestamp: iso(20_000), sameContentTrees: new Set([T]) }))).toBe(true); // newer, same content
     expect(freshFor(r, edit({ sameContentTrees: new Set(['b'.repeat(40)]) }))).toBe(false); // another tree
-    expect(freshFor({ ...r, tree: null }, edit({ sameContentTrees: new Set(['a'.repeat(40)]) }))).toBe(false);
-    expect(freshFor({ ...r, tree: undefined }, edit({ sameContentTrees: new Set(['a'.repeat(40)]) }))).toBe(false);
+    expect(freshFor(r, edit({ lastEditTimestamp: iso(20_000), sameContentTrees: new Set(['b'.repeat(40)]) }))).toBe(false); // newer, other content
+    // A tree that is malformed, or could not be read, is never the time rule.
+    expect(freshFor({ ...r, tree: 'not-a-tree' }, edit({ lastEditTimestamp: iso(20_000) }))).toBe(false);
+    expect(freshFor(r, edit({ lastEditTimestamp: iso(20_000), unverifiedTrees: new Set([T]) }))).toBe(false);
+    // No tree key (written before the trees): the time rule, while its time is trusted.
+    const old = { ...r, tree: undefined };
+    expect(freshFor(old, edit({ lastEditTimestamp: iso(20_000) }))).toBe(true); // newer than the edit
+    expect(freshFor(old, edit({ lastEditTimestamp: null }))).toBe(true);
+    expect(freshFor(old, edit({ lastEditTimestamp: '' }))).toBe(true);
+    expect(freshFor(old, edit({}))).toBe(false); // older
+    expect(freshFor(old, edit({ sameContentTrees: new Set([T]) }))).toBe(false); // nothing to match
+    expect(freshFor(old, edit({ lastEditTimestamp: iso(20_000), distrustedRecords: new Set([old]) }))).toBe(false); // its checkout changed
+    // (v0.36.6, R4) `tree: null` is a work-tree hash that failed: never judged by time, whatever the
+    //   edit says, unless no repo could have given it a tree (timeTrustedRecords).
+    const unhashed = { ...r, tree: null };
+    for (const last of [iso(20_000), null, '']) expect(freshness(unhashed, edit({ lastEditTimestamp: last }))).toBe('unverified');
+    expect(freshness(unhashed, edit({ lastEditTimestamp: iso(20_000), sameContentTrees: new Set([T]) }))).toBe('unverified');
+    expect(freshness(unhashed, edit({ lastEditTimestamp: iso(20_000), timeTrustedRecords: new Set([unhashed]) }))).toBe('fresh');
+    expect(freshness(unhashed, edit({ timeTrustedRecords: new Set([unhashed]) }))).toBe('stale'); // outside a repo: the time rule
   });
 
   test('withSameContent: the trees of older records that hold the file as it is now', () => {
@@ -273,43 +293,60 @@ describe('content freshness: freshFor', () => {
     expect(withSameContent(e3, [old, mid], top)).toBe(e3);
 
     write(top, 'src/a.ts', 'export const a = 1;\n');
-    // Not read: a record newer than the edit (time decides), one that does not list the file,
-    //   one with no valid tree, an edit with no time, a file outside the repo, a deleted file.
+    // (R4) Time no longer decides what is read: a record newer than the edit, and an edit with no
+    //   time, are compared by content like any other.
     const none = [edit()];
-    expect(withSameContent(none, [record([a], { timestamp: iso(10_000), tree: tree1 })], top)).toBe(none);
+    expect([...withSameContent(none, [record([a], { timestamp: iso(10_000), tree: tree1 })], top)[0]!.sameContentTrees!]).toEqual([tree1]);
+    expect([...withSameContent([edit(a, null)], [old], top)[0]!.sameContentTrees!]).toEqual([tree1]);
+    // Not read: one that does not list the file, a malformed tree (freshFor calls it unverified), a
+    //   file outside the repo, an edit no record lists.
     expect(withSameContent(none, [record([join(top, 'src/b.ts')], { timestamp: iso(60_000), tree: tree1 })], top)).toBe(none);
-    for (const tree of [null, undefined, 'not-a-tree', 'A'.repeat(40)]) {
+    for (const tree of ['not-a-tree', 'A'.repeat(40)]) {
       expect(withSameContent(none, [record([a], { timestamp: iso(60_000), tree: tree as never })], top)).toBe(none);
     }
-    const noTime = [edit(a, null)];
-    expect(withSameContent(noTime, [old], top)).toBe(noTime);
     const out2 = [edit(write(tmp(), 'z.ts', 'x\n')), edit(join(top, 'src/gone.ts'))];
     expect(withSameContent(out2, [old], top)).toBe(out2);
-    // A tree git does not have (a valid-looking id): no trees, no failure.
-    const ghost = [edit()];
-    expect(withSameContent(ghost, [record([a], { timestamp: iso(60_000), tree: 'c'.repeat(40) })], top)).toBe(ghost);
+    // A record with no tree in a repo that has commits, and no commit of its own: its checkout is
+    //   not known, so its time is not trusted.
+    const out3 = withSameContent(none, [record([a], { timestamp: iso(60_000), tree: undefined })], top);
+    expect(out3[0]!.distrustedRecords?.size).toBe(1);
+    // `tree: null` (the hash failed) is unverified on its own account; no repo can have given it a tree
+    //   only outside one.
+    const hashFailed = record([a], { timestamp: iso(60_000), tree: null });
+    const out4 = withSameContent(none, [hashFailed], top);
+    expect(out4[0]!.distrustedRecords).toBeUndefined();
+    expect(out4[0]!.timeTrustedRecords).toBeUndefined();
+    expect(freshness(hashFailed, out4[0] ?? none[0]!)).toBe('unverified');
+    const plain = tmp();
+    const outside = write(plain, 'x.ts', 'x\n');
+    const noRepo = record([outside], { timestamp: iso(10_000), tree: null }); // newer than the edit
+    const out5 = withSameContent([edit(outside)], [noRepo], plain);
+    expect(freshness(noRepo, out5[0]!)).toBe('fresh'); // outside a repo the time rule is all there is
+    // A tree git does not have (a valid-looking id) cannot be compared: unverified, never the time rule.
+    const ghost = withSameContent([edit()], [record([a], { timestamp: iso(60_000), tree: 'c'.repeat(40) })], top);
+    expect(ghost[0]!.sameContentTrees).toBeUndefined();
+    expect([...ghost[0]!.unverifiedTrees!]).toEqual(['c'.repeat(40)]);
     // A file the record's tree lacks (new in the session) has nothing to match.
     const fresh = write(top, 'src/new.ts', 'export const n = 1;\n');
     const newEdit = [edit(fresh)];
     expect(withSameContent(newEdit, [record([fresh], { timestamp: iso(60_000), tree: tree1 })], top)).toBe(newEdit);
   });
 
-  test('withSameContent reads at most 30 record trees per call, the newest first', () => {
+  test('withSameContent reads at most 30 record trees per call, the newest first; the rest are unverified', () => {
     const { top } = repo({ 'src/a.ts': 'export const a = 1;\n' });
     const a = join(top, 'src/a.ts');
     // 32 commits, each with a different tree that keeps a.ts as it is.
     const trees = sh(top, 'for i in $(seq 1 32); do echo $i > f$i; git add f$i; git commit -qm x$i; git rev-parse HEAD^{tree}; done').split('\n');
     const results = trees.map((tree, i) => record([a], { timestamp: iso(100_000 - i * 1_000), tree })); // trees[0] is the oldest
-    const t0 = Date.now();
-    const out = withSameContent<ChangedFileEdit>([{ file: a, lastEditTimestamp: iso(1_000) }], results, top);
-    const took = Date.now() - t0;
+    // A clock that never advances: the 2 s budget is not what stops the reads here.
+    const out = withSameContent<ChangedFileEdit>([{ file: a, lastEditTimestamp: iso(1_000) }], results, top, undefined, { now: () => 0 });
     const got = out[0]!.sameContentTrees!;
-    // The reads also stop after a 2 s budget: exactly 30 only when the machine was not slow.
-    expect(got.size).toBeLessThanOrEqual(30);
-    if (took < 1_000) expect(got.size).toBe(30);
+    expect(got.size).toBe(30);
     expect(got.has(trees[31]!)).toBe(true);
     expect(got.has(trees[0]!)).toBe(false);
     expect(got.has(trees[1]!)).toBe(false);
+    // The two oldest are not read, and are not evidence either: unverified, never decided by time.
+    expect([...out[0]!.unverifiedTrees!].sort()).toEqual([trees[0]!, trees[1]!].sort());
   }, 60_000);
 
   test('validateTestCoverage: a stale record counts when its tree holds the content, not when the content differs', () => {

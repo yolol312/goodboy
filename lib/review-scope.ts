@@ -5,15 +5,14 @@
 
 import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
-import { HOOK_GIT_ARGS, HOOK_GIT_ENV } from './hook-git';
+import { gitOut } from './git-run';
 
 /** Up to this many changed lines, one review-all covers every axis. */
 export const SMALL_DIFF_LINES = 200;
 const MAX_COUNTED_BYTES = 1024 * 1024;
 
 function git(cwd: string, args: string[]): string | null {
-  const r = Bun.spawnSync(['git', ...HOOK_GIT_ARGS, ...args], { cwd, env: { ...process.env, ...HOOK_GIT_ENV }, stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
-  return r.exitCode === 0 ? r.stdout.toString() : null;
+  return gitOut(cwd, args, { timeoutMs: 10_000 });
 }
 
 /** git's top-level is a real path; so must the files be, or a checkout reached through a
@@ -44,7 +43,7 @@ export function changedLineCount(cwd: string, files: string[]): number | null {
     rels.push(r.split(sep).join('/'));
   }
   if (rels.length === 0) return 0;
-  const numstat = git(top, ['diff', '--numstat', '-z', 'HEAD', '--', ...rels]);
+  const numstat = git(top, ['diff', '--numstat', '-z', '--no-ext-diff', '--no-textconv', 'HEAD', '--', ...rels]);
   const untracked = git(top, ['ls-files', '-z', '--others', '--exclude-standard', '--', ...rels]);
   if (numstat === null || untracked === null) return null;
   const seen = new Set<string>();

@@ -68,7 +68,7 @@ import { fitProbes, probeEstimate, probesSummary, runProbes } from './probes';
 import { GOODBOY_CASES, readUserCases, runSmoke, smokeSummary } from './smoke';
 import { surveyProject } from './test-survey';
 import { BACKFILL_FILE, backfillSummary, DEFAULT_BATCH, markTarget, MAX_TARGETS, mergeSurvey, nextBatch, readBackfill, repoRel, type TargetStatus, withBackfillLock, writeBackfill } from './test-backfill';
-import { repoTop } from './changed-coverage';
+import { extraBlobsFor, repoTop } from './changed-coverage';
 
 // ---- 유틸 ----
 
@@ -293,6 +293,16 @@ function failOutsideRepo(cmd: string, file: string): never {
   );
 }
 
+/** (v0.36.6) `extra_blobs`: the content ids of the listed files the record's `tree` lacks (git-ignored
+ *  files), taken here and never from the agent: whatever the input carried is dropped first. See
+ *  lib/changed-coverage.ts extraBlobsFor, which hashes them the way the Stop's check does. */
+function setExtraBlobs(cwd: string, result: { extra_blobs?: Record<string, string> }, tree: string | null | undefined, files: readonly string[]): void {
+  delete result.extra_blobs;
+  const top = topOf(cwd);
+  const extra = top === null ? undefined : extraBlobsFor(top, tree, files);
+  if (extra !== undefined) result.extra_blobs = extra;
+}
+
 export async function cmdReviewWrite(cwd: string, args: string[]): Promise<void> {
   const raw = await readInput(args[0], 'ReviewResult');
 
@@ -316,6 +326,7 @@ export async function cmdReviewWrite(cwd: string, args: string[]): Promise<void>
   result.reviewed_files = (result.reviewed_files ?? []).map((f) => openedPath(cwd, f));
   // (#26) The reviewed content, taken here and never from the agent, as test-write does.
   result.tree = workTreeState(cwd).tree;
+  setExtraBlobs(cwd, result, result.tree, result.reviewed_files);
   const reviewsDir = join(cwd, '.claude', 'reviews');
   ensureDir(reviewsDir);
   const outPath = uniqueJsonPath(reviewsDir, timestampToFilename(result.timestamp));
@@ -683,6 +694,7 @@ export async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
   const state = workTreeState(cwd);
   result.commit = state.commit;
   result.tree = state.tree;
+  setExtraBlobs(cwd, result, state.tree, result.tested_files);
   const testsDir = join(cwd, '.claude', 'tests');
   ensureDir(testsDir);
   const outPath = uniqueJsonPath(testsDir, timestampToFilename(result.timestamp));

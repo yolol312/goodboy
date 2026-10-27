@@ -14,6 +14,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { runBounded } from './bounded';
+import { spawnGit } from './git-run';
 import { isUnder } from './private-files';
 import { readRegular } from './safe-read';
 import { maskSecrets } from './secret-patterns';
@@ -265,7 +266,7 @@ function makeSandbox(run: string, i: number): Sandbox {
     writeFileSync(join(project, SRC), 'export const a = 1;\n');
     try {
       // Without the user's git config: an init.templateDir would copy their hooks in.
-      Bun.spawnSync(['git', 'init', '-q'], { cwd: project, stdout: 'ignore', stderr: 'ignore', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+      spawnGit(project, ['init', '-q'], { env: { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
     } catch {
       // no git
     }

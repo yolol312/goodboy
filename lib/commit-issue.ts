@@ -26,7 +26,8 @@ import { lstatSync, realpathSync, renameSync, statSync, writeFileSync, type Stat
 import { dirname, join, resolve as resolvePath } from 'node:path';
 import { stripHeredocs, type HeredocOwner } from './bash-write';
 import { ensureSessionDir } from './file-tracker';
-import { HOOK_GIT_ARGS, HOOK_GIT_ENV, splitAliasValue } from './hook-git';
+import { spawnGit } from './git-run';
+import { splitAliasValue } from './hook-git';
 import { GIT_VALUE_OPTS, WHOLE_SUBSTITUTION, cdTarget, mentionsGit, readCommand, shellReadsStdin } from './outward-command';
 import { GIT_BUILTINS } from './push-test';
 import { readRegular } from './safe-read';
@@ -186,8 +187,6 @@ const MAX_READ_BYTES = 4 * 1024 * 1024;
 const MAX_GIT_CALLS = 8;
 /** Alias chains and heredoc shells inside heredoc shells, followed this deep. */
 const MAX_DEPTH = 2;
-/** Every git the rule runs starts no program from the repo's config (lib/hook-git.ts). */
-const SAFE_GIT = HOOK_GIT_ARGS;
 /** Env that moves git's config or repository away from what goodboy reads. */
 const ENV_MOVES_GIT = /^(?:GIT_CONFIG\w*|GIT_DIR|GIT_COMMON_DIR|GIT_WORK_TREE|HOME|XDG_CONFIG_HOME)$/;
 
@@ -276,24 +275,14 @@ function runGit(ctx: Ctx, cwd: string, args: string[]): string | null {
   if (++ctx.calls > MAX_GIT_CALLS) throw new Denied(TOO_MANY);
   const left = ctx.deadline - Date.now();
   if (left <= 0) throw new Denied(TOO_SLOW);
-  let proc;
-  try {
-    proc = Bun.spawnSync(['git', ...args], {
-      cwd,
-      env: { ...process.env, ...HOOK_GIT_ENV },
-      stdout: 'pipe',
-      stderr: 'pipe',
-      timeout: Math.min(SPAWN_MS, left),
-      maxBuffer: MAX_MESSAGE_BYTES,
-    });
-  } catch {
-    return null; // no such directory: git fails the same way
-  }
-  if (proc.exitedDueToTimeout || proc.signalCode) throw new Denied(TOO_SLOW);
-  if (proc.exitCode !== 0) return null;
-  const out = proc.stdout.toString();
-  take(ctx, out.length);
-  return out;
+  // Starts no program from the repo's config (lib/git-run.ts). The command is the user's own, so
+  //   replace refs apply to it as they will to the user's git (`honorReplace`).
+  const r = spawnGit(cwd, args, { timeoutMs: Math.min(SPAWN_MS, left), maxBuffer: MAX_MESSAGE_BYTES, honorReplace: true });
+  if (!r.ran) return null; // no such directory: git fails the same way
+  if (r.stalled) throw new Denied(TOO_SLOW);
+  if (r.code !== 0) return null;
+  take(ctx, r.out.length);
+  return r.out;
 }
 
 /** A message file's text, read once per call; null when there is none. */
@@ -405,13 +394,13 @@ function checkCommit(args: string[], here: string, ctx: Ctx, scope: GitScope, sr
     const key = [here, msg.reuse.ref, msg.reuse.subject, ...scope.repo].join('\0');
     if (!ctx.reused.has(key)) {
       const format = `--format=${msg.reuse.subject ? '%s' : '%B'}`;
-      ctx.reused.set(key, runGit(ctx, here, [...SAFE_GIT, ...scope.repo, 'log', '-1', '--no-show-signature', format, '--end-of-options', msg.reuse.ref, '--']));
+      ctx.reused.set(key, runGit(ctx, here, [...scope.repo, 'log', '-1', '--no-show-signature', format, '--end-of-options', msg.reuse.ref, '--']));
     }
     const reused = ctx.reused.get(key);
     if (reused) texts.add(reused);
   } else if (lookup) {
     // After a conflicted merge, `git commit --no-edit` takes MERGE_MSG.
-    const path = runGit(ctx, here, [...SAFE_GIT, ...scope.repo, 'rev-parse', '--git-path', 'MERGE_MSG'])?.trim();
+    const path = runGit(ctx, here, [...scope.repo, 'rev-parse', '--git-path', 'MERGE_MSG'])?.trim();
     const text = path ? readMessage(ctx, resolvePath(here, path), 'MERGE_MSG') : null;
     if (text !== null) texts.add(text);
   }
@@ -444,7 +433,7 @@ function aliasOf(ctx: Ctx, sub: string, here: string, scope: GitScope): string[]
     if (m && m[1]!.toLowerCase() === name) value = m[2]!;
   }
   // The call's own `-c` settings go along: `-c include.path=…` can define the alias.
-  value ??= runGit(ctx, here, [...scope.cfg.flatMap((c) => ['-c', c]), ...SAFE_GIT, ...scope.repo, 'config', '--get', `alias.${sub}`]);
+  value ??= runGit(ctx, here, [...scope.cfg.flatMap((c) => ['-c', c]), ...scope.repo, 'config', '--get', `alias.${sub}`]);
   const v = value?.trim() ?? '';
   const out = v === '' ? null : v.startsWith('!') ? [v] : splitAliasValue(v);
   ctx.aliases.set(key, out);

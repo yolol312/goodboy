@@ -13,7 +13,8 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, uti
 import { tmpdir } from 'node:os';
 import { basename, join, resolve as resolvePath } from 'node:path';
 import { stripHeredocs } from './bash-write';
-import { HOOK_GIT_ARGS, HOOK_GIT_ENV, NO_GRAFTS, splitAliasValue } from './hook-git';
+import { spawnGit } from './git-run';
+import { splitAliasValue } from './hook-git';
 import { agentName, ROUTE } from './routing-policy';
 import {
   classifyHost,
@@ -122,19 +123,11 @@ export const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
  *  work-tree hash (docs/stabilization-plan.md §10.10). No replace refs or grafts: `git replace
  *  <code tree> <prose tree>` made untested code read as tested or as prose (I6 review). */
 function git(cwd: string, args: string[], env: Record<string, string> = {}, timeoutMs = 15_000): string | null {
-  try {
-    const proc = Bun.spawnSync(['git', '--no-replace-objects', ...HOOK_GIT_ARGS, ...args], {
-      cwd,
-      env: { ...process.env, ...HOOK_GIT_ENV, ...NO_GRAFTS, ...env },
-      stdout: 'pipe',
-      stderr: 'pipe',
-      timeout: timeoutMs,
-    });
-    if (proc.exitCode !== 0) return null;
-    return proc.stdout.toString().trim();
-  } catch {
-    return null;
-  }
+  // The work-tree hash's `git add` keeps the repo's clean filters (`keepFilters`): the tree it
+  //   writes has to be the one a commit stores. A hand-off check reads the repo as it is now: no
+  //   answer comes from a Stop's snapshot (`noMemo`).
+  const r = spawnGit(cwd, args, { env, timeoutMs, noMemo: true, keepFilters: args[0] === 'add' });
+  return r.code === 0 ? r.out.trim() : null;
 }
 
 /** The repo's top directory in cwd's own spelling, or null outside a repo. */

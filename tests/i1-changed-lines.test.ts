@@ -1,6 +1,6 @@
 // I1 changed lines (track I §15, issue #2): every changed code line runs in a test of the
 // recorded tree. diff coverage reports the files a report saw at all, the files the diff has
-// and its base; per changed file only passing records made after its last edit count; a
+// and its base; per changed file only passing records of its current content count; a
 // changed code file the diff has and the report lacks counts as not covered (M24/M25);
 // exemptions are file globs the user decided in the policy file, pinned at the session start
 // with the start HEAD; the test gate blocks on gaps (GOODBOY_DIFF_COVERAGE=on|warn|off).
@@ -562,12 +562,15 @@ describe('the gaps', () => {
     writeFileSync(join(d, 'a.ts'), 'export const a = 1;\n');
     sh(d, "git add -A && git commit -q -m 'ABC-1 one'");
     const start = sh(d, 'git rev-parse HEAD');
-    sh(d, "git commit -q --allow-empty -m 'ABC-1 two'");
+    writeFileSync(join(d, 'a.ts'), 'export const a = 2;\n');
+    sh(d, "git commit -qam 'ABC-1 two'");
     const later = sh(d, 'git rev-parse HEAD');
     writeFileSync(join(d, '.git', 'info', 'grafts'), `${start} ${later}\n`);
     const a = [join(d, 'a.ts')];
     const out = changedLineGaps({ results: [result(changed({ 'a.ts': [1, 1] }, ['a.ts'], later), a)], edits: edits(a), top: d, exempt: [], startHead: start });
-    expect(out.lateBase).toEqual({ base: later, head: start });
+    // (R2) a.ts is not what it was at the start, in the later commit: the base is refused for it,
+    //   whatever a graft says about the commits' history (ancestry decides nothing here).
+    expect(out).toEqual({ measured: true, gaps: [{ file: 'a.ts', refusedBase: later, head: start }] });
   });
 
   test('a declaration file is no code, also when a transpiler would reject its text', () => {
@@ -596,7 +599,7 @@ describe('the gaps', () => {
     expect(changedLineGaps({ ...args, results: [old, result(changed({ 'src/a.ts': [3, 5] }), a)] }).gaps).toEqual([{ file: 'src/a.ts', covered: 3, total: 5 }]);
     const noCov = changedLineGaps({ ...args, results: [old, result(undefined, a)] });
     expect(noCov).toEqual({ measured: true, gaps: [{ file: 'src/a.ts', unmeasured: true }] });
-    expect(changedLineReason(noCov, 'cli.ts')).toContain('no passing record after its last edit measured it');
+    expect(changedLineReason(noCov, 'cli.ts')).toContain('no passing record of its current content measured it');
     // A newer record that does not test the file does not count for it either.
     expect(changedLineGaps({ ...args, results: [old, result(changed({ 'src/a.ts': [3, 3] }), [f('src/other.ts')])] }).gaps).toEqual([{ file: 'src/a.ts', unmeasured: true }]);
   });
@@ -639,16 +642,19 @@ describe('the gaps', () => {
     const rec = (base: string) => [result(changed({ 'a.ts': [1, 1] }, ['a.ts'], base), a)];
     const args = { edits: edits(a), top: d, exempt: [], startHead: start };
     const late = changedLineGaps({ ...args, results: rec(later) });
-    expect(late).toEqual({ measured: false, gaps: [], lateBase: { base: later, head: start } });
+    // (R2) The later base is refused for a.ts: the file is not what it was at the start there.
+    expect(late).toEqual({ measured: true, gaps: [{ file: 'a.ts', refusedBase: later, head: start }] });
     expect(changedLineReason(late, 'cli.ts')).toContain(`--base ${start}`);
+    expect(changedLineReason(late, 'cli.ts')).toContain(`measured only against ${later.slice(0, 12)}`);
     expect(changedLineGaps({ ...args, results: rec(start) })).toEqual({ measured: true, gaps: [] });
-    expect(changedLineGaps({ ...args, startHead: later, results: rec(start) }).measured).toBe(true);
-    expect(changedLineGaps({ ...args, results: rec('f'.repeat(40)) }).lateBase).toBeDefined();
-    // No commit when the session started: only the empty tree shows everything.
+    // Another start (the later commit): the old base is an ancestor of it, but a.ts differs there: refused too.
+    expect(changedLineGaps({ ...args, startHead: later, results: rec(start) }).gaps).toEqual([{ file: 'a.ts', refusedBase: start, head: later }]);
+    expect(changedLineGaps({ ...args, results: rec('f'.repeat(40)) }).gaps).toEqual([{ file: 'a.ts', refusedBase: 'f'.repeat(40), head: start }]); // unknown to git
+    // No commit when the session started: a base where the file exists is refused; only one without it counts.
     const none = changedLineGaps({ ...args, startHead: null, results: rec(start) });
-    expect(none.lateBase).toEqual({ base: start, head: null });
+    expect(none.gaps).toEqual([{ file: 'a.ts', refusedBase: start, head: null }]);
     expect(changedLineReason(none, 'cli.ts')).toContain('--base empty');
-    expect(changedLineGaps({ ...args, startHead: null, results: rec(emptyTree(d)!) }).measured).toBe(true);
+    expect(changedLineGaps({ ...args, startHead: null, results: rec(emptyTree(d)!) }).gaps).toEqual([]);
   });
 });
 
@@ -684,7 +690,8 @@ describe('replace refs', () => {
     expect(sh(d, `git merge-base --is-ancestor ${other} ${start} && echo yes`)).toBe('yes'); // git itself is fooled
     const a = [join(d, 'a.ts')];
     const late = changedLineGaps({ results: [result(changed({ 'a.ts': [1, 1] }, ['a.ts'], other), a)], edits: edits(a), top: d, exempt: [], startHead: start });
-    expect(late).toEqual({ measured: false, gaps: [], lateBase: { base: other, head: start } });
+    // (R2) `other` is an empty tree, where a.ts does not exist: not what the start has, so refused.
+    expect(late).toEqual({ measured: true, gaps: [{ file: 'a.ts', refusedBase: other, head: start }] });
   });
 });
 
@@ -886,6 +893,9 @@ describe('through test-write and the Stop hook', () => {
   function record(d: string, coverage?: unknown, extra: Record<string, unknown> = {}) {
     return {
       timestamp: new Date(Date.now() + 60_000).toISOString(),
+      // As test-write stores it (v0.36.6, R4): the HEAD it ran on. A hand-written record with no tree
+      //   is judged by time only while its checkout is HEAD or before it.
+      commit: sh(d, 'git rev-parse HEAD'),
       tested_files: [join(d, 'src', 'a.ts')],
       category: 'fix-bug',
       test_files: [join(d, 'tests', 'a.test.ts')],

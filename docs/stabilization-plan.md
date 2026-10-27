@@ -2157,14 +2157,17 @@ What ships:
      the red/green run copies the source again in a later turn, after the Stop that accepted its test)
      and its bytes now equal the copy's (read as buffers, size first, at most 16 MB).
 
-   The checks are batched, because a git spawn costs about 60 ms and the Stop hook's 15 s timeout
+   The checks are batched, because a git spawn cost about 60 ms on the loaded machine then (about
+   20-40 ms through the `/usr/bin/git` shim and 6 ms for the real binary, measured in v0.36.6) and the Stop hook's 15 s timeout
    skips the test and review gates (a probe with 500 ignored files took 60.9 s with two spawns per
    file): one `ls-files` for all candidates, one `check-ignore` for all of them, one `.gitignore`
    verdict per deciding file, and one `ls-files` for the byte-equal sources. At most
    `MAX_BUILD_COPY_CANDIDATES` (200) candidates are examined and the whole call has a wall-clock budget,
-   `BUILD_COPY_BUDGET_MS` (3 s; each git call gets the time that is left as its timeout). A candidate
+   `BUILD_COPY_BUDGET_MS` (3 s, one deadline for the whole call: each git call gets what is left of it as
+   its timeout, and none when nothing is). A candidate
    past the cap or the budget stays in the layer-1 set (fail closed) and the Stop logs
-   `test warn build-copy: <n> candidate(s) kept in the test set (over the candidate cap | out of time)`.
+   `test warn build-copy: <n> candidate(s) kept in the test set (over the candidate cap | out of time)`
+   (v0.36.6 adds the byte cap and a git failure as causes: §15.22).
    The cheap per-copy checks (plain file, untracked, ignored by a pristine `.gitignore`) run before the
    change set is listed or any bytes are read, so a tracked file under `build/` or `target/` costs one
    listing and no more. Decided again each Stop; any read, git or compare error keeps the obligation;
@@ -2172,7 +2175,7 @@ What ships:
    never a copy (`check-ignore` refuses `--literal-pathspecs`, and git would read it as pathspec
    magic).
 
-What was dropped (D, the waiting state, planned for v0.36.6):
+What was dropped (D, the waiting state, planned for v0.36.7):
 
 D was built in full (`await-decision` CLI command, a pending-decision file with edit, record and agent
 cursors, a `deferred` gate decision, a deferral on every test and review block and on the
@@ -2181,10 +2184,10 @@ evidence-free Stop pass. The model records its own question and the Stop then en
 showed a Stop passed with no test record or no review at all, and that re-arming after every edit
 makes the pass permanent. The gates' rule is that they pass on evidence or on the user's decision, never
 on the model's own call. Codex agreed and set the minimum for the day: ship without self-service
-deferral, ship causes 1-3 with the build-copy rule hardened. The code is kept outside the repo for the
-v0.36.6 work.
+deferral, ship causes 1-3 with the build-copy rule hardened. The code is kept outside the repo, in
+`~/goodboy-trials/i32-deferral/`, for later work.
 
-Design conditions for D in v0.36.6 (Codex round 5). D becomes a user-authorized design:
+Design conditions for D in v0.36.7 (Codex round 5). D becomes a user-authorized design:
 
 - Authorization. A deferral needs a user-authored authorization: a user marker like the existing
   approval marker (a file only the user creates), never the model's CLI call. The hook binds it to the
@@ -2205,7 +2208,7 @@ Design conditions for D in v0.36.6 (Codex round 5). D becomes a user-authorized 
 - The `stop_hook_active` silent pass. Codex also questioned it: that path ends silently whenever it
   accepted nothing. It predates #32 and is the deliberate deadlock-avoidance path (v0.26.7-8), so
   v0.36.5 leaves it exactly as it was (`emit(acceptMsg ? { systemMessage: acceptMsg } : {})`), and
-  v0.36.6 must weigh it.
+  v0.36.7 must weigh it.
 
 Known limits:
 
@@ -2214,6 +2217,244 @@ Known limits:
   build dirs (only `target` and `build`, by the issue's field case).
 - A dev-cycle test is accepted on a mutation entry the agent writes, like every other mutation probe
   (see rule 2).
+
+### 15.22 v0.36.6: the gates judge by content, and cost less (Codex round 6)
+
+Two researches of a field session ran side by side. The false-block one found that layer 1 and the
+review chose their records by time (`freshFor`), while a `git checkout` changes a file with no edit in
+the log, and that the changed-line check refused a record wholesale when its base was not the
+session-start HEAD or an ancestor of it. The git-cost one found that every Stop spawned `git` 22-28
+times (14 spawn sites, each with its own subset of the protections, 10-11 byte-identical repeats) and
+that on macOS `/usr/bin/git` is a shim that asks `xcode-select` for the real binary on every call. Codex
+round 6 (2026-10-27) decided what ships now (two parts) and what waits ("Later").
+
+Measured (macOS, 2026-10-27, one machine). Fixture: the mixed Stop of tests/i36-git-cost.test.ts (two
+edited sources, an edited test and doc, an ignored build copy, a test record and a review record written
+as `test-write` and `review-write` store them today: `commit` and the work-tree `tree`), built fresh in a
+temp repo for every run. Method: the same hook (`hooks/stop.ts`, default environment, all rules on) run
+against v0.36.5 (commit 1ad8e58, `git archive` into a scratch dir) and against this tree. Git calls are
+counted twice, by a `Bun.spawnSync` preload that logs argv and by a `git` first on PATH that logs argv and
+runs the real one; the two agree. Byte-identical repeats are calls with the same directory, arguments and
+stdin. Wall time is the first Stop on a fresh fixture ("cold"), 8 runs of each side interleaved.
+
+| | v0.36.5 | this tree |
+|---|---|---|
+| git calls, all rules on | 28 | 22 |
+| byte-identical repeats among them | 10 | 2 |
+| git calls, the suite's rule switches (the test's setting) | 24 | 19 |
+| repeats, same setting | 9 | 2 |
+| cold first Stop, median (range) | 843 ms (825-1168) | 345 ms (321-399) |
+
+- Both Stops end at the review, which names the build copy. The two repeats left are the `hash-object`
+  of the edited files, taken once by the test evaluation and once by the review's (R4 hashes each
+  edited file to compare it with a record's tree, so `hash-object` went from 4 calls to 5; a hash
+  batch is one evaluation's and nothing is kept across evaluations).
+- Records with no `commit` and no `tree` (the form the first measurement of this section used, 28 to 18)
+  are not a like-for-like count any more: on this tree R4 stops that Stop early at "could not verify"
+  after 12 calls, before the later gates run. v0.36.5 makes 28 calls either way (it judged them by time).
+  The 28 to 18 figure came from that fixture and is withdrawn.
+- Cost per call, 40 `git rev-parse --show-cdup` in a row, two rounds: the `/usr/bin/git` shim 22.5 and
+  38.8 ms, the real binary (`xcrun --find git`) 6.6 and 5.9 ms; `xcrun --find git` itself 15.5 ms
+  (30 runs), once per process. The first plan figures (22-44 and 5-12 ms) are replaced by these.
+- Most of the time saved is the shim, not the call count: 28 calls at about 30 ms against 22 at about 6.
+
+Part 1 (infrastructure, no change to what a gate decides):
+
+1. One git spawn helper, `lib/git-run.ts`, for every site that ran `git` itself (the changed-coverage
+   `git`/`hookGit`, diff-coverage, existing-tests, push-test, review-scope, write-sweep, commit-issue,
+   test-catalog, test-survey, project-dir, field-report; probes and smoke at init). Every call has
+   `--no-replace-objects`, no grafts, no fsmonitor, no signature check, no transport, no lazy fetch, and
+   every filter driver of the repo's config emptied for a command that can run one (when the list cannot
+   be read, the command is not run). The safety settings come after the caller's own `-c`, and the
+   safety environment overrides the caller's; only `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
+   `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_NOSYSTEM` pass from a caller
+   (the object-directory pair is the hand-off check's scratch directory, lib/push-test.ts
+   `workTreeState`). The filter list is read with the caller's own `-C`, `--git-dir`, `--work-tree`,
+   `--config-env` and `-c filter.*` / `-c include.*`, so a filter the caller defines is emptied too and
+   a repo named by `-C` is read as the command will see it (other options, such as
+   `-c core.quotePath=false`, leave the list as it is, so one memoized listing still serves a Stop).
+   A command that diffs gets `--no-ext-diff --no-textconv` from the helper (`diff`, `show`, `log`,
+   `diff-files`, `diff-index`, `diff-tree`; `blame` and `grep` take only `--no-textconv`), right after
+   the subcommand. Callers keep their own time limits (and one shared deadline), raw output and stdin.
+2. The binary (`lib/git-binary.ts`): only on darwin, and only when the first `git` on PATH is exactly
+   `/usr/bin/git`, `/usr/bin/xcrun --find git` runs once (absolute, no shell, short timeout) and its
+   answer is used when it is one absolute path to a regular executable file; any other case is plain
+   `git`. The answer lives in a module variable while PATH, `DEVELOPER_DIR` and the other selecting
+   variables stay the same; no cache file. `tests/setup.ts` puts the real tool's directory first on
+   PATH for the spawns that pass `{ ...process.env }`.
+3. A limited memo inside one Stop snapshot: reads of immutable objects by full id (`ls-tree`, `cat-file`,
+   `rev-parse` of a full id), the repo top, the filter list, and HEAD resolved once. Never memoized:
+   anything that reads the work tree or the index, calls with an env override, errors, timeouts. The
+   current hash of a file is shared only inside one evaluation (a hash batch), keyed by the file's stat.
+4. Build copies: eligible sources are bucketed by size before any file is read; caps on the bytes read
+   and kept, on the candidates and on the sources; one absolute deadline for every step (each git spawn
+   gets what is left, none when nothing is). The acceptance check in `lib/session-criteria.ts` asks
+   `check-ignore` once for all product paths.
+
+Part 1 deviates from the decision in three places, each on purpose:
+
+- `commit-issue` runs git with `honorReplace`: the user's own `git commit -C <ref>` honors replace
+  refs, and the check must read the message as git will.
+- `push-test`'s work-tree hash (`add` into a temp index) keeps the repo's clean filters, because the tree
+  it records must be the tree a commit stores; the hand-off check must agree with `git commit`.
+- `review-scope` adds `--no-ext-diff` and `--no-textconv` to its `diff`, so a configured external diff
+  or textconv program never runs in the hook (the helper now adds them for every command that diffs;
+  the three callers that passed them keep doing so).
+
+Part 2 (gate logic):
+
+1. R4, content-based freshness (`freshness`, `freshFor`: lib/test-validator.ts; `withSameContent`:
+   lib/changed-coverage.ts). A test or review record with a tree counts for a file only when the file's
+   content and kind in `record.tree` are the file's now: the same blob id, and the same mode (the
+   executable bit is ignored where `core.fileMode` is false); a file deleted now matches a tree that
+   lacks it. The two timestamp shortcuts are gone (a record newer than the last edit, an edit with no
+   time). A tree git does not have, a malformed one, a link or directory in the file's place, and a
+   read that ran past the tree cap (30) or the 2 s budget are `unverified`, never the time rule. A
+   record with no `tree` key (written before the trees) still uses its time, but only while its
+   checkout is not known to have changed: its `commit` is HEAD or an ancestor of it (one
+   `merge-base --is-ancestor` per commit, at most 20); a record with no commit in a repo that has
+   history, a commit that is not on HEAD's history, a HEAD that does not resolve (a repo with no commit
+   yet, or `git checkout --orphan` from a committed one) and a git that did not run make it
+   unverified. Outside a git repo there is no checkout to doubt and the time stays. A record with an
+   explicit `tree: null` is a different thing: `test-write` and `review-write` store it when the
+   work-tree hash failed (an unreadable file, a git that stalled), and the model can make that happen. It
+   names no content, so it is unverified in every repo and never judged by time (outside a git repo,
+   where no tree can be taken, the time stays: `ChangedFileEdit.timeTrustedRecords`); the block names the
+   cause ("a record with `tree: null` ... its work-tree hash failed"). The cap on record trees read per
+   call (30) is spent newest first across the edited files, one record per file at a time, a tree
+   already wanted costing nothing (one `ls-tree` serves every edited path that asks), so a file with
+   many old records never starves another file's newest one; what is left past the cap is unverified.
+   When the content check itself fails, the review path marks every review unverified (`allUnverified`)
+   and never reads them by time. The messages tell the three states apart:
+   "no record" (never ran), "older than the last edit" (the record tested other content), and "could not
+   verify" (a tree that cannot be read or compared; not "the tests never ran"). Reviews follow the same
+   rule through the same function (`ChangedFileEdit.sameContentTrees`, `unverifiedTrees`,
+   `distrustedRecords`, `timeTrustedRecords`).
+2. R3 (`withoutAbsentTests`, lib/test-validator.ts, called once by `evaluateTestResults`). A passing
+   record whose `test_files` names a file that is not on disk is dropped before every rule, with a note
+   naming the record (category and time) and the path, which goes into the block that says the file is
+   still unverified; the gate log keeps it too. A failing or blocked record stays. Nothing remaining for
+   a file leaves its obligation. The deletion and weakening checks of existing tests read the repo, not
+   these records, and are unchanged.
+3. R2, per-file coverage bases (`changedLineGaps`). It now sees every record that passes the per-record
+   checks on its own (a pass, no failing suite, valid evidence, no forbidden pattern in its test files),
+   not only the one each file's time picked. A base other than the start HEAD is accepted for a file
+   only when the file's entry at that base equals its entry at the start (mode and blob, or neither
+   exists; no start commit means "does not exist"). Ancestry alone is not enough: an ancestor where the
+   file differs is refused. A refused base is a gap `{ file, refusedBase, head }`, and the message names
+   the base, the file and the `--base` to measure against. `GapsOut.lateBase` is gone (it judged a
+   record as a whole).
+4. The branch note (`divergedFromStart`, `branchNote` in hooks/stop.ts). When a layer-1 block lists files
+   that differ from the session-start HEAD only because HEAD moved to another line (each equals its blob
+   at `merge-base(start, HEAD)`), the block adds a note saying so and that a new session started on this
+   branch does not count them. It still blocks: the comparison base stays the start (R1 is later).
+5. The narrowed LCOV exemption (`lib/lcov-report.ts`, called from `needsTestCoverage`, layer-1 scope only;
+   `classifyPath` still calls everything under `coverage/` code, and the review keeps the file in its
+   set). Only `coverage/lcov.info` and `coverage/.lcov.info.<one segment>.tmp` at the repo top, and only
+   when all hold: untracked now (not in the index, so not staged) and absent from the session-start HEAD
+   (an unknown start is no; no start commit is yes); an existing regular file with one link, no symlink on
+   its path, not executable, no shebang; a bounded (8 MiB, 400 000 lines, 4 096 per line) complete LCOV
+   parse (every line a known tag with its value's shape, every record opened by `SF:` and closed by
+   `end_of_record`, nothing after the last one). The text values are limited to what the tools write, so
+   a complete report cannot also be a script (`TN:` and `FNDA:` read as labels in JavaScript): a test
+   name is words, `. -` and spaces; a source path is words and `. @ + ~ % # $ -`, spaces, `/` and `[id]`
+   brackets, with a parenthesis only around a whole segment (`src/(group)/a.ts`, as bun writes it); a
+   function name is words and `. # $ [ ]` and spaces, `(anonymous_N)` or `<name>`; a `DA` checksum is
+   base64 (`=` only as its end padding). No quote, backtick, brace, other `=`, `;`, `&`, `|`, `\`, `!`, `?`, `*` or call can appear, so no
+   JavaScript, shell or other script is valid with a side effect. Over-strict only means a report stays
+   test-required (it fails closed). A truncated temp report stays required. Any read or git failure is a
+   no. The answer is computed once per Stop (`snapshotMemo`).
+6. `onSkipped` of the build copies counts every undecided candidate once, under one cause: the candidate
+   cap, the byte budget, the time budget, or a git error (new). A candidate abandoned after it passed
+   the ignore check, or found byte-equal and waiting for the tracked check, is counted; a deleted or
+   tracked one is decided and is not. The Stop logs `git failed` for the new cause. `buildCopies` is now
+   a short function over small steps that share one `Call` state.
+7. Unicode (`lib/path-spelling.ts`). Git keeps a path's spelling (macOS git precomposes to NFC); the edit
+   log and a record keep the tool's. A name counts as another spelling of the same file only when the
+   two paths have the same device and inode; `treeEntries` and the record-to-edit matches (test and
+   review coverage, `changedLineGaps`) use it. On Linux two normalizations of a name are two files, and
+   nothing merges them.
+8. The lows from the v0.36.5 reviews: the `build-copies.ts` header says "directory segment"; the budget
+   wording above matches the code; `lib/record-paths.ts` says a finding's `file` stays as written and is
+   resolved by the Stop itself (`resolvePath(cwd, f)` in hooks/stop.ts); `isEnvName` and `recordBase` are no
+   longer exported (the test that read `recordBase` goes through `recordPath`); `relIn` is `relInside`
+   (exported from lib/changed-coverage.ts); the D code's location above. The wall-time assertions of
+   tests/i32-stop-gate-repeats.test.ts for the build-copy budget use an injected clock; two kinds of real
+   wall time remain, on purpose: tests/i32-stop-gate-repeats.test.ts:852 asserts a run with a 400 ms
+   budget ends under 3 s, and the hung-git tests of tests/i36-git-cost.test.ts assert 2.5-5 s bounds. Both
+   have a real hung or sleeping `git` process, which only a real clock can time, and the margins are
+   wide (several times the budget) so a loaded machine does not make them flaky. Nothing now asserts that
+   the production budgets fit the hook's 15 s timeout as a whole.
+9. Ignored files and `extra_blobs` (`extraBlobsFor`: lib/changed-coverage.ts; `setExtraBlobs`:
+   lib/cli.ts). R4 alone would have made a git-ignored (or work-tree-hash-excluded) code file that the
+   session edited, such as `.env.local` or `scripts/local.js`, impossible to evidence: it is in no
+   record tree, so no record could match its content and the Stop would block until the session ended
+   (before R4 a newer record counted by time). `test-write` and `review-write` now compute, themselves
+   and never from the agent, the git blob id of each `tested_files` / `reviewed_files` entry that is
+   inside the repo (its real parent too), an existing regular file with one link, and absent from the
+   record's `tree`. They hash it with `blobsNow`, the helper the Stop's current-content check uses
+   (filters emptied), and store `extra_blobs: { <absolute path>: <oid> }`. It is bounded: at most 64
+   files and 8 MiB in all, taken in the order listed; past either cap the rest are left out and stay
+   unverified (fail closed). Any `extra_blobs` in the agent's input is dropped first. In `withSameContent`,
+   a file that is absent from `record.tree` (not a tracked one: the tree still decides those) is fresh
+   for that record when `record.extra_blobs[file]` equals its current content id
+   (`ChangedFileEdit.extraBlobRecords`, read by `freshness`); a missing or different entry, an
+   unreadable tree, or a state that cannot be compared is unchanged (`stale` / `unverified`). Reviews use
+   the same function. The push check is unaffected: it reads `tree` only (no `extra_blobs` in
+   lib/push-test.ts), and an ignored file is in no hand-off tree. Tests: the `extra_blobs` group of
+   tests/i36-gate-content.test.ts.
+
+Existing tests changed because R4 and R3 are stricter: the freshness tests of tests/i23-gate-scope.test.ts
+(a record with a tree is no longer fresh by time; the reads no longer skip a newer record, and a missing
+tree is `unverified`, the cap test uses an injected clock); the Stop-level fixtures that hand-write records
+with no tree in a repo with history, or in one whose HEAD does not resolve (tests/i1-changed-lines.test.ts,
+tests/i23-gate-scope-stop.test.ts, tests/i5-existing-tests.test.ts, tests/h7-light-review.test.ts,
+tests/i3b-test-types.test.ts) now carry the `commit`, `tree` or both that `test-write` and `review-write`
+store; the fixtures that used `tree: null` for "a record from before the trees" use no `tree` key
+(`tree: null` is a failed hash now); the late-base tests of tests/i1-changed-lines.test.ts follow the
+per-file base rule; tests/stop-test-gate.test.ts expects the R3 note for a record whose test file is
+absent. Tests: tests/i36-gate-content.test.ts (Part 2) and tests/i36-git-cost.test.ts (Part 1); the
+round after the first reviews added the `tree: null` group, the 35-record cap test, the LCOV
+text-limits group (real bun, c8 and istanbul forms pass; 51 polyglot attempts and 100 000 mutations are
+refused), the filter-list-with-caller-options and diff-program tests, the raw-spawn detector with its own
+positive and negative cases, and a mixed-Stop fixture whose records are stored as `test-write` stores
+them (the earlier one had no commit or tree, so the Stop ended at "could not verify" before the review
+and its counts were those of an early exit).
+
+Known limits:
+
+- A file git ignores (so it is in no record tree) is evidenced by the record's own `extra_blobs` (Part 2
+  item 9), not by a tree. Residuals: a record written before v0.36.6 has none, so an ignored file it
+  covered is `stale` until the tests run again; a file past the caps (64 files, 8 MiB in all: a file that
+  does not fit also leaves out the ones after it), a link, a file with more than one link, or one reached through a link out of the repo gets no
+  id and stays unverified; the id is taken when the record is written, so a file changed between the test
+  run and `test-write` is recorded as it then is.
+- A record with no `tree` key whose checkout later moves to a later commit of the same line looks
+  unchanged. Test records written by v0.36.1 and later carry a `tree` (review records from v0.36.2), but
+  it is null when git cannot hash the work tree (an unreadable file, a stalled git, no commit), and such a
+  record is unverified, not old.
+- A coverage base that is another commit but has the same entry for the file is accepted even though the
+  rest of that commit differs: the changed lines of that file are the same.
+
+Later (plan only):
+
+- R1: a branch-aware comparison base, with suspended (not deleted) obligations persisted by path and
+  content identity; the immutable start HEAD stays for policy, version-only checks, build-copy trust and
+  the original test inventory.
+- The user-authorized waiting state (#32), v0.36.7.
+- A runner-owned artifact registry for other tool outputs (`.pyc` is executable bytecode; `junit*.xml`
+  can be application input).
+- The outer Stop hook timeout must not turn "verification unfinished" into a silent pass.
+- Refactors the v0.36.6 reviews found and left: the five thin local git wrappers around `spawnGit`
+  (`lib/changed-coverage.ts` `git`/`hookGit`, `existing-tests.ts`, `diff-coverage.ts`, `review-scope.ts`,
+  `write-sweep.ts`) with different shapes; splitting `lib/changed-coverage.ts` (about 1060 lines: the
+  record-content logic of R4, `withSameContent`, `distrustedLegacy`, `currentStates`, `extra_blobs`, would
+  be a module of its own); the duplicated conditions of `productEvidenceProblems` and the main loop in
+  `lib/session-criteria.ts` (near :484); the memo of `lib/git-binary.ts`, which is keyed by the cwd as
+  well as the selecting variables (decision C1', kept as Codex required): a Stop that alternates the
+  repo top and another cwd runs `xcrun --find git` again on each switch (15-17 ms each, about 340 ms for
+  20 switches), which eats part of the saving; the key needs the cwd only when PATH has a relative
+  entry.
 
 ## 16. J — Field reports (v0.34.0)
 

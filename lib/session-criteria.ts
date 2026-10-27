@@ -385,7 +385,7 @@ function isProductDoc(rel: string): boolean {
  *  causality. What the gate checks is the shape: this entry names a mutation command, a product
  *  file that exists, valid red and green, and a test that is code by its class. */
 const VERSION_DIR_TEST = /^docs\/versions\/[^/]+\//i;
-export function devCycleTestIsProductEvidence(testRel: string, cov: AcceptanceCoverage, root: string): boolean {
+export function devCycleTestIsProductEvidence(testRel: string, cov: AcceptanceCoverage, root: string, ignored: IgnoreLookup = ignoreLookup(root, [])): boolean {
   try {
     if (!VERSION_DIR_TEST.test(testRel) || !isTestFile(testRel)) return false;
     const abs = join(root, testRel);
@@ -393,10 +393,35 @@ export function devCycleTestIsProductEvidence(testRel: string, cov: AcceptanceCo
     if (evidenceProblems(cov).length > 0) return false;
     const m = cov.mutation;
     if (!m || typeof m.command !== 'string' || m.command.trim() === '' || m.detected !== true) return false;
-    return typeof m.file === 'string' && isProductFile(m.file, root);
+    return typeof m.file === 'string' && isProductFile(m.file, root, ignored);
   } catch {
     return false;
   }
+}
+
+/** Whether git ignores a repo-relative path: true, false, or null when git cannot say. */
+export type IgnoreLookup = (rel: string) => boolean | null;
+
+/** One `git check-ignore --stdin` for every path planned (canonical, so aliases of one file are
+ *  one path), run on the first question; a path asked that was not planned runs it again with
+ *  that path added. A path git cannot decide, or a git that fails, answers null: no product
+ *  file. A name starting with `:` is a pathspec magic to `check-ignore`: null. */
+export function ignoreLookup(root: string, planned: Iterable<string>): IgnoreLookup {
+  const asked = new Set(planned);
+  let checked: Set<string> | null = null;
+  let ignoredSet: Set<string> | null = null;
+  return (rel) => {
+    if (rel.startsWith(':')) return null;
+    if (checked === null || !checked.has(rel)) {
+      asked.add(rel);
+      const list = [...asked].filter((p) => !p.startsWith(':'));
+      // Exit 0: some ignored, printed; 1: none; anything else: unknown.
+      const r = hookGit(root, ['check-ignore', '-z', '--stdin'], list.map((p) => `${p}\0`).join(''));
+      checked = new Set(asked);
+      ignoredSet = r.code === 0 || r.code === 1 ? new Set(r.out.split('\0').filter((p) => p !== '')) : null;
+    }
+    return ignoredSet === null ? null : ignoredSet.has(rel);
+  };
 }
 
 /** An existing regular file with one link, whose real path is inside `root`. */
@@ -413,17 +438,23 @@ function regularInRepo(abs: string, root: string): boolean {
 /** A path segment that marks a scratch or build copy, never the product itself. */
 const SCRATCH_SEGMENT = /(?:^|\/)(?:target|build|dist|node_modules|\.git|\.claude|\.testkit-run|tmp|temp|scratch)\//i;
 
-/** The file a mutation broke is an existing product file of the repo (#32). */
-function isProductFile(value: string, root: string): boolean {
+/** The repo-relative path of the file a mutation broke when it is an existing product file of the
+ *  repo by everything but git's ignore rules (#32), else null. */
+function productCandidate(value: string, root: string): string | null {
   const rel = evidencePath(value, root);
-  if (rel === null || rel === 'outside' || rel === '') return false;
+  if (rel === null || rel === 'outside' || rel === '') return null;
   const abs = join(root, rel);
-  if (!regularInRepo(abs, root)) return false;
-  if (isProductDoc(rel) || isTestFile(rel) || TEST_RUNNER_CONFIG.test(rel) || isTestkitHarness(abs, root)) return false;
-  if (SCRATCH_SEGMENT.test(rel) || /(?:^|\/)__probe[^/]*$/.test(rel)) return false;
-  if (!needsTests(abs, root)) return false;
-  // A git-ignored file is a copy, not the product (exit 0: ignored; 1: not; else unknown = no).
-  return hookGit(root, ['check-ignore', '-q', '--', rel]).code === 1;
+  if (!regularInRepo(abs, root)) return null;
+  if (isProductDoc(rel) || isTestFile(rel) || TEST_RUNNER_CONFIG.test(rel) || isTestkitHarness(abs, root)) return null;
+  if (SCRATCH_SEGMENT.test(rel) || /(?:^|\/)__probe[^/]*$/.test(rel)) return null;
+  return needsTests(abs, root) ? rel : null;
+}
+
+/** The file a mutation broke is an existing product file of the repo (#32). */
+function isProductFile(value: string, root: string, ignored: IgnoreLookup): boolean {
+  const rel = productCandidate(value, root);
+  // A git-ignored file is a copy, not the product (ignored: a copy; unknown: no).
+  return rel !== null && ignored(rel) === false;
 }
 
 /** A path-like value as repo-relative (symlinks resolved when the file exists), 'outside' when
@@ -448,6 +479,19 @@ function evidencePath(value: string, root: string): string | 'outside' | null {
 /** Why the evidence of a product criterion is a document check (I2), one line each. */
 export function productEvidenceProblems(results: TestResult[], root: string): string[] {
   const out: string[] = [];
+  // The dev-cycle tests' product files, asked of git once for all of them (v0.36.6): every
+  //   path a mutation names that could be product evidence, canonical and without duplicates.
+  const planned = new Set<string>();
+  for (const r of results) {
+    for (const cov of r.acceptance ?? []) {
+      const test = typeof cov?.id === 'string' && PRODUCT.test(cov.id) && typeof cov.test === 'string' ? evidencePath(cov.test, root) : null;
+      const file = cov?.mutation?.file;
+      if (test === null || test === 'outside' || !VERSION_DIR_TEST.test(test) || typeof file !== 'string') continue;
+      const rel = productCandidate(file, root);
+      if (rel !== null) planned.add(rel);
+    }
+  }
+  const ignored = ignoreLookup(root, planned);
   for (const r of results) {
     for (const cov of r.acceptance ?? []) {
       const id = typeof cov?.id === 'string' ? cov.id : '';
@@ -457,7 +501,7 @@ export function productEvidenceProblems(results: TestResult[], root: string): st
       else if (test !== null && isProductDoc(test)) {
         if (isDocumentFile(test)) {
           out.push(`${id}: its test is a document (${short(cov.test)}); a product criterion needs a test of the product code.`);
-        } else if (!devCycleTestIsProductEvidence(test, cov, root)) {
+        } else if (!devCycleTestIsProductEvidence(test, cov, root, ignored)) {
           // (#32) Code in the dev-cycle folder: product evidence only with a mutation of the product.
           out.push(
             `${id}: its test (${short(cov.test)}) is in the dev-cycle folder, where it counts as a document. Move the test out ` +
