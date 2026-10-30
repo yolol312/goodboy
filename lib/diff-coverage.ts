@@ -149,17 +149,19 @@ export function parseReport(text: string, format: ReportFormat): LineHits {
       } else if (line.startsWith('end_of_record')) file = null;
     }
   } else if (format === 'cobertura') {
-    for (const cls of text.matchAll(/<class\b([^>]*)>([^]*?)<\/class>/g)) {
+    for (const cls of text.matchAll(/<class\b([^>]*?)(?:\/>|>([^]*?)<\/class>)/g)) {
       const file = attr(cls[1]!, 'filename');
-      if (!file) continue;
+      if (!file || cls[2] === undefined) continue;
       for (const l of cls[2]!.matchAll(/<line\b([^>]*)\/?>/g)) mark(file, Number(attr(l[1]!, 'number')), Number(attr(l[1]!, 'hits')) > 0);
     }
   } else if (format === 'jacoco') {
     for (const pkg of text.matchAll(/<package\b([^>]*)>([^]*?)<\/package>/g)) {
       const dir = attr(pkg[1]!, 'name') ?? '';
-      for (const src of pkg[2]!.matchAll(/<sourcefile\b([^>]*)>([^]*?)<\/sourcefile>/g)) {
+      // (#25) A file with no code (an interface) is a self-closing `<sourcefile …/>`: it must not
+      //   swallow the next file's lines.
+      for (const src of pkg[2]!.matchAll(/<sourcefile\b([^>]*?)(?:\/>|>([^]*?)<\/sourcefile>)/g)) {
         const name = attr(src[1]!, 'name');
-        if (!name) continue;
+        if (!name || src[2] === undefined) continue;
         const file = dir ? `${dir}/${name}` : name;
         // `ci`: covered instructions on the line.
         for (const l of src[2]!.matchAll(/<line\b([^>]*)\/?>/g)) mark(file, Number(attr(l[1]!, 'nr')), Number(attr(l[1]!, 'ci')) > 0);

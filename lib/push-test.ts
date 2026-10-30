@@ -11,7 +11,7 @@
 
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join, resolve as resolvePath } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
 import { stripHeredocs } from './bash-write';
 import { spawnGit } from './git-run';
 import { splitAliasValue } from './hook-git';
@@ -606,7 +606,7 @@ export function treeDiff(cwd: string, a: string, b: string): string[] | null {
  *  checks, so the two cannot drift), or null when it is: verdict pass, a well-formed tree, at
  *  least one suite that ran, no failing suite, test files that exist, red-green evidence, no
  *  always-true test patterns. A hand-made JSON with only `verdict` and `tree` is not one. */
-function notPassing(r: TestResult): string | null {
+function notPassing(r: TestResult, linesOf?: (file: string) => ReadonlySet<number> | null): string | null {
   if (r.verdict !== 'pass') return `its verdict is ${String(r.verdict)}`;
   if (typeof r.tree !== 'string' || !OBJECT_ID.test(r.tree)) return 'it records no tested tree';
   const suites = Array.isArray(r.suites) ? r.suites : [];
@@ -620,10 +620,64 @@ function notPassing(r: TestResult): string | null {
       ? 'it has no acceptance criterion with red-green evidence'
       : "an acceptance criterion's red-green evidence does not hold (its red run, green run or mutation probe)";
   }
-  if (scanForbiddenPatterns(files).length > 0) return 'a test file has an always-true pattern';
+  if (scanForbiddenPatterns(files, linesOf).length > 0) return 'a test file has an always-true pattern';
   return null;
 }
 const passing = (r: TestResult): boolean => notPassing(r) === null;
+
+/** The always-true scan's lines for a hand-off of `rev`: per test file, the lines the push adds,
+ *  i.e. added since the one commit where `rev`'s history meets the remote-tracking refs (git's
+ *  boundary of `rev --not --remotes`), as the Stop gate scans only the session's added lines. A
+ *  pattern a test file already had there (a documented `test.todo`) is not this push's (field
+ *  report, v0.36.8 release). A file the push leaves unchanged has no lines; a changed file whose
+ *  hunks cannot be read counts whole, and so does everything when there is no single boundary
+ *  (a new repo, an unknown remote state, several boundaries) or git fails. */
+export function pushedTestLines(cwd: string, rev: string): ((file: string) => ReadonlySet<number> | null) | undefined {
+  const top = topOf(cwd);
+  if (top === null) return undefined;
+  const head = git(cwd, ['rev-parse', '--verify', '--quiet', '--end-of-options', `${rev}^{commit}`]);
+  if (head === null || !OBJECT_ID.test(head)) return undefined;
+  const walk = git(cwd, ['rev-list', '--boundary', head, '--not', '--remotes']);
+  if (walk === null) return undefined;
+  const boundary = walk.split('\n').filter((l) => l.startsWith('-')).map((l) => l.slice(1));
+  if (boundary.length !== 1 || !OBJECT_ID.test(boundary[0]!)) return undefined;
+  const base = boundary[0]!;
+  // `-z`: names as they are, never quoted (a quoted name would match no file and skip it).
+  //   Not through git(): its trim would cut a name's leading space (review round 2).
+  const listed = spawnGit(cwd, ['diff', '--no-ext-diff', '--no-renames', '--name-only', '-z', '--end-of-options', base, head], { timeoutMs: 15_000, noMemo: true });
+  if (listed.code !== 0) return undefined;
+  const changed = new Set(listed.out.split('\0').filter((l) => l !== ''));
+  const memo = new Map<string, Set<number> | null>();
+  // One diff per file asked about, so no line of another file's diff can pass for a header; in it
+  //   only lines starting `@@ ` are read (content lines start with `+`, `-`, a space or `\`).
+  const addedIn = (rel: string): Set<number> | null => {
+    if (memo.has(rel)) return memo.get(rel)!;
+    const out = git(cwd, ['diff', '--no-ext-diff', '--no-renames', '--no-color', '-U0', '--end-of-options', base, head, '--', `:(top,literal)${rel}`]);
+    let lines: Set<number> | null = null;
+    if (out !== null) {
+      lines = new Set<number>();
+      let hunks = 0;
+      for (const line of out.split('\n')) {
+        const m = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
+        if (!m) continue;
+        hunks++;
+        const start = Number(m[1]);
+        const count = m[2] === undefined ? 1 : Number(m[2]);
+        for (let n = start; n < start + count; n++) lines.add(n);
+      }
+      // A changed file with no hunk read (a mode change, a binary): whole.
+      if (hunks === 0) lines = null;
+    }
+    memo.set(rel, lines);
+    return lines;
+  };
+  return (file: string): ReadonlySet<number> | null => {
+    const rel = relative(top, resolvePath(cwd, file)).split(sep).join('/');
+    if (rel === '' || rel.startsWith('../') || isAbsolute(rel)) return null;
+    if (!changed.has(rel)) return new Set();
+    return addedIn(rel);
+  };
+}
 
 /** Prose a docs-only hand-off may change (#13): Markdown, reStructuredText or AsciiDoc under a
  *  top-level `docs/` or `doc/`, or a root file such as README.md, CHANGELOG.md or LICENSE. Not
@@ -729,7 +783,8 @@ export function checkHandoff(
     const tree = treeOf(h.cwd, rev);
     if (tree === null) return { ok: false, why: 'unresolved', rev, tree };
     const forTree = results.filter((r) => r.tree === tree);
-    if (forTree.some(passing)) continue;
+    const linesOf = forTree.length > 0 ? pushedTestLines(h.cwd, rev) : undefined;
+    if (forTree.some((r) => notPassing(r, linesOf) === null)) continue;
     const blocked = forTree.find((r) => r.verdict === 'blocked');
     if (blocked) return { ok: false, why: 'blocked', rev, tree, blocked };
     // Not when the tree handed off has a failed result of its own (a README doctest).
@@ -740,7 +795,7 @@ export function checkHandoff(
     }
     const newestPass = passed[0];
     const differs = newestPass ? (diffOf(h.cwd, newestPass.tree!, tree) ?? undefined) : undefined;
-    const rejected = forTree.length > 0 ? (notPassing(forTree[0]!) ?? undefined) : undefined;
+    const rejected = forTree.length > 0 ? (notPassing(forTree[0]!, linesOf) ?? undefined) : undefined;
     return { ok: false, why: 'no-result', rev, tree, ...(differs ? { differs } : {}), ...(rejected ? { rejected } : {}) };
   }
   return Object.keys(docRevs).length > 0 ? { ok: true, docsOnly: docRevs } : { ok: true };

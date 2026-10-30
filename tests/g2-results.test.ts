@@ -105,6 +105,20 @@ describe('changed-line coverage', () => {
     expect([...parseReport('mode: set\nsrc/a.ts:1.1,3.2 2 1\n', 'go').get('src/a.ts')!.keys()]).toEqual([1, 2, 3]);
   });
 
+  // (#25) A code-free file (an interface) is a self-closing element; it must not take the next file's lines.
+  test('self-closing JaCoCo sourcefile and Cobertura class elements', () => {
+    const jac =
+      '<report name="r"><package name="src"><sourcefile name="I.java"/><sourcefile name="a.ts"><line nr="1" mi="0" ci="3"/></sourcefile></package></report>';
+    const j = parseReport(jac, 'jacoco');
+    expect([...(j.get('src/a.ts') ?? new Map())]).toEqual([[1, true]]);
+    expect(j.has('src/I.java')).toBe(false);
+    const cob =
+      '<coverage><packages><package><classes><class filename="src/I.java"/><class filename="src/a.ts"><lines><line number="1" hits="2"/></lines></class></classes></package></packages></coverage>';
+    const c = parseReport(cob, 'cobertura');
+    expect([...(c.get('src/a.ts') ?? new Map())]).toEqual([[1, true]]);
+    expect(c.has('src/I.java')).toBe(false);
+  });
+
   test('test-write warns about a tested file whose changed lines never ran', () => {
     const r = repo();
     mkdirSync(join(r, 'tests'));

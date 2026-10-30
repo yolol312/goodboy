@@ -2786,6 +2786,31 @@ Not in this release: #35 (a nested worktree made mid-session is judged with the 
 start, §15.23 rule 11), the stale worktree record warning of #36, JaCoCo self-closing `<sourcefile/>`
 (#25), and the review gate's own re-block on turns with no change.
 
+### 15.25 v0.36.9: push scan of added lines, self-closing coverage elements (#25)
+
+1. The push check (`notPassing` in `lib/push-test.ts`) scanned every listed test file whole for
+   always-true patterns, while the Stop gate scans only the session's added lines and its I5 rule asks
+   to list every existing test that loads a changed file. A documented `test.todo` already on the remote
+   (`tests/commit-issue-l1-final.test.ts`, §10.10) then voided every full record (seen at the v0.36.8
+   release). Now `pushedTestLines(cwd, rev)` gives the lines the push adds: the rev is resolved to a
+   commit id first (no option injection), the base is the single boundary of `rev-list --boundary <id>
+   --not --remotes`, and `diff -U0 base id` gives the added lines. A file the push does not change has
+   none; a changed file whose hunks cannot be read, and everything when there is no single boundary
+   (no remote, several boundaries) or git fails, is scanned whole (fails closed). Names come from
+   `diff --name-only -z` (a quoted name matched no file and was skipped) and each file gets its own
+   `diff -U0 … -- :(literal)<path>` in which only `@@ ` lines are read (an added line `++ b/x` passed for
+   a header and moved later hunks to another file): review round 1, two highs. Known limit (medium):
+   the boundary rests on the remote-tracking refs, which a local `git update-ref refs/remotes/…`
+   can move; that hides patterns from this scan only, as the Stop gate scans the session's added lines
+   from its own pinned start.
+2. `parseReport` read a self-closing JaCoCo `<sourcefile …/>` (a code-free interface) as the start of
+   an element that ran to the next file's `</sourcefile>`, so that file's lines went to the wrong name
+   (#25 part 2). Self-closing JaCoCo `sourcefile` and Cobertura `class` elements are skipped.
+
+Not in this release: the review gate's re-block on turns with no change (seven block sites; no field
+report yet), #35, the stale-worktree record note of #36 (gate log only, not shown unless a block), #25
+part 3 (mutation runs recorded as suites).
+
 ## 16. J — Field reports (v0.34.0)
 
 Asked by the user on 2026-10-16: improvements and bugs found while using goodboy elsewhere
