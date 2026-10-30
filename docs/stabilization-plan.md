@@ -2755,6 +2755,37 @@ Later (plan only):
 
 - The user-authorized waiting state (#32) moves to v0.36.8.
 
+### 15.24 v0.36.8: test gate false positives (#32, #34, #36, #37)
+
+The cause. The test gate judges every edit since its cursor, and the cursor moves only when the whole
+gate passes. One item the session cannot satisfy (a finished dev cycle's UI criteria, an integration suite
+asked for by a path word, a file git put back unchanged) kept every earlier edit pending, so each later
+Stop re-blocked with the same text, also on turns that changed no code (#37: 29 blocks in one session).
+
+The fix (user-approved trade-off, 2026-10-30):
+
+1. F1 (#32, #34, #37): a Stop whose turn changed no layer-1 code (`testEditsSince` from the project dir's
+   mark, below) does not block. It logs `carried`, warns in one line, and keeps the cursor, so the next
+   turn that changes code blocks on the whole pending set and the push check still asks for passing tests.
+   This replaces the waiting state of §15.21 D for the test gate: nothing re-blocks while the user decides.
+   The turn is counted from the last full Stop that judged layer 1 in that project dir (`testGateTurns`
+   in the habit state, one mark per dir like the cursors), not
+   from the turn before, since a `stop_hook_active` Stop moves the counter too (review round 1). The start
+   gate of §15.23 is not relaxed: an unknown start still blocks every full Stop.
+2. F2 (#34, #37): the dev-cycle UIUX/PT criteria are asked only when the cycle is not `done` and the
+   session edited `docs/CYCLE.md` or a file in the version folder (`cycleWorkedOn`); otherwise a notice
+   once per session. Requirement rows and policy criteria are unchanged. Assumption: a session at stage 6
+   that never touched the cycle documents is not working on that cycle.
+3. F3 (#36): PreToolUse keeps sha1 hashes of git-dirty files (500 files, 1 MB each) for calls that can
+   place files; the sweep does not record a file whose content equals its start hash. A missing hash
+   records as before. `.idea/` and `*.iml` are housekeeping.
+4. F4 (#37): a JVM source (`.java .kt .kts .scala .groovy`) with a path word needs IO imports or calls
+   to be boundary code; an unreadable one keeps the path word.
+
+Not in this release: #35 (a nested worktree made mid-session is judged with the enclosing checkout's
+start, §15.23 rule 11), the stale worktree record warning of #36, JaCoCo self-closing `<sourcefile/>`
+(#25), and the review gate's own re-block on turns with no change.
+
 ## 16. J — Field reports (v0.34.0)
 
 Asked by the user on 2026-10-16: improvements and bugs found while using goodboy elsewhere

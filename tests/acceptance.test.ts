@@ -9,6 +9,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  cycleWorkedOn,
   extractAppClasses,
   extractComponentCriteria,
   extractControlGroupIds,
@@ -596,7 +597,21 @@ describe('readAcceptance: the problem it reports (F2)', () => {
     expect(found.problem).toBeNull();
     expect(readAcceptance(project('- **현재 버전**: <v0.1>\n'))).toEqual({ devCycle: false, criteria: [], problem: null });
     // stage 1–2: the version folder exists, UIUX.md and the prototype do not yet
-    expect(readAcceptance(project('- **현재 버전**: v0.1\n'))).toEqual({ devCycle: true, criteria: [], problem: null });
+    expect(readAcceptance(project('- **현재 버전**: v0.1\n'))).toMatchObject({ devCycle: true, criteria: [], problem: null });
+  });
+
+  // (#34, #37) The criteria are the cycle's own work: a done cycle, or one whose documents the
+  //   session never edited, asks nothing of a later change.
+  test('cycleWorkedOn: not done, and the session edited CYCLE.md or the version folder', () => {
+    const cwd = project('- **현재 버전**: v0.1\n- **현재 단계**: 6\n', ENGLISH_UIUX);
+    const reading = readAcceptance(cwd);
+    expect(cycleWorkedOn(reading, cwd, [join(cwd, 'src', 'a.ts')])).toBe(false);
+    expect(cycleWorkedOn(reading, cwd, [join(cwd, 'docs', 'CYCLE.md')])).toBe(true);
+    expect(cycleWorkedOn(reading, cwd, [join(cwd, 'docs', 'versions', 'v0.1', 'UIUX.md')])).toBe(true);
+    expect(cycleWorkedOn(reading, cwd, [join(cwd, 'docs', 'versions', 'v0.10', 'UIUX.md')])).toBe(false);
+    const done = project('- **현재 버전**: v0.1\n- **현재 단계**: 완료\n', ENGLISH_UIUX);
+    expect(cycleWorkedOn(readAcceptance(done), done, [join(done, 'docs', 'CYCLE.md')])).toBe(false);
+    expect(cycleWorkedOn(readAcceptance(project(null)), cwd, [])).toBe(true);
   });
 
   test('a CYCLE.md without a current-version line in either language', () => {

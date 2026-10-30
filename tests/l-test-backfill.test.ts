@@ -76,7 +76,8 @@ ${asserts}
 function jvmProject(): string {
   return repo({
     'build.gradle': "plugins { id 'org.springframework.boot' version '3.3.0'; id 'jacoco' }\ndependencies { testImplementation 'org.springframework.boot:spring-boot-starter-test' }\n",
-    'src/main/java/com/acme/user/UserController.java': 'class UserController { /* routes */ }\n'.repeat(5),
+    // A JVM file is boundary code by its imports, not its name alone (#37).
+    'src/main/java/com/acme/user/UserController.java': 'import org.springframework.web.bind.annotation.RestController;\n' + 'class UserController { /* routes */ }\n'.repeat(5),
     'src/main/java/com/acme/user/UserService.java': 'class UserService {}\n',
     'src/main/java/com/acme/order/OrderService.java': 'class OrderService {}\n'.repeat(3),
     'src/main/resources/templates/index.html': '<html></html>\n',

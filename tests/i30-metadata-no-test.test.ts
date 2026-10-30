@@ -60,6 +60,8 @@ const EXEMPT = [
   '.github/pull_request_template.md',
   '.github/PULL_REQUEST_TEMPLATE/hotfix.md',
   '.github/FUNDING.yml',
+  '.idea/misc.xml', // #36
+  'module/app.iml', // #36
 ];
 
 describe('needsTests: fixed housekeeping names need no test record', () => {

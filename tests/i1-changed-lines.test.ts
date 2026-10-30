@@ -23,9 +23,9 @@ import {
   sessionCoverageStart,
 } from '../lib/changed-coverage';
 import { changedLines, diffCoverage, diffCoverageOf } from '../lib/diff-coverage';
-import { ensureSessionDir, recordEdit, textAfterEdit } from '../lib/file-tracker';
+import { ensureSessionDir, getCurrentTurn, recordEdit, textAfterEdit } from '../lib/file-tracker';
 import { restoreGateState, snapshotGateState } from '../lib/state-guard';
-import { afterBash, changedFilesSince, placedFiles, statusFiles, writesIndirectly } from '../lib/write-sweep';
+import { afterBash, changedFilesSince, placedFiles, statusFiles, withContentHashes, writesIndirectly } from '../lib/write-sweep';
 import { noteBashStart, safeToolUseId, takeBashStart } from '../lib/approval-marker';
 import type { ChangedFileEdit } from '../lib/review-validator';
 import type { TestResult } from '../lib/types';
@@ -237,7 +237,8 @@ describe('diff coverage', () => {
       expect(start.since).toBeGreaterThan(Date.now() - 10_000); // the note was read: not the 5-minute fallback
     });
     note('toolu_i1good', { top: d, files: [wip] });
-    expect(takeBashStart(s, 'toolu_i1good', d).status).toEqual({ top: d, files: [wip] });
+    // (#36) The snapshot carries the content hashes of its files; this note had none.
+    expect(takeBashStart(s, 'toolu_i1good', d).status).toEqual({ top: d, files: [wip], hashes: {} });
     // Through afterBash: a half-formed snapshot must not turn the repo's uncommitted files into this call's writes.
     const command = 'git checkout -- README.md';
     for (const status of [{ top: d }, { top: d, files: 'wip.ts' }]) {
@@ -247,6 +248,34 @@ describe('diff coverage', () => {
     // The same call with a whole snapshot that lacks wip.ts does record it.
     note('toolu_i1whole', { top: d, files: [] });
     expect(afterBash(s, 'toolu_i1whole', d, command, undefined).context ?? '').toContain(wip);
+  });
+
+  // (#36) A file the call put back with the content it had at the start is no write of it (`git stash pop`).
+  test('content hashes in the start note: a file rewritten with the same content is no write, one with other content is', () => {
+    const d = tmp();
+    gitRepo(d);
+    writeFileSync(join(d, 'README.md'), 'r\n');
+    sh(d, "git add -A && git commit -q -m 'ABC-1 init'");
+    const kept = join(d, 'kept.ts');
+    const changed = join(d, 'changed.ts');
+    writeFileSync(kept, 'export const k = 1;\n');
+    writeFileSync(changed, 'export const c = 1;\n');
+    const s = sid();
+    const command = 'git stash pop';
+    const snap = statusFiles(d);
+    expect(snap).not.toBeNull();
+    const note = (id: string, hashes: unknown) =>
+      writeFileSync(join(ensureSessionDir(s), `bash-start-${safeToolUseId(id)}.json`), JSON.stringify({ t: Date.now(), cwd: d, tuid: id, markers: [], status: { ...snap, hashes } }));
+    // Read back: strings are kept, anything else is dropped.
+    note('toolu_i1h0', { [kept]: 'abc', [changed]: 7 });
+    expect(takeBashStart(s, 'toolu_i1h0', d).status?.hashes).toEqual({ [kept]: 'abc' });
+    // The call rewrites both files; only the one with other content counts as written.
+    note('toolu_i1h1', withContentHashes(snap!).hashes);
+    writeFileSync(kept, 'export const k = 1;\n');
+    writeFileSync(changed, 'export const c = 2;\n');
+    const context = afterBash(s, 'toolu_i1h1', d, command, undefined).context ?? '';
+    expect(context).toContain(changed);
+    expect(context).not.toContain(kept);
   });
 
   test('a call that cds out of its repo and moves files into it: the start repo is swept too', () => {
@@ -959,6 +988,10 @@ describe('through test-write and the Stop hook', () => {
     }
   };
 
+  // (#32, #37) A Stop whose turn changed no code asks nothing of the earlier edits: each Stop here
+  //   follows a new edit of src/a.ts, as a turn that changes code does.
+  const editAgain = (d: string, s: string) => recordEdit(s, join(d, 'src', 'a.ts'), getCurrentTurn(s), undefined, Date.now());
+
   test('test-write keeps files, in_report, diff_lines and base, and rejects malformed ones', () => {
     const d = project();
     const w = (input: unknown) => Bun.spawnSync(['bun', CLI, 'test-write'], { cwd: d, stdin: new TextEncoder().encode(JSON.stringify(input)), stdout: 'pipe', stderr: 'pipe' });
@@ -984,8 +1017,10 @@ describe('through test-write and the Stop hook', () => {
     expect(blocked.reason).toMatch(/changed-line coverage/);
     expect(blocked.reason).toContain('src/a.ts (1 of 2 lines ran)');
     putRecord(d, record(d)); // no coverage at all
+    editAgain(d, s);
     expect((await stop(d, s)).reason).toMatch(/measure-coverage/);
     putRecord(d, record(d, cov(2, 2)));
+    editAgain(d, s);
     expect((await stop(d, s)).reason ?? '').not.toMatch(/changed-line coverage|measure-coverage/);
   }, 60_000);
 
@@ -1021,6 +1056,7 @@ describe('through test-write and the Stop hook', () => {
     expect(partial.decision).toBe('block');
     expect(partial.reason).toContain('src/a.ts (1 of 2 lines ran)');
     putRecord(d, stale, record(d)); // the newest has no coverage at all
+    editAgain(d, s);
     const none = await stop(d, s);
     expect(none.decision).toBe('block');
     expect(none.reason).toMatch(/measure-coverage/);

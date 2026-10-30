@@ -360,6 +360,8 @@ const METADATA_NO_TEST_RECORD = [
   /^\.github\/(?:PULL_REQUEST_TEMPLATE|pull_request_template)(?:\.md)?$/, // Contribution text.
   /^\.github\/(?:PULL_REQUEST_TEMPLATE|pull_request_template)\/(?:[^/]+\/)*[^/]+\.md$/, // Contribution text.
   /^\.github\/FUNDING\.yml$/, // Sponsorship metadata.
+  /(?:^|\/)\.idea\//, // IDE workspace settings (#36).
+  /\.iml$/, // IDE module files (#36).
 ];
 const EMPTY_PLACEHOLDER = /(?:^|\/)(?:\.gitkeep|\.keep)$/; // only a regular, single-link, zero-byte file
 const VERSION_ONLY_MANIFEST = /^(?:package\.json|\.claude-plugin\/plugin\.json)$/;

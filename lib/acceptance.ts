@@ -27,7 +27,7 @@
 // 필수로 만들지 않는다.
 
 import { existsSync } from 'node:fs';
-import { resolve as resolvePath } from 'node:path';
+import { resolve as resolvePath, sep } from 'node:path';
 import { MAX_DOC_BYTES, readRegular } from './safe-read';
 
 export type AcceptanceSource =
@@ -530,6 +530,9 @@ export interface AcceptanceReading {
    *  not blocking, since their screens may have no product code yet. An unknown stage is not
    *  before it: the criteria block as before. Set only when true. */
   uiPending?: true;
+  /** The current version's folder and the stage CYCLE.md names: the Stop asks for the criteria
+   *  only of a cycle that is not done and that the session worked on (#34, #37). */
+  cycle?: { versionDir: string; stage: number | 'done' | null };
 }
 
 /** Nothing to read: no dev-cycle documents, or layer 1 switched off. */
@@ -555,6 +558,7 @@ export function readAcceptance(cwd: string): AcceptanceReading {
       devCycle: true,
       criteria,
       ...(typeof stage === 'number' && stage < VERIFY_STAGE ? { uiPending: true as const } : {}),
+      cycle: { versionDir: art.versionDir, stage },
       problem:
         unreadable.length > 0
           ? { kind: 'unreadable', files: unreadable }
@@ -565,6 +569,21 @@ export function readAcceptance(cwd: string): AcceptanceReading {
   } catch {
     return NO_ACCEPTANCE;
   }
+}
+
+/** (#34, #37) Whether the dev-cycle criteria of `reading` are this session's to prove: the cycle
+ *  is not done and one of `editedFiles` is its CYCLE.md or lies in its version folder. A reading
+ *  without a cycle has no criteria, so it is true there. */
+export function cycleWorkedOn(reading: AcceptanceReading, cwd: string, editedFiles: readonly string[]): boolean {
+  const c = reading.cycle;
+  if (!c) return true;
+  if (c.stage === 'done') return false;
+  const cycleMd = resolvePath(cwd, 'docs', 'CYCLE.md');
+  const dir = c.versionDir.endsWith(sep) ? c.versionDir : c.versionDir + sep;
+  return editedFiles.some((f) => {
+    const abs = resolvePath(cwd, f);
+    return abs === cycleMd || abs.startsWith(dir);
+  });
 }
 
 /** readAcceptance(cwd).criteria, for a caller that needs nothing else. */

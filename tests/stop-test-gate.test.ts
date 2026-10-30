@@ -5,7 +5,7 @@
 // 테스트 게이트에서 막히면 리뷰 게이트까지 가지 않는 것이 정상 동작이다.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { approvalMarkerRelPath } from '../lib/approval-marker';
@@ -58,6 +58,13 @@ function seedSession(tmp: string, sessionId: string, turn: number, editFiles: st
     mkdirSync(dirname(abs), { recursive: true });
     writeFileSync(abs, '', 'utf8');
   }
+}
+
+/** Records one more edit of `file` in the turn the next Stop closes. */
+function editAgain(tmp: string, sessionId: string, cwd: string, file: string): void {
+  const dir = join(tmp, `goodboy-session-${sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_')}`);
+  const turn = parseInt(readFileSync(join(dir, 'turn.txt'), 'utf8').trim(), 10);
+  appendFileSync(join(dir, 'edits.jsonl'), JSON.stringify({ file: resolve(cwd, file), turn, timestamp: new Date().toISOString() }) + '\n', 'utf8');
 }
 
 /** repo에 실재하는 테스트 파일을 만들고 절대경로를 반환. */
@@ -249,7 +256,7 @@ describe('Stop hook — 층1 테스트 게이트', () => {
     writePassingReview(cwd, [resolve(cwd, CODE_FILE)]);
 
     const out = await runStop(tmp, cwd, sessionId);
-    expect(out.decision).toBeUndefined();
+    expect(out.reason).toBeUndefined();
     expect(existsSync(testCursorPath(tmp, sessionId, cwd))).toBe(true);
   });
 
@@ -342,7 +349,7 @@ describe('Stop hook — 층1 테스트 게이트', () => {
 
   test('dev-cycle 수용 기준이 미커버면 BLOCK', async () => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 3, [CODE_FILE], cwd);
+    seedSession(tmp, sessionId, 3, [CODE_FILE, 'docs/CYCLE.md'], cwd);
     // dev-cycle 산출물: 신규 화면 1건이 확정돼 있다.
     mkdirSync(join(cwd, 'docs', 'versions', 'v0.1'), { recursive: true });
     writeFileSync(join(cwd, 'docs', 'CYCLE.md'), '- **현재 버전**: v0.1\n', 'utf8');
@@ -372,11 +379,11 @@ describe('Stop hook — 층1 테스트 게이트', () => {
     ['5', 6, true], // set back from 6 to 5 during the session
     ['5', undefined, true], // no stage in the pin (an older pin)
     ['6', 6, true],
-    ['완료', 'done', true],
+    ['완료', 'done', false], // (#34, #37) a done cycle asks nothing
     ['', null, true],
   ])('UI criteria at stage "%s" (pinned %p): block = %p', async (stage, pinned, blocks) => {
     const { tmp, cwd, sessionId } = newSandbox();
-    seedSession(tmp, sessionId, 3, [CODE_FILE], cwd);
+    seedSession(tmp, sessionId, 3, [CODE_FILE, 'docs/CYCLE.md'], cwd);
     const pin = { top: cwd, rows: null, policy: null, ...(pinned === undefined ? {} : { stage: pinned }) };
     writeFileSync(join(tmp, `goodboy-session-${sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_')}`, 'criteria-pin.json'), JSON.stringify(pin), 'utf8');
     mkdirSync(join(cwd, 'docs', 'versions', 'v0.1'), { recursive: true });
@@ -392,7 +399,26 @@ describe('Stop hook — 층1 테스트 게이트', () => {
     const out = await runStop(tmp, cwd, sessionId);
     const blockedForUi = out.decision === 'block' && String(out.reason).includes('UIUX-NEW-1');
     expect(blockedForUi).toBe(blocks);
-    if (!blocks) expect(JSON.stringify(out)).toContain('UIUX-NEW-1');
+    if (!blocks && stage !== '완료') expect(JSON.stringify(out)).toContain('UIUX-NEW-1');
+  });
+
+  // (#34, #37) A session that never edited the cycle's documents is not asked for its criteria.
+  test('dev-cycle criteria are not asked of a session that did not work on the cycle', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 3, [CODE_FILE], cwd);
+    mkdirSync(join(cwd, 'docs', 'versions', 'v0.1'), { recursive: true });
+    writeFileSync(join(cwd, 'docs', 'CYCLE.md'), '- **현재 버전**: v0.1\n- **현재 단계**: 6\n', 'utf8');
+    writeFileSync(
+      join(cwd, 'docs', 'versions', 'v0.1', 'UIUX.md'),
+      '## 화면 목록\n\n| 화면 | 구분 |\n|---|---|\n| 설정 | 신규 |\n',
+      'utf8',
+    );
+    const tf = makeTestFile(cwd, 'tests/a.test.ts');
+    writeTestResult(cwd, { testedFiles: [resolve(cwd, CODE_FILE)], testFiles: [tf], acceptance: [goodAcceptance()] });
+
+    const out = await runStop(tmp, cwd, sessionId);
+    expect(String(out.reason ?? '')).not.toContain('UIUX-NEW-1');
+    expect(existsSync(testCursorPath(tmp, sessionId, cwd))).toBe(true);
   });
 
   test('acceptance가 비면 BLOCK — red-green 전체를 건너뛰는 우회 (라이브 실측)', async () => {
@@ -496,7 +522,7 @@ describe('Stop hook — 층1 테스트 게이트', () => {
   test('stop_hook_active: a result that leaves a dev-cycle criterion uncovered is not accepted', async () => {
     const accepted = async (acceptance: Array<Record<string, unknown>>): Promise<boolean> => {
       const { tmp, cwd, sessionId } = newSandbox();
-      seedSession(tmp, sessionId, 3, [CODE_FILE], cwd);
+      seedSession(tmp, sessionId, 3, [CODE_FILE, 'docs/CYCLE.md'], cwd);
       mkdirSync(join(cwd, 'docs', 'versions', 'v0.1'), { recursive: true });
       writeFileSync(join(cwd, 'docs', 'CYCLE.md'), '- **현재 버전**: v0.1\n', 'utf8');
       writeFileSync(
@@ -544,18 +570,69 @@ describe('Stop hook — 층1 테스트 게이트', () => {
     expect(first.reason).not.toContain('재시도');
     expect(first.systemMessage ?? '').not.toContain(touch);
 
+    editAgain(tmp, sessionId, cwd, CODE_FILE);
     const second = await runStop(tmp, cwd, sessionId);
     expect(second.decision).toBe('block');
     expect(second.reason).toContain('(block 2)');
     expect(second.systemMessage ?? '').toContain(touch);
     expect(second.systemMessage ?? '').toContain('GOODBOY_TEST_GATE=off');
 
+    editAgain(tmp, sessionId, cwd, CODE_FILE);
     const third = await runStop(tmp, cwd, sessionId);
     expect(third.decision).toBe('block');
     expect(third.reason).toContain('No test result covers the changed code');
     expect(third.reason).toContain('(block 3)');
     expect(existsSync(testCursorPath(tmp, sessionId, cwd))).toBe(false);
   });
+
+  // (#32, #34, #37) A turn that changed no code is not blocked again for the earlier edits: they
+  //   stay pending (no cursor move) and block the next turn that changes code.
+  test('a turn with no code change is not re-blocked; the next code change blocks again', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 3, [CODE_FILE], cwd);
+    // As in a live session: the edits carry the turn counter's value, which the Stop then moves.
+    writeFileSync(join(tmp, `goodboy-session-${sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_')}`, 'turn.txt'), '3', 'utf8');
+
+    writePassingReview(cwd, [resolve(cwd, CODE_FILE)]);
+
+    const first = await runStop(tmp, cwd, sessionId);
+    expect(first.decision).toBe('block');
+
+    const idle = await runStop(tmp, cwd, sessionId);
+    expect(idle.reason).toBeUndefined();
+    expect(JSON.stringify(idle)).toContain('코드 변경이 없어');
+    expect(existsSync(testCursorPath(tmp, sessionId, cwd))).toBe(false);
+
+    editAgain(tmp, sessionId, cwd, CODE_FILE);
+    const next = await runStop(tmp, cwd, sessionId);
+    expect(next.decision).toBe('block');
+    expect(next.reason).toContain('No test result covers the changed code');
+  });
+
+  // Review round 1: a stop_hook_active Stop moves the turn counter too. Code edited after a block,
+  //   before that Stop, is still this turn's change at the next full Stop.
+  test('an edit made after a block counts as a change past the stop_hook_active Stop', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    seedSession(tmp, sessionId, 3, [CODE_FILE], cwd);
+    writeFileSync(join(tmp, `goodboy-session-${sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_')}`, 'turn.txt'), '3', 'utf8');
+    writePassingReview(cwd, [resolve(cwd, CODE_FILE)]);
+
+    expect((await runStop(tmp, cwd, sessionId)).decision).toBe('block');
+    editAgain(tmp, sessionId, cwd, CODE_FILE);
+    const active = Bun.spawn(['bun', STOP_HOOK], {
+      cwd,
+      env: { ...process.env, TMPDIR: tmp, HOME: tmp, GOODBOY_TEST_GATE: 'on' },
+      stdin: new TextEncoder().encode(JSON.stringify({ session_id: sessionId, cwd, hook_event_name: 'Stop', stop_hook_active: true })),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    await new Response(active.stdout).text();
+    await active.exited;
+
+    const next = await runStop(tmp, cwd, sessionId);
+    expect(next.decision).toBe('block');
+    expect(next.reason).toContain('No test result covers the changed code');
+  }, 30_000);
 
   test("the user's Stop marker passes the test gate once and moves the test cursor", async () => {
     const { tmp, cwd, sessionId } = newSandbox();

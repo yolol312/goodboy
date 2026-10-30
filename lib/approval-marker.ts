@@ -72,6 +72,9 @@ export interface BashStartNote {
 export interface GitStatusSnapshot {
   top: string;
   files: string[];
+  /** (#36) Content hashes of those files when the call started (some may be missing): a file
+   *  the call put back with the same content (`git stash pop`, `rebase --autostash`) is no write. */
+  hashes?: Record<string, string>;
 }
 
 function productionSnapshot(cwd: string): Record<string, string[]> {
@@ -191,7 +194,13 @@ export function takeBashStart(sessionId: string, toolUseId: string | undefined, 
       }
       if (rec.hosts && typeof rec.hosts === 'object') hosts = rec.hosts;
       const st = rec.status as Partial<GitStatusSnapshot> | undefined;
-      if (st && typeof st.top === 'string' && Array.isArray(st.files)) status = { top: st.top, files: st.files.map(String) };
+      if (st && typeof st.top === 'string' && Array.isArray(st.files)) {
+        const hashes: Record<string, string> = {};
+        if (st.hashes && typeof st.hashes === 'object') {
+          for (const [k, v] of Object.entries(st.hashes)) if (typeof v === 'string') hashes[k] = v;
+        }
+        status = { top: st.top, files: st.files.map(String), hashes };
+      }
     } catch {
       // no start note: the short fallback window above
     }

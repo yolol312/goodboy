@@ -91,6 +91,7 @@ import {
   missingTestFiles,
   pruneOldReviewFiles,
   pruneOldTestFiles,
+  cycleWorkedOn,
   NO_ACCEPTANCE,
   readAcceptance,
   readTestCursor,
@@ -917,7 +918,26 @@ function runTestRules(
   //   not blocking; the requirement rows and policy entries still block. The stage at the
   //   session's start counts too, so setting it back mid-session relaxes nothing.
   const uiPending = acceptance.uiPending === true && startedBeforeVerification(sessionId, top);
-  const pendingUi = uiPending ? uncoveredCriteria(ran, acceptance.criteria) : [];
+  // (#34, #37) The dev-cycle criteria belong to the cycle's own work: a cycle marked done, or one
+  //   whose documents (CYCLE.md, its version folder) this session never edited, asks nothing of a
+  //   later, unrelated change. They are listed once, not blocking.
+  const cycleOpen = cycleWorkedOn(acceptance, cwd, getEditHistory(sessionId).files);
+  if (!cycleOpen && acceptance.criteria.length > 0) {
+    const idle = uncoveredCriteria(ran, acceptance.criteria);
+    if (idle.length > 0) {
+      logGate(sessionId, 'test', 'warn', `cycle-not-in-session(${idle.length})`);
+      const state = readHabitState(sessionId);
+      if (state.cycleCriteriaIdleWarned !== true) {
+        state.cycleCriteriaIdleWarned = true;
+        writeHabitState(sessionId, state);
+        habitWarnings.push(
+          `[goodboy] 이 세션은 dev-cycle 문서를 다루지 않아(또는 사이클이 완료돼) UI 수용 기준 ${idle.length}개를 요구하지 않았어요. ` +
+            `사이클 검증은 그 사이클을 진행하는 세션에서 해요.`,
+        );
+      }
+    }
+  }
+  const pendingUi = uiPending && cycleOpen ? uncoveredCriteria(ran, acceptance.criteria) : [];
   if (pendingUi.length > 0) {
     logGate(sessionId, 'test', 'warn', `ui-pending(${pendingUi.length})`);
     habitWarnings.push(
@@ -925,7 +945,7 @@ function runTestRules(
         `${pendingUi.slice(0, 5).map((c) => c.id).join(', ')}${pendingUi.length > 5 ? ` 외 ${pendingUi.length - 5}개` : ''}.`,
     );
   }
-  const uncovered = uncoveredCriteria(ran, [...(uiPending ? [] : acceptance.criteria), ...session.criteria]);
+  const uncovered = uncoveredCriteria(ran, [...(uiPending || !cycleOpen ? [] : acceptance.criteria), ...session.criteria]);
   if (uncovered.length > 0) {
     // The uncovered ones, up to 20: the list is the session's, which acceptance-list (the
     //   documents now) cannot show.
@@ -1321,6 +1341,18 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
 
     const testsDir = resolvePath(cwd, '.claude', 'tests');
     const results = findRecentTestFiles(testsDir, testWindowMinutes());
+    // (#32 #34 #37) The edits since the last full Stop that judged layer 1 (a stop_hook_active Stop
+    //   moves the turn counter too, so "the turn before" would miss edits made after a block). A turn
+    //   that changed no code adds nothing to verify; the earlier, unverified edits stay pending (the
+    //   cursor holds) and block the next turn that changes code, and the push check still asks for
+    //   passing tests. One mark per project dir, as the cursors: a Stop in another checkout or a
+    //   subdirectory has not judged this dir's edits.
+    const habit = readHabitState(sessionId);
+    const marks = { ...(habit.testGateTurns ?? {}) };
+    const changedThisTurn = testEditsSince(sessionId, cwd, marks[cwd] ?? 0).length > 0;
+    marks[cwd] = getCurrentTurn(sessionId);
+    habit.testGateTurns = marks;
+    writeHabitState(sessionId, habit);
 
     // `start`: the start gate's block (#33). It counts, so the user's marker notice appears, but it
     //   carries no "record a blocked result" advice: no record, blocked or not, is accepted there.
@@ -1328,6 +1360,15 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
       // The user's override (track G) passes as the old escape did: cursor moves, counter resets.
       if (userPass(sessionId, cwd, 'test')) {
         acceptTests(sessionId, cwd);
+        return null;
+      }
+      // The start gate (#33) keeps blocking every full Stop: no verification can be accepted there.
+      if (!changedThisTurn && !start) {
+        logGate(sessionId, 'test', 'warn', `carried (no code change this turn): ${reason}`);
+        habitWarnings.push(
+          `[goodboy] 이번 턴에는 코드 변경이 없어 테스트 게이트가 막지 않았어요. 앞서 바뀐 코드 ` +
+            `${recentEdits.length}개 파일은 아직 검증되지 않았고, 다음에 코드를 바꾸는 턴이나 push 전에 다시 확인해요.`,
+        );
         return null;
       }
       const count = readRetryCount(sessionId, TEST_COUNT_FILE) + 1;

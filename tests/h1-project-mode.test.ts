@@ -110,6 +110,7 @@ describe('through the hooks', () => {
     expect((await stop(s)).reason ?? '').toContain('No test result covers the changed code');
     // A marker written during the session, without the user's evidence, does not count.
     writeFileSync(join(d, 'CLAUDE.md'), 'goodboy: non-project\n');
+    await edit(); // a turn that changes code: one that changed none is not blocked again (#32, #37)
     expect((await stop(s)).reason ?? '').toContain('No test result covers the changed code');
     // The next session starts with the marker: no test gate; the review gate still blocks.
     const next = sid();

@@ -7,7 +7,8 @@
 // checkout`…), whose named targets are recorded too (`mv` keeps the old mtime). Limited to
 // such commands, so ordinary commands pay no `git status`.
 
-import { statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { readFileSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
 import { noteBashStart, openBashCalls, restoreProductionHosts, sweepNewMarkers, takeBashStart } from './approval-marker';
 import { bashChangedPaths } from './role-limits';
@@ -137,7 +138,12 @@ export function afterBash(
           }
         }
       }
-      const written = [...new Set([...fresh, ...placedFiles(command, startCwd, topOf.get(startCwd) ?? startCwd)])];
+      // (#36) A file the call put back with the content it had at the start is no write of it.
+      const same = (f: string): boolean => {
+        const h = start.status?.hashes?.[f];
+        return h !== undefined && contentHash(f) === h;
+      };
+      const written = [...new Set([...fresh, ...placedFiles(command, startCwd, topOf.get(startCwd) ?? startCwd)])].filter((f) => !same(f));
       if (written.length > 0) {
         const turn = getCurrentTurn(sessionId);
         for (const f of written) recordEdit(sessionId, f, turn, agentId, safeMtime(f));
@@ -227,6 +233,31 @@ export function statusFiles(cwd: string, timeoutMs = 30_000): { top: string; fil
     if (!isGoodboyArtifact(abs)) files.push(abs);
   }
   return { top, files };
+}
+
+/** Hashes of the content of up to 500 files of at most 1 MB each: the rest are left out, so
+ *  they count as written when their times change (fails closed). */
+const MAX_HASHED_FILES = 500;
+const MAX_HASHED_BYTES = 1_000_000;
+
+export function contentHash(file: string): string | null {
+  try {
+    const st = statSync(file);
+    if (!st.isFile() || st.size > MAX_HASHED_BYTES) return null;
+    return createHash('sha1').update(readFileSync(file)).digest('hex');
+  } catch {
+    return null;
+  }
+}
+
+/** (#36) The status snapshot with the content hashes of its files, for the post hook. */
+export function withContentHashes(status: { top: string; files: string[] }): { top: string; files: string[]; hashes: Record<string, string> } {
+  const hashes: Record<string, string> = {};
+  for (const f of status.files.slice(0, MAX_HASHED_FILES)) {
+    const h = contentHash(f);
+    if (h !== null) hashes[f] = h;
+  }
+  return { ...status, hashes };
 }
 
 /** Project files (absolute paths) that git sees as modified or untracked and that changed at

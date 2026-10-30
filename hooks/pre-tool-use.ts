@@ -33,6 +33,7 @@ import {
   ensureApprovalDir,
   ensureSessionDir,
   statusFiles,
+  withContentHashes,
   textAfterEdit,
   writesIndirectly,
   envInt,
@@ -1717,7 +1718,7 @@ function main(): void {
         const command = typeof toolInput.command === 'string' ? toolInput.command : undefined;
         const status =
           command !== undefined && envStr('GOODBOY_BASH_WRITE_GATE', 'deny') !== 'off' && writesIndirectly(command)
-            ? (statusFiles(cwd, 5_000) ?? undefined)
+            ? ((s) => (s ? withContentHashes(s) : undefined))(statusFiles(cwd, 5_000))
             : undefined;
         noteBashStart(sessionId, input.tool_use_id, cwd, command, input.agent_id, status);
         snapshotGateState(sessionId, input.tool_use_id);

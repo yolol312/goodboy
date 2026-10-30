@@ -66,6 +66,28 @@ describe('boundary code', () => {
     }
   });
 
+  // (#37) A JVM source is judged by what it does: a name with `Server` in it is no boundary code.
+  test('JVM sources: a path word needs IO imports or calls', () => {
+    const d = tmp();
+    const file = (rel: string, text: string) => {
+      mkdirSync(dirname(join(d, rel)), { recursive: true });
+      writeFileSync(join(d, rel), text);
+      return boundaryReason(join(d, rel), rel);
+    };
+    expect(file('src/LicenseServerReply.java', 'package a;\nimport com.fasterxml.jackson.databind.JsonNode;\nclass LicenseServerReply {}\n')).toBeNull();
+    expect(file('src/ServerIo.java', 'import java.io.*;\nclass ServerIo {}\n')).toBe('imports `java.io.*`');
+    expect(file('src/ServerRun.kt', 'fun r() = ProcessBuilder("ls").start()\n')).toBe('calls `ProcessBuilder(`');
+    // A `/*` inside a string hides nothing.
+    expect(file('src/ServerPaths.java', 'class P { String a = "/api/*"; void r() throws Exception { new Socket("h", 1); } }\n')).toBe('calls `newSocket(`');
+    expect(file('src/LicenseServerJob.java', 'package a;\nimport java.net.http.HttpClient;\nclass LicenseServerJob {}\n')).toBe('imports `java.net`');
+    expect(file('src/UserController.kt', 'import org.springframework.web.bind.annotation.GetMapping\n')).toBe('imports `org.springframework.web`');
+    expect(file('src/ServerRun.java', 'class ServerRun { void r() throws Exception { new ProcessBuilder("ls").start(); } }\n')).toBe('calls `newProcessBuilder(`');
+    // No path word: a JVM file is not read (as before).
+    expect(file('src/Format.java', 'import java.net.URL;\n')).toBeNull();
+    // Other languages keep the path word.
+    expect(file('src/serverReply.ts', 'export const x = 1;\n')).toBe('path word `server`');
+  });
+
   test('AC-2: found by content: JS/TS imports and calls, not in comments, strings or type imports', () => {
     const js = (text: string) => boundaryInContent(text, '.ts');
     expect(js("import { readFileSync } from 'node:fs';")).toBe('imports `fs`');

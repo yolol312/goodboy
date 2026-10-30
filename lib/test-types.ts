@@ -75,6 +75,13 @@ const PY_IO_CALL =
 const GO_IO_IMPORT = /"(os\/exec|net\/http|net|net\/rpc|database\/sql|io\/ioutil)"/;
 const GO_IO_CALL = /\bos\s*\.\s*(?:Open|OpenFile|Create|ReadFile|WriteFile|Remove|RemoveAll|Rename|Mkdir|MkdirAll|ReadDir)\s*\(|\bexec\s*\.\s*Command\b/;
 
+// (#37) JVM sources: a path word alone does not make one boundary code; its imports or calls do.
+const JVM_EXT = new Set(['.java', '.kt', '.kts', '.scala', '.groovy']);
+const JVM_IO_IMPORT =
+  /^[ \t]*import[ \t]+(?:static[ \t]+)?(java\.net|java\.sql|javax\.sql|java\.nio\.file|java\.io\.File\w*|java\.io\.\*|java\.net\.http|javax\.servlet|jakarta\.servlet|javax\.persistence|jakarta\.persistence|javax\.ws|jakarta\.ws|org\.springframework\.(?:web|jdbc|data|http|jms|kafka|amqp|mail|stereotype\.(?:Controller|Repository))|org\.apache\.ibatis|org\.mybatis|org\.hibernate|org\.apache\.http|org\.apache\.hc|okhttp3|retrofit2|io\.netty|io\.ktor|redis\.clients|io\.lettuce|com\.mongodb|software\.amazon|com\.amazonaws|feign|reactor\.netty|kotlinx\.coroutines\.io)(?!\w)/m;
+// Kotlin and Scala construct without `new`.
+const JVM_IO_CALL = /\b(?:new\s+)?(?:ProcessBuilder|Socket|ServerSocket|URL|FileInputStream|FileOutputStream|FileReader|FileWriter|RandomAccessFile)\s*\(|\bRuntime\s*\.\s*getRuntime\s*\(\s*\)\s*\.\s*exec\b|\bDriverManager\s*\.|\bHttpClient\s*\.|\bFiles\s*\.\s*(?:read|write|newBuffered|newInput|newOutput|delete|copy|move|create|list|walk|lines)\w*\s*\(/;
+
 /** The largest source file whose content is read; a larger one (or one that is not a regular
  *  file) counts as boundary code: the rule fails closed. */
 export const MAX_SOURCE_BYTES = 2_000_000;
@@ -136,6 +143,15 @@ export function boundaryInContent(text: string, ext: string): string | null {
     const call = code.match(PY_IO_CALL);
     return call ? `calls \`${call[0].replace(/\s+/g, '')}\`` : null;
   }
+  if (JVM_EXT.has(ext)) {
+    // Comments are not stripped: a `/*` or `//` inside a string (`"/api/*"`, a URL) would hide
+    //   real code; a call inside a comment only errs toward asking for the suite (review round 1).
+    const code = text;
+    const imp = code.match(JVM_IO_IMPORT);
+    if (imp) return `imports \`${imp[1]}\``;
+    const call = code.match(JVM_IO_CALL);
+    return call ? `calls \`${call[0].replace(/\s+/g, '')}\`` : null;
+  }
   if (ext === '.go') {
     const code = text.replace(/\/\/[^\n]*/g, '');
     const imp = code.match(GO_IO_IMPORT);
@@ -156,10 +172,14 @@ export function boundaryReason(abs: string, rel: string): string | null {
   const ext = extname(rel).toLowerCase();
   const words = pathWords(rel);
   const word = words.find((w) => BOUNDARY_WORDS.has(w));
-  if (word) return `path word \`${word}\``;
+  // (#37) A JVM source is judged by its content: `LicenseServerReply.java`, a pure parser, is no
+  //   boundary code for its name. One that cannot be read keeps the path word (fails closed).
+  const jvm = JVM_EXT.has(ext);
+  if (word && !jvm) return `path word \`${word}\``;
   if (rel.toLowerCase().split('/').slice(0, -1).includes('bin')) return 'under `bin/`';
   if (SHELL_EXT.has(ext)) return 'a shell script';
-  if (!JS_EXT.has(ext) && ext !== '.py' && ext !== '.pyw' && ext !== '.go') return null;
+  if (jvm && !word) return null;
+  if (!jvm && !JS_EXT.has(ext) && ext !== '.py' && ext !== '.pyw' && ext !== '.go') return null;
   let key: string;
   try {
     const st = statSync(abs);
@@ -169,7 +189,12 @@ export function boundaryReason(abs: string, rel: string): string | null {
   }
   if (contentMemo.has(key)) return contentMemo.get(key)!;
   const read = readRegular(abs, MAX_SOURCE_BYTES);
-  const why = read === 'absent' ? null : read === 'refused' ? 'content not readable (not a regular file, or over 2 MB)' : boundaryInContent(read.text, ext);
+  const why =
+    read === 'absent'
+      ? null
+      : read === 'refused'
+        ? jvm ? `path word \`${word}\`` : 'content not readable (not a regular file, or over 2 MB)'
+        : boundaryInContent(read.text, ext);
   contentMemo.set(key, why);
   return why;
 }
