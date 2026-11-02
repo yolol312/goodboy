@@ -1,0 +1,9 @@
+{
+  "docs": [
+    { "path": ".goodboy/policy.md", "session_start": true, "covers": [] },
+    { "path": "CLAUDE.md", "session_start": false, "covers": [] },
+    { "path": "docs/stabilization-plan.md", "session_start": false, "covers": ["hooks/**", "lib/**", "agents/**", "skills/**"] },
+    { "path": "README.md", "session_start": false, "covers": [".claude-plugin/plugin.json", "package.json", "hooks/hooks.json", "skills/**", "agents/**", "statusline/**", "bin/**"] },
+    { "path": ".goodboy/test-catalog.md", "session_start": false, "covers": ["tests/**"] }
+  ]
+}

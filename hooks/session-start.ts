@@ -80,7 +80,8 @@ if (import.meta.main) {
       //   (lib/commit-issue.ts; `/clear` starts a new session id).
       if ((source === 'startup' || source === 'resume' || source === 'clear') && sessionId) {
         // (#33) One deadline for the start-pin git calls (the hook's own timeout is 15 s; past it
-        //   no snapshot is taken), and one `git worktree list` shared by the snapshot and the pins.
+        //   no snapshot is taken), and one `git worktree list` per repository (since #35 only the
+        //   tip snapshot lists worktrees).
         startPinDeadline(START_PIN_BUDGET_MS.sessionStart);
         withSharedWorktreeList(() => {
           try {

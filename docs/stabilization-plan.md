@@ -2861,6 +2861,40 @@ by text and missed; a Stop whose cwd is outside the project dir takes cwd as the
 repair` run inside a planted `.git` makes its back-pointer valid: that dir is then a checkout of its
 own, and its edits are held by the cross-check as any other checkout's.
 
+### 15.27 v0.36.11: high findings are superseded by content, not by mtime (#38)
+
+Seen while releasing v0.36.10: the release routine (commit on the fix branch, `git checkout main`,
+`git merge --ff-only`) rewrote every changed file with the same content at one instant (reflog and
+mtimes agree), and the next full Stop blocked on three high findings that a delta review had
+cleared an hour before. The 2026-11-02 handoff read it as "the delta review lacked dimensions"; the
+gate log and the mtimes show the cause was the time rule of `currentFindings`.
+
+1. `currentFindings` (`lib/review-validator.ts`) takes an optional `TreeContentLookup`. For each
+   finding that the cheap test keeps as a candidate (newer reviews listing the flagged file cover
+   its review's axes), it asks once, for all candidates, what the trees of the finding's review
+   and of those newer reviews hold for the flagged file and its review's other files.
+2. A file changed since the finding's review when that review's tree has other content than the
+   file has now; a file whose content is the one the review saw has not changed, whatever its
+   mtime (a checkout, a `touch`, a fix taken back). A newer review saw the change when its tree has
+   the file's content now; a tree with other content saw a version since replaced and does not
+   count.
+3. Where a tree cannot tell (no tree, a tree lacking the file such as an ignored one, a file that
+   is no regular file now, an unreadable tree, past `MAX_TREES` or the 2 s budget), the pair is
+   judged by time as before, and only where the mtime shows the change too. Apart from the
+   content-proven case the rule is never weaker than the time rule; without a lookup it is the
+   time rule. The absent flagged file keeps its rule (a change right after the review).
+4. `treeContent` (`lib/changed-coverage.ts`) answers the lookup: one `git ls-tree` per tree with
+   every file asked of it, the files' blob ids from the hash batch, compared by blob id only (a
+   `chmod +x` is no fix: security review round 1). The Stop's `splitFindings` passes it; an
+   exception falls back to time and is logged as a hook error. The mtime is read from the same
+   normalized path the content check reads (`link/../f` resolved as the OS opens it), so time and
+   content never judge two different files (security review round 1).
+5. The high-severity block says the axes must review the flagged file as it is now.
+
+Also in this release: the project knowledge files `.goodboy/` are committed (the user's decision,
+2026-11-02), with two corrections to the policy (P3's source date, P5's list of hook files whose
+helpers tests import), and two stale comments about the shared worktree list.
+
 ## 16. J — Field reports (v0.34.0)
 
 Asked by the user on 2026-10-16: improvements and bugs found while using goodboy elsewhere

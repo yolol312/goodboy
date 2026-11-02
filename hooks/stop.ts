@@ -31,6 +31,7 @@ import {
   repoTop,
   sessionCoverageStart,
   sessionUserGlobs,
+  treeContent,
   withSameContent,
 } from '../lib/changed-coverage';
 import { changedLines } from '../lib/diff-coverage';
@@ -1534,7 +1535,21 @@ function splitFindings(
       for (const f of found) ownFindings.add(f);
     }
   }
-  const open = currentFindings(reviews, cursorTimestamp, (file) => fileModifiedAt(resolvePath(cwd, file)));
+  // (#38) Supersession by the reviews' trees where they tell the content; by time where they do
+  //   not, and wholly by time when the lookup fails (as before #38).
+  const open = currentFindings(
+    reviews,
+    cursorTimestamp,
+    (file) => fileModifiedAt(resolvePath(cwd, file)),
+    (asks) => {
+      try {
+        return treeContent(scopeOf(sessionId, cwd).top, asks);
+      } catch (err) {
+        hookError(sessionId, 'stop', 'finding supersession by content', err);
+        return () => undefined;
+      }
+    },
+  );
   // Reviews older than this session's first edit cannot be about its work. A finding's
   //   superseders are newer than its review, so one call serves both bounds.
   const foreignSince =
@@ -2348,7 +2363,8 @@ function main(): void {
               sessionId,
               cwd,
               `high severity 발견사항을 수정하세요: ${issues}. A finding clears when, after the fix, ` +
-                `the review axes that raised it (${axes || 'unknown'}) review the flagged file again: a delta review ` +
+                `the review axes that raised it (${axes || 'unknown'}) review the flagged file as it is now (a review ` +
+                `of content changed since does not count; a checkout that keeps a tracked file's content changes nothing): a delta review ` +
                 `(one ${agentName(ROUTE.review)} with \`mode: delta\` and the fixed files) does it.`,
               'review',
               '',

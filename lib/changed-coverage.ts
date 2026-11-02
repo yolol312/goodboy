@@ -939,6 +939,53 @@ export function withSameContent<T extends ChangedFileEdit, R extends Pick<TestRe
   });
 }
 
+/** (#38) What review trees show about the content of files now, for the supersession of findings
+ *  (lib/review-validator.ts currentFindings, `TreeContentLookup`): true when the tree has the file's
+ *  content now as a blob (its mode aside), false when it has other content or a non-blob, and undefined when
+ *  that cannot be told: the file is no regular file now (gone, a link, unreadable), the tree lacks
+ *  it (git-ignored, or left out of the work-tree hash), the tree could not be read, or it is past
+ *  MAX_TREES or the time budget (the caller then goes by time, as before #38). `asks` maps each
+ *  tree to the absolute paths asked of it; trees are read in its order, one `git ls-tree` each. */
+export function treeContent(
+  top: string,
+  asks: ReadonlyMap<string, ReadonlySet<string>>,
+  options: SameContentOptions = {},
+): (tree: string, abs: string) => boolean | undefined {
+  const now = options.now ?? Date.now;
+  const t0 = now();
+  const left = (): number => (options.budgetMs ?? TREE_BUDGET_MS) - (now() - t0);
+  const maxTrees = options.maxTrees ?? MAX_TREES;
+  const want = new Map<string, Map<string, string>>(); // tree → abs → rel
+  for (const [tree, files] of asks) {
+    if (!TREE_ID.test(tree) || want.size >= maxTrees) continue;
+    const rels = new Map<string, string>();
+    for (const abs of files) {
+      const rel = relInside(top, abs);
+      if (rel !== null) rels.set(abs, rel);
+    }
+    if (rels.size > 0) want.set(tree, rels);
+  }
+  const answers = new Map<string, Map<string, boolean>>(); // tree → abs → answer (no string key per lookup)
+  if (want.size > 0) {
+    const states = currentStates(top, [...new Set([...want.values()].flatMap((m) => [...m.values()]))], left);
+    for (const [tree, rels] of want) {
+      const entries = left() > 0 ? treeEntries(top, tree, [...rels.values()], left) : null;
+      if (entries === null) continue;
+      const byFile = new Map<string, boolean>();
+      for (const [abs, rel] of rels) {
+        const state = states.get(rel)!;
+        const entry = entries.get(rel);
+        if (state.kind !== 'file' || entry === undefined) continue;
+        // Content only: a mode change (`chmod +x`) is no fix, so it neither changes a file since a
+        //   review nor makes a review of the old mode stale (security review).
+        byFile.set(abs, entry.type === 'blob' && entry.id === state.id);
+      }
+      answers.set(tree, byFile);
+    }
+  }
+  return (tree, abs) => answers.get(tree)?.get(abs);
+}
+
 /** The edits with every record unverified: the answer when the content check itself failed (a
  *  record that cannot be read, an error). A record with no tree is not judged by time, and one
  *  with a tree is not the file's content, so nothing counts as evidence. */

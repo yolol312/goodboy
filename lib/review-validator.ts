@@ -412,6 +412,18 @@ export function fileModifiedAt(file: string): number | null {
   }
 }
 
+/** (#38) What review trees show about files' content now (lib/changed-coverage.ts treeContent),
+ *  asked once per `currentFindings` call with every tree and file the supersession rule needs
+ *  (absolute paths, normalized as the review paths are). The answer for a tree and a file: true,
+ *  the tree has the file with its content and kind now; false, other content or kind; undefined,
+ *  not known (the tree could not be read or lacks the file, the file is no regular file now, a
+ *  limit was hit): that pair is judged by time, as before #38. */
+export type TreeContentLookup = (
+  asks: ReadonlyMap<string, ReadonlySet<string>>,
+) => (tree: string, file: string) => boolean | undefined;
+
+const TREE_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+
 /** 커서(마지막 수락) 이후의 신뢰 리뷰들에서 "아직 유효한" finding을 모은다 (v0.26.6).
  *
  *  리뷰 지적(사각지대) 대응: finding 평가를 effective(커버리지 구성 리뷰)로만 하면,
@@ -424,6 +436,14 @@ export function fileModifiedAt(file: string): number | null {
  *   - reviews written after that change list the flagged file; and
  *   - together they cover every axis of the finding's review (axesOfDimensions: a review
  *     without dimensions is the hallucination axis).
+ *  (#38) "Changed" and "after that change" are read by content where the reviews' trees tell it
+ *  (`contentOf`): a file changed since the finding's review when that review's tree has other
+ *  content for it than the file has now, and a later review saw the change when its tree has the
+ *  file's content now. Only where a tree cannot tell is it the file's mtime, as before: `git
+ *  checkout` and a fast-forward merge rewrite files with the same content and move their mtimes
+ *  past every review, which reopened findings a re-review had cleared. A file whose content is the
+ *  one the finding's review saw has not changed, whatever its mtime (a `touch`, or a fix taken
+ *  back). Without `contentOf` the rule is the time rule throughout.
  *  The v0.26.6 rule took any newer review of the file. In the parallel per-axis flow every
  *  axis lists every changed file, so a high finding survived only if its axis wrote last:
  *  a clean refactoring review cleared a security high, and a re-run with no change cleared
@@ -438,13 +458,14 @@ export function currentFindings(
   reviews: ReviewResult[],
   sinceTimestamp: string | null,
   modifiedAt: ModifiedAt = fileModifiedAt,
+  contentOf?: TreeContentLookup,
 ): ReviewFinding[] {
   if (!Array.isArray(reviews) || reviews.length === 0) return [];
   const nowMs = Date.now();
   const sinceMs = typeof sinceTimestamp === 'string' && sinceTimestamp !== '' ? Date.parse(sinceTimestamp) : NaN;
-  // Per review, once: its time, the files it lists and its axes. Resolving reviewed_files
-  //   inside the finding loop made the Stop quadratic in the number of reviews (12 s at 800,
-  //   round-3 final performance review).
+  // Per review, once: its time, the files it lists, its axes and its tree. Resolving
+  //   reviewed_files inside the finding loop made the Stop quadratic in the number of reviews
+  //   (12 s at 800, round-3 final performance review).
   const pool = reviews
     .filter((r) => hasTrustedTimestamp(r, nowMs))
     .map((r) => ({
@@ -452,45 +473,100 @@ export function currentFindings(
       ms: Date.parse(r.timestamp),
       files: new Set((r.reviewed_files ?? []).map((f) => normalizePath(f))),
       axes: axesOfDimensions(Array.isArray(r.dimensions_checked) ? r.dimensions_checked : []),
+      tree: typeof r.tree === 'string' && TREE_ID.test(r.tree) ? r.tree : null,
     }))
     .filter((e) => !(e.ms <= sinceMs));
+  type Entry = (typeof pool)[number];
   const mtimes = new Map<string, number | null>();
   const mtimeOf = (file: string): number | null => {
     const key = normalizePath(file);
     if (!mtimes.has(key)) mtimes.set(key, modifiedAt(file));
     return mtimes.get(key) ?? null;
   };
-  // The axes that reviews newer than `afterMs` and listing `key` cover together.
-  const axesAfter = (afterMs: number, key: string): Set<string> => {
-    const out = new Set<string>();
-    for (const o of pool) if (o.ms > afterMs && o.files.has(key)) for (const a of o.axes) out.add(a);
-    return out;
+  const covers = (e: Entry, by: Iterable<Entry>): boolean => {
+    const axes = new Set<string>();
+    for (const o of by) for (const a of o.axes) axes.add(a);
+    return e.axes.every((a) => axes.has(a));
   };
-  const out: ReviewFinding[] = [];
+
+  // Pass 1, the cheap test: without newer reviews of its axes that list the flagged file, the
+  //   finding stays, and no file is stat'ed. The rest are candidates, with the files whose change
+  //   could have fixed them: the flagged file and its review's other files, once each.
+  const verdicts: { f: ReviewFinding; open: boolean }[] = [];
+  const candidates: { at: number; e: Entry; key: string; later: Entry[]; files: { abs: string; m: number | null }[] }[] = [];
   for (const e of pool) {
     if (!Array.isArray(e.r.findings)) continue;
     for (const f of e.r.findings) {
       if (!f || typeof f.file !== 'string') continue;
       const key = normalizePath(f.file);
-      const covers = (axes: Set<string>): boolean => e.axes.every((a) => axes.has(a));
-      // Cheap test first: without newer reviews of its axes the finding stays, and no file
-      //   is stat'ed.
-      if (!covers(axesAfter(e.ms, key))) {
-        out.push(f);
+      const later = pool.filter((o) => o.ms > e.ms && o.files.has(key));
+      if (!covers(e, later)) {
+        verdicts.push({ f, open: true });
         continue;
       }
-      let changedAt = Infinity;
+      const seen = new Set<string>();
+      const files: { abs: string; m: number | null }[] = [];
       for (const file of [f.file, ...(e.r.reviewed_files ?? [])]) {
-        const m = mtimeOf(file);
-        // Only the flagged file's absence is a change (deleted or moved). Another listed file
-        //   may have been missing when the review was written (a path the change deleted, a
-        //   typo), and counting it made one clean re-run enough (round-3 closing reviews).
-        if (m === null) {
-          if (normalizePath(file) === key) changedAt = Math.min(changedAt, e.ms);
-        } else if (m > e.ms) changedAt = Math.min(changedAt, m);
+        const abs = normalizePath(file);
+        if (seen.has(abs)) continue;
+        seen.add(abs);
+        // The mtime of the path the content check reads (a `link/../f` spelling resolved as the OS
+        //   opens it), so time and content never judge two different files (security review).
+        files.push({ abs, m: mtimeOf(abs) });
       }
-      if (changedAt === Infinity || !covers(axesAfter(changedAt, key))) out.push(f);
+      candidates.push({ at: verdicts.length, e, key, later, files });
+      verdicts.push({ f, open: true });
     }
   }
-  return out;
+
+  // (#38) One question to the trees: each candidate's own review tree and the trees of the
+  //   reviews that could supersede it, about each of its files that is there now.
+  let holds: (tree: string, file: string) => boolean | undefined = () => undefined;
+  if (contentOf && candidates.length > 0) {
+    const asks = new Map<string, Set<string>>();
+    const ask = (tree: string | null, abs: string): void => {
+      if (tree !== null) asks.set(tree, (asks.get(tree) ?? new Set()).add(abs));
+    };
+    for (const c of candidates) {
+      for (const { abs, m } of c.files) {
+        if (m === null) continue;
+        ask(c.e.tree, abs);
+        for (const o of c.later) ask(o.tree, abs);
+      }
+    }
+    if (asks.size > 0) holds = contentOf(asks);
+  }
+
+  // Pass 2: a candidate is superseded when a file of it changed since its review, and the reviews
+  //   that saw such a change cover its review's axes.
+  for (const { at, e, key, later, files } of candidates) {
+    const saw = new Set<Entry>();
+    let changed = false;
+    for (const { abs, m } of files) {
+      if (m === null) {
+        // Only the flagged file's absence is a change (deleted or moved), right after the review.
+        //   Another listed file may have been missing when the review was written (a path the
+        //   change deleted, a typo), and counting it made one clean re-run enough (round-3
+        //   closing reviews).
+        if (abs === key) {
+          changed = true;
+          for (const o of later) saw.add(o);
+        }
+        continue;
+      }
+      const before = e.tree === null ? undefined : holds(e.tree, abs);
+      if (before === true) continue; // the content the review saw: no change, whatever the mtime
+      if (before === undefined && !(m > e.ms)) continue; // by time: not changed since the review
+      changed = true;
+      for (const o of later) {
+        const now = o.tree === null ? undefined : holds(o.tree, abs);
+        // By content where both trees tell it; by time otherwise, and only where time shows the
+        //   change too (a content change under an older mtime leaves no time to compare with). A
+        //   later tree with other content than now saw a version since replaced: it does not count.
+        if (now === true ? before === false || o.ms > m : now === undefined && m > e.ms && o.ms > m) saw.add(o);
+      }
+    }
+    if (changed && covers(e, saw)) verdicts[at]!.open = false;
+  }
+  return verdicts.filter((v) => v.open).map((v) => v.f);
 }

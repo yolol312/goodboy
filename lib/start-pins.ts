@@ -117,8 +117,8 @@ const answered = (r: GitResult): boolean => r.ran && !r.stalled && r.code !== -1
 
 let sharedLists: Map<string, GitResult> | null = null;
 
-/** `fn` with one `git worktree list` per repository shared by every `listWorktrees` inside it (the
- *  SessionStart's tip snapshot and the pins it makes). Nothing is kept outside. */
+/** `fn` with one `git worktree list` per repository shared by every `listWorktrees` inside it (since
+ *  #35 only the SessionStart's tip snapshot lists them). Nothing is kept outside. */
 export function withSharedWorktreeList<T>(fn: () => T): T {
   if (sharedLists !== null) return fn();
   sharedLists = new Map();

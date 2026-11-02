@@ -5,10 +5,11 @@
 // so that the review gate is the one under test.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { REVIEW_CURSOR_FILE, cursorFileName } from '../lib/review-cursor';
+import { requiredDimensionsFor } from '../lib/review-dimensions';
 
 const STOP_HOOK = resolve(import.meta.dir, '..', 'hooks', 'stop.ts');
 const CODE_FILE = 'src/a.ts';
@@ -89,12 +90,18 @@ interface StopOut {
   systemMessage?: string;
 }
 
-async function runStop(tmp: string, cwd: string, sessionId: string, stopHookActive = false): Promise<StopOut> {
+async function runStop(tmp: string, cwd: string, sessionId: string, stopHookActive = false, transcriptPath?: string): Promise<StopOut> {
   const proc = Bun.spawn(['bun', STOP_HOOK], {
     cwd,
     env: { ...process.env, TMPDIR: tmp, HOME: tmp, GOODBOY_TEST_GATE: 'off' },
     stdin: new TextEncoder().encode(
-      JSON.stringify({ session_id: sessionId, cwd, hook_event_name: 'Stop', stop_hook_active: stopHookActive }),
+      JSON.stringify({
+        session_id: sessionId,
+        cwd,
+        hook_event_name: 'Stop',
+        stop_hook_active: stopHookActive,
+        ...(transcriptPath === undefined ? {} : { transcript_path: transcriptPath }),
+      }),
     ),
     stdout: 'pipe',
     stderr: 'pipe',
@@ -171,4 +178,167 @@ describe('Stop review gate: a turn with no reviewable change is not re-blocked',
     expect(next.reason).toContain('Review is required');
     expect(JSON.stringify(next)).not.toContain(CARRY_WARNING);
   }, 30_000);
+});
+
+// The other carry sites of the review gate (hooks/stop.ts `carryReview`): each blocks once; a turn
+// that changes no reviewable file is carried with the warning and a `carried` gate-log line; a new
+// edit blocks again. The review (or its flaw) is the one fixture each site needs.
+describe('Stop review gate: every other carry site', () => {
+  /** A review of the code file; `over` sets what the site under test needs. */
+  function writeReview(cwd: string, over: Record<string, unknown> = {}): void {
+    const dir = join(cwd, '.claude', 'reviews');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'review.json'),
+      JSON.stringify({
+        timestamp: new Date(Date.now() + 60_000).toISOString(),
+        reviewed_files: [resolve(cwd, CODE_FILE)],
+        category: 'add-feature',
+        findings: [],
+        unknown_assumptions_checked: [],
+        verdict: 'pass',
+        dimensions_checked: requiredDimensionsFor([resolve(cwd, CODE_FILE)]),
+        ...over,
+      }),
+      'utf8',
+    );
+  }
+  const gateLog = (stateDir: string): string => {
+    const p = join(stateDir, 'gate-log.jsonl');
+    return existsSync(p) ? readFileSync(p, 'utf8') : '';
+  };
+
+  /** Blocked once with `blockText`; carried on the next idle turn; blocked again after a new edit. */
+  async function expectCarry(
+    sb: ReturnType<typeof newSandbox>,
+    blockText: string,
+    why: string,
+    transcriptPath?: string,
+  ): Promise<void> {
+    const { tmp, cwd, sessionId, stateDir } = sb;
+    const first = await runStop(tmp, cwd, sessionId, false, transcriptPath);
+    expect(first.decision).toBe('block');
+    expect(first.reason).toContain(blockText);
+
+    const idle = await runStop(tmp, cwd, sessionId, false, transcriptPath);
+    expect(idle.decision).toBeUndefined();
+    expect(idle.reason).toBeUndefined();
+    expect(JSON.stringify(idle)).toContain(CARRY_WARNING);
+    expect(gateLog(stateDir)).toContain(`carried (no change this turn): ${why}`);
+    expect(existsSync(reviewCursorPath(stateDir, cwd))).toBe(false); // the edits stay pending
+
+    editAgain(stateDir, cwd);
+    const next = await runStop(tmp, cwd, sessionId, false, transcriptPath);
+    expect(next.decision).toBe('block');
+    expect(next.reason).toContain(blockText);
+    expect(JSON.stringify(next)).not.toContain(CARRY_WARNING);
+  }
+
+  test('invalid review (a review that does not list the changed file)', async () => {
+    const sb = newSandbox();
+    seedSession(sb.stateDir, sb.cwd);
+    writeReview(sb.cwd, { reviewed_files: [resolve(sb.cwd, 'src/other.ts')] });
+    await expectCarry(sb, 'Review validation failed', '리뷰되지 않은 변경 파일 1개');
+  }, 30_000);
+
+  test('assumptions-unchecked (a declared guess the review did not check)', async () => {
+    const sb = newSandbox();
+    seedSession(sb.stateDir, sb.cwd);
+    writeReview(sb.cwd);
+    const transcript = join(sb.tmp, 'transcript.jsonl');
+    const reasoning = ['## 추론', '### 사실', '- a.ts를 Read로 확인함', '### 추측', '- ⚠️ 호출자는 항상 문자열을 넘길 것이다'].join('\n');
+    writeFileSync(
+      transcript,
+      [
+        JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: reasoning }] } }),
+        JSON.stringify({ message: { model: 'claude-3-5-sonnet', usage: { input_tokens: 1000 } } }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+    await expectCarry(sb, 'did not check them', 'assumptions-unchecked', transcript);
+  }, 30_000);
+
+  test('missing-dimensions (a review that assessed none of the dimensions the change needs)', async () => {
+    const sb = newSandbox();
+    seedSession(sb.stateDir, sb.cwd);
+    writeReview(sb.cwd, { dimensions_checked: [] });
+    await expectCarry(sb, 'did not assess the quality dimensions', 'missing-dimensions:');
+  }, 30_000);
+});
+
+// weakened-tests needs a repo and a session start pinned at its commit (the weakened rule compares
+// with it), so this one runs the real SessionStart and PostToolUse hooks, as tests/i5-existing-tests.test.ts.
+describe('Stop review gate: the weakened-tests carry site', () => {
+  const sh = (cwd: string, cmd: string) => Bun.spawnSync(['sh', '-c', cmd], { cwd, stdout: 'pipe', stderr: 'pipe' }).stdout.toString().trim();
+  const T = 'import { expect, test } from "bun:test";\n';
+  const ROOT = resolve(import.meta.dir, '..');
+  async function hook(cwd: string, base: string, sid: string, script: string, payload: Record<string, unknown>): Promise<string> {
+    const p = Bun.spawn(['bun', join(ROOT, 'hooks', script)], {
+      cwd,
+      env: { ...process.env, TMPDIR: base, HOME: base, CLAUDE_PLUGIN_ROOT: ROOT, GOODBOY_DISABLE_DELEGATION: '1', GOODBOY_CLAIM_FLUSH_WAIT_MS: '0', GOODBOY_POLICY_GATE: 'off', GOODBOY_TEST_GATE: 'off', GOODBOY_DOCS_GATE: 'off', GOODBOY_EXISTING_TESTS: 'on' },
+      stdin: new TextEncoder().encode(JSON.stringify({ session_id: sid, cwd, ...payload })),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const out = await new Response(p.stdout).text();
+    await p.exited;
+    return out;
+  }
+
+  test('a weakened existing test: blocked once; the next turn without an edit is carried; a new edit blocks again', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'goodboy-rc-weak-'));
+    tmpDirs.push(base);
+    const top = realpathSync(mkdtempSync(join(base, 'repo-')));
+    sh(top, 'git init -q -b main && git config user.email t@e.com && git config user.name t && git config commit.gpgsign false');
+    const testFile = join(top, 'tests', 'calc.test.ts');
+    mkdirSync(join(top, 'tests'), { recursive: true });
+    writeFileSync(join(top, 'package.json'), '{"scripts":{"test":"bun test"}}');
+    writeFileSync(testFile, `${T}test("add", () => { expect(1 + 2).toBe(3); expect(0 + 0).toBe(0); });\n`);
+    sh(top, "git add -A && git commit -q -m 'ABC-1 start'");
+    const sid = `rc-${Math.random().toString(36).slice(2)}`;
+    const stateDir = join(base, `goodboy-session-${sid}`);
+    await hook(top, base, sid, 'session-start.ts', { hook_event_name: 'SessionStart', source: 'startup' });
+    const record = () => hook(top, base, sid, 'post-tool-use.ts', { hook_event_name: 'PostToolUse', tool_name: 'Write', tool_input: { file_path: testFile } });
+    const stop = async (): Promise<StopOut> => {
+      const out = await hook(top, base, sid, 'stop.ts', { hook_event_name: 'Stop', stop_hook_active: false });
+      try {
+        return JSON.parse(out) as StopOut;
+      } catch {
+        return {};
+      }
+    };
+
+    writeFileSync(testFile, `${T}test("add", () => { expect(1 + 2).toBe(3); });\n`); // one check fewer
+    await record();
+    const { workTreeState } = await import('../lib/push-test');
+    mkdirSync(join(top, '.claude', 'reviews'), { recursive: true });
+    writeFileSync(
+      join(top, '.claude', 'reviews', 'review.json'),
+      JSON.stringify({
+        timestamp: new Date(Date.now() + 1_000).toISOString(),
+        tree: workTreeState(top).tree, // as review-write stores it
+        reviewed_files: [testFile],
+        category: 'fix-bug',
+        findings: [],
+        unknown_assumptions_checked: [],
+        verdict: 'pass',
+        dimensions_checked: requiredDimensionsFor([testFile]),
+      }),
+    );
+
+    const first = await stop();
+    expect(first.decision).toBe('block');
+    expect(first.reason).toContain('lost checks');
+
+    const idle = await stop();
+    expect(idle.decision).toBeUndefined();
+    expect(JSON.stringify(idle)).toContain(CARRY_WARNING);
+    expect(readFileSync(join(stateDir, 'gate-log.jsonl'), 'utf8')).toContain('carried (no change this turn): weakened-tests: tests/calc.test.ts');
+
+    await record(); // the same content, edited again: a new change this turn
+    const next = await stop();
+    expect(next.decision).toBe('block');
+    expect(next.reason).toContain('lost checks');
+    expect(JSON.stringify(next)).not.toContain(CARRY_WARNING);
+  }, 120_000);
 });
