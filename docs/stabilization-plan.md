@@ -2895,6 +2895,46 @@ Also in this release: the project knowledge files `.goodboy/` are committed (the
 2026-11-02), with two corrections to the policy (P3's source date, P5's list of hook files whose
 helpers tests import), and two stale comments about the shared worktree list.
 
+### 15.28 v0.36.12: a push from a nested repo of a project dir that is no repo (#39)
+
+Field report (goodboy 0.36.10): the session's project dir was a plain folder holding two git repos
+(a backend and a frontend). Every test record had `commit` and `tree` null, because `test-write`
+hashed the work tree of the project dir only (`workTreeState` is null outside a repo), while the
+push test check compares a result's `tree` with the tree of the repo being pushed. Running the tests
+again could not change it; the only way through was the user's one-use approval. `cli.ts
+regression` failed outright there ("not inside a git repository"), so the regression step of the
+push check could not pass either.
+
+1. `test-write` also records `trees`: the work tree of each other repo inside the project dir that
+   a tested file belongs to, keyed by the repo's real top (`repoTrees`, lib/push-test.ts). A file's
+   repo is found by walking up from its dir to the project dir for a `.git` entry (no git call; the
+   walk is shared by every file below a dir, and the real path is taken once per dir: review round
+   2), and candidates are confirmed by one `rev-parse` each until 8 repos are found; test-write
+   warns about the candidates left over. A tested file outside the project
+   dir names no repo (review round 1: `tested_files` is the agent's list, so a repo elsewhere would
+   have become a tested tree). The trees are taken from git, never from the agent (an input `trees`
+   is dropped). The project's own repo is left out: its tree is `tree`, whose meaning is unchanged
+   (the Stop's content freshness reads it against the project top).
+2. The push test check takes a result's tested trees as `tree` plus the values of `trees`
+   (`treesOf`). A tree hash names content exactly, so a pushed tree equal to any of them is the
+   tested content, whichever repo hashed it. The prose-only bases and the "differs from the newest
+   passing result" list use each result's tree of the pushed repo (`trees[real top]`, else `tree`),
+   so a result per repo keeps the five-result budget of the prose check (review round 1); the top is
+   looked up only when a result has `trees`.
+3. `cli.ts regression` runs in the repo the shell is in when that repo is inside the project dir
+   (a nested clone, or the project's own repo), else in the project dir's repo (`regressionTop`):
+   the same repos `repoTrees` records (review round 1: with the project's repo first, a nested
+   clone in a project that is a repo got a tested tree but never a regression). A shell in a plain
+   subdir of the project's repo runs it at the top, as before. The record is kept in the project
+   dir, where the push check reads it, and is matched by tree.
+4. `test-write` warns when it recorded no tree at all (no tested file in a repo inside the project
+   dir, or git could not hash one), so the gap shows before a push.
+
+Not in this release: in such a layout the Stop's changed-line check has no start commit for the
+project dir and measures against the empty tree (seen in the report's gate log, and asked about
+in the local report); that is a separate follow-up. The Stop's record freshness reads `tree` only,
+so there it relies on time-trusted records, as before.
+
 ## 16. J — Field reports (v0.34.0)
 
 Asked by the user on 2026-10-16: improvements and bugs found while using goodboy elsewhere

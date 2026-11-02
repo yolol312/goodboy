@@ -3,7 +3,7 @@
 Feature → test type, generated from the test files by goodboy (`cli.ts test-catalog`).
 Regenerate it instead of editing it; the docs rule compares it with a fresh copy.
 
-Totals: unit 169 files, 2717 tests; e2e 2 files, 54 tests.
+Totals: unit 170 files, 2756 tests; e2e 2 files, 54 tests.
 
 | Feature | Type | File | Tests |
 |---|---|---|---|
@@ -70,6 +70,7 @@ Totals: unit 169 files, 2717 tests; e2e 2 files, 54 tests.
 | push check: always-true patterns in the lines the push adds | unit | tests/i369-push-scan.test.ts | 15 |
 | currentFindings with trees (#38): "changed" is the content the review saw; currentFindings with trees (#38): what is asked, and when; treeContent (#38) on a real repo; currentFindings (#38) with the real lookup | unit | tests/i38-finding-supersession.test.ts | 29 |
 | #38 a cleared finding stays cleared when the files are rewritten with the same content; #38 a finding is still open where the content says it is; #38 files the trees cannot judge fall back to the time rule | unit | tests/i38-review-supersession-stop.test.ts | 10 |
+| repoTrees; repoTrees: names, and the cap on confirmed repos; treesOf; regressionTop; checkHandoff: a result with no `tree` and the pushed repo\; cmdTestWrite in a plain folder holding repos | unit | tests/i39-nested-repo-push.test.ts | 39 |
 | boundary code; the types a file needs; missing types; the user globs | unit | tests/i3b-test-types.test.ts | 20 |
 | the whole-suite command; cli.ts regression; records and the check; the push check | unit | tests/i4-regression.test.ts | 22 |
 | the tests that load a changed file; affected gaps; weakened tests; the Stop | unit | tests/i5-existing-tests.test.ts | 50 |

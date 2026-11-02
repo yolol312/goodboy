@@ -179,6 +179,11 @@ export interface TestResult {
    *  git tree hash (lib/push-test.ts workTreeState). The push test check matches `tree`. */
   commit?: string | null;
   tree?: string | null;
+  /** (#39) Set by `cli.ts test-write`, never by the agent: the working tree (as `tree`) of each other
+   *  git repo inside the project dir that a tested file belongs to, keyed by that repo's real top
+   *  (the repos of a project dir that is no repo, or nested clones). Only the push test check reads
+   *  it: a pushed tree that equals one is the tested content. */
+  trees?: Record<string, string>;
   /** (v0.36.6) Set by `cli.ts test-write`, never by the agent: the content ids (git blob ids, keyed
    *  by absolute path) of tested files that `tree` lacks (git-ignored, or left out of the work-tree
    *  hash). The Stop compares one with the file's content now, so an edited ignored code file can

@@ -11,10 +11,11 @@
 
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
 import { stripHeredocs } from './bash-write';
 import { spawnGit } from './git-run';
 import { splitAliasValue } from './hook-git';
+import { isUnder, realDeep } from './private-files';
 import { agentName, ROUTE } from './routing-policy';
 import {
   classifyHost,
@@ -205,6 +206,102 @@ export function workTreeState(
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+/** Most repos `repoTrees` hashes (each one a work-tree hash). */
+const MAX_TREE_REPOS = 8;
+
+/** (#39) The working tree of each git repo inside `projectDir` that the files belong to, other than
+ *  the project's own repo (whose tree is the record's `tree`), keyed by the repo's real top: a
+ *  project dir that is no repo holds its code in nested clones, and a push from one of them hands
+ *  off that repo's tree. A file outside the project dir names no repo. A file's repo is found by
+ *  walking up from its dir to the project dir for a `.git` entry (no git call; the walk is shared by
+ *  every file below a dir), and candidates are confirmed by one git call each until MAX_TREE_REPOS
+ *  repos are found; the candidates left over are returned in `dropped`. A repo whose tree cannot be
+ *  taken is left out. Relative names resolve against the project dir. */
+export function repoTrees(files: readonly string[], projectDir: string): { trees: Record<string, string>; dropped: string[] } {
+  const root = realDeep(projectDir);
+  const ownReal = realTopOf(projectDir);
+  const byDir = new Map<string, string | null>(); // a file's dir as spelled → its repo's real top, or null
+  const holder = new Map<string, string | null>(); // real dir → the real dir with `.git` it is in, or null
+  const candidates: string[] = [];
+  for (const f of files) {
+    if (typeof f !== 'string' || f === '') continue;
+    const spelled = dirname(resolvePath(projectDir, f));
+    if (!byDir.has(spelled)) byDir.set(spelled, gitHolder(realDeep(spelled), root, holder));
+    const found = byDir.get(spelled) ?? null;
+    if (found !== null && found !== ownReal && !candidates.includes(found)) candidates.push(found);
+  }
+  const repos: string[] = [];
+  let next = 0;
+  for (; next < candidates.length && repos.length < MAX_TREE_REPOS; next++) {
+    if (realTopOf(candidates[next]!) === candidates[next]) repos.push(candidates[next]!);
+  }
+  const trees: Record<string, string> = {};
+  for (const real of repos) {
+    const tree = workTreeState(real).tree;
+    if (tree !== null && OBJECT_ID.test(tree)) trees[real] = tree;
+  }
+  return { trees, dropped: candidates.slice(next) };
+}
+
+/** The nearest dir from `dir` up to `root` (both real) that holds a `.git` entry, or null (also when
+ *  `dir` is not inside `root`). `holder` memoises every dir walked. */
+function gitHolder(dir: string, root: string, holder: Map<string, string | null>): string | null {
+  const rel = relative(root, dir);
+  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null;
+  const walked: string[] = [];
+  let found: string | null = null;
+  for (let d = dir; ; ) {
+    const known = holder.get(d);
+    if (known !== undefined) {
+      found = known;
+      break;
+    }
+    walked.push(d);
+    if (existsSync(join(d, '.git'))) {
+      found = d;
+      break;
+    }
+    const up = dirname(d);
+    if (d === root || up === d) break;
+    d = up;
+  }
+  for (const w of walked) holder.set(w, found);
+  return found;
+}
+
+/** The real top of the repo `dir` is in, or null outside a repo. */
+function realTopOf(dir: string): string | null {
+  const top = topOf(dir);
+  return top === null ? null : realDeep(top);
+}
+
+/** (#39) The repo `cli.ts regression` runs in: the one the shell is in when that repo is inside the
+ *  project dir (a nested clone, or the project's own repo), else the project dir's repo, else null.
+ *  The same repos `repoTrees` records trees for. */
+export function regressionTop(projectDir: string, shell: string): string | null {
+  const top = topOf(shell);
+  if (top !== null && isUnder(top, projectDir)) return top;
+  return topOf(projectDir);
+}
+
+/** The tested trees of a result: `tree` and the trees of the other repos it tested (#39). */
+export function treesOf(r: TestResult): string[] {
+  const out: string[] = [];
+  if (typeof r.tree === 'string' && OBJECT_ID.test(r.tree)) out.push(r.tree);
+  const more = r.trees;
+  if (more !== null && typeof more === 'object' && !Array.isArray(more)) {
+    for (const t of Object.values(more)) if (typeof t === 'string' && OBJECT_ID.test(t) && !out.includes(t)) out.push(t);
+  }
+  return out;
+}
+
+/** A result's tested tree of the repo whose real top is `realTop`: its `trees` entry, else `tree`. */
+function treeForRepo(r: TestResult, realTop: string | null): string | null {
+  const more = r.trees;
+  const t = realTop !== null && more !== null && typeof more === 'object' && Object.hasOwn(more, realTop) ? more[realTop] : r.tree;
+  return typeof t === 'string' && OBJECT_ID.test(t) ? t : null;
 }
 
 /** The tree of a revision as it would be handed off, without goodboy artifacts (so it compares
@@ -608,7 +705,7 @@ export function treeDiff(cwd: string, a: string, b: string): string[] | null {
  *  always-true test patterns. A hand-made JSON with only `verdict` and `tree` is not one. */
 function notPassing(r: TestResult, linesOf?: (file: string) => ReadonlySet<number> | null): string | null {
   if (r.verdict !== 'pass') return `its verdict is ${String(r.verdict)}`;
-  if (typeof r.tree !== 'string' || !OBJECT_ID.test(r.tree)) return 'it records no tested tree';
+  if (treesOf(r).length === 0) return 'it records no tested tree';
   const suites = Array.isArray(r.suites) ? r.suites : [];
   if (!suites.some((s) => typeof s?.passed === 'number' && s.passed > 0)) return 'no suite ran a passing test';
   const files = Array.isArray(r.test_files) ? r.test_files : [];
@@ -779,22 +876,34 @@ export function checkHandoff(
   if (h.unclear) return { ok: false, why: 'unclear', rev: h.unclear, tree: null, ...(h.runFirst ? { runFirst: h.runFirst } : {}) };
   const docRevs: Record<string, string[]> = {};
   const passed = results.filter(passing);
+  // (#39) The real top of the repo handed off, the key of a result's `trees`: one git call, made
+  //   only when a result has `trees` (null: every result's `tree`).
+  let key: string | null | undefined;
+  const repoKey = (): string | null => {
+    if (key === undefined) key = results.some((r) => r.trees !== undefined) ? realTopOf(h.cwd) : null;
+    return key;
+  };
+  // Each passing result's tree of this repo, taken once for every rev (one result per repo keeps
+  //   the five-result budget of the prose check).
+  let own: string[] | undefined;
+  const ownTrees = (): string[] => (own ??= passed.map((r) => treeForRepo(r, repoKey())).filter((t): t is string => t !== null));
   for (const rev of h.revs) {
     const tree = treeOf(h.cwd, rev);
     if (tree === null) return { ok: false, why: 'unresolved', rev, tree };
-    const forTree = results.filter((r) => r.tree === tree);
+    const forTree = results.filter((r) => treesOf(r).includes(tree));
     const linesOf = forTree.length > 0 ? pushedTestLines(h.cwd, rev) : undefined;
     if (forTree.some((r) => notPassing(r, linesOf) === null)) continue;
     const blocked = forTree.find((r) => r.verdict === 'blocked');
     if (blocked) return { ok: false, why: 'blocked', rev, tree, blocked };
     // Not when the tree handed off has a failed result of its own (a README doctest).
-    const bases = forTree.some((r) => r.verdict !== 'pass') ? [] : docsOnly(h.cwd, rev, tree, passed.map((r) => r.tree!));
+    const bases = forTree.some((r) => r.verdict !== 'pass') ? [] : docsOnly(h.cwd, rev, tree, ownTrees());
     if (bases.length > 0) {
       docRevs[rev] = bases;
       continue;
     }
     const newestPass = passed[0];
-    const differs = newestPass ? (diffOf(h.cwd, newestPass.tree!, tree) ?? undefined) : undefined;
+    const base = newestPass ? treeForRepo(newestPass, repoKey()) : null;
+    const differs = base !== null ? (diffOf(h.cwd, base, tree) ?? undefined) : undefined;
     const rejected = forTree.length > 0 ? (notPassing(forTree[0]!, linesOf) ?? undefined) : undefined;
     return { ok: false, why: 'no-result', rev, tree, ...(differs ? { differs } : {}), ...(rejected ? { rejected } : {}) };
   }

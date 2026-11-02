@@ -21,7 +21,7 @@ import type {
   TestVerdict,
   Verdict,
 } from './types';
-import { topOf, treeDiff, workTreeState } from './push-test';
+import { regressionTop, repoTrees, topOf, treeDiff, treesOf, workTreeState } from './push-test';
 import { cliProjectDir } from './project-dir';
 import { openedPath } from './file-tracker';
 import { DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, outputSummary, type RegressionRecord, regressionCommands, runCommands, writeRegressionRecord } from './regression';
@@ -694,6 +694,12 @@ export async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
   const state = workTreeState(cwd);
   result.commit = state.commit;
   result.tree = state.tree;
+  // (#39) And the trees of the other repos the tested files belong to (nested clones, or every repo
+  //   when the project dir is none): a push from one hands off that repo's tree. The validator
+  //   already keeps no `trees` of the agent's; the delete keeps it so if that ever changes.
+  delete result.trees;
+  const repos = repoTrees(result.tested_files, cwd);
+  if (Object.keys(repos.trees).length > 0) result.trees = repos.trees;
   setExtraBlobs(cwd, result, state.tree, result.tested_files);
   const testsDir = join(cwd, '.claude', 'tests');
   ensureDir(testsDir);
@@ -715,6 +721,14 @@ export async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
   if (idle.length > 0) {
     process.stderr.write(`warning: no changed line of these tested files ran in the tests: ${idle.join(', ')}\n`);
   }
+  if (repos.dropped.length > 0) {
+    process.stderr.write(`warning: tested files span more repos than goodboy hashes; no tree recorded for ${repos.dropped.join(', ')} (a push from them needs a test run of their own).\n`);
+  }
+  if (treesOf(result).length === 0) {
+    process.stderr.write(
+      'warning: no tested tree recorded (no tested file is in a git repository inside the project dir, or git could not hash it), so no push can match this result.\n',
+    );
+  }
 }
 
 // ---- command: regression (track I, I4) ----
@@ -727,8 +741,14 @@ async function cmdRegression(cwd: string, args: string[]): Promise<void> {
   const t = args.indexOf('--timeout-min');
   const minutes = t >= 0 ? Number(args[t + 1]) : NaN;
   const timeoutMs = Number.isFinite(minutes) && minutes > 0 ? Math.min(minutes * 60_000, MAX_TIMEOUT_MS) : DEFAULT_TIMEOUT_MS;
-  const top = topOf(cwd);
-  if (top === null) fail('regression: not inside a git repository; the push check compares git trees.');
+  // (#39) A project dir that is no repo: the nested repo the shell is in.
+  const top = regressionTop(cwd, process.cwd());
+  if (top === null) {
+    fail(
+      'regression: not inside a git repository; the push check compares git trees. When the project dir is no repository, ' +
+        'run it from inside the repository you will push (cd into it first).',
+    );
+  }
   const found = regressionCommands(top);
   if (found === null) {
     fail(
