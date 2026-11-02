@@ -7,7 +7,7 @@
 //   on the same ghost files again).
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { approvalMarkerRelPath } from '../lib/approval-marker';
@@ -113,6 +113,16 @@ async function runStop(tmp: string, cwd: string, sessionId: string): Promise<Sto
   }
 }
 
+/**
+ * One more edit of `file` in the turn the next Stop closes. The review gate does not block a turn
+ * that changed nothing (tests/stop-review-carry.test.ts), so each repeated block needs a change.
+ */
+function editAgain(tmp: string, sessionId: string, cwd: string, file: string): void {
+  const dir = join(tmp, `goodboy-session-${sessionId.replace(/[^a-zA-Z0-9_\-]/g, '_')}`);
+  const turn = parseInt(readFileSync(join(dir, 'turn.txt'), 'utf8').trim(), 10);
+  appendFileSync(join(dir, 'edits.jsonl'), JSON.stringify({ file: resolve(cwd, file), turn, timestamp: new Date().toISOString() }) + '\n', 'utf8');
+}
+
 /** The review cursor lives in the session state dir (A3), one file per project directory. */
 const cursorPath = (tmp: string, sessionId: string, cwd: string): string =>
   join(
@@ -139,6 +149,7 @@ describe('Stop hook — validateReview failure gate: user override (defect D, tr
     expect(out1.systemMessage ?? '').not.toContain(touch);
 
     // 2nd: block, and the user is told how to override (no env switch for review gates).
+    editAgain(tmp, sessionId, cwd, 'src/a.ts'); // a Stop after a turn with no change is not blocked again
     const out2 = await runStop(tmp, cwd, sessionId);
     expect(out2.decision).toBe('block');
     expect(out2.reason).toContain('(block 2)');
@@ -146,6 +157,7 @@ describe('Stop hook — validateReview failure gate: user override (defect D, tr
     expect(out2.systemMessage ?? '').not.toContain('GOODBOY_');
 
     // 3rd: still a block (the old escape passed here).
+    editAgain(tmp, sessionId, cwd, 'src/a.ts');
     const out3 = await runStop(tmp, cwd, sessionId);
     expect(out3.decision).toBe('block');
     expect(out3.reason).toContain('(block 3)');

@@ -9,7 +9,7 @@
 //   - rule 4: an unknown start never grants an exemption or an acceptance;
 //   - rule 5: criteria baselines and seen lists per top;
 //   - rules 7-10: atomic pins, a recreated worktree, per-top cursors, legacy sessions;
-//   - rule 11: a nested worktree whose start differs from the first checkout's blocks;
+//   - rule 11 (#35): a nested worktree is a checkout of its own; a Stop in the first checkout points to its edits;
 //   - round 9: git names a checkout whose .git cannot be read, the empty start needs a complete frozen tip set
 //     (or an object store with no commit), first-sight dirt comes from three sets, an incomplete first sight
 //     blocks every Stop, the start block's own text, frozen grants, the first top's identity, a missing pin,
@@ -238,22 +238,28 @@ describe('the research repro: a linked worktree is judged against its own start 
     expect(out.reason ?? '').toContain('Review is required');
   });
 
-  test('nest: a worktree made mid-session inside A, outside .claude/worktrees, stays deferred but its Stop blocks instead of using A\'s start', async () => {
+  // (#35) A worktree made mid-session inside A is a checkout of its own: a Stop in it judges its edits
+  //   against its own first-sight start (Y), and a Stop in A says they wait there.
+  test('nest: a worktree made mid-session inside A is its own checkout with its own start; A\'s Stop points to it', async () => {
     const w = world();
     await startSession(w, w.A);
     const B = join(w.A, 'wt', 'b');
     worktree(w, B, w.Y);
     const calc = write(B, 'src/calc.ts', CALC_X);
-    await post(w, w.A, calc); // the shell is in A: the worktree is not resolved as a project
-    for (const gate of ['on', 'off']) {
-      const out = await stop(w, B, { GOODBOY_TEST_GATE: gate });
-      expect(out.decision).toBe('block');
-      expect(out.reason).toContain('linked worktree nested in');
-      expect(out.reason).toContain(`start is ${w.Y.slice(0, 12)}`);
-    }
+    await post(w, w.A, calc); // the shell is in A
+    const inB = await stop(w, B, { GOODBOY_TEST_GATE: 'on' });
+    expect(inB.decision).toBe('block');
+    expect(inB.reason).toContain('No test result covers the changed code');
+    expect(inB.reason).not.toContain('start is unknown');
+    const reviewB = await stop(w, B, { GOODBOY_TEST_GATE: 'off' });
+    expect(reviewB.reason).toContain('Review is required');
+    const inA = await stop(w, w.A, { GOODBOY_TEST_GATE: 'on' });
+    expect(inA.decision).toBe('block');
+    expect(inA.reason).toContain('another checkout of the project');
+    expect(inA.reason).toContain(B);
   });
 
-  test('nest: a nested worktree at the same commit as A\'s start is no ambiguity', async () => {
+  test('nest: a nested worktree at the same commit as A\'s start is its own checkout too', async () => {
     const w = world();
     await startSession(w, w.A);
     const B = join(w.A, 'wt', 'b');
@@ -261,7 +267,8 @@ describe('the research repro: a linked worktree is judged against its own start 
     const calc = write(B, 'src/calc.ts', CALC_X + '// edit\n');
     await post(w, w.A, calc);
     const out = await stop(w, w.A, { GOODBOY_TEST_GATE: 'on' });
-    expect(out.reason ?? '').not.toContain('linked worktree nested in');
+    expect(out.reason ?? '').toContain('another checkout of the project');
+    expect(out.reason ?? '').not.toContain('No test result covers');
   });
 });
 
@@ -699,7 +706,7 @@ describe('rule 9: acceptance cursors are per checkout', () => {
     reviewRecord(w.A, [b, nt]);
     const out = await stop(w, w.A, { GOODBOY_TEST_GATE: 'on', GOODBOY_DIFF_COVERAGE: 'off', GOODBOY_EXISTING_TESTS: 'off' });
     expect(out.decision).toBe('block');
-    expect(out.reason).toContain('linked worktree nested in');
+    expect(out.reason).toContain('another checkout of the project'); // (#35) B's edits are judged in B
     expect(readdirSync(w.sdir).filter((f) => f.startsWith('.goodboy-last-'))).toEqual([]);
   });
 });
@@ -1260,14 +1267,15 @@ describe('round 9, fix 10 and 11: git cost', () => {
     expect(f.calls()).toEqual([]);
   });
 
-  test('SessionStart lists the worktrees once, for the note and for the snapshot', async () => {
+  // (#35) The worktree note (worktrees.txt) is gone: the snapshot is the list's only reader.
+  test('SessionStart lists the worktrees once, for the snapshot', async () => {
     const w = world();
     laterWorktree(w, w.Y);
     const f = fakeGit();
     await startSession(w);
     expect(f.calls().filter((l) => /(?:^| )worktree list/.test(l)).length).toBe(1);
     expect(existsSync(join(w.sdir, 'start-tips.json'))).toBe(true);
-    expect(existsSync(join(w.sdir, 'worktrees.txt'))).toBe(true);
+    expect(existsSync(join(w.sdir, 'worktrees.txt'))).toBe(false);
   });
 });
 

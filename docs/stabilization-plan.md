@@ -1878,9 +1878,10 @@ read as the main checkout. The gate asked for the other version's acceptance cri
 the agents' records landed in the main checkout. `projectDir` (I10) took only
 `.claude/worktrees/<name>`.
 
-Fix (`lib/project-dir.ts`): the nearest dir above the hook's `cwd` that is a worktree of the
-project's repository is the project, wherever it sits, when it existed at the session's
-start. SessionStart notes the repository's worktrees (`worktrees.txt` in the session dir),
+(Changed in v0.36.10, §15.26: no SessionStart note; one made later counts too, and the Stop
+cross-checks the other checkouts.) Fix (`lib/project-dir.ts`): the nearest dir above the hook's
+`cwd` that is a worktree of the project's repository is the project, wherever it sits, when it
+existed at the session's start. SessionStart notes the repository's worktrees (`worktrees.txt` in the session dir),
 and the hooks pass the session id. It counts only when its `.git` is a file (a linked
 worktree's is; a nested clone's is a directory and costs no git call), git takes it as a work
 tree's top, its common git dir is the project's, and the project's `git worktree list` names
@@ -2547,7 +2548,8 @@ The design (Codex round 8, `~/goodboy-trials/v0367/decisions.md`; new module `li
    with another start (10).
 10. A session from before v0.36.7 (a pin, no tips file): its pin stands for its own checkout, nothing is
     snapshotted on a resume, every other checkout is unknown.
-11. A linked worktree of the repository nested inside the Stop's checkout that the hooks do not take as a
+11. (Superseded by §15.26 in v0.36.10: a nested linked worktree is its own checkout whenever made.)
+    A linked worktree of the repository nested inside the Stop's checkout that the hooks do not take as a
     project (`resolvedAsProject`: not under `.claude/worktrees`, not noted at the start) stays deferred, but
     when edits lie in it and its start (computed by the same first-sight rule) is not the checkout's start,
     the Stop blocks with the two starts named instead of using the checkout's silently.
@@ -2810,6 +2812,54 @@ start, §15.23 rule 11), the stale worktree record warning of #36, JaCoCo self-c
 Not in this release: the review gate's re-block on turns with no change (seven block sites; no field
 report yet), #35, the stale-worktree record note of #36 (gate log only, not shown unless a block), #25
 part 3 (mutation runs recorded as suites).
+
+### 15.26 v0.36.10: review gate carries no-change turns; nested worktrees are their own checkouts (#35)
+
+1. The review gate (seven block sites in `hooks/stop.ts`) re-blocked every later turn with the same
+   reason, as the test gate did before F1 (§15.24): its cursor moves only on acceptance. Now a per-dir
+   mark `reviewGateTurns` (habit state) holds the turn counter at the last full Stop whose review gate
+   judged that dir; a turn in which no pending review file has an edit since that mark does not block
+   on the six evidence sites (no review, validation, high severity, unchecked assumptions, missing
+   dimensions, weakened tests). It logs `carried`, warns in one line and keeps the cursor, so the next
+   turn that changes a file blocks on the whole pending set. The start gates (#33) still block every
+   full Stop. Same trade-off as F1: a high finding can stay open across turns that change nothing;
+   the push check looks at tests only. It was item 2 of the 2026-10-30 handoff plan, which the user
+   asked to continue on 2026-11-02; the user confirmed the trade-off itself at the release gate the
+   same day.
+2. #35 (user decisions 2026-11-02: a worktree's start is its first sight; the hole a `cd` would open
+   is closed by a cross-check). A linked worktree of the project's repository nested anywhere in the
+   project dir is a checkout of its own, whenever it was made: `projectDir` no longer requires it to
+   be noted at SessionStart (`pinWorktrees`, `resolvedAsProject` and rule 11's `nestedWorktreeStarts`
+   are gone). Its start is the first-sight start of §15.23 rule 2, and its records live in its own
+   `.claude/`. `nestedCheckoutOf` (`lib/git-dirs.ts`, files only, `fsDirs` moved there) takes its
+   files out of the enclosing checkout's edit scope (`isWithin` in `lib/file-tracker.ts`), except
+   Claude Code's agent worktrees under `.claude/worktrees`, which keep their place in the project
+   dir's scope as before.
+3. The cross-check (`otherCheckouts`, before the test gate): every full Stop lists the project's
+   other checkouts (the project dir and its nested worktrees) that hold this session's edits with a
+   net change since that checkout's review cursor (an unknown start there counts every edit). When
+   this turn changed a file anywhere in the project (since the previous full Stop in this dir), it
+   blocks (`checkout` gate, own counter, the user's marker passes it) and names the files and the
+   way out: `cd` into it, verify there, end the turn there. Otherwise a one-line warning (as F1).
+   Security review round 1: blocking only on the other checkout's own new edits let a model keep
+   working in one checkout while another's stayed unjudged. The review cursor stands for both layers
+   there; a test left pending after a review is the push check's.
+4. One rule for "nested checkout" (refactoring review round 1): `linkedWorktreeOf` reads `.git` and
+   the admin dir's `gitdir` back-pointer (no git call; `projectDir` used to ask git), and both
+   `projectDir` and the edit scope use it, so no dir leaves the project dir's scope unless a Stop
+   inside it takes it as its project. Verdicts are memoized for a second per directory (an
+   unmemoized check cost 27 s for 20k edit records).
+5. Role limits and the skill rule (security review round 1): a path outside the call's checkout but
+   inside the project dir (a main-checkout file seen from a nested worktree) is judged against the
+   project dir (`scopeRootOf` in `hooks/pre-tool-use.ts`), not taken as outside the project.
+
+Known limits: a subagent that writes its test or review record from the enclosing checkout puts it
+where the nested worktree's Stop does not look (the block text says to run them from inside it).
+Unchanged from v0.36.9 (security review round 1, medium and low): a Stop inside `.claude/worktrees`
+checks no other checkout; an edit logged under a symlinked spelling of the project dir is compared
+by text and missed; a Stop whose cwd is outside the project dir takes cwd as the root. `git worktree
+repair` run inside a planted `.git` makes its back-pointer valid: that dir is then a checkout of its
+own, and its edits are held by the cross-check as any other checkout's.
 
 ## 16. J — Field reports (v0.34.0)
 

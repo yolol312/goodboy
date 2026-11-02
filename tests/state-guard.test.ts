@@ -95,8 +95,8 @@ describe('through the hooks', () => {
   });
 
   // (#21 round-2 review) The worktree pin is SessionStart's: a line a call adds is taken back,
-  //   and a pin a call creates is removed, so a worktree made mid-session never becomes its own
-  //   project.
+  //   and a pin a call creates is removed. Since v0.36.10 (#35) nothing reads it; the guard stays
+  //   for a session started on an older version.
   test('the worktree pin is put back after a call, and one a call creates is removed', async () => {
     const s = sandbox();
     const pin = join(s.dir, 'worktrees.txt');

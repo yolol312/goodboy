@@ -35,8 +35,10 @@ import {
 } from '../lib/changed-coverage';
 import { changedLines } from '../lib/diff-coverage';
 import { beginGitSnapshot, withHashBatch } from '../lib/git-run';
-import { projectDir, resolvedAsProject } from '../lib/project-dir';
-import { nestedWorktreeStarts, sameStart, START_PIN_BUDGET_MS, startPinDeadline, type StartRef } from '../lib/start-pins';
+import { projectDir, projectRoot } from '../lib/project-dir';
+import { START_PIN_BUDGET_MS, startPinDeadline } from '../lib/start-pins';
+import { nestedCheckoutOf } from '../lib/git-dirs';
+import { realDeep } from '../lib/private-files';
 import { setRecordBase } from '../lib/record-paths';
 import { buildCopies } from '../lib/build-copies';
 import { isGeneratedLcov } from '../lib/lcov-report';
@@ -248,6 +250,9 @@ const REVIEW_VALIDATE_COUNT_FILE = '.goodboy-review-validate-retry-count.txt';
 
 // (#33) the start gate: a checkout whose changes before its first sight are not known.
 const START_COUNT_FILE = '.goodboy-start-retry-count.txt';
+
+// (#35) edits another checkout of the project has not had reviewed.
+const CHECKOUT_COUNT_FILE = '.goodboy-checkout-retry-count.txt';
 
 // (layer 1) the test gate, apart from the review counter.
 const TEST_COUNT_FILE = '.goodboy-test-retry-count.txt';
@@ -721,12 +726,11 @@ function warnAcceptanceProblem(sessionId: string, cwd: string, problem: Acceptan
 /** (#33) Why neither layer 1 nor the review can judge the edits against the session's start, or null.
  *  The start of this checkout is unknown (a worktree whose history no rule relates to the start, a
  *  session from before the start snapshot, a git error): nothing is judged against a guessed one and
- *  nothing passes on it. And edits under a linked worktree nested in this checkout that the hooks do
- *  not take as a project of its own (made mid-session, outside `.claude/worktrees`) are judged here
- *  with this checkout's start: that stands only when it is the worktree's start too. A session with
- *  no pin at all (SessionStart never ran) keeps the old behavior: the base checks are skipped. Any
- *  error is a block. */
-function startProblem(sessionId: string, cwd: string, files: readonly string[]): string | null {
+ *  nothing passes on it. (#35) A linked worktree nested in this checkout is a checkout of its own
+ *  (lib/git-dirs.ts): its edits are not in this one's scope, so no start of another is used here.
+ *  A session with no pin at all (SessionStart never ran) keeps the old behavior: the base checks are
+ *  skipped. Any error is a block. */
+function startProblem(sessionId: string, cwd: string): string | null {
   try {
     const top = scopeOf(sessionId, cwd).top;
     const start = sessionCoverageStart(sessionId, cwd, top);
@@ -737,20 +741,53 @@ function startProblem(sessionId: string, cwd: string, files: readonly string[]):
         'Start a new session inside that checkout so its start is pinned, or ask the user to let this Stop pass once with their Stop approval marker.'
       );
     }
-    if (start.head === undefined) return null;
-    const mine: StartRef = start.head === null ? { kind: 'empty' } : { kind: 'commit', head: start.head };
-    const odd = nestedWorktreeStarts(sessionId, top, files, (wt) => resolvedAsProject(wt, cwd, sessionId)).find((n) => !sameStart(n.start, mine));
-    if (odd === undefined) return null;
-    const of = (s: StartRef) => (s.kind === 'commit' ? s.head.slice(0, 12) : s.kind === 'empty' ? 'the empty tree' : `unknown (${s.reason})`);
-    return (
-      `Edits under ${odd.dir} are in a linked worktree nested in ${top} that was made after the session started and is not under .claude/worktrees: ` +
-      `this Stop judges them with ${top}'s start (${of(mine)}), but that worktree's start is ${of(odd.start)}. ` +
-      'Work in a worktree under .claude/worktrees or outside the project dir (the hooks take those as their own checkout), or start a ' +
-      'new session inside it, or ask the user to let this Stop pass once with their Stop approval marker.'
-    );
+    return null;
   } catch (err) {
     return `The session's start could not be determined (${String(err).slice(0, 160)}), so the changes cannot be judged against it. Start a new session in this checkout, or ask the user to let this Stop pass once with their Stop approval marker.`;
   }
+}
+
+/** (#35) The other checkouts of the project (the project dir and the linked worktrees of its
+ *  repository nested in it, lib/git-dirs.ts) that hold edits of this session with a net change
+ *  that no review there has accepted, with whether this turn changed a file anywhere in the
+ *  project (since the previous full Stop in `cwd`): as the review gate's carry, a turn that changes
+ *  a file blocks on the whole pending set. Each checkout's edits are judged only by a Stop run inside it (its own start
+ *  and records), so a Stop elsewhere must say they wait: a `cd` into another checkout (#21
+ *  security review) would otherwise leave them unjudged. The review cursor stands for both
+ *  layers (a test still pending after a review is the push check's, as with F1). An unknown start
+ *  there counts every edit since its cursor. A Stop inside Claude Code's agent worktrees
+ *  (`.claude/worktrees`) checks nothing: those stay in the project dir's scope, as before. */
+function otherCheckouts(sessionId: string, cwd: string): { dir: string; files: string[]; thisTurn: boolean }[] {
+  const root = resolvePath(projectRoot(cwd));
+  if (resolvePath(cwd).startsWith(join(root, '.claude', 'worktrees') + sep)) return [];
+  const habit = readHabitState(sessionId);
+  const marks = { ...(habit.checkoutGateTurns ?? {}) };
+  const mark = marks[cwd] ?? 0;
+  marks[cwd] = getCurrentTurn(sessionId);
+  habit.checkoutGateTurns = marks;
+  writeHabitState(sessionId, habit);
+  const me = realDeep(resolvePath(cwd));
+  const owners = new Set<string>();
+  for (const f of getEditHistory(sessionId).files) {
+    const abs = resolvePath(f);
+    if (!abs.startsWith(root + sep)) continue;
+    owners.add(nestedCheckoutOf(abs, root) ?? root);
+  }
+  // (security review round 1) Any change in the project this turn, in any checkout: blocking only on
+  //   the other checkout's own new edits let a model keep working here while those stayed unjudged.
+  const changed = getEditsWithLastTimestampSince(sessionId, mark).some((e) => resolvePath(e.file).startsWith(root + sep));
+  const out: { dir: string; files: string[]; thisTurn: boolean }[] = [];
+  for (const dir of owners) {
+    if (realDeep(dir) === me) continue;
+    const edits = getEditsWithLastTimestampSince(sessionId, readReviewCursor(dir, sessionId)?.turn ?? 0, dir);
+    if (edits.length === 0) continue;
+    const top = repoTop(dir);
+    const start = sessionCoverageStart(sessionId, dir, top);
+    const pending = start.unknown !== undefined ? edits : netChangedEdits(edits, top, start.head);
+    if (pending.length === 0) continue;
+    out.push({ dir, files: pending.map((e) => e.file), thisTurn: changed });
+  }
+  return out;
 }
 
 /** (#33) Why every full Stop judged in this checkout blocks whatever its edit list holds, or null: the
@@ -775,9 +812,7 @@ function incompleteStartProblem(sessionId: string, cwd: string): string | null {
 
 /** (#33, round 10) Why the stop_hook_active Stop cannot accept verification, or null: the start of the
  *  checkout is unresolved, by the incomplete-start rule (every full Stop) or by the start rule (when
- *  edits are pending for the test or the review gate). The start rule is judged on the pending paths,
- *  the ones the full Stop would judge: a superset (the raw edit paths) could flag a nested worktree
- *  whose files are not pending. */
+ *  edits are pending for the test or the review gate, as the full Stop would judge them). */
 function unresolvedBaseline(sessionId: string, cwd: string): string | null {
   const incomplete = incompleteStartProblem(sessionId, cwd);
   if (incomplete !== null) return incomplete;
@@ -790,7 +825,7 @@ function unresolvedBaseline(sessionId: string, cwd: string): string | null {
   } catch {
     return null; // the accepts below judge it, and they refuse an unknown start
   }
-  return pending.length === 0 ? null : startProblem(sessionId, cwd, pending);
+  return pending.length === 0 ? null : startProblem(sessionId, cwd);
 }
 
 type TestEvaluation =
@@ -813,7 +848,7 @@ function evaluateTestResults(
   sessionId: string,
 ): TestEvaluation {
   // (#33) No start, no verdict: the rules below all compare with it.
-  const startIssue = startProblem(sessionId, cwd, changedEdits.map((e) => e.file));
+  const startIssue = startProblem(sessionId, cwd);
   if (startIssue !== null) return { kind: 'block', reason: startIssue, start: true };
   // (#23) Every rule runs and the block names all their gaps at once: stopping at the first one
   //   made each fix uncover the next, one Stop each. A rule that throws ends the evaluation:
@@ -1388,7 +1423,7 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
       );
     };
 
-    const startIssue = startProblem(sessionId, cwd, recentEdits);
+    const startIssue = startProblem(sessionId, cwd);
     if (startIssue !== null) return block(startIssue, true);
     if (results.length === 0) {
       const preview = recentEdits.slice(0, 5).join(', ');
@@ -1604,7 +1639,7 @@ function tryAcceptPendingReview(
     const netEdits = reviewEditsSince(sessionId, cwd, cursorTurn);
     const recentEdits = netEdits.map((e) => e.file);
     if (recentEdits.length === 0) return null;
-    if (startProblem(sessionId, cwd, recentEdits) !== null) return null; // (#33)
+    if (startProblem(sessionId, cwd) !== null) return null; // (#33)
     const reviewsDir = resolvePath(cwd, '.claude', 'reviews');
     const reviews = findRecentReviewFiles(reviewsDir, reviewWindowMinutes());
     if (reviews.length === 0) return null;
@@ -1663,7 +1698,7 @@ function main(): void {
       //   from the shell's current dir, which follows a model's `cd` (a Stop from a subdir
       //   passed a change outside it with no test or review). Citations also resolve from it.
       const shellCwd = input.cwd ?? process.cwd();
-      const cwd = projectDir(shellCwd, process.env, input.session_id);
+      const cwd = projectDir(shellCwd, process.env);
       // (#32) A record's relative file names resolve against the project dir, not the process
       //   dir (the shell's, which follows a model's `cd`).
       setRecordBase(cwd);
@@ -2056,6 +2091,48 @@ function main(): void {
         resetRetryCount(sessionId, START_COUNT_FILE);
       }
 
+      // (#35) Another checkout of the project (the project dir, or a linked worktree nested in it)
+      //   holds edits this Stop does not judge. Blocks when this turn changed a file anywhere in the
+      //   project; on a turn that changed none, a one-line warning (as F1).
+      const others = (() => {
+        try {
+          return otherCheckouts(sessionId, cwd);
+        } catch (err) {
+          hookError(sessionId, 'stop', 'other-checkouts', err);
+          return [];
+        }
+      })();
+      const due = others.filter((o) => o.thisTurn);
+      if (due.length > 0 && !userPass(sessionId, cwd, 'checkout')) {
+        const count = readRetryCount(sessionId, CHECKOUT_COUNT_FILE) + 1;
+        writeRetryCount(sessionId, count, CHECKOUT_COUNT_FILE);
+        logGate(sessionId, 'checkout', 'deny', due.map((o) => `${o.dir} (${o.files.length})`).join(', '));
+        const list = due
+          .map((o) => `${o.dir}: ${o.files.slice(0, 3).map((f) => relative(o.dir, f)).join(', ')}${o.files.length > 3 ? ` and ${o.files.length - 3} more` : ''}`)
+          .join('; ');
+        emit(
+          blockOutput(
+            sessionId,
+            cwd,
+            `Unverified edits are in another checkout of the project, which this Stop (in ${cwd}) does not judge: ${list}. ` +
+              'Each checkout is verified by a Stop run inside it, against its own start and with its own records: `cd` into it, ' +
+              'run the tests and the review from there (their records land in its .claude/), and end the turn there.',
+            'checkout',
+            '',
+            count,
+          ),
+        );
+        return;
+      }
+      if (due.length === 0) resetRetryCount(sessionId, CHECKOUT_COUNT_FILE);
+      if (others.length > 0 && due.length === 0) {
+        logGate(sessionId, 'checkout', 'warn', `carried: ${others.map((o) => o.dir).join(', ')}`);
+        habitWarnings.push(
+          `[goodboy] 다른 체크아웃(${others.map((o) => o.dir).join(', ')})에 아직 검증되지 않은 변경이 있어요. ` +
+            '그 체크아웃 안에서 턴을 마칠 때 확인해요.',
+        );
+      }
+
       // (B6) 층1 — 테스트 게이트. 리뷰보다 **먼저** 동작을 검증한다.
       //   리뷰(리팩토링·성능·보안)는 "동작은 맞다"를 전제로 하는 검토라, 테스트가
       //   통과하지 않은 코드를 리뷰하는 것은 순서가 뒤집힌 것이다.
@@ -2090,6 +2167,33 @@ function main(): void {
         }
       })();
       const recentEdits = netEdits.map((e) => e.file);
+      // (as layer 1's F1, #32 #37) A turn that changed no reviewable file since the last Stop whose
+      //   review gate judged this dir adds nothing to review: the earlier edits stay pending (the
+      //   cursor holds) and block the next turn that changes one. One mark per project dir.
+      const reviewChangedThisTurn = (() => {
+        try {
+          const habit = readHabitState(sessionId);
+          const marks = { ...(habit.reviewGateTurns ?? {}) };
+          const since = new Set(getEditsWithLastTimestampSince(sessionId, marks[cwd] ?? 0, cwd).map((e) => e.file));
+          marks[cwd] = getCurrentTurn(sessionId);
+          habit.reviewGateTurns = marks;
+          writeHabitState(sessionId, habit);
+          return recentEdits.some((f) => since.has(f));
+        } catch {
+          return true; // fail closed: judged as a change
+        }
+      })();
+      /** True (and the Stop ends with a one-line warning) when this turn changed nothing to review. */
+      const carryReview = (why: string): boolean => {
+        if (reviewChangedThisTurn) return false;
+        logGate(sessionId, 'review', 'warn', `carried (no change this turn): ${why}`);
+        habitWarnings.push(
+          `[goodboy] 이번 턴에는 파일 변경이 없어 리뷰 게이트가 막지 않았어요. 앞서 바뀐 파일 ` +
+            `${recentEdits.length}개는 아직 리뷰가 끝나지 않았고, 다음에 파일을 바꾸는 턴에 다시 확인해요.`,
+        );
+        emit({});
+        return true;
+      };
       if (recentEdits.length === 0) {
         statusSnapshot.reviewPending = false;
         emit({});
@@ -2098,7 +2202,7 @@ function main(): void {
       statusSnapshot.reviewPending = true;
 
       // (#33) A review of changes judged against an unknown or an ambiguous start is no acceptance.
-      const startIssue = startProblem(sessionId, cwd, recentEdits);
+      const startIssue = startProblem(sessionId, cwd);
       if (startIssue !== null) {
         if (userPass(sessionId, cwd, 'review')) {
           acceptReview(sessionId, cwd);
@@ -2131,6 +2235,7 @@ function main(): void {
           emit({});
           return;
         }
+        if (carryReview('no-review-file')) return;
         const preview = recentEdits.slice(0, 5).join(', ');
         const more = recentEdits.length > 5 ? ` 외 ${recentEdits.length - 5}개` : '';
         const count = readRetryCount(sessionId, REVIEW_VALIDATE_COUNT_FILE) + 1;
@@ -2168,6 +2273,7 @@ function main(): void {
       })();
       if (!v.ok) {
         if (!userPass(sessionId, cwd, 'review')) {
+          if (carryReview(v.reason ?? 'invalid')) return;
           const count = readRetryCount(sessionId, REVIEW_VALIDATE_COUNT_FILE) + 1;
           writeRetryCount(sessionId, count, REVIEW_VALIDATE_COUNT_FILE);
           logGate(sessionId, 'review', 'deny', v.reason ?? 'invalid');
@@ -2232,6 +2338,7 @@ function main(): void {
       if (highSev.length > 0) {
         const issues = findingsSummary(highSev, false);
         if (!userPass(sessionId, cwd, 'review')) {
+          if (carryReview('high-severity')) return;
           const count = readRetryCount(sessionId) + 1;
           writeRetryCount(sessionId, count);
           logGate(sessionId, 'review', 'deny', 'high-severity');
@@ -2272,6 +2379,7 @@ function main(): void {
       );
       if (declaredUnknowns > 0 && checkedAssumptions === 0) {
         if (!userPass(sessionId, cwd, 'review')) {
+          if (carryReview('assumptions-unchecked')) return;
           const count = readRetryCount(sessionId) + 1;
           writeRetryCount(sessionId, count);
           logGate(sessionId, 'review', 'deny', 'assumptions-unchecked');
@@ -2315,6 +2423,7 @@ function main(): void {
       if (missingDims.length > 0) {
         const dimList = missingDims.join(', ');
         if (!userPass(sessionId, cwd, 'review')) {
+          if (carryReview(`missing-dimensions: ${dimList}`)) return;
           const count = readRetryCount(sessionId) + 1;
           writeRetryCount(sessionId, count);
           logGate(sessionId, 'review', 'deny', `missing-dimensions: ${dimList}`);
@@ -2350,6 +2459,7 @@ function main(): void {
       const unjudged = weakMode === 'off' ? [] : unjudgedWeakenedNow(sessionId, cwd, reviews);
       if (unjudged.length > 0 && weakMode === 'on') {
         if (!userPass(sessionId, cwd, 'review')) {
+          if (carryReview(`weakened-tests: ${unjudged.map((w) => w.rel).join(', ')}`)) return;
           const count = readRetryCount(sessionId) + 1;
           writeRetryCount(sessionId, count);
           logGate(sessionId, 'review', 'deny', `weakened-tests: ${unjudged.map((w) => w.rel).join(', ')}`);

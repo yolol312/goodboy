@@ -13,7 +13,7 @@ import { changedLines } from '../lib/diff-coverage';
 import { changedStartTests, startTestFiles } from '../lib/existing-tests';
 import { privateTerms } from '../lib/field-report';
 import { recordEdit } from '../lib/file-tracker';
-import { pinWorktrees, projectDir } from '../lib/project-dir';
+import { projectDir } from '../lib/project-dir';
 import { revisionTree, topOf, workTreeState } from '../lib/push-test';
 import { requiredDimensionsFor } from '../lib/review-dimensions';
 import { changedLineCount } from '../lib/review-scope';
@@ -208,7 +208,6 @@ describe('every git a hook or library runs carries the safety settings', () => {
     ['write-sweep statusFiles', (r) => statusFiles(r.d)],
     ['test-catalog catalogRows', (r) => catalogRows(r.d)],
     ['test-survey surveyProject', (r) => surveyProject(r.d)],
-    ['project-dir pinWorktrees', (r) => pinWorktrees(sid(), { CLAUDE_PROJECT_DIR: r.d })],
     ['field-report privateTerms', (r) => privateTerms(r.d)],
   ];
   for (const [name, run] of sites) {
@@ -232,14 +231,14 @@ describe('every git a hook or library runs carries the safety settings', () => {
     expect(diff.args).toContain('--no-textconv');
   });
 
-  test('project-dir: the worktree check (sharesRepo) is protected too', () => {
+  // (#35) The worktree check reads the files git keeps (lib/git-dirs.ts): no git call to protect.
+  test('project-dir: the worktree check runs no git', () => {
     const r = repo();
     const wt = join(r.d, '.claude', 'worktrees', 'w1');
     sh(r.d, `git worktree add -q "${wt}" -b w1`);
     const f = fakeGit();
-    expect(projectDir(wt, { CLAUDE_PROJECT_DIR: r.d }, sid())).toBe(real(wt));
-    expect(only(f, 'worktree').length).toBeGreaterThan(0);
-    expectSafe(f, 'sharesRepo');
+    expect(projectDir(wt, { CLAUDE_PROJECT_DIR: r.d })).toBe(real(wt));
+    expect(f.calls().length).toBe(0);
   });
 
   test('commit issue rule: protected, and the user command reads replace refs as the user git will', () => {

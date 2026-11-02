@@ -78,7 +78,9 @@ describe('worktree pins', () => {
     await proc.exited;
   }
 
-  test('the hook writes the worktrees that exist at the start, once, and not on a compaction', async () => {
+  // (#35) The worktree note is gone: a nested worktree is its own project whenever it was made
+  //   (lib/project-dir.ts), so SessionStart writes no worktrees.txt.
+  test('the hook writes no worktree note', async () => {
     const tmp = mkdtempSync(join(tmpdir(), 'goodboy-ss-tmp-'));
     const project = mkdtempSync(join(tmpdir(), 'goodboy-ss-proj-'));
     dirs.push(tmp, project);
@@ -88,19 +90,7 @@ describe('worktree pins', () => {
     git('add', '.');
     git('commit', '-qm', 'init');
     git('worktree', 'add', '-q', '.worktrees/v2');
-    const note = join(tmp, 'goodboy-session-ss-1', 'worktrees.txt');
-
-    await start('compact', project, 'ss-1', tmp);
-    expect(existsSync(note)).toBe(false);
-
     await start('startup', project, 'ss-1', tmp);
-    const listed = readFileSync(note, 'utf8').split('\n');
-    expect(listed).toContain(realpathSync(project));
-    expect(listed).toContain(realpathSync(join(project, '.worktrees', 'v2')));
-
-    // A worktree added later is not in the note, and a resume keeps the note as it was.
-    git('worktree', 'add', '-q', '--detach', 'docs/.late', 'HEAD');
-    await start('resume', project, 'ss-1', tmp);
-    expect(readFileSync(note, 'utf8')).not.toContain('.late');
+    expect(existsSync(join(tmp, 'goodboy-session-ss-1', 'worktrees.txt'))).toBe(false);
   }, 30_000);
 });

@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { approvalMarkerRelPath } from '../lib/approval-marker';
 import { AXIS_DIMENSIONS } from '../lib/review-dimensions';
+import { forgetReviewTurnMark } from './review-turn-mark';
 
 const ROOT = resolve(import.meta.dir, '..');
 const STOP = join(ROOT, 'hooks', 'stop.ts');
@@ -122,6 +123,7 @@ function transcript(repo: Repo, text: string): string {
 async function stopUntilUserPass(repo: Repo, transcriptPath?: string): Promise<HookOut> {
   const payload = { session_id: SID, hook_event_name: 'Stop', ...(transcriptPath ? { transcript_path: transcriptPath } : {}) };
   for (let i = 1; i <= 3; i++) {
+    forgetReviewTurnMark(repo.tmp, SID); // judged as a turn that changed a file (no carry)
     const blocked = await run(repo, STOP, payload);
     expect(blocked.decision).toBe('block');
     expect(blocked.reason ?? '').toContain(`(block ${i})`);

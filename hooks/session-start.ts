@@ -12,7 +12,7 @@
 import { pinCommitIssueSettings } from '../lib/commit-issue';
 import { pinProjectMode, projectMode } from '../lib/project-mode';
 // After a compact or a resume the shell may still be in a model's `cd` subdir (I10).
-import { pinWorktrees, projectDir } from '../lib/project-dir';
+import { projectDir } from '../lib/project-dir';
 import { knowledgeRoot, knowledgeSessionNotice } from '../lib/project-knowledge';
 import { claudeMdNotice } from '../lib/doc-map';
 import { tierAdvice } from '../lib/test-profile';
@@ -80,25 +80,22 @@ if (import.meta.main) {
       //   (lib/commit-issue.ts; `/clear` starts a new session id).
       if ((source === 'startup' || source === 'resume' || source === 'clear') && sessionId) {
         // (#33) One deadline for the start-pin git calls (the hook's own timeout is 15 s; past it
-        //   no snapshot is taken), and one `git worktree list` for the note below and the snapshot.
+        //   no snapshot is taken), and one `git worktree list` shared by the snapshot and the pins.
         startPinDeadline(START_PIN_BUDGET_MS.sessionStart);
         withSharedWorktreeList(() => {
-          // (#21) The worktrees that exist now: one nested elsewhere than .claude/worktrees is
-          //   its own project only when noted here, so the pins below follow it too.
-          pinWorktrees(sessionId);
           try {
-            pinCommitIssueSettings(sessionId, projectDir(input.cwd ?? process.cwd(), process.env, sessionId));
+            pinCommitIssueSettings(sessionId, projectDir(input.cwd ?? process.cwd(), process.env));
           } catch {
             // best-effort: without pins, a later file counts only when unchanged since the session dir was made
           }
           // …and the project mode its cwd has now (lib/project-mode.ts; not on compact, which
           //   would trust a marker written during the session).
-          pinProjectMode(sessionId, projectDir(input.cwd ?? process.cwd(), process.env, sessionId ?? undefined));
+          pinProjectMode(sessionId, projectDir(input.cwd ?? process.cwd(), process.env));
           // …and the user's policy globs with the start HEAD (I1, lib/changed-coverage.ts). Pinned
           //   whatever the changed-line mode: the static previews (I3a) count without it.
-          pinCoverageStart(sessionId, projectDir(input.cwd ?? process.cwd(), process.env, sessionId ?? undefined));
+          pinCoverageStart(sessionId, projectDir(input.cwd ?? process.cwd(), process.env));
           // …and the requirement rows and policy `test:` lines it starts from (I2).
-          pinSessionCriteria(sessionId, projectDir(input.cwd ?? process.cwd(), process.env, sessionId ?? undefined));
+          pinSessionCriteria(sessionId, projectDir(input.cwd ?? process.cwd(), process.env));
         });
       }
       const warnings = source === 'startup' || source === 'resume' ? configWarnings(process.env) : [];
@@ -107,7 +104,7 @@ if (import.meta.main) {
       let knowledge: { context?: string; systemMessage?: string } = {};
       if (sessionId && (process.env.GOODBOY_POLICY_GATE ?? 'on').trim().toLowerCase() !== 'off') {
         try {
-          knowledge = knowledgeSessionNotice(projectDir(input.cwd ?? process.cwd(), process.env, sessionId ?? undefined), sessionId);
+          knowledge = knowledgeSessionNotice(projectDir(input.cwd ?? process.cwd(), process.env), sessionId);
         } catch {
           knowledge = {};
         }
@@ -117,7 +114,7 @@ if (import.meta.main) {
       let decisions: string | null = null;
       if (sessionId) {
         try {
-          decisions = decisionAuthorityContext(projectDir(input.cwd ?? process.cwd(), process.env, sessionId ?? undefined), sessionId);
+          decisions = decisionAuthorityContext(projectDir(input.cwd ?? process.cwd(), process.env), sessionId);
         } catch {
           decisions = null;
         }
@@ -127,7 +124,7 @@ if (import.meta.main) {
       let claudeMd: string | null = null;
       let tier: { context: string; systemMessage: string } | null = null;
       if (sessionId) {
-        const dir = projectDir(input.cwd ?? process.cwd(), process.env, sessionId ?? undefined);
+        const dir = projectDir(input.cwd ?? process.cwd(), process.env);
         try {
           if (projectMode(dir, sessionId) !== 'non-project') {
             const root = knowledgeRoot(dir).root;
@@ -143,7 +140,7 @@ if (import.meta.main) {
       let inbox: { systemMessage: string; context: string } | null = null;
       if (source === 'startup' || source === 'resume' || source === 'clear') {
         try {
-          inbox = inboxNotice(projectDir(input.cwd ?? process.cwd(), process.env, sessionId ?? undefined));
+          inbox = inboxNotice(projectDir(input.cwd ?? process.cwd(), process.env));
         } catch {
           inbox = null;
         }

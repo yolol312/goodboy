@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { forgetReviewTurnMark } from './review-turn-mark';
 
 const STOP_HOOK = resolve(import.meta.dir, '..', 'hooks', 'stop.ts');
 const tmpDirs: string[] = [];
@@ -81,6 +82,7 @@ interface StopOut {
 }
 
 async function runStop(tmp: string, cwd: string, sessionId: string): Promise<StopOut> {
+  forgetReviewTurnMark(tmp, sessionId); // judged as a turn that changed a file (no carry)
   const proc = Bun.spawn(['bun', STOP_HOOK], {
     cwd,
     // Layer 1 fires before review; turn it off to isolate the gates under test.

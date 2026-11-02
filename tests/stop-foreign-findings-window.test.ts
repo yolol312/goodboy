@@ -19,6 +19,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, w
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { AXIS_DIMENSIONS } from '../lib/review-dimensions';
+import { forgetReviewTurnMark } from './review-turn-mark';
 
 const ROOT = resolve(import.meta.dir, '..');
 const STOP = join(ROOT, 'hooks', 'stop.ts');
@@ -89,6 +90,7 @@ async function edit(repo: Repo, sessionId: string, rel: string): Promise<void> {
 }
 
 async function stop(repo: Repo, sessionId: string, active = false): Promise<HookOut> {
+  forgetReviewTurnMark(repo.tmp, sessionId); // judged as a turn that changed a file (no carry)
   return run(repo, STOP, { session_id: sessionId, hook_event_name: 'Stop', ...(active ? { stop_hook_active: true } : {}) });
 }
 

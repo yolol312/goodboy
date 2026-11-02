@@ -18,6 +18,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
+import { nestedCheckoutOf } from './git-dirs';
 
 interface TrackRecord {
   file: string;
@@ -558,13 +559,15 @@ export function getEditTimeline(sessionId: string): { file: string; t: number }[
   return out;
 }
 
-/** withinDir가 주어지면 파일이 그 디렉터리 하위인지 판정. 없으면 항상 true. */
+/** withinDir가 주어지면 파일이 그 디렉터리 하위인지 판정. 없으면 항상 true.
+ *  (#35) A file in a linked worktree of the same repository nested below `withinDir` is that
+ *  checkout's, not `withinDir`'s: a Stop judges it inside that worktree (lib/git-dirs.ts). */
 function isWithin(file: string, withinDir?: string): boolean {
   if (!withinDir) return true;
   try {
     const root = resolve(withinDir);
     const f = resolve(file);
-    return f === root || f.startsWith(root + sep);
+    return f === root || (f.startsWith(root + sep) && nestedCheckoutOf(f, root) === null);
   } catch {
     return true; // 판정 불가 → 포함(fail-closed: 리뷰를 더 요구하는 쪽)
   }

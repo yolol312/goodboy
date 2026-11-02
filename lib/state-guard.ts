@@ -30,8 +30,9 @@ const EVIDENCE = /^(?:skill-evidence|marker-evidence)\.jsonl$/;
 /** Written only by SessionStart (the pins) and the Stop (the criteria it required, the weakened
  *  tests a review judged): one a Bash call created would set the session's start or criteria
  *  (I2 security review round 2: a crafted seen list failed the gate open). The worktree pin
- *  (#21) too: a line a Bash call added would make a worktree the model created mid-session
- *  its own project and narrow the gates' scope. The start pins of v0.36.7 (#33: the frozen ref tips,
+ *  (#21) is no longer written or read since v0.36.10 (#35: a nested worktree is its own project
+ *  whenever made); it stays guarded, so a session started on an older version keeps it as it was.
+ *  The start pins of v0.36.7 (#33: the frozen ref tips,
  *  one start pin and one criteria baseline per checkout, the criteria a Stop required there) are
  *  the same kind: a forged one would set a checkout's start. */
 const HOOK_ONLY = /^(?:(?:project-mode-pin|coverage-pin|criteria-pin|criteria-seen|judged-weakened)\.json|worktrees\.txt|start-tips\.json|(?:start-pin|criteria-pin|criteria-seen)-[0-9a-f]{16}\.json)$/;

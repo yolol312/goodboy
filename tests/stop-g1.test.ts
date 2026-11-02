@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -36,7 +36,13 @@ function setup() {
     await proc.exited;
     return out;
   };
-  return { cwd, sid, dir, edit, stop };
+  // Another edit of the file in the turn the next Stop closes: the review gate no longer blocks a
+  //   turn that changed nothing (tests/stop-review-carry.test.ts), so each block needs a change.
+  const editAgain = (rel: string) => {
+    const turn = parseInt(readFileSync(join(dir, 'turn.txt'), 'utf8').trim() || '0', 10);
+    appendFileSync(join(dir, 'edits.jsonl'), JSON.stringify({ file: join(cwd, rel), turn, timestamp: new Date().toISOString() }) + '\n');
+  };
+  return { cwd, sid, dir, edit, editAgain, stop };
 }
 
 const RUNNING = [{ id: 'a1', type: 'subagent', status: 'running', description: 'review', agent_type: 'goodboy:review-changes' }];
@@ -64,16 +70,18 @@ describe('gates wait for running agents', () => {
 });
 
 describe('review required, no review at all', () => {
-  test("blocks on every Stop, tells the user from the 2nd; the user's marker passes once", async () => {
+  test("blocks on every Stop that follows a change, tells the user from the 2nd; the user's marker passes once", async () => {
     const s = setup();
     s.edit('src/a.ts');
     const first = await s.stop();
     expect(first.decision).toBe('block');
     expect(String(first.reason)).toContain('(block 1)');
     expect(first.systemMessage ?? '').not.toContain('goodboy-stop-approved');
+    s.editAgain('src/a.ts');
     const second = await s.stop();
     expect(String(second.reason)).toContain('(block 2)');
     expect(String(second.systemMessage)).toContain(`.goodboy-stop-approved-${s.sid.slice(0, 8)}.txt`);
+    s.editAgain('src/a.ts');
     expect((await s.stop()).decision).toBe('block'); // no count-based pass
     mkdirSync(join(s.cwd, '.claude'), { recursive: true });
     writeFileSync(join(s.cwd, '.claude', `.goodboy-stop-approved-${s.sid.slice(0, 8)}.txt`), '');

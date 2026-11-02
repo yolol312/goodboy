@@ -8,7 +8,7 @@
 //     catches that keep a hook alive when the session dir cannot be used;
 //   - the git dir that git names and the file system does not hold;
 //   - first-sight pins whose changes cannot be recorded, and a checkout made again with an empty start;
-//   - nestedWorktreeStarts, incompleteStart, noteSessionTop, resolvedAsProject and the criteria of the
+//   - nestedCheckoutOf (lib/git-dirs.ts), incompleteStart, noteSessionTop and the criteria of the
 //     worktrees that exist at the session's start.
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -17,14 +17,13 @@ import { delimiter, dirname, join } from 'node:path';
 import { incompleteStart, noteSessionTop, pinCoverageStart } from '../lib/changed-coverage';
 import { resetGitBinary } from '../lib/git-binary';
 import { ensureSessionDir, sessionDir } from '../lib/file-tracker';
-import { pinWorktrees, resolvedAsProject } from '../lib/project-dir';
+import { nestedCheckoutOf } from '../lib/git-dirs';
 import { pinSessionCriteria, startedBeforeVerification } from '../lib/session-criteria';
 import {
   earlierKeys,
   hasStartPin,
   listWorktrees,
   nearestGitTop,
-  nestedWorktreeStarts,
   sessionStartRan,
   takeStartSnapshot,
   topIdentity,
@@ -320,43 +319,48 @@ describe('a checkout made again where the session started with no commit', () =>
   });
 });
 
-describe('nestedWorktreeStarts: linked worktrees inside the checkout that hold some of the files', () => {
-  function nested(): { sid: string; A: string; B: string } {
+describe('nestedCheckoutOf (lib/git-dirs.ts, #35): the linked worktree inside the checkout that owns a file', () => {
+  function nested(): { A: string; B: string } {
     const { A } = repo();
-    const sid = session();
-    takeStartSnapshot(sid, A);
     const B = addWorktree(A, join(A, 'wt', 'b'));
-    return { sid, A, B };
+    return { A, B };
   }
 
-  test('a file in the nested worktree names it with its own start; other files, and files outside, name none', () => {
-    const { sid, A, B } = nested();
+  test('a file in the nested worktree names it, whenever it was made; other files, and files outside, name none', () => {
+    const { A, B } = nested();
     mkdirSync(join(B, 'src', 'sub'), { recursive: true });
-    const files = [join(B, 'src', 'calc.ts'), join(B, 'src', 'sub', 'x.ts'), join(A, 'src', 'calc.ts'), A, dirname(A), join(tmp(), 'out.ts')];
-    const out = nestedWorktreeStarts(sid, A, files, () => false);
-    expect(out.length).toBe(1);
-    expect(out[0]!.dir).toBe(B);
-    expect(out[0]!.start).toMatchObject({ kind: 'commit' });
+    expect(nestedCheckoutOf(join(B, 'src', 'calc.ts'), A)).toBe(B);
+    expect(nestedCheckoutOf(join(B, 'src', 'sub', 'x.ts'), A)).toBe(B);
+    expect(nestedCheckoutOf(join(A, 'src', 'calc.ts'), A)).toBeNull();
+    expect(nestedCheckoutOf(A, A)).toBeNull();
+    expect(nestedCheckoutOf(join(tmp(), 'out.ts'), A)).toBeNull();
   });
 
-  test('a worktree the hooks resolve as a project of its own is left to them', () => {
-    const { sid, A, B } = nested();
-    expect(nestedWorktreeStarts(sid, A, [join(B, 'src', 'calc.ts')], (wt) => wt === B)).toEqual([]);
+  test("Claude Code's agent worktrees under .claude/worktrees stay in the checkout's scope", () => {
+    const { A } = repo();
+    const inside = addWorktree(A, join(A, '.claude', 'worktrees', 'in'));
+    expect(nestedCheckoutOf(join(inside, 'src', 'calc.ts'), A)).toBeNull();
   });
 
-  test('a nested clone (its .git is a directory) and a worktree of another repository are no nested worktree of this one', () => {
-    const { sid, A } = nested();
+  test('a nested clone (its .git is a directory), a worktree of another repository and a .git file naming the checkout itself are none', () => {
+    const { A } = nested();
     const clone = join(A, 'vendor', 'clone');
     mkdirSync(clone, { recursive: true });
     sh(clone, GIT_INIT);
     const other = repo();
     const foreign = addWorktree(other.A, join(A, 'vendor', 'foreign'));
-    expect(nestedWorktreeStarts(sid, A, [write(clone, 'a.ts', 'x\n'), write(foreign, 'b.ts', 'y\n')], () => false)).toEqual([]);
+    expect(nestedCheckoutOf(write(clone, 'a.ts', 'x\n'), A)).toBeNull();
+    expect(nestedCheckoutOf(write(foreign, 'b.ts', 'y\n'), A)).toBeNull();
+    mkdirSync(join(A, 'mods', 'x'), { recursive: true });
+    writeFileSync(join(A, 'mods', 'x', '.git'), 'gitdir: ../../.git\n');
+    expect(nestedCheckoutOf(write(join(A, 'mods', 'x'), 'c.ts', 'z\n'), A)).toBeNull();
   });
 
   test('a checkout with no .git has no worktrees to name', () => {
     const plain = tmp();
-    expect(nestedWorktreeStarts(session(), plain, [join(plain, 'a.ts')], () => false)).toEqual([]);
+    mkdirSync(join(plain, 'w'), { recursive: true });
+    writeFileSync(join(plain, 'w', '.git'), 'gitdir: /nowhere\n');
+    expect(nestedCheckoutOf(join(plain, 'w', 'a.ts'), plain)).toBeNull();
   });
 });
 
@@ -413,21 +417,6 @@ describe('what the hooks see of a checkout that is not the session`s first (lib/
     expect(startPins(sid).length).toBe(before); // unknown is never pinned, but discovery was asked
     expect(topIdentity(broken).unknown).toBeDefined();
     expect(A).not.toBe(broken);
-  });
-});
-
-describe('resolvedAsProject (lib/project-dir.ts)', () => {
-  test('a worktree under .claude/worktrees or one noted at the session`s start is a project; another below the dir is not', () => {
-    const { A } = repo();
-    const sid = session();
-    const inside = addWorktree(A, join(A, '.claude', 'worktrees', 'in'));
-    const noted = addWorktree(A, join(tmp(), 'noted'));
-    pinWorktrees(sid, { CLAUDE_PROJECT_DIR: A }); // SessionStart's note of the worktrees that exist
-    const later = addWorktree(A, join(A, 'wt', 'later'));
-    expect(resolvedAsProject(inside, A, sid)).toBe(true);
-    expect(resolvedAsProject(noted, A, sid)).toBe(true);
-    expect(resolvedAsProject(later, A, sid)).toBe(false);
-    expect(resolvedAsProject(later, A, session())).toBe(false); // a session with no note
   });
 });
 

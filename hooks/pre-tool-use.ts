@@ -5,7 +5,7 @@ import { existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSy
 import { join, resolve as resolvePath, sep } from 'node:path';
 import { addedUserGlobs, diffCoverageMode, isPolicyFile, type UserGlobKey } from '../lib/changed-coverage';
 import { checkRegression, readRegressionRecords, type RegressionOutcome, regressionMessage, regressionMode } from '../lib/regression';
-import { projectDir } from '../lib/project-dir';
+import { projectDir, projectRoot } from '../lib/project-dir';
 import { agentName, ROUTE } from '../lib/routing-policy';
 import { testTypesMode } from '../lib/test-types';
 import { classifyPath } from '../lib/verification-scope';
@@ -402,7 +402,14 @@ function main(): void {
       //   from the project dir instead (I10).
       const cwd = input.cwd ?? process.cwd();
       const sessionId = input.session_id ?? 'unknown';
-      const projectCwd = projectDir(cwd, process.env, sessionId);
+      const projectCwd = projectDir(cwd, process.env);
+      // (#35, security review round 1) A path outside this call's checkout but inside the enclosing
+      //   project dir (a main-checkout file seen from a nested worktree) is judged against the
+      //   project dir by the role limits and the skill rule, not taken as outside the project.
+      const scopeRootOf = (abs: string): string =>
+        projectRelative(abs, resolvePath(projectCwd)) !== null || resolvePath(abs) === resolvePath(projectCwd)
+          ? resolvePath(projectCwd)
+          : resolvePath(projectRoot(cwd, process.env));
       const toolName = input.tool_name ?? '';
       const toolInput = input.tool_input ?? {};
 
@@ -985,17 +992,16 @@ function main(): void {
         const role = roleOf(input.agent_type);
         if (role) {
           let denial: string | null = null;
-          const projectRoot = resolvePath(projectCwd);
           if (['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(toolName)) {
             const p = strOrNull(toolInput.file_path) ?? strOrNull(toolInput.notebook_path);
-            if (p) denial = writeDenial(role, resolvePath(cwd, p), projectRoot);
+            if (p) denial = writeDenial(role, resolvePath(cwd, p), scopeRootOf(resolvePath(cwd, p)));
           } else if (toolName === 'Bash' && typeof toolInput.command === 'string') {
             // Redirects (no meta-dir exemptions unless the role writes code) plus file
             //   programs and mutating git commands (security review: cp/mv/rm, git checkout).
             const strict = role.writes !== 'code';
             const changed = [...classifyBashWrite(toolInput.command, cwd, { strict }), ...bashChangedPaths(toolInput.command, cwd)];
             for (const f of changed) {
-              denial = writeDenial(role, resolvePath(cwd, f), projectRoot);
+              denial = writeDenial(role, resolvePath(cwd, f), scopeRootOf(resolvePath(cwd, f)));
               if (denial) break;
             }
           } else if (toolName === 'Skill') {
@@ -1022,9 +1028,10 @@ function main(): void {
         const p = strOrNull(toolInput.file_path) ?? strOrNull(toolInput.notebook_path);
         if (p) {
           const abs = resolvePath(cwd, p);
-          const rel = projectRelative(abs, resolvePath(projectCwd));
+          const scope = scopeRootOf(abs);
+          const rel = projectRelative(abs, scope);
           if (rel !== null && classifyPath(rel) === 'code' && !isGoodboyArtifact(abs)) {
-            const cursor = readReviewCursor(projectCwd, sessionId);
+            const cursor = readReviewCursor(scope, sessionId);
             const since = cursor ? Date.parse(cursor.timestamp) : 0;
             if (!hasSkillEvidenceSince(sessionId, Number.isFinite(since) ? since : 0)) {
               const msg = skillRuleMessage(CLI_PATH, sessionId);

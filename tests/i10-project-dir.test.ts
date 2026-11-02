@@ -4,11 +4,11 @@
 // a subdir counted only the edits below it and passed an untested change elsewhere.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { approvalMarkerShown } from '../lib/approval-marker';
-import { cliProjectDir, noteProjectDir, pinWorktrees, projectDir } from '../lib/project-dir';
+import { cliProjectDir, noteProjectDir, projectDir } from '../lib/project-dir';
 
 const PRE_HOOK = resolve(import.meta.dir, '..', 'hooks', 'pre-tool-use.ts');
 const STOP_HOOK = resolve(import.meta.dir, '..', 'hooks', 'stop.ts');
@@ -149,10 +149,11 @@ describe('I10 review: worktrees, approval paths, the CLI', () => {
     expect(projectDir(p, { CLAUDE_PROJECT_DIR: '/' })).toBe(p);
   });
 
-  // (#21) A worktree of the project's repository nested anywhere is its own project when it
-  //   existed at the session's start (SessionStart notes them); one added later, a nested clone
-  //   or a `.git` file pointing at the project's git dir is not (#21 security review).
-  test('a worktree in any nested folder that existed at the start is its own project', () => {
+  // (#21, #35) A worktree of the project's repository nested anywhere is its own project, whenever
+  //   it was made; a nested clone or a `.git` file pointing at the project's git dir is not (#21
+  //   security review). Leaving the main checkout's edits behind by a `cd` is the Stop's to catch
+  //   (tests/i35-nested-checkouts.test.ts).
+  test('a worktree in any nested folder is its own project, also one made mid-session', () => {
     const p = dir('goodboy-21-p-');
     const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
     const git = (cwd: string, ...a: string[]) => Bun.spawnSync(['git', '-c', 'user.email=p@x', '-c', 'user.name=p', ...a], { cwd, env });
@@ -161,26 +162,26 @@ describe('I10 review: worktrees, approval paths, the CLI', () => {
     git(p, 'add', '.');
     git(p, 'commit', '-qm', 'init');
     git(p, 'worktree', 'add', '-q', '.worktrees/v2');
-    const sid = `t21-${Math.random().toString(36).slice(2)}`;
-    pinWorktrees(sid, { CLAUDE_PROJECT_DIR: p });
     const wt = join(p, '.worktrees', 'v2');
     mkdirSync(join(wt, 'src', 'main'), { recursive: true });
-    expect(projectDir(join(wt, 'src', 'main'), { CLAUDE_PROJECT_DIR: p }, sid)).toBe(wt);
-    expect(projectDir(join(p, '.worktrees'), { CLAUDE_PROJECT_DIR: p }, sid)).toBe(p);
-    // No session: only .claude/worktrees counts, as before.
-    expect(projectDir(join(wt, 'src', 'main'), { CLAUDE_PROJECT_DIR: p })).toBe(p);
-    // Added after the start: the main checkout's edits stay in scope.
+    expect(projectDir(join(wt, 'src', 'main'), { CLAUDE_PROJECT_DIR: p })).toBe(wt);
+    expect(projectDir(join(p, '.worktrees'), { CLAUDE_PROJECT_DIR: p })).toBe(p);
+    // Added later (#35): its own project too.
     git(p, 'worktree', 'add', '-q', '--detach', 'docs/.late', 'HEAD');
-    expect(projectDir(join(p, 'docs', '.late'), { CLAUDE_PROJECT_DIR: p }, sid)).toBe(p);
+    expect(projectDir(join(p, 'docs', '.late'), { CLAUDE_PROJECT_DIR: p })).toBe(join(p, 'docs', '.late'));
     git(p, 'clone', '-q', p, 'vendor/clone');
-    expect(projectDir(join(p, 'vendor', 'clone'), { CLAUDE_PROJECT_DIR: p }, sid)).toBe(p);
+    expect(projectDir(join(p, 'vendor', 'clone'), { CLAUDE_PROJECT_DIR: p })).toBe(p);
     mkdirSync(join(p, 'mods', 'x'), { recursive: true });
     writeFileSync(join(p, 'mods', 'x', '.git'), 'gitdir: ../../.git\n');
-    expect(projectDir(join(p, 'mods', 'x'), { CLAUDE_PROJECT_DIR: p }, sid)).toBe(p);
+    expect(projectDir(join(p, 'mods', 'x'), { CLAUDE_PROJECT_DIR: p })).toBe(p);
   });
 
   // With no git on PATH spawnSync throws; the worktree is then not one, and the hook goes on.
-  test('no git on PATH: a pinned worktree is not recognized, and nothing throws', () => {
+  // (#35, refactoring review round 1) What a nested worktree is comes from the files git keeps
+  //   (lib/git-dirs.ts linkedWorktreeOf), the rule the edit scope uses too: no git call, and a
+  //   `.git` file that names a real worktree's admin dir is no worktree when the admin dir's
+  //   back-pointer names another place.
+  test('a nested worktree is recognized from its files with no git call; a planted or moved one is not', () => {
     const p = dir('goodboy-21-p-');
     const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
     const git = (cwd: string, ...a: string[]) => Bun.spawnSync(['git', '-c', 'user.email=p@x', '-c', 'user.name=p', ...a], { cwd, env });
@@ -189,18 +190,21 @@ describe('I10 review: worktrees, approval paths, the CLI', () => {
     git(p, 'add', '.');
     git(p, 'commit', '-qm', 'init');
     git(p, 'worktree', 'add', '-q', '.worktrees/v2');
-    const sid = `t21-${Math.random().toString(36).slice(2)}`;
-    pinWorktrees(sid, { CLAUDE_PROJECT_DIR: p });
+    git(p, 'worktree', 'add', '-q', '--detach', 'moved-from', 'HEAD');
     const wt = join(p, '.worktrees', 'v2');
-    expect(projectDir(wt, { CLAUDE_PROJECT_DIR: p }, sid)).toBe(wt); // control: with git it is one
-    // Bun resolves `git` before the test can change PATH: make the spawn throw as a missing
-    //   executable does (ENOENT).
+    // A `.git` file copied from the real worktree: its admin dir's back-pointer names v2.
+    mkdirSync(join(p, 'docs', 'sub'), { recursive: true });
+    writeFileSync(join(p, 'docs', 'sub', '.git'), readFileSync(join(wt, '.git')));
+    // A worktree moved without `git worktree move`.
+    renameSync(join(p, 'moved-from'), join(p, 'moved-to'));
     const real = Bun.spawnSync;
     (Bun as { spawnSync: unknown }).spawnSync = () => {
       throw Object.assign(new Error('Executable not found in $PATH: "git"'), { code: 'ENOENT' });
     };
     try {
-      expect(projectDir(wt, { CLAUDE_PROJECT_DIR: p }, sid)).toBe(p);
+      expect(projectDir(wt, { CLAUDE_PROJECT_DIR: p })).toBe(wt);
+      expect(projectDir(join(p, 'docs', 'sub'), { CLAUDE_PROJECT_DIR: p })).toBe(p);
+      expect(projectDir(join(p, 'moved-to'), { CLAUDE_PROJECT_DIR: p })).toBe(p);
     } finally {
       (Bun as { spawnSync: unknown }).spawnSync = real;
     }

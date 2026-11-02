@@ -161,6 +161,10 @@ export interface HabitState {
   cycleCriteriaIdleWarned?: boolean;
   /** Layer 1 (#32, #37): per project dir, the turn counter at the last full Stop that judged layer 1 there; edits at or after it are this turn's. */
   testGateTurns?: Record<string, number>;
+  /** Review gate (as testGateTurns): per project dir, the turn counter at the last full Stop whose review gate judged that dir's edits. */
+  reviewGateTurns?: Record<string, number>;
+  /** (#35) Per project dir, the turn counter at the last full Stop that checked the project's other checkouts from there. */
+  checkoutGateTurns?: Record<string, number>;
   /** Layer 1 (F2): whether the "dev-cycle documents yield no acceptance criteria" warning was shown (once per session). */
   acceptanceProblemWarned?: boolean;
 }

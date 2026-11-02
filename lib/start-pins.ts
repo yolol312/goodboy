@@ -57,10 +57,11 @@
 // One deadline per hook bounds the git calls here (startPinDeadline).
 
 import { createHash } from 'node:crypto';
-import { existsSync, linkSync, lstatSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { existsSync, linkSync, lstatSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { ensureSessionDir, getCurrentTurn, recordEdit } from './file-tracker';
 import { snapshotMemo, spawnGit, type GitOptions, type GitResult } from './git-run';
+import { fsDirs } from './git-dirs';
 import { realDeep } from './private-files';
 import { MAX_STATE_BYTES, readRegular } from './safe-read';
 
@@ -117,7 +118,7 @@ const answered = (r: GitResult): boolean => r.ran && !r.stalled && r.code !== -1
 let sharedLists: Map<string, GitResult> | null = null;
 
 /** `fn` with one `git worktree list` per repository shared by every `listWorktrees` inside it (the
- *  SessionStart's note of the worktrees and the tip snapshot both read it). Nothing is kept outside. */
+ *  SessionStart's tip snapshot and the pins it makes). Nothing is kept outside. */
 export function withSharedWorktreeList<T>(fn: () => T): T {
   if (sharedLists !== null) return fn();
   sharedLists = new Map();
@@ -143,34 +144,6 @@ export function listWorktrees(dir: string): GitResult {
 }
 
 // ── Identity ────────────────────────────────────────────────────────────────────────────────
-
-/** The admin dir and the common git dir of the checkout at `top`, read from `.git` (no git call);
- *  null when `top` has no `.git` this can read. A linked worktree's `.git` is a file naming its
- *  admin dir `<common>/worktrees/<name>`. */
-function fsDirs(top: string): { admin: string; common: string } | null {
-  try {
-    const dot = join(top, '.git');
-    const st = lstatSync(dot);
-    if (st.isDirectory()) {
-      const admin = realpathSync(dot);
-      return { admin, common: admin };
-    }
-    if (!st.isFile()) return null;
-    const r = readRegular(dot, 4096, true);
-    const m = typeof r === 'string' ? null : /^gitdir:[ \t]*(.+?)[ \t]*$/m.exec(r.text);
-    if (!m) return null;
-    const admin = realpathSync(resolve(top, m[1]!));
-    const c = readRegular(join(admin, 'commondir'), 4096, true);
-    // A `commondir` that is there and cannot be read says nothing, and a linked worktree's admin dir
-    // (`<common>/worktrees/<name>`, which also has a `gitdir` file pointing back at its checkout) without
-    // one is damaged: neither is a repository of its own. A separate git dir under a directory that happens
-    // to be named `worktrees` has no `gitdir` file, so it stays a repository of its own.
-    if (c === 'refused' || (c === 'absent' && basename(dirname(admin)) === 'worktrees' && readRegular(join(admin, 'gitdir'), 4096, true) !== 'absent')) return null;
-    return { admin, common: typeof c === 'string' ? admin : realpathSync(resolve(admin, c.text.trim())) };
-  } catch {
-    return null;
-  }
-}
 
 /** The common git dir of the checkout at `top`, read from its `.git` with no git call; null when that read fails. */
 export function commonDirOf(top: string): string | null {
@@ -655,45 +628,7 @@ function dirtyPaths(top: string, base: string | null): string[] | null | 'many' 
   return out.size > MAX_FIRST_SIGHT_PATHS ? 'many' : [...out];
 }
 
-// ── Nested worktrees (rule 11) ──────────────────────────────────────────────────────────────
-
-/** The linked worktrees of `top`'s repository that lie inside it and hold some of `files`, with
- *  the start of each. Only those the hooks do not resolve as a project of their own (not under
- *  `.claude/worktrees`, not noted at the session's start): a Stop run in `top` judges their files
- *  with `top`'s start. Files only; no git call except a first sight. */
-export function nestedWorktreeStarts(sessionId: string, top: string, files: readonly string[], resolvedBySession: (wt: string) => boolean): { dir: string; start: StartRef }[] {
-  const mine = fsDirs(top);
-  if (mine === null) return [];
-  const seenDirs = new Map<string, string | null>();
-  const found = new Map<string, StartRef>();
-  for (const file of files) {
-    const rel = relative(top, resolve(file));
-    if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) continue;
-    // From the file's dir up to (not including) the top: the nearest linked worktree.
-    for (let d = dirname(resolve(file)); d !== top && d.startsWith(top + sep); d = dirname(d)) {
-      let nested = seenDirs.get(d);
-      if (nested === undefined) {
-        nested = null;
-        try {
-          if (lstatSync(join(d, '.git')).isFile()) {
-            const theirs = fsDirs(d);
-            if (theirs !== null && theirs.common === mine.common && theirs.admin !== mine.admin && !resolvedBySession(d)) nested = d;
-          }
-        } catch {
-          nested = null;
-        }
-        seenDirs.set(d, nested);
-      }
-      if (nested !== null) {
-        if (!found.has(nested)) found.set(nested, topStart(sessionId, nested));
-        break;
-      }
-    }
-  }
-  return [...found].map(([dir, start]) => ({ dir, start }));
-}
-
 /** Whether two starts are the same point (a commit, or both the empty tree). */
-export function sameStart(a: StartRef, b: StartRef): boolean {
+function sameStart(a: StartRef, b: StartRef): boolean {
   return (a.kind === 'commit' && b.kind === 'commit' && a.head === b.head) || (a.kind === 'empty' && b.kind === 'empty');
 }

@@ -4,117 +4,47 @@
 // `<project>/sub`, while CLAUDE_PROJECT_DIR stays `<project>`. A Stop run from the subdir
 // counted only the edits below it, so a change elsewhere passed with no test or review.
 
-import { existsSync, lstatSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { renameSync, rmSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { ensureSessionDir, sessionDir } from './file-tracker';
-import { spawnGit } from './git-run';
+import { linkedWorktreeOf } from './git-dirs';
 import { isUnder, isDir, realDeep } from './private-files';
 import { readRegular } from './safe-read';
-import { listWorktrees } from './start-pins';
 
 const PROJECT_FILE = 'project-dir.txt';
 
 /** CLAUDE_PROJECT_DIR when the hook's `cwd` is that dir or inside it (by path, or through
- *  links); else `cwd`: a dir elsewhere, a test, or a CLI without the variable. A worktree of
- *  the project's repository nested inside it is its own project: Claude Code's agent worktrees
- *  under `.claude/worktrees/<name>` (I10 review), and since #21 one anywhere else that existed
- *  when the session started (a field report: a version's worktree in a dot-folder of the
- *  project was read as the main checkout, with the other version's criteria and records; the
- *  session's id names the note, pinWorktrees). The nearest such dir above `cwd` counts only
- *  when git says it is a work tree's top sharing the project's repository and listed among its
- *  worktrees: a submodule, a nested clone or a `.git` a model made to narrow the gates' scope
- *  (review 2: `docs/sub/.git`) stays part of the project.
- *  Only for what belongs to the project (records, edit scope, state, approval markers); a
- *  relative path in a Bash command still resolves from `cwd`, where the shell runs it. */
-export function projectDir(cwd: string, env: NodeJS.ProcessEnv = process.env, sessionId?: string): string {
+ *  links); else `cwd`: a dir elsewhere, a test, or a CLI without the variable. The enclosing
+ *  project dir, before any nested worktree is taken apart (projectDir). */
+export function projectRoot(cwd: string, env: NodeJS.ProcessEnv = process.env): string {
   const p = (env.CLAUDE_PROJECT_DIR ?? '').trim();
   if (p === '' || !isAbsolute(p)) return cwd;
   const dir = resolve(p);
-  if (dir === sep || !isUnder(cwd, dir)) return cwd;
+  return dir === sep || !isUnder(cwd, dir) ? cwd : dir;
+}
+
+/** The project dir the gates use for `cwd`: projectRoot, or the nearest linked worktree of the
+ *  project's repository nested in it that holds `cwd`. Claude Code's agent worktrees under
+ *  `.claude/worktrees/<name>` (I10 review), and since #35 one anywhere else, whenever it was made
+ *  (#21 took only those that existed when the session started, so a worktree made mid-session in a
+ *  dot-folder was judged with the main checkout's start and blocked). Leaving the main checkout's
+ *  edits behind by a `cd` into one (#21 security review) is closed in the Stop: it blocks on edits
+ *  another checkout of the project has not had verified (hooks/stop.ts, otherCheckouts). What a
+ *  linked worktree is comes from `linkedWorktreeOf` (lib/git-dirs.ts), the rule the edit scope uses
+ *  too: a submodule, a nested clone or a `.git` a model made to narrow the gates' scope (review 2:
+ *  `docs/sub/.git`) stays part of the project.
+ *  Only for what belongs to the project (records, edit scope, state, approval markers); a
+ *  relative path in a Bash command still resolves from `cwd`, where the shell runs it. */
+export function projectDir(cwd: string, env: NodeJS.ProcessEnv = process.env): string {
+  const dir = projectRoot(cwd, env);
+  if (dir === cwd) return cwd;
   const parts = relative(realDeep(dir), realDeep(resolve(cwd))).split(sep).filter((s) => s !== '');
-  // Elsewhere than `.claude/worktrees`, only a worktree that existed when the session started
-  //   (#21 security review: one a model adds mid-session and cds into would drop the main
-  //   checkout's edits from the gates' scope and lift the role limits there).
-  const pinned = parts[0] === '.claude' && parts[1] === 'worktrees' ? null : pinnedWorktrees(sessionId);
   // Nearest first: a worktree inside a worktree's folder is the inner one.
   for (let n = parts.length; n > 0; n--) {
     const wt = join(dir, ...parts.slice(0, n));
-    if (pinned !== null && !pinned.has(realDeep(wt))) continue;
-    // A linked worktree's `.git` is a file; a directory there is a nested clone (no git call).
-    if (isGitFile(join(wt, '.git')) && sharesRepo(wt, dir)) return wt;
+    if (linkedWorktreeOf(wt, dir)) return wt;
   }
   return dir;
-}
-
-function isGitFile(p: string): boolean {
-  try {
-    return lstatSync(p).isFile();
-  } catch {
-    return false;
-  }
-}
-
-const WORKTREES_FILE = 'worktrees.txt';
-
-/** The worktrees SessionStart noted for the session; empty with no session or no note. */
-function pinnedWorktrees(sessionId: string | undefined): Set<string> {
-  if (!sessionId) return new Set();
-  const r = readRegular(join(sessionDir(sessionId), WORKTREES_FILE), 256 * 1024, true);
-  return new Set(typeof r === 'object' ? r.text.split('\n').filter((l) => isAbsolute(l)) : []);
-}
-
-/** Whether the hooks take the worktree `wt` below the project dir `dir` as a project of its own for
- *  this session: one under `.claude/worktrees`, or one noted at the session's start (#21). The
- *  others stay part of `dir` (#33: a Stop run in `dir` judges their files with `dir`'s start). */
-export function resolvedAsProject(wt: string, dir: string, sessionId: string): boolean {
-  const parts = relative(realDeep(dir), realDeep(wt)).split(sep);
-  return (parts[0] === '.claude' && parts[1] === 'worktrees') || pinnedWorktrees(sessionId).has(realDeep(wt));
-}
-
-/** SessionStart: notes the project repository's worktrees as they are now, kept for a resumed
- *  session. Best-effort; only with CLAUDE_PROJECT_DIR. */
-export function pinWorktrees(sessionId: string, env: NodeJS.ProcessEnv = process.env): void {
-  const p = (env.CLAUDE_PROJECT_DIR ?? '').trim();
-  if (p === '' || !isAbsolute(p)) return;
-  try {
-    const dir = ensureSessionDir(sessionId);
-    if (existsSync(join(dir, WORKTREES_FILE))) return;
-    const r = listWorktrees(resolve(p)); // shared with the tip snapshot of the same SessionStart
-    if (r.code !== 0) return;
-    const list = r.out
-      .split('\n')
-      .filter((l) => l.startsWith('worktree '))
-      .map((l) => realDeep(l.slice('worktree '.length)));
-    const tmp = join(dir, `.${WORKTREES_FILE}.${process.pid}.tmp`);
-    rmSync(tmp, { force: true });
-    writeFileSync(tmp, list.join('\n') + '\n', { mode: 0o600, flag: 'wx' });
-    renameSync(tmp, join(dir, WORKTREES_FILE));
-  } catch {
-    // best-effort: no note, no nested worktree outside .claude/worktrees counts
-  }
-}
-
-/** Whether `wt` is a worktree of the repository at `dir`: git takes `wt` as a work tree's top
- *  (an invalid `.git` there makes git find the project's repo above it instead), its common
- *  git dir is `dir`'s, and the repository lists it as one of its worktrees (#21 review: a
- *  `.git` file pointing at the project's own git dir passed the first two). */
-function sharesRepo(wt: string, dir: string): boolean {
-  if (!existsSync(join(wt, '.git'))) return false;
-  // With no git on PATH nothing runs (code -1): then it is no worktree, and the hook goes on (review).
-  const git = (d: string, args: string[]) => spawnGit(d, args);
-  const ask = (d: string): [string, string] | null => {
-    const r = git(d, ['rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir']);
-    const lines = r.out.trim().split('\n');
-    return r.code === 0 && lines.length === 2 ? [realDeep(lines[0]!), realDeep(lines[1]!)] : null;
-  };
-  const a = ask(wt);
-  const b = ask(dir);
-  if (a === null || b === null || a[0] !== realDeep(wt) || a[1] !== b[1] || a[0] === b[0]) return false;
-  const list = git(dir, ['worktree', 'list', '--porcelain']);
-  if (list.code !== 0) return false;
-  return list.out
-    .split('\n')
-    .some((l) => l.startsWith('worktree ') && realDeep(l.slice('worktree '.length)) === a[0]);
 }
 
 /** Notes the session's project dir for the goodboy CLI. The hooks get CLAUDE_PROJECT_DIR; the
@@ -142,9 +72,9 @@ export function noteProjectDir(sessionId: string, env: NodeJS.ProcessEnv = proce
  *  it; a nested work tree is its own project). Otherwise the cwd. */
 export function cliProjectDir(cwd: string, env: NodeJS.ProcessEnv = process.env): string {
   const sid = (env.CLAUDE_CODE_SESSION_ID ?? '').trim() || undefined;
-  if ((env.CLAUDE_PROJECT_DIR ?? '').trim() !== '') return projectDir(cwd, env, sid);
+  if ((env.CLAUDE_PROJECT_DIR ?? '').trim() !== '') return projectDir(cwd, env);
   if (sid === undefined) return cwd;
   const r = readRegular(join(sessionDir(sid), PROJECT_FILE), 4096, true);
   const noted = typeof r === 'object' ? r.text.trim() : '';
-  return noted !== '' && isAbsolute(noted) && isDir(noted) ? projectDir(cwd, { CLAUDE_PROJECT_DIR: noted }, sid) : cwd;
+  return noted !== '' && isAbsolute(noted) && isDir(noted) ? projectDir(cwd, { CLAUDE_PROJECT_DIR: noted }) : cwd;
 }
