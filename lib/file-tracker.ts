@@ -109,9 +109,26 @@ export function ensureSessionDir(sessionId: string): string {
  *  therefore walked segment by segment, and at each `..` the prefix so far is made real (when it
  *  exists) before going up. Without a `..` this is plain `resolve(cwd, filePath)`, with no file
  *  system call. One helper for every place that records or looks up a tool's file path, so
- *  reads and edits agree and a recorded path never hides a link behind a collapsed `..`. */
-export function openedPath(cwd: string, filePath: string): string {
+ *  reads and edits agree and a recorded path never hides a link behind a collapsed `..`.
+ *  The walk yields real spellings (`/private/var` for macOS `/var`) even where no link was
+ *  crossed, so the result is spelled back through the nearest ancestor of the cwd that holds it
+ *  (#31): a caller comparing it with `resolve(cwd)` sees an inside path as inside.
+ *  `memo`: real paths already taken (null: none) for one evaluation, such as the targets of one
+ *  shell command; a caller keeps it no longer than that, so a changed link is never read stale. */
+export function openedPath(cwd: string, filePath: string, memo?: RealpathMemo): string {
   try {
+    const realOf = (p: string): string | null => {
+      const hit = memo?.get(p);
+      if (hit !== undefined) return hit;
+      let r: string | null;
+      try {
+        r = realpathSync(p);
+      } catch {
+        r = null; // does not exist, or is no dir
+      }
+      memo?.set(p, r);
+      return r;
+    };
     const split = sep === '\\' ? /[\\/]/ : /\//;
     if (!filePath.split(split).includes('..')) return resolve(cwd, filePath);
     const start = isAbsolute(filePath) ? filePath : resolve(cwd) + sep + filePath;
@@ -123,17 +140,37 @@ export function openedPath(cwd: string, filePath: string): string {
         cur = join(cur, seg);
         continue;
       }
-      try {
-        cur = realpathSync(cur);
-      } catch {
-        // a prefix that does not exist (or is no dir) cannot be opened through; go up by name
-      }
-      cur = dirname(cur);
+      if (cur === root) continue; // the root is real, and its parent is itself
+      // a prefix that does not exist (or is no dir) cannot be opened through; go up by name
+      cur = dirname(realOf(cur) ?? cur);
     }
-    return cur;
+    return spelledLikeCwd(cwd, cur, realOf);
   } catch {
     return filePath;
   }
+}
+
+/** Real paths taken during one evaluation (null: the path has none). */
+export type RealpathMemo = Map<string, string | null>;
+
+/** `real` spelled through the nearest ancestor of `resolve(cwd)` whose real path holds it, or
+ *  `real` as it is (no ancestor below the root holds it, or none can be resolved). An ancestor
+ *  spelled as its real path has only real ancestors, so the walk stops there (review: a command
+ *  with thousands of `..` targets took one `realpath` per ancestor each). */
+function spelledLikeCwd(cwd: string, real: string, realOf: (p: string) => string | null): string {
+  let at = resolve(cwd);
+  const root = parse(at).root;
+  while (at !== root) {
+    // an ancestor that does not exist has no real spelling; try its parent
+    const r = realOf(at);
+    if (r === at) return real; // this ancestor and all above it are real: the spelling is the same
+    if (r !== null) {
+      if (real === r) return at;
+      if (real.startsWith(r + sep)) return at + real.slice(r.length);
+    }
+    at = dirname(at);
+  }
+  return real;
 }
 
 function normalize(filePath: string): string {

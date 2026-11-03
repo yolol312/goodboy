@@ -201,8 +201,9 @@ describe('repoTrees: names, and the cap on confirmed repos', () => {
     expect(process.cwd()).not.toContain(w.base); // the process dir is elsewhere (the repo under test)
     expect(pt.repoTrees(['fe/src/a.ts'], w.parent).trees).toEqual({ [w.fe]: headTree(w.fe) });
     expect(pt.repoTrees(['./be/src/a.ts', 'fe/a.test.ts'], w.parent).trees).toEqual({ [w.be]: headTree(w.be), [w.fe]: headTree(w.fe) });
-    // A relative name that climbs out of the project dir names no repo, and one that is a bare file name
-    // is the project dir's own file (no repo here).
+    // A relative name that climbs out of the project dir names no repo (a real repo is there), and one
+    // that is a bare file name is the project dir's own file (no repo here).
+    makeRepo(join(w.base, 'other'), 'other');
     expect(pt.repoTrees(['../other/src/a.ts', 'notes.txt'], w.parent)).toEqual({ trees: {}, dropped: [] });
     // The same name does not reach a repo of the process dir: a plain folder with no `fe` finds none.
     const empty = tmp();

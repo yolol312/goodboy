@@ -416,11 +416,35 @@ function sameJson(a: unknown, b: unknown): boolean {
   return Object.is(a, b);
 }
 
+/** The number literals of a valid JSON text as written, in order (strings skipped). */
+function numberLiterals(text: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i]!;
+    if (c === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
+      i = j + 1;
+    } else if (c === '-' || (c >= '0' && c <= '9')) {
+      let j = i + 1;
+      while (j < text.length && /[0-9.eE+-]/.test(text[j]!)) j++;
+      out.push(text.slice(i, j));
+      i = j;
+    } else i++;
+  }
+  return out;
+}
+
 /** Both texts are JSON objects with an own top-level string `version`, and are equal without it.
- *  A duplicate key, a parse failure or anything not an object is a no. */
+ *  A duplicate key, a parse failure or anything not an object is a no; so are number literals
+ *  spelled otherwise (numbers past double precision parse equal: #31). */
 function versionOnlyChange(before: string, after: string): boolean {
   try {
     if (hasDuplicateKeys(before) || hasDuplicateKeys(after)) return false;
+    const na = numberLiterals(before);
+    const nb = numberLiterals(after);
+    if (na.length !== nb.length || na.some((n, i) => n !== nb[i])) return false;
     const a: unknown = JSON.parse(before);
     const b: unknown = JSON.parse(after);
     const plain = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);

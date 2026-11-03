@@ -2,6 +2,7 @@
 
 import { readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
+import { OBJECT_ID as TREE_ID } from './git-run';
 import { recordPath } from './record-paths';
 import { axesOfDimensions } from './review-dimensions';
 import { freshness, listsFile, NULL_TREE_NOTE } from './test-validator';
@@ -422,7 +423,6 @@ export type TreeContentLookup = (
   asks: ReadonlyMap<string, ReadonlySet<string>>,
 ) => (tree: string, file: string) => boolean | undefined;
 
-const TREE_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 
 /** 커서(마지막 수락) 이후의 신뢰 리뷰들에서 "아직 유효한" finding을 모은다 (v0.26.6).
  *

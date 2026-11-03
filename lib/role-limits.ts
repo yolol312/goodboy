@@ -7,6 +7,7 @@
 // writes test files only; `docs` writes docs only; `code` writes anything.
 
 import { basename, relative, resolve as resolvePath, sep } from 'node:path';
+import { openedPath, type RealpathMemo } from './file-tracker';
 import { commandSegments, dropRedirects, gitSubcommandAt, plainWord, readCommand, xargsCommandAt } from './outward-command';
 import { namesOwnResultDir } from './result-dir';
 import { agentName, LEGACY_AGENTS, roleOf, ROUTE, type RoleSpec } from './routing-policy';
@@ -65,7 +66,7 @@ function clusterValue(words: string[], flag: string): string | undefined {
 }
 
 /** Programs that write files named by an option or into a directory (security review round 2). */
-function optionTargets(prog: string, words: string[], base: string): string[] | null {
+function optionTargets(prog: string, words: string[], base: string, opened: (base: string, p: string) => string): string[] | null {
   const valueOf = (names: string[]): string | undefined => {
     for (let i = 1; i < words.length; i++) {
       const w = words[i]!;
@@ -83,26 +84,26 @@ function optionTargets(prog: string, words: string[], base: string): string[] | 
     case 'gtar':
     case 'bsdtar': {
       const extracting = words.some((w, i) => i > 0 && (w === '-x' || w === '--extract' || (/^-?[a-zA-Z]*x[a-zA-Z]*$/.test(w) && !w.startsWith('--'))));
-      return extracting ? [resolvePath(base, valueOf(['-C', '--directory']) ?? '.')] : [];
+      return extracting ? [opened(base, valueOf(['-C', '--directory']) ?? '.')] : [];
     }
     case 'unzip':
-      return [resolvePath(base, valueOf(['-d']) ?? '.')];
+      return [opened(base, valueOf(['-d']) ?? '.')];
     case 'curl': {
       // Also inside a short-flag cluster: `-so file`, `-sSLo file`, `-sO` (layer-1 round).
       const o = valueOf(['-o', '--output']) ?? clusterValue(words, 'o');
       // `--output-dir dir` holds a relative -o file (curl 7.73+).
-      if (o !== undefined) return [resolvePath(base, valueOf(['--output-dir']) ?? '.', o)];
+      if (o !== undefined) return [opened(opened(base, valueOf(['--output-dir']) ?? '.'), o)];
       const remoteName = words.some((w, i) => i > 0 && (w === '--remote-name' || w === '--remote-name-all' || /^-[a-zA-Z]*O[a-zA-Z]*$/.test(w)));
-      return remoteName ? [resolvePath(base, valueOf(['--output-dir']) ?? '.')] : [];
+      return remoteName ? [opened(base, valueOf(['--output-dir']) ?? '.')] : [];
     }
     case 'wget': {
       const o = valueOf(['-O', '--output-document']) ?? clusterValue(words, 'O') ?? valueOf(['-P', '--directory-prefix']);
-      return [resolvePath(base, o ?? '.')];
+      return [opened(base, o ?? '.')];
     }
     case 'rsync':
     case 'ditto':
     case 'scp':
-      return args.length > 0 && !/^[^/]*:/.test(args[args.length - 1]!) ? [resolvePath(base, args[args.length - 1]!)] : [];
+      return args.length > 0 && !/^[^/]*:/.test(args[args.length - 1]!) ? [opened(base, args[args.length - 1]!)] : [];
     default:
       return null;
   }
@@ -117,24 +118,28 @@ export function bashChangedPaths(command: string, cwd: string, opts: { skip?: Re
   // Paths read like classifyBashWrite reads them: each segment from the dir it runs in
   //   (readCommand: subshell scopes, pushd/popd; layer-1 round: `(cd /tmp) && cp x src/a.ts`
   //   was read from /tmp), from the cwd when that dir cannot be told; a path with `$`, a glob
-  //   or a backtick cannot be resolved and is skipped (fail-open, as there).
+  //   or a backtick cannot be resolved and is skipped (fail-open, as there). A path is taken the
+  //   way the OS opens it (`openedPath`: `lnk/../f` goes through the link, #31); `cd` dirs stay
+  //   logical, as the shell keeps them.
   const literal = (a: string) => !/[$`*?]/.test(a);
+  const memo: RealpathMemo = new Map(); // one command: its targets share the prefixes' real paths
+  const opened = (b: string, p: string): string => openedPath(b, p, memo);
   for (const { words, dir } of readCommand(command, cwd).segments) {
     const prog = basename(words[0] ?? '');
     const args = words.slice(1).filter((w) => !w.startsWith('-'));
     if (prog === 'cd' || prog === 'pushd' || prog === 'popd') continue;
     const base = dir ?? cwd;
     if (opts.skip?.has(prog)) continue;
-    const viaOptions = optionTargets(prog, words, base);
+    const viaOptions = optionTargets(prog, words, base, opened);
     if (viaOptions !== null) {
       out.push(...viaOptions.filter((p) => literal(p)));
     } else if (FILE_MUTATORS.has(prog)) {
       // chmod's mode is no path (trial 5: `chmod +x /tmp/x.sh` was read as `<project>/+x`).
       const files = prog === 'chmod' ? args.filter((a) => !CHMOD_MODE.test(a)) : args;
       const targets = COPY_LIKE.has(prog) ? files.slice(-1) : files;
-      for (const a of targets) if (literal(a)) out.push(resolvePath(base, a));
+      for (const a of targets) if (literal(a)) out.push(opened(base, a));
     } else if ((prog === 'perl' || prog === 'ruby') && words.some((w) => /^-[a-zA-Z]*i/.test(w))) {
-      for (const a of args.slice(1)) if (literal(a)) out.push(resolvePath(base, a)); // the first is the script
+      for (const a of args.slice(1)) if (literal(a)) out.push(opened(base, a)); // the first is the script
     } else if (prog === 'git') {
       if (GIT_MUTATING.has(words[gitSubcommandAt(words)] ?? '')) out.push(resolvePath(base, '.git'));
     }
@@ -307,7 +312,7 @@ export function resultDirWrite(command: string, cwd: string): string | null {
       else if (WRITES_LAST.has(run)) xargsWritesInput = token === undefined || (runOperands.at(-1) ?? '').includes(token);
     } else {
       // Options that name where a program writes (tar -x -C, unzip -d, curl -o, wget -O).
-      targets = optionTargets(prog, plain, base) ?? [];
+      targets = optionTargets(prog, plain, base, (b, p) => openedPath(b, p)) ?? [];
     }
     const hit = targets.find(named);
     if (hit) return hit;

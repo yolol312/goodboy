@@ -14,6 +14,7 @@
 
 import { homedir } from 'node:os';
 import { normalize as normalizePath, resolve as resolvePath, sep } from 'node:path';
+import { openedPath, type RealpathMemo } from './file-tracker';
 import { namesOwnResultDir, RESULT_DIR } from './result-dir';
 
 /** 세그먼트 토큰 중 리다이렉션 연산자(> <) 자리를 표시하는 마커.
@@ -688,6 +689,7 @@ export function classifyBashWrite(command: string, cwd: string, opts: { strict?:
   if (cwdAbs === '') return [];
 
   const denied = new Set<string>();
+  const memo: RealpathMemo = new Map(); // one command: its targets share the prefixes' real paths
   for (const { target: t, index } of targets) {
     if (ALWAYS_ALLOWED.has(t)) continue;
     // A target naming this session's result dirs is a project write even when it has `$` or a
@@ -699,16 +701,17 @@ export function classifyBashWrite(command: string, cwd: string, opts: { strict?:
     if (RESULT_DIR.test(flat)) {
       const at = t.startsWith('/') ? cwdAbs : baseDirAt(cwdAbs, cds, index);
       if (namesOwnResultDir(t, at, cwdAbs)) {
-        denied.add(resolvePath(at, flat.replace(/[$`*?].*$/, '')));
+        denied.add(openedPath(at, t.replace(/["'\\]/g, '').replace(/[$`*?].*$/, ''), memo));
         continue;
       }
     }
     // 변수/치환이 섞인 타깃은 판정 불가 → fail-open(허용)
     if (/[$`*?]/.test(t)) continue;
     const base = t.startsWith('/') ? cwdAbs : baseDirAt(cwdAbs, cds, index);
+    // The shell opens the path the OS way: `lnk/../f` goes through the link (#31).
     let abs: string;
     try {
-      abs = resolvePath(base, t);
+      abs = openedPath(base, t, memo);
     } catch {
       continue;
     }

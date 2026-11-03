@@ -100,8 +100,9 @@ describe('bounds of one call', () => {
     const command = `: '${'&#1 '.repeat(25_000)}'\n${Array.from({ length: 3000 }, () => 'git commit -F -').join('; ')}\n: ' #5'`;
     const { value, ms } = timed(() => commitIssueDenial(command, r, sid()));
     expect(value).toBeNull();
-    expect(ms).toBeLessThan(3000);
-  });
+    // About 0.5 s when idle; the bound leaves room for a loaded full run (a flake at 3 s).
+    expect(ms).toBeLessThan(8000);
+  }, 30_000);
 
   test('400 heredoc scripts are read once each, not once per shell', () => {
     const r = repo();

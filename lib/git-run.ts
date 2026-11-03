@@ -168,7 +168,8 @@ export function currentHashBatch(): HashBatch | null {
   return hashBatch;
 }
 
-const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+/** A full object id (sha1 or sha256). */
+export const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const text = (input: string | Buffer): string => (typeof input === 'string' ? input : input.toString('latin1'));
 /** An object named by its full id: the object, `<id>:<path>`, `<id>^{commit}`, `<id>^{tree}`. */
 const OBJECT_SPEC = /^[0-9a-f]{40}(?:[0-9a-f]{24})?(?::[^]*|\^\{(?:commit|tree)\})?$/;

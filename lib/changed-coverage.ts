@@ -27,7 +27,7 @@
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
 import { ensureSessionDir, getEditHistory } from './file-tracker';
-import { currentHashBatch, spawnGit } from './git-run';
+import { currentHashBatch, OBJECT_ID as TREE_ID, spawnGit } from './git-run';
 import { knowledgeRoot, parsePolicyEntries, POLICY_FILE } from './project-knowledge';
 import { hasSpelling, sameFileSpelling } from './path-spelling';
 import { realDeep } from './private-files';
@@ -543,9 +543,14 @@ export type BlobAtCommit = { kind: 'text'; text: string } | { kind: 'absent' } |
 
 /** (#30) A file's content at a commit (a blob, as stored: no filters), told apart by why there is
  *  none: see `BlobAtCommit`. Three short git calls: the mode first, then the size, so a huge blob is
- *  never read. `left`: the time left of a shared deadline (`error` when it runs out). */
+ *  never read. `left`: the time left of a shared deadline (`error` when it runs out); without one,
+ *  the three calls share one 5 s deadline, so a hung git costs 5 s, not 15 s (#31). */
 export function blobAtCommitResult(top: string, commit: string, rel: string, maxBytes: number, left?: () => number): BlobAtCommit {
-  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(commit) || rel === '' || rel.includes('\n')) return { kind: 'error' };
+  if (!TREE_ID.test(commit) || rel === '' || rel.includes('\n')) return { kind: 'error' };
+  if (left === undefined) {
+    const deadline = Date.now() + 5_000;
+    left = () => deadline - Date.now();
+  }
   const entry = git(top, ['ls-tree', '-z', '--end-of-options', commit, '--', rel], undefined, 5_000, left);
   if (entry.code !== 0) return { kind: 'error' };
   if (entry.out === '') return { kind: 'absent' };
@@ -716,7 +721,6 @@ export function divergedFromStart(top: string, startHead: string | null | undefi
   return files.length === 0 ? null : { head: headId, mergeBase, files };
 }
 
-const TREE_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 /** At most this many record trees are read per Stop (one `git ls-tree` each, all the files a tree
  *  is asked about in that call), within this time. A tree past either limit is not read, and its
  *  record is not evidence (it never falls back to its time). */

@@ -2935,6 +2935,45 @@ project dir and measures against the empty tree (seen in the report's gate log, 
 in the local report); that is a separate follow-up. The Stop's record freshness reads `tree` only,
 so there it relies on time-trusted records, as before.
 
+### 15.29 v0.36.13: Bash paths are judged the way the OS opens them (#31)
+
+#31 asked for one path rule (`openedPath`) at every guard that judges a tool path. A probe on
+Claude Code 2.1.316 settled which guards can see a `..` at all: CC collapses `..` in the
+`file_path` of Read, Edit and Write lexically before the hook sees it, and opens that collapsed
+path (`sub/lnk/../w.txt` landed in `sub/w.txt`, and the hook saw `.../sub/w.txt`). The edit-tool
+guard sites in `hooks/pre-tool-use.ts` therefore never get a `..`, and the lexical `resolvePath`
+there matches what CC opens: no change. The shell opens Bash paths the OS way.
+
+1. `openedPath` (`lib/file-tracker.ts`) spells its result through the nearest ancestor of the cwd
+   whose real path holds it (`spelledLikeCwd`). The `..` walk makes prefixes real, so a cwd under
+   an alias (macOS `/var` for `/private/var`) got back `/private/var/...` even with no link, and a
+   caller comparing with `resolve(cwd)` saw an inside path as outside (the Bash read
+   classification already did; #31 low 1). A `..` at the root takes no `realpath`, and the
+   respell walk stops at the first ancestor spelled as its real path (review: thousands of `..`
+   targets took one `realpath` per ancestor each).
+2. Bash file arguments go through `openedPath`: redirect targets and the result-dir case in
+   `classifyBashWrite` (`lib/bash-write.ts`), and the option and argument targets of
+   `optionTargets`/`bashChangedPaths` (`lib/role-limits.ts`; `curl --output-dir d -o f` opens `d`,
+   then `f` in it). `cd` dirs stay logical, as the shell keeps them. So `/tmp/lnk/../w.txt` with
+   `/tmp/lnk -> <project>/sub` is a project write, and `sub/ext/../w.txt` with `ext` leading out of
+   the project is not.
+3. Lows: `blobAtCommitResult` without a `left` gives its three git calls one 5 s deadline (the
+   Stop's caller passes none, so a hung git cost up to 15 s per manifest). `versionOnlyChange`
+   also requires the number literals of both texts to be spelled the same, in order (numbers past
+   double precision parse equal). `TREE_ID` is `OBJECT_ID` from `lib/git-run.ts`.
+4. Test timing: `commit-issue-bounds` (3000 commits) bound 3 s → 8 s with a 30 s test timeout; the
+   real-repo tests of `i38-finding-supersession` get a 30 s default. `i36-git-cost` already has a
+   60 s default (the handoff's "no timeout" was wrong), so it is unchanged. The i39 relative-names
+   test now makes the outside `other` repo it asserts is not named (the assertion was vacuous).
+
+Also: policy P5's body now says `hooks/session-start.ts` is exempt as a whole (the user's
+`coverage-exempt` line of 2026-11-03).
+
+Kept as known limits: the test-catalog counter is lexical (an `it (` in a comment counts), and
+changing it would make every project's catalog stale; `otherCheckouts` passes on a throw like every
+Stop gate's error path. Backlog: the state guard denied a Bash `grep` whose text held the source
+identifier `inGoodboySessionDir` (a false positive).
+
 ## 16. J — Field reports (v0.34.0)
 
 Asked by the user on 2026-10-16: improvements and bugs found while using goodboy elsewhere

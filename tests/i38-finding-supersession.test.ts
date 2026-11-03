@@ -1,7 +1,7 @@
 // #38 in-process: how `currentFindings` (lib/review-validator.ts) reads "changed" and "seen" through
 // the reviews' trees (a fake `TreeContentLookup`), and what `treeContent` (lib/changed-coverage.ts)
 // answers on a real temporary repo. The Stop hook end to end is tests/i38-review-supersession-stop.test.ts.
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -9,6 +9,9 @@ import { treeContent } from '../lib/changed-coverage';
 import { setRecordBase } from '../lib/record-paths';
 import { type TreeContentLookup, currentFindings, fileModifiedAt } from '../lib/review-validator';
 import type { ReviewFinding, ReviewResult } from '../lib/types';
+
+// The real-repo tests spawn several git commands each; bun's 5 s default is too tight under a loaded full run.
+setDefaultTimeout(30_000);
 
 const A = '/repo/a.ts';
 const B = '/repo/b.ts';

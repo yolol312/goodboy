@@ -34,10 +34,12 @@ version's README row and details block.
 
 ## P5 Hook entry files are exempt from changed-line coverage
 - decide: human
-- source: user 2026-11-02
+- source: user 2026-11-02; exempt list user 2026-11-03
 - date: 2026-11-02
-- checked: 2026-11-02
+- checked: 2026-11-03
 The hooks' `main()` bodies run only in the child processes the tests spawn, so bun's in-process
-coverage never measures those lines; spawned-hook tests prove them. Exported helpers that tests
-import (`hooks/post-tool-use.ts`, `hooks/session-start.ts`, `hooks/user-prompt-submit.ts`) are
-measured; new testable logic belongs in `lib/`.
+coverage never measures those lines; spawned-hook tests prove them. The files below are exempt;
+`hooks/session-start.ts` is exempt as a whole although tests import some of its helpers (the
+user's choice, 2026-11-03). The exported helpers of `hooks/post-tool-use.ts` and
+`hooks/user-prompt-submit.ts` stay measured; new testable logic belongs in `lib/`.
+- coverage-exempt: hooks/stop.ts, hooks/pre-tool-use.ts, hooks/session-start.ts
