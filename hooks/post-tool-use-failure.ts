@@ -8,6 +8,11 @@
 // Never blocks; any error is swallowed.
 
 import { afterBash, appendDispatchLog, hookError } from '../lib';
+import { HOOK_CLOCK_MS, startHookClock } from '../lib/hook-clock';
+
+// (v0.36.14, plan §15.30 item 12) One clock for the hook: the shell-write sweep's nested-repo walk and git calls
+//   end before the 15 s hook timeout (lib/hook-clock.ts); a hook killed there records no write.
+startHookClock(HOOK_CLOCK_MS.postToolUseFailure);
 
 interface PostToolUseFailureInput {
   session_id?: string;

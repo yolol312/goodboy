@@ -2974,6 +2974,205 @@ changing it would make every project's catalog stale; `otherCheckouts` passes on
 Stop gate's error path. Backlog: the state guard denied a Bash `grep` whose text held the source
 identifier `inGoodboySessionDir` (a false positive).
 
+### 15.30 v0.36.14: the Stop judges each nested repo of a project dir that is no repo (#39 follow-up)
+
+The follow-up §15.28 left open. In the #39 field report's gate log, every full Stop carried "Changed
+lines that no test ran: be/src/…/X.java (measured only against 4b825dc642cb, where the file is not
+what it was when the session started, with no commit)", and running the tests again could not
+clear it. Reproduced on 2026-11-04 (a plain `proj/` holding a repo `be/` with a committed file, a
+session edit, a record from `diff-coverage` run in `be/`):
+
+- The Stop judges every file under one top, `repoTop(cwd)`, which outside a repo is the project dir
+  itself (`hooks/stop.ts` `scopeOf`); its pin has `head: null`, so the file is named `be/src/x.ts`.
+- R2 (`acceptsBase`, lib/changed-coverage.ts) reads the record's base with `git ls-tree` in that
+  top (`treeEntries`); git exits 128 there, the read is null, and every base is refused
+  (`refusedBase`), the empty tree as well as `be`'s HEAD.
+- The next failures behind it: the record's keys are relative to `be/` (`src/x.ts`), so once a base
+  were accepted the file would not be found in it (a `hidden` gap); and no nested repo has a start:
+  `takeStartSnapshot` returns when the project dir is no repo, so a nested repo first pinned by a
+  hook (`sessionCoverageStart` → `topStart`) is unknown ("no start snapshot") when it has history,
+  `empty` when it has no commit object.
+- Other rules fail open in that layout: the I5 rules (affected and weakened tests) and the net
+  change check need a start commit and do nothing; record and review freshness fall back to time
+  (`tree` is null); in `auto` the test gate looks for test infrastructure in the project dir only.
+
+`otherCheckouts` is the only per-top loop in the Stop, and it only lists another checkout's pending
+files; it does not recognise nested clones (`nestedCheckoutOf` finds linked worktrees of the root's
+repo only).
+
+The user's decisions (2026-11-04): fix all of it (each nested repo judged under its own top, a
+session start per nested repo, `diff-coverage` measured against that repo's start); a nested repo
+first seen during the session gets a first-sight start like a linked worktree (§15.23). Stated as it
+is (the question said so): a linked worktree gets a real start because its HEAD is related to the
+frozen tips of its repo, but a repo cloned during the session has no tips to relate to, so with
+history it is unknown until the user passes the Stop with the one-shot marker or starts a new
+session (which pins it at the start, within the caps); one made by `git init` is `empty`.
+
+Design. It applies only when the project dir is no repo (`topIdentity` is `nogit`); a project dir
+that is a repo keeps its behavior.
+
+1. Repos of the project dir. `repoOfFile(file, projectDir)` returns `{top, realTop}` or null for a
+   loose file: the nearest dir between the file's dir and the project dir that holds a `.git` entry
+   and that the repo-top check of `repoTrees` (lib/push-test.ts, moved to a shared helper) confirms;
+   a `.git` that is not a repo top (a planted or empty `be/src/.git`) is passed over and the walk
+   goes on up. `top` is spelled as the project dir is (project dir + the walked relative path) and is
+   used for every `relative()` and git call, because the edit log keeps the tool's spelling;
+   `realTop` (`realDeep`) only keys `trees` and `coverage.changed` entries. A submodule (a `.git`
+   file) counts as a repo. `nestedRepos(projectDir)`: the repos below the project dir by a bounded
+   walk down that follows no links (depth 4, at most 2 000 dirs, dot dirs and `node_modules`
+   skipped, descending into repos found), at most `MAX_EAGER_TOPS` (64) repos; `MAX_TREE_REPOS` (8)
+   still limits only hashed trees. When a cap stops the walk, SessionStart says so.
+2. Starts. Tips are kept per repository in `start-tips-<hash of the common dir>.json` (the session's
+   repo keeps `start-tips.json`); `readTips`, `discover` (`sameRepo`), `earlier`/`carryOver`,
+   `sessionStartRan` and `worktreesAtStart` look the file up by the top's common dir, and the new name
+   joins `GUARDED` and `HOOK_ONLY` in lib/state-guard.ts with its protection tests. The eager-pin loop
+   of `takeStartSnapshot` is factored out and run for the session's repo, or, in a project dir that is
+   no repo, once per repo of `nestedRepos`: each repo's HEAD (`commit`) or `empty`, its tips frozen,
+   its linked worktrees pinned. A nested repo first seen later (a clone or `git init` during the
+   session, or one past the caps) is pinned at first sight (`sessionCoverageStart` → `topStart`):
+   no commit object, `empty`; history, unknown, with a text that says the repo was first seen during
+   the session (no tips because the project dir is no repo), and that a new session pins it only
+   within the caps.
+3. Groups. One helper `groupsOf(sessionId, cwd)` returns `[{top, realTop, head, edits}]` (the edits
+   of the session grouped by `repoOfFile`; loose files form the project dir's group, judged as
+   today). `testEditsSince`, `startProblem`, `incompleteStartProblem` (the repos of the edit log
+   only), `unresolvedBaseline`, `tryAcceptPendingTest`/`tryAcceptPendingReview` and `weakenedNow`
+   (memo keyed by repo) all use it, so the full Stop and the `stop_hook_active` path judge the same
+   groups. `runTestRules` is split: once per Stop (the coverage and staleness union, suites, evidence,
+   forbidden patterns, criteria) and per group (start gate, net change, changed-line gaps, I5 affected
+   and weakened tests, test types) with that group's `top` and `head`. Record views
+   are built once per group and passed to every check (freshness looks records up by identity). The
+   forbidden-pattern scan gets one `linesOf` that picks the test file's repo, so the added-test-lines
+   check runs once per Stop, not per group. Reasons name the changed files relative to the project dir
+   (`be/src/x.ts`); the coverage and staleness reasons still name absolute paths and may repeat once
+   per repo (they are de-duplicated by identical text only).
+4. One deadline for the grouped evaluation, shared by every group (`withSameContent` and
+   `treeContent` take what is left, not a fresh 2 s each); groups it does not reach block with a
+   reason saying the check ran out of time, so a slow repo never ends the Stop by the hook timeout.
+   The test groups and the review groups each get `GOODBOY_STOP_GROUP_BUDGET_MS` (6 s by default,
+   a non-negative integer, ms) and never more than the hook clock has left (see 12).
+5. Record trees. `review-write` records `trees` and per-repo `extra_blobs` as `test-write` records
+   `trees` (`repoTrees` of the reviewed files). A record's tree for a group is `trees[realTop]`; a
+   record without it has no tree there, which in a repo is unverified, never judged by time (a
+   record from before this release blocks as "could not verify" until written again). The #38
+   supersession (`currentFindings`) resolves a review's tree per file by the file's repo, and
+   `treeContent` runs once per repo with the answers merged (`splitFindings`). `extra_blobs` follow
+   the way the Stop judges the files: in a project dir that is a repo (one group, every file against
+   the record's `tree`, a nested clone's too) they are taken against `tree` for all files, as before
+   this release; only in a project dir that is no repo are they taken per repo against `trees[realTop]`
+   (a loose file or a repo with no tree has none). `test-write` and `review-write` both pass `trees`.
+6. `coverage.changed` names its repo. `diff-coverage` adds `top` (`realDeep` of the repo it ran in)
+   to its output. `test-write` takes `coverage.changed` as one object or a list; a `top` that is not a
+   repo inside the project dir drops the entry with a warning (the label is the agent's, so the R2
+   base check and freshness remain the real checks). One normalizer `changedEntries(r, realTop)`
+   gives a group its entries (an object without `top` belongs to the project dir's own repo, only when
+   that is a repo); every reader goes through it: the test-write validator and its idle-file warning,
+   `changedLineGaps`, `types.ts` (the push check reads no coverage). `coverage.subprocess` pairs take an optional `top`
+   the same way, so `be/src/x.ts` and `fe/src/x.ts` do not satisfy each other. The measure-coverage
+   skill and the README show the list form.
+7. `diff-coverage` base. `main()` passes the project dir (`cliProjectDir`) as well as the shell dir.
+   In a nested repo of a project dir that is no repo, with a session id (`CLAUDE_CODE_SESSION_ID`)
+   and no `--base`, it reads that repo's pin through a new read-only helper (no pin file and no edit
+   log entry written by the CLI) and measures against it (`commit` or `empty`); a repo with no pin or
+   an unknown one fails with that reason. Everything else keeps the `HEAD` default (no session id, a
+   project dir that is a repo). The output says `base_source: start|head|arg`; the Stop's advice names
+   the repo dir to run it in and, for a refused base inside a nested repo, gives no `--base` (as the
+   measure-coverage skill says: `diff-coverage` takes that repo's start there).
+8. Shell-made changes. In a project dir that is no repo, the indirect-write sweep after a Bash call
+   runs `git status` per repo within its git budget, and the Stop calls `noteSessionTop` for every
+   repo the walk finds (one first seen now is pinned, and its changes already made are recorded as
+   the session's) before grouping, so edits made by a shell command are in the edit log as they are
+   inside a repo. The sweep's order: the repos the session already knows first (a start pin or a
+   per-repo tips file in the session dir, `knownTops`), then the walk's other repos, each once by
+   its real top, up to the walk's cap of 64 and within the same time budget; so a crowd of repos
+   made later (`a000`..`a063`) cannot push a known repo out. The walk runs once per hook process
+   for a root (the call's dir and the shell's start dir ask for the same one). An incomplete sweep
+   adds no block; the call's result says `swept: false` as before.
+9. `auto` test gate: test infrastructure in the project dir, any repo of `nestedRepos` or any repo of
+   an edit group counts.
+10. Exemption globs (`coverage-exempt`, `test-type-exempt`, `static-preview`) are read once from the
+    project dir's pin and matched against both names of a file, relative to its repo (`src/gen/x.ts`)
+    and to the project dir (`be/src/gen/x.ts`). Classification (`needsTests`, previews, test types)
+    uses the project-dir name except where it needs git (net change, start blob, the manifest rule
+    `isMetadataNoTest`, `isGeneratedLcov`), which uses the repo top.
+11. The review gate and its neighbours take the groups of 3: `reviewEditsSince`, `staleDocsNow`,
+    `withDocNote`, the effort advice, the friction notice, `acceptReview`'s judged-weakened pin and
+    the review gate's start gate.
+12. Bounded confirmations and one hook clock. The walk and `repoOfFile` confirm a `.git` entry with
+    `git rev-parse --show-cdup`, and a `.git` git cannot read (a FIFO as HEAD, a stalled disk) made
+    that call block until its 15 s limit: the Stop was killed at the hook timeout (15 s), emitted
+    nothing, and passed (security review: fail open). The design:
+    a. `lib/hook-clock.ts`: `startHookClock(ms)`, `hookLeft()` (Infinity when never started: the CLI,
+       a library caller, a test), `resetHookClock()`. The Stop starts it first thing with 11 s,
+       SessionStart with 12 s (the start pins' own 8 s budget stays whole inside it); both hooks time
+       out at 15 s. The post hooks start it too (delta security review: they run the shell-write
+       sweep's walk, and 10 planted FIFO dirs killed PostToolUseFailure at 15 s, so the write went
+       unrecorded and the Stop passed): PostToolUseFailure 11 s (15 s timeout), PostToolUse 45 s (60 s),
+       and SubagentStop 11 s (15 s; it finishes the agent's open Bash calls through the same sweep,
+       round-2 review). `nestedStatus` takes `min(its timeout, hookLeft())` before anything else and
+       reads the repos the session knows before it walks: the walk's confirmations can use up a 3 s
+       sweep budget (the Stop's and SubagentStop's open calls), never those repos. The Stop's transcript flush
+       wait (`GOODBOY_CLAIM_FLUSH_WAIT_MS`, up to 8 s) runs at most `FLUSH_PAST_CLOCK_MS` (2 s) past the
+       clock. A test reads hooks/hooks.json and checks every clock leaves 2 s before its timeout.
+    b. Every phase stops at it: `newDeadline` (the test and review groups) is `min(its own end,
+       hookLeft())` and the start pins' `timeLeft` too, so a phase that runs out blocks through its
+       own path (`ran out of time`, a transient unknown start) instead of the hook being killed.
+       The phases had separate budgets (the walk, the start pins 6 s, the test groups 6 s, the review
+       groups 6 s), which a slow git (0.1-0.2 s per call) could use in turn.
+    c. Each confirmation gets the smallest of a per-call limit (`CONFIRM_LIMIT_MS`, 2 s), what the
+       process's cumulative confirmation budget has left (`CONFIRM_BUDGET_MS`, 4 s of time spent in
+       confirmations, not a wall-clock deadline: the grouping runs late in the Stop; kept only while
+       a hook clock runs, which every hook that walks starts: the CLI has no hook timeout, and the unit
+       tests share one process, so an always-on budget would leak across test files) and `hookLeft()`; with nothing
+       left no git runs. A confirmation that did not answer (cut off at its limit, stalled, killed, or
+       no time left) is `unanswered`, and the dir is remembered in a module-level set so it is never
+       asked twice in the process. 'yes' and 'no' answers are not kept across calls.
+    d. Unanswered fails closed. `nestedRepos` marks the walk `capped` and lists the dir in
+       `unanswered`; `repoOfFile` returns the dir as a repo with `unconfirmed: true` instead of
+       walking past it; `groupsOf` makes a nested group for it whose start is unknown ("git did not
+       answer in time for `<rel>` (it holds a `.git` entry that git could not read…); if it is no
+       real repository, remove its `.git`; otherwise the next Stop tries again") and calls neither
+       `startOf` nor `incompleteStart` for it; `repoTrees` and `extra_blobs` treat it as a repo with
+       no tree (no hash, no blob: unverified). Planted dirs that sort first can use up the budget
+       and leave a real repo unasked: its block then also names the other dirs git did not answer
+       for in that Stop (up to 5, and a count), so the model knows which `.git` to remove.
+    e. Test seams (env, `GOODBOY_TEST_*`, unset in use): `GOODBOY_TEST_CONFIRM_LIMIT_MS`,
+       `GOODBOY_TEST_CONFIRM_BUDGET_MS` (also turns the budget on without a hook clock),
+       `GOODBOY_TEST_GROUP_DELAY_MS`, `GOODBOY_TEST_HOOK_CLOCK_MS` (replaces a hook's clock).
+    Not in this release (pre-existing on main 8398c35, to be filed separately): a FIFO HEAD in an
+    untracked nested `.git` inside an ordinary repo makes `git status` and `git ls-files --others`
+    block (measured: both cut off by `timeout 5`, rc 124), so any gate that runs them waits for its
+    own git limit.
+
+Loose code files in the project dir keep today's block ("not measured"): `diff-coverage` cannot run
+outside a repo, so their exit is a `blocked` test record or a `coverage-exempt` entry; the block text
+says so.
+
+Not in this release: a project dir that is itself a repo with nested clones inside it (the clones'
+files stay judged under the project's repo, and so do their `extra_blobs`: item 5); `otherCheckouts`
+stays as it is.
+
+Known limits: a repo created mid-session behind 64 others can still miss the shell-write sweep (the
+known repos go first, the rest of the walk is capped at 64: item 8). An edit spelled through a symlink
+inside the project dir (`proj/link` -> `proj/be`) is assigned to `be` by its real dir, but its
+spelling is not under the group's spelled top, so the line and net-change rules cannot see it and
+the Stop blocks until the file is edited through the real path (fails closed; security review, low).
+
+Tests: an end-to-end Stop fixture with `proj/be` and `proj/fe` (a session edit in each, records from
+`diff-coverage` run in each repo): blocked before tests, passed after, and the reproduction's exact
+block gone; the `stop_hook_active` path judging the same groups as the full Stop; a record with
+trees for `be` only (`fe` unverified, not by time); one record per repo and one with a list-shaped
+`coverage.changed`; subprocess pairs of the same name in two repos; pinned exemptions still applying
+to nested files; a project dir reached through a symlink; a planted `be/src/.git`; a repo past the
+caps; the per-repo tips file refused when written from Bash; the shared deadline with a slow group;
+`diff-coverage` with a read-only pin (no file written) and with no session id; a repo cloned during
+the session (unknown, its text) and one made by `git init` (empty); a shell-made edit in `be/`; a
+loose code file; the docs gate and review freshness per repo; a project repo holding a nested clone
+whose edited file is judged fresh by a `test-write` record (item 5); 64 decoy repos made after the
+start do not starve the sweep (item 8); a planted FIFO `.git` beside a real repo and inside the edited
+file's dir, many of them (item 12: the Stop blocks within the hook time, the cumulative budget caps
+the confirmations).
+
 ## 16. J — Field reports (v0.34.0)
 
 Asked by the user on 2026-10-16: improvements and bugs found while using goodboy elsewhere

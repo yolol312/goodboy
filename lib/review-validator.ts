@@ -423,6 +423,11 @@ export type TreeContentLookup = (
   asks: ReadonlyMap<string, ReadonlySet<string>>,
 ) => (tree: string, file: string) => boolean | undefined;
 
+/** (#39) The real top of the repo a file (absolute) belongs to, when the project dir is no repo and the file is
+ *  in a repo below it; null for any other file. A review's tree for the file is then the review's `trees`
+ *  entry for that repo. */
+export type RepoOfFile = (abs: string) => string | null;
+
 
 /** 커서(마지막 수락) 이후의 신뢰 리뷰들에서 "아직 유효한" finding을 모은다 (v0.26.6).
  *
@@ -459,6 +464,7 @@ export function currentFindings(
   sinceTimestamp: string | null,
   modifiedAt: ModifiedAt = fileModifiedAt,
   contentOf?: TreeContentLookup,
+  repoOf?: RepoOfFile,
 ): ReviewFinding[] {
   if (!Array.isArray(reviews) || reviews.length === 0) return [];
   const nowMs = Date.now();
@@ -474,9 +480,19 @@ export function currentFindings(
       files: new Set((r.reviewed_files ?? []).map((f) => normalizePath(f))),
       axes: axesOfDimensions(Array.isArray(r.dimensions_checked) ? r.dimensions_checked : []),
       tree: typeof r.tree === 'string' && TREE_ID.test(r.tree) ? r.tree : null,
+      trees: r.trees !== null && typeof r.trees === 'object' && !Array.isArray(r.trees) ? r.trees : undefined,
     }))
     .filter((e) => !(e.ms <= sinceMs));
   type Entry = (typeof pool)[number];
+  // (#39) The tree a review has for a file: its own `tree`, or, for a file of a repo below a project dir that is
+  //   no repo (`repoOf` names that repo's real top), the review's entry for that repo; none when it has none
+  //   (that pair is then judged by time, as a review with no tree is).
+  const treeOf = (e: Entry, abs: string): string | null => {
+    const top = repoOf?.(abs) ?? null;
+    if (top === null) return e.tree;
+    const t = e.trees !== undefined && Object.hasOwn(e.trees, top) ? e.trees[top] : undefined;
+    return typeof t === 'string' && TREE_ID.test(t) ? t : null;
+  };
   const mtimes = new Map<string, number | null>();
   const mtimeOf = (file: string): number | null => {
     const key = normalizePath(file);
@@ -530,8 +546,8 @@ export function currentFindings(
     for (const c of candidates) {
       for (const { abs, m } of c.files) {
         if (m === null) continue;
-        ask(c.e.tree, abs);
-        for (const o of c.later) ask(o.tree, abs);
+        ask(treeOf(c.e, abs), abs);
+        for (const o of c.later) ask(treeOf(o, abs), abs);
       }
     }
     if (asks.size > 0) holds = contentOf(asks);
@@ -554,12 +570,14 @@ export function currentFindings(
         }
         continue;
       }
-      const before = e.tree === null ? undefined : holds(e.tree, abs);
+      const eTree = treeOf(e, abs);
+      const before = eTree === null ? undefined : holds(eTree, abs);
       if (before === true) continue; // the content the review saw: no change, whatever the mtime
       if (before === undefined && !(m > e.ms)) continue; // by time: not changed since the review
       changed = true;
       for (const o of later) {
-        const now = o.tree === null ? undefined : holds(o.tree, abs);
+        const oTree = treeOf(o, abs);
+        const now = oTree === null ? undefined : holds(oTree, abs);
         // By content where both trees tell it; by time otherwise, and only where time shows the
         //   change too (a content change under an older mtime leaves no time to compare with). A
         //   later tree with other content than now saw a version since replaced: it does not count.

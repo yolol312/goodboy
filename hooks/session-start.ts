@@ -20,8 +20,10 @@ import { decisionAuthorityContext } from '../lib/decision-authority';
 import { clearReadRecords } from '../lib/file-tracker';
 import { pinCoverageStart } from '../lib/changed-coverage';
 import { pinSessionCriteria } from '../lib/session-criteria';
+import { HOOK_CLOCK_MS, startHookClock } from '../lib/hook-clock';
 import { START_PIN_BUDGET_MS, startPinDeadline, withSharedWorktreeList } from '../lib/start-pins';
 import { inboxNotice } from '../lib/field-report';
+import { MAX_NESTED_DEPTH, MAX_NESTED_DIRS, MAX_NESTED_REPOS } from '../lib/nested-repos';
 import { hookError } from '../lib/gate-log';
 
 interface SessionStartInput {
@@ -55,6 +57,9 @@ export function configWarnings(env: Record<string, string | undefined>): string[
   return out;
 }
 
+/** (#39) The project dir is no repo, so its repos are found by a bounded walk; one cap stopped it. User-facing, so Korean. */
+export const WALK_CAP_NOTICE = `[goodboy] 프로젝트 폴더 아래 git 저장소 탐색이 한도(깊이 ${MAX_NESTED_DEPTH} · 폴더 ${MAX_NESTED_DIRS}개 · 저장소 ${MAX_NESTED_REPOS}개)에 걸려, 못 찾은 저장소는 세션 시작 시점이 고정되지 않았어요.`;
+
 async function readStdin(): Promise<string> {
   let data = '';
   for await (const chunk of process.stdin) data += chunk;
@@ -66,6 +71,9 @@ if (import.meta.main) {
   let errorSession: string | null = null;
   readStdin()
     .then((raw) => {
+      // (#39, plan §15.30 item 2b) One clock for the whole hook (its timeout is 15 s): the nested walk and the
+      //   start pins stop at it. The start pins' own 8 s budget below stays whole inside it.
+      startHookClock(HOOK_CLOCK_MS.sessionStart);
       let input: SessionStartInput = {};
       try {
         input = raw.trim() === '' ? {} : (JSON.parse(raw) as SessionStartInput);
@@ -76,6 +84,8 @@ if (import.meta.main) {
       const sessionId = typeof input.session_id === 'string' && input.session_id !== '' ? input.session_id : null;
       errorSession = sessionId;
       if (source === 'compact' && sessionId) clearReadRecords(sessionId);
+      // (#39) The project dir is no repo and the walk down for its repos hit a cap: said below.
+      let walkCapped = false;
       // A new, resumed or cleared session uses the commit issue settings on disk now
       //   (lib/commit-issue.ts; `/clear` starts a new session id).
       if ((source === 'startup' || source === 'resume' || source === 'clear') && sessionId) {
@@ -94,7 +104,7 @@ if (import.meta.main) {
           pinProjectMode(sessionId, projectDir(input.cwd ?? process.cwd(), process.env));
           // …and the user's policy globs with the start HEAD (I1, lib/changed-coverage.ts). Pinned
           //   whatever the changed-line mode: the static previews (I3a) count without it.
-          pinCoverageStart(sessionId, projectDir(input.cwd ?? process.cwd(), process.env));
+          walkCapped = pinCoverageStart(sessionId, projectDir(input.cwd ?? process.cwd(), process.env));
           // …and the requirement rows and policy `test:` lines it starts from (I2).
           pinSessionCriteria(sessionId, projectDir(input.cwd ?? process.cwd(), process.env));
         });
@@ -152,6 +162,7 @@ if (import.meta.main) {
         ...(claudeMd ? [claudeMd] : []),
         ...(tier ? [tier.systemMessage] : []),
         ...(inbox ? [inbox.systemMessage] : []),
+        ...(walkCapped ? [WALK_CAP_NOTICE] : []),
       ];
       const context = [knowledge.context, decisions, tier?.context, inbox?.context].filter((c): c is string => !!c).join('\n\n');
       const out: Record<string, unknown> = {};

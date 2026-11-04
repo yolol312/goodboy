@@ -32,7 +32,7 @@ import { knowledgeRoot, parsePolicyEntries, POLICY_FILE } from './project-knowle
 import { realDeep } from './private-files';
 import { projectRelative } from './role-limits';
 import { MAX_DOC_BYTES, MAX_STATE_BYTES, readRegular } from './safe-read';
-import { earlierKeys, topIdentity, topStart, worktreesAtStart, writeOnce, type TopIdentity } from './start-pins';
+import { commonDirOf, earlierKeys, topIdentity, topStart, worktreesAtStart, writeOnce, type TopIdentity } from './start-pins';
 import { evidenceProblems, isTestFile, requiresMutationProbe, TEST_RUNNER_CONFIG } from './test-validator';
 import { classifyFile, isTestkitHarness, needsTests } from './verification-scope';
 import type { AcceptanceCoverage, TestResult } from './types';
@@ -291,7 +291,7 @@ export function pinSessionCriteria(sessionId: string, cwd: string): void {
  *  work trees as they are now. A document that cannot be read pins an unknown baseline, which blocks. */
 function pinOtherTops(sessionId: string, startTop: string): void {
   const mine = realDeep(startTop);
-  for (const w of worktreesAtStart(sessionId)) {
+  for (const w of worktreesAtStart(sessionId, commonDirOf(startTop))) {
     if (w.top === mine) continue;
     try {
       const who = topIdentity(w.top);

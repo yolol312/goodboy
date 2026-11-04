@@ -162,11 +162,19 @@ describe('repoTrees', () => {
     write(w.parent, 'fake1/x.ts', 'x\n');
     write(w.parent, 'fake2/.git', 'gitdir: /nonexistent/nowhere\n');
     write(w.parent, 'fake2/x.ts', 'x\n');
-    // Also inside a real repo: the marker is a directory in a plain subfolder of be.
+    const files = [join(w.parent, 'fake1', 'x.ts'), join(w.parent, 'fake2', 'x.ts')];
+    expect(pt.repoTrees(files, w.parent)).toEqual({ trees: {}, dropped: [] });
+  }, 30_000);
+
+  // §15.30 item 1: a `.git` that is no repo top is passed over and the walk goes on up (it used to drop
+  // the file: the candidate was the fake dir, and the real repo above it was never looked at).
+  test('a `.git` marker inside a real repo is passed over: the file belongs to the repo above it', () => {
+    const w = nested();
     write(w.be, 'sub/.git/HEAD', 'nothing\n');
     write(w.be, 'sub/x.ts', 'x\n');
-    const files = [join(w.parent, 'fake1', 'x.ts'), join(w.parent, 'fake2', 'x.ts'), join(w.be, 'sub', 'x.ts')];
-    expect(pt.repoTrees(files, w.parent)).toEqual({ trees: {}, dropped: [] });
+    const out = pt.repoTrees([join(w.be, 'sub', 'x.ts')], w.parent);
+    expect(Object.keys(out.trees)).toEqual([w.be]);
+    expect(out.dropped).toEqual([]);
   }, 30_000);
 
   test('the tree is the content as it would be handed off: an uncommitted edit counts, and the commit then matches', () => {
@@ -231,7 +239,7 @@ describe('repoTrees: names, and the cap on confirmed repos', () => {
     expect(out.dropped).toEqual([]);
   }, 60_000);
 
-  test('the confirmation stops at 8 real repos: every candidate after the 8th, fake or real, is `dropped` unconfirmed', () => {
+  test('a real repo after the 8th is `dropped`; a fake `.git` is no candidate at all (every `.git` is confirmed by the walk)', () => {
     const base = tmp();
     const files: string[] = [];
     const tops: string[] = [];
@@ -240,14 +248,14 @@ describe('repoTrees: names, and the cap on confirmed repos', () => {
       tops.push(r);
       files.push(join(r, 'src', 'a.ts'));
     }
-    write(base, 'fake9/.git/HEAD', 'nothing\n'); // a fake after the 8th: not confirmed, so named as dropped
+    write(base, 'fake9/.git/HEAD', 'nothing\n'); // a fake after the 8th: passed over by the walk, not a candidate
     write(base, 'fake9/x.ts', 'x\n');
     files.push(join(base, 'fake9', 'x.ts'));
     const r10 = makeRepo(join(base, 'r10'), 'r10');
     files.push(join(r10, 'src', 'a.ts'));
     const out = pt.repoTrees(files, base);
     expect(Object.keys(out.trees)).toEqual(tops);
-    expect(out.dropped).toEqual([join(base, 'fake9'), r10]);
+    expect(out.dropped).toEqual([r10]);
     // Exactly 8 candidates: nothing is dropped.
     expect(pt.repoTrees(files.slice(0, 8), base).dropped).toEqual([]);
   }, 60_000);

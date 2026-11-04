@@ -151,6 +151,7 @@ describe('changed-line coverage', () => {
       in_report: ['src/a.ts', 'src/new.ts'],
       diff_lines: { 'lcov.info': 8, 'src/a.ts': 2, 'src/new.ts': 1 }, // the report itself is an untracked file
       base: Bun.spawnSync(['git', 'rev-parse', 'HEAD'], { cwd: r }).stdout.toString().trim(),
+      top: realpathSync(r), // (#39) the repo it ran in, as a real path
     });
   });
 

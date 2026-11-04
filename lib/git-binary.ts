@@ -71,7 +71,10 @@ function xcrunPath(stdout: string): string | null {
 export function resolveGitBinary(env: Env, cwd: string, opts: GitBinaryOptions = {}): string {
   const platform = opts.platform ?? process.platform;
   if (platform !== 'darwin') return 'git';
-  const key = [...SELECTORS.map((k) => env[k] ?? ''), cwd, opts.xcrun ?? '', opts.shim ?? ''].join('\0');
+  // The cwd matters only when PATH has an entry spelled relative to it (an empty entry is the cwd too):
+  //   `firstGitOnPath` resolves those against it. Keyed on it always, every cwd change reran `xcrun --find git`.
+  const relativePath = (env.PATH ?? '').split(delimiter).some((d) => d === '' || !isAbsolute(d));
+  const key = [...SELECTORS.map((k) => env[k] ?? ''), relativePath ? cwd : '', opts.xcrun ?? '', opts.shim ?? ''].join('\0');
   if (memo?.key === key) return memo.bin;
   const bin = resolveNow(env, cwd, opts);
   memo = { key, bin };

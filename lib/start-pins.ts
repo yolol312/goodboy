@@ -11,6 +11,9 @@
 //     canonical common git dir, and the worktrees that exist. A failure, a truncation or a
 //     deadline writes nothing: a partial list is never a complete one. Refs that move later cannot
 //     change it.
+//   - start-tips-<hash of the common dir>.json: the same for every other repository (#39, plan §15.30):
+//     in a project dir that is no repo each nested repo is snapshotted at the session's start, and a
+//     repo is looked up by its canonical common git dir (a linked worktree shares its repo's file).
 //   - start-pin-<key>.json (once per top): the top's start. <key> is the canonical top plus the
 //     identity of its git dir (path, inode, birth time). The existing worktrees are pinned at the
 //     session's start; a top first seen later is pinned the first time a hook resolves it.
@@ -58,10 +61,12 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync, linkSync, lstatSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
-import { ensureSessionDir, getCurrentTurn, recordEdit } from './file-tracker';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { ensureSessionDir, getCurrentTurn, recordEdit, sessionDir } from './file-tracker';
 import { snapshotMemo, spawnGit, type GitOptions, type GitResult } from './git-run';
 import { fsDirs } from './git-dirs';
+import { hookLeft } from './hook-clock';
+import { MAX_NESTED_DEPTH, MAX_NESTED_DIRS, MAX_NESTED_REPOS, nestedRepos } from './nested-repos';
 import { realDeep } from './private-files';
 import { MAX_STATE_BYTES, readRegular } from './safe-read';
 
@@ -77,8 +82,9 @@ const NULL_ID = /^0{40}(?:0{24})?$/;
 const TIPS_FILE = 'start-tips.json';
 /** Ref tips kept; more means no snapshot (a truncated list is never a complete one). */
 const MAX_TIPS = 100_000;
-/** Worktrees pinned at the session's start (and criteria baselines read); the others are pinned when first seen. */
-const MAX_EAGER_TOPS = 64;
+/** Worktrees pinned at the session's start (and criteria baselines read), and, in a project dir that is
+ *  no repo, the nested repos snapshotted then; the others are pinned when first seen. */
+export const MAX_EAGER_TOPS = MAX_NESTED_REPOS;
 /** Paths that differ at a top's first sight; more makes its start unknown and incomplete. */
 const MAX_FIRST_SIGHT_PATHS = 20_000;
 /** One git call here: at most this, and never more than the hook's deadline has left. */
@@ -105,7 +111,9 @@ export function startPinDeadline(totalMs: number): void {
   deadlineAt = Date.now() + totalMs;
 }
 
-const timeLeft = (): number => (deadlineAt === null ? Infinity : deadlineAt - Date.now());
+/** What this module's git calls may still use: the start-pin deadline's, and never more than the hook's own
+ *  clock has left (lib/hook-clock.ts: every phase of a hook ends before the hook timeout). */
+const timeLeft = (): number => Math.min(deadlineAt === null ? Infinity : deadlineAt - Date.now(), hookLeft());
 
 function git(cwd: string, args: readonly string[], opts: GitOptions = {}): GitResult {
   return spawnGit(cwd, args, { timeoutMs: GIT_LIMIT_MS, left: timeLeft, ...opts });
@@ -258,14 +266,20 @@ function readJsonFile(path: string): unknown | 'absent' | 'bad' {
   }
 }
 
-const startPinFile = (sessionId: string, key: string): string => join(ensureSessionDir(sessionId), `start-pin-${key}.json`);
+/** The pin file of a key. `readOnly`: the session dir is not made when it is missing (a read by the CLI). */
+const startPinFile = (sessionId: string, key: string, readOnly = false): string => join(readOnly ? sessionDir(sessionId) : ensureSessionDir(sessionId), `start-pin-${key}.json`);
 
-/** Whether SessionStart ran for this session: its tip snapshot or any start pin is in the session
- *  dir. A coverage pin that is missing then was lost or removed, not never made. */
+/** The tips file of a repository other than the session's own: named by a hash of its canonical common git dir
+ *  (like the start pin keys; lib/state-guard.ts guards the name). */
+const tipsFileOf = (common: string): string => `start-tips-${createHash('sha256').update(common).digest('hex').slice(0, 16)}.json`;
+const TIPS_NAME = /^start-tips(?:-[0-9a-f]{16})?\.json$/;
+
+/** Whether SessionStart ran for this session: a tip snapshot (the session's or a nested repo's) or any start
+ *  pin is in the session dir. A coverage pin that is missing then was lost or removed, not never made. */
 export function sessionStartRan(sessionId: string): boolean {
   try {
     const dir = ensureSessionDir(sessionId);
-    return existsSync(join(dir, TIPS_FILE)) || readdirSync(dir).some((f) => /^start-pin-[0-9a-f]{16}\.json$/.test(f));
+    return readdirSync(dir).some((f) => TIPS_NAME.test(f) || /^start-pin-[0-9a-f]{16}\.json$/.test(f));
   } catch {
     return false;
   }
@@ -277,18 +291,38 @@ interface Tips {
   worktrees: { top: string; key: string }[];
 }
 
-function readTips(sessionId: string): Tips | null {
-  const v = readJsonFile(join(ensureSessionDir(sessionId), TIPS_FILE)) as Partial<Tips> & { v?: number };
+function readTipsFile(path: string): Tips | null {
+  const v = readJsonFile(path) as Partial<Tips> & { v?: number };
   if (!v || typeof v !== 'object' || v === null || v.v !== 1 || typeof v.common !== 'string') return null;
   if (!Array.isArray(v.tips) || !v.tips.every((t) => typeof t === 'string' && OBJECT_ID.test(t))) return null;
   const worktrees = Array.isArray(v.worktrees) ? v.worktrees.filter((w) => w && typeof w.top === 'string' && typeof w.key === 'string') : [];
   return { common: v.common, tips: v.tips, worktrees };
 }
 
-/** The worktrees that existed when the session started (empty for a session with no snapshot). */
-export function worktreesAtStart(sessionId: string): { top: string; key: string }[] {
+/** The tip snapshot of the repository whose canonical common git dir is `common`: the session's own file
+ *  (`start-tips.json`) when it is for that repository, else the file named by a hash of `common`. Without
+ *  `common`, the session's own file. Null when there is none for it (a session from before v0.36.7, a
+ *  snapshot that failed, a repository first seen after the start). */
+function readTips(sessionId: string, common?: string): Tips | null {
+  const dir = ensureSessionDir(sessionId);
+  const own = readTipsFile(join(dir, TIPS_FILE));
+  if (common === undefined || own?.common === common) return own;
+  return readTipsFile(join(dir, tipsFileOf(common)));
+}
+
+/** The worktrees every snapshot of the session lists (the registrations `earlier` looks for). */
+function allListedWorktrees(sessionId: string): { top: string; key: string }[] {
+  const dir = ensureSessionDir(sessionId);
+  const out: { top: string; key: string }[] = [];
+  for (const f of readdirSync(dir)) if (TIPS_NAME.test(f)) out.push(...(readTipsFile(join(dir, f))?.worktrees ?? []));
+  return out;
+}
+
+/** The worktrees that existed when the session started in the repository whose common git dir is `common`
+ *  (empty for a session with no snapshot of it). Without `common`: the session's own repository. */
+export function worktreesAtStart(sessionId: string, common?: string | null): { top: string; key: string }[] {
   try {
-    return readTips(sessionId)?.worktrees ?? [];
+    return readTips(sessionId, common ?? undefined)?.worktrees ?? [];
   } catch {
     return [];
   }
@@ -311,11 +345,32 @@ function validStart(s: unknown): s is StartRef {
 }
 
 /** The pin file of this top and identity: the entry, 'absent', or 'bad' (unreadable, or not this top's). */
-function readEntry(sessionId: string, who: TopIdentity): Entry | 'absent' | 'bad' {
-  const v = readJsonFile(startPinFile(sessionId, who.key));
+function readEntry(sessionId: string, who: TopIdentity, readOnly = false): Entry | 'absent' | 'bad' {
+  const v = readJsonFile(startPinFile(sessionId, who.key, readOnly));
   if (v === 'absent' || v === 'bad') return v;
   const e = v as Partial<Entry>;
   return e && e.v === 1 && e.top === who.top && e.id === who.id && validStart(e.start) ? (e as Entry) : 'bad';
+}
+
+/** What `readTopStart` finds: the start, or `absent` (no pin for this checkout). */
+export type StartRead = StartRef | { kind: 'absent' };
+
+/** (#39) The session's start pin of the checkout at `top`, read and nothing else: no pin file, no edit-log
+ *  entry and no session dir is made (`topStart` would pin a top it sees first, and record the changes already
+ *  made in it). For the CLI (`diff-coverage` in a nested repo): `commit` or `empty` is the start, `unknown` says
+ *  why there is none, `absent` means no pin was made for this checkout (not in the session's start walk, and no
+ *  hook has seen it yet). Never throws. */
+export function readTopStart(sessionId: string, top: string): StartRead {
+  try {
+    const who = topIdentity(top);
+    if (who.unknown !== undefined) return unknown(`it could not be told what the checkout is (${who.unknown})`);
+    if (who.id === 'nogit') return { kind: 'absent' };
+    const e = readEntry(sessionId, who, true);
+    if (e === 'absent') return { kind: 'absent' };
+    return e === 'bad' ? unknown('its recorded start is unreadable') : e.start;
+  } catch (err) {
+    return unknown(`its start could not be read (${String(err).slice(0, 120)})`);
+  }
 }
 
 /** Whether this top already has a start pin (any content): a hook has nothing to pin for it. */
@@ -325,6 +380,28 @@ export function hasStartPin(sessionId: string, who: TopIdentity): boolean {
   } catch {
     return false;
   }
+}
+
+/** (#39) The checkouts this session knows: the (canonical) tops of its start pins and the repositories of its tip
+ *  snapshots (the parent of a `.git` common dir), read from the session dir with no git call. The shell-write sweep
+ *  reads these first, so a crowd of repos made later cannot push a known one out of its cap. Never throws. */
+export function knownTops(sessionId: string): string[] {
+  const out = new Set<string>();
+  try {
+    const dir = sessionDir(sessionId);
+    for (const f of readdirSync(dir)) {
+      if (/^start-pin-[0-9a-f]{16}\.json$/.test(f)) {
+        const e = readJsonFile(join(dir, f)) as Partial<Entry> | 'absent' | 'bad';
+        if (e !== 'absent' && e !== 'bad' && e && typeof e.top === 'string') out.add(e.top);
+      } else if (TIPS_NAME.test(f)) {
+        const t = readTipsFile(join(dir, f));
+        if (t !== null && basename(t.common) === '.git') out.add(dirname(t.common));
+      }
+    }
+  } catch {
+    // none known
+  }
+  return [...out].sort();
 }
 
 // ── The snapshot at the session's start ─────────────────────────────────────────────────────
@@ -361,13 +438,40 @@ function noCommitObjects(top: string, common: string): boolean | null {
 /** SessionStart, the session's first: the frozen tips and the pins of the worktrees that exist now.
  *  Written once; a session that already has either is left as it is (a resume never refreshes
  *  them). Best-effort: nothing is written on any failure, a truncation or a deadline, and a session
- *  with no snapshot treats every top but its first as unknown. */
-export function takeStartSnapshot(sessionId: string, top: string): void {
+ *  with no snapshot treats every top but its first as unknown. When `top` is no repo (the project dir
+ *  is a plain folder holding repos, #39), the same is done for each repo of `nestedRepos(top)`, each
+ *  with its own tips file. Returns whether the walk down for those repos hit a cap (SessionStart says
+ *  so); false in a repo. */
+export function takeStartSnapshot(sessionId: string, top: string): boolean {
   try {
     const dirs = probeDirs(top);
-    if (dirs.kind !== 'dirs') return;
+    if (dirs.kind === 'dirs') {
+      snapshotRepo(sessionId, top, dirs.common, TIPS_FILE, false);
+      return false;
+    }
+    if (dirs.kind !== 'none') return false;
+    const found = nestedRepos(top);
+    const done = new Set<string>(); // a linked worktree nested in a repo shares its repository's snapshot
+    for (const repo of found.repos) {
+      const d = probeDirs(repo.top);
+      if (d.kind !== 'dirs' || done.has(d.common)) continue;
+      done.add(d.common);
+      snapshotRepo(sessionId, repo.top, d.common, tipsFileOf(d.common), true);
+    }
+    return found.capped;
+  } catch {
+    return false; // best-effort: no snapshot
+  }
+}
+
+/** The tips of the repository at `top` (whose canonical common git dir is `common`) and the pins of its
+ *  worktrees, written to `tipsFile`. Nothing is written when that file exists, and nothing on a failure,
+ *  a truncation or the deadline. A nested repo's own checkout is pinned even when `git worktree list` does not
+ *  name it (a repo with a separate git dir, a submodule: git lists the git dir as its worktree there). */
+function snapshotRepo(sessionId: string, top: string, common: string, tipsFile: string, nested: boolean): void {
+  try {
     const dir = ensureSessionDir(sessionId);
-    if (existsSync(join(dir, TIPS_FILE))) return;
+    if (existsSync(join(dir, tipsFile))) return;
     const refs = git(top, ['for-each-ref', '--format=%(objectname) %(objecttype) %(*objectname) %(*objecttype)'], { maxBuffer: 32 * 1024 * 1024 });
     const wts = listWorktrees(top);
     if (refs.code !== 0 || !answered(refs) || wts.code !== 0 || !answered(wts)) return;
@@ -379,6 +483,12 @@ export function takeStartSnapshot(sessionId: string, top: string): void {
       else if (type === 'tag' && peeledType === 'tag') return; // a tag of a tag: its commit is not listed, so the set is not complete
     }
     const listed = parseWorktrees(wts.out);
+    if (nested && !listed.some((w) => realDeep(w.top) === realDeep(top))) {
+      const h = git(top, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']);
+      if (!answered(h) || h.code > 1) return; // git could not say: no snapshot (an unborn HEAD is exit 1)
+      const id = h.out.trim();
+      listed.unshift({ top, head: h.code === 0 && OBJECT_ID.test(id) ? id : null });
+    }
     for (const w of listed) if (w.head !== null) tips.add(w.head);
     if (tips.size > MAX_TIPS) return;
     const pinned: { top: string; key: string }[] = [];
@@ -391,7 +501,7 @@ export function takeStartSnapshot(sessionId: string, top: string): void {
       pinned.push({ top: who.top, key: who.key });
     }
     // Last: with no tips file every top but the first reads as unknown, never as partly known.
-    writeOnce(join(dir, TIPS_FILE), JSON.stringify({ v: 1, common: dirs.common, tips: [...tips], worktrees: pinned }));
+    writeOnce(join(dir, tipsFile), JSON.stringify({ v: 1, common, tips: [...tips], worktrees: pinned }));
   } catch {
     // best-effort: no snapshot
   }
@@ -418,18 +528,18 @@ function computeTopStart(sessionId: string, top: string): StartRef {
   // Outside a repo: nothing to compare with, and never pinned (a repo made here later is another identity).
   // But no git where the session pinned a checkout is a hidden or removed .git, not an unborn repository.
   if (who.id === 'nogit') {
-    const gone = earlier(sessionId, who, readTips(sessionId));
+    const gone = earlier(sessionId, who);
     return gone.starts.length + gone.lost.length > 0 ? unknown('it has no git directory now, although the session pinned a checkout at that path (a hidden or removed .git)', true) : { kind: 'empty' };
   }
   const known = readEntry(sessionId, who); // the hit path reads no other pin
   if (known !== 'absent' && known !== 'bad') return known.start;
   if (known === 'bad') return unknown('its recorded start is unreadable');
-  const tips = readTips(sessionId); // none: a session from before v0.36.7, or its snapshot failed
+  const tips = readTips(sessionId, who.common); // none: a session from before v0.36.7, its snapshot failed, or a repository first seen now
   // Listed at the session's start, so its pin was made then: a missing one is no first sight.
   if (tips?.worktrees.some((w) => w.key === who.key)) return unknown('its start pin, made when the session started, is missing', true);
-  const before = earlier(sessionId, who, tips);
+  const before = earlier(sessionId, who);
   if (before.starts.length + before.lost.length > 0) return carryOver(sessionId, top, who, tips, before);
-  const found = discover(top, who, tips);
+  const found = discover(top, who, tips, () => readTips(sessionId), () => projectIsNoRepo(sessionId));
   if (found.dirty === null) return found.start; // a git error: not pinned, asked again next time
   if (!recordChanges(sessionId, top, found.dirty)) return unknown('the changes already made in it could not be recorded', true);
   writeOnce(startPinFile(sessionId, who.key), JSON.stringify({ v: 1, top: who.top, id: who.id, start: found.start } satisfies Entry));
@@ -468,9 +578,9 @@ interface Earlier {
 
 /** What the session registered at `who`'s path under another identity: the first top's coverage pin,
  *  the start pins in the session dir, and the worktrees the snapshot lists (a listed one whose pin is
- *  gone or unreadable is lost). For a checkout with no git, also at a path above it: git finds the
+ *  gone or unreadable is lost; the snapshots of every repository count). For a checkout with no git, also at a path above it: git finds the
  *  repository from a subdirectory, so a checkout under a pinned top that has none lost its `.git`. */
-function earlier(sessionId: string, who: TopIdentity, tips: Tips | null): Earlier {
+function earlier(sessionId: string, who: TopIdentity): Earlier {
   const out: Earlier = { keys: [], starts: [], lost: [] };
   const above = who.id === 'nogit';
   const at = (p: unknown): p is string => typeof p === 'string' && (p === who.top || (above && who.top.startsWith(p.endsWith(sep) ? p : p + sep)));
@@ -490,14 +600,14 @@ function earlier(sessionId: string, who: TopIdentity, tips: Tips | null): Earlie
     out.keys.push(m[1]!);
     out.starts.push(e.start);
   }
-  for (const w of tips?.worktrees ?? []) if (at(w.top) && w.key !== who.key && !out.keys.includes(w.key)) out.lost.push(`the start pin of ${w.top} is missing or unreadable`);
+  for (const w of allListedWorktrees(sessionId)) if (at(w.top) && w.key !== who.key && !out.keys.includes(w.key)) out.lost.push(`the start pin of ${w.top} is missing or unreadable`);
   return out;
 }
 
 /** The keys of the identities the session registered at `who`'s path before this one (empty: none, or unreadable). */
 export function earlierKeys(sessionId: string, who: TopIdentity): string[] {
   try {
-    return earlier(sessionId, who, readTips(sessionId)).keys;
+    return earlier(sessionId, who).keys;
   } catch {
     return [];
   }
@@ -543,6 +653,26 @@ function carryOver(sessionId: string, top: string, who: TopIdentity, tips: Tips 
   return winner === 'absent' || winner === 'bad' ? first : winner.start;
 }
 
+/** Whether the project dir the session started in is no repo: its coverage pin's top has no `.git` at or
+ *  above it. Then its repos have no snapshot unless the walk at the session's start found them (#39). */
+function projectIsNoRepo(sessionId: string): boolean {
+  try {
+    const cp = readJsonFile(join(ensureSessionDir(sessionId), COVERAGE_PIN_FILE)) as { top?: unknown } | 'absent' | 'bad';
+    return typeof cp === 'object' && cp !== null && typeof cp.top === 'string' && nearestGitTop(cp.top) === null;
+  } catch {
+    return false;
+  }
+}
+
+/** Why a repository with history has no start when the session has no snapshot of it. In a project dir that is
+ *  no repo (#39) the repo was first seen during the session (or its snapshot at the start failed): there are
+ *  no tips to relate its HEAD to. The other text is the one written for a session from before v0.36.7. */
+function noSnapshotReason(noRepoProject: boolean): string {
+  return noRepoProject
+    ? `it was first seen during the session (or its start snapshot could not be taken): the project dir is no repo, so it has no start snapshot, and a new session pins the repos below the project dir only within the caps (depth ${MAX_NESTED_DEPTH}, ${MAX_NESTED_DIRS} dirs, ${MAX_NESTED_REPOS} repos)`
+    : 'the session has no start snapshot (it began before v0.36.7, or the snapshot could not be taken), so only the checkout it started in has a known start';
+}
+
 /** The repo-relative paths in which HEAD differs from the carried-over start (`diff --name-only -z <start> HEAD`,
  *  renames off; for an empty start, the files of HEAD). Null when git fails or ran out of time; 'many' past the cap. */
 function committedDifferences(top: string, start: StartRef): string[] | null | 'many' {
@@ -561,7 +691,13 @@ function committedDifferences(top: string, start: StartRef): string[] | null | '
 
 /** Relates the checkout's HEAD to the frozen tips. `dirty`: the repo-relative paths that differ from
  *  the start now, or null when git failed or ran out of time (the answer is then not pinned). */
-function discover(top: string, who: TopIdentity, tips: Tips | null): { start: StartRef; dirty: string[] | null } {
+function discover(
+  top: string,
+  who: TopIdentity,
+  tips: Tips | null,
+  sessionTips: () => Tips | null,
+  noRepoProject: () => boolean,
+): { start: StartRef; dirty: string[] | null } {
   const transient = (reason: string) => ({ start: unknown(reason, true), dirty: null });
   const common = who.common!; // a repo: topIdentity gave no `unknown` and was not `nogit`
   const sameRepo = tips !== null && common === tips.common;
@@ -582,7 +718,7 @@ function discover(top: string, who: TopIdentity, tips: Tips | null): { start: St
   } else {
     const h = head.out.trim();
     base = h;
-    if (tips === null) start = unknown('the session has no start snapshot (it began before v0.36.7, or the snapshot could not be taken), so only the checkout it started in has a known start');
+    if (tips === null) start = sessionTips() !== null ? unknown(`it belongs to another repository (${common}) than the one the session started in, and it has history`) : unknown(noSnapshotReason(noRepoProject()));
     else if (!sameRepo) start = unknown(`it belongs to another repository (${common}) than the one the session started in, and it has history`);
     else {
       const input = `${h}\n${tips.tips.map((t) => `^${t}\n`).join('')}`;

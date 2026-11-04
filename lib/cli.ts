@@ -69,6 +69,10 @@ import { GOODBOY_CASES, readUserCases, runSmoke, smokeSummary } from './smoke';
 import { surveyProject } from './test-survey';
 import { BACKFILL_FILE, backfillSummary, DEFAULT_BATCH, markTarget, MAX_TARGETS, mergeSurvey, nextBatch, readBackfill, repoRel, type TargetStatus, withBackfillLock, writeBackfill } from './test-backfill';
 import { extraBlobsFor, repoTop } from './changed-coverage';
+import { changedEntries, MAX_CHANGED_ENTRIES, scopeCoverageTops } from './coverage-entries';
+import { repoOfFile, type RepoWalkMemo } from './nested-repos';
+import { isUnder, realDeep } from './private-files';
+import { readTopStart, topIdentity } from './start-pins';
 
 // ---- 유틸 ----
 
@@ -295,12 +299,37 @@ function failOutsideRepo(cmd: string, file: string): never {
 
 /** (v0.36.6) `extra_blobs`: the content ids of the listed files the record's `tree` lacks (git-ignored
  *  files), taken here and never from the agent: whatever the input carried is dropped first. See
- *  lib/changed-coverage.ts extraBlobsFor, which hashes them the way the Stop's check does. */
-function setExtraBlobs(cwd: string, result: { extra_blobs?: Record<string, string> }, tree: string | null | undefined, files: readonly string[]): void {
+ *  lib/changed-coverage.ts extraBlobsFor, which hashes them the way the Stop's check does.
+ *  Judged the way the Stop judges the files: a project dir that is a repo has one group (every file,
+ *  a nested clone's too, against the project repo's `tree`), so the blobs are taken against `tree`
+ *  for all of them. (#39) A project dir that is no repo judges each repo apart: a file of a repo
+ *  inside it against that repo's entry of `trees` (nothing for a repo with no tree, or one git did not
+ *  answer for), and a loose file has none. */
+function setExtraBlobs(
+  cwd: string,
+  result: { extra_blobs?: Record<string, string> },
+  tree: string | null | undefined,
+  files: readonly string[],
+  trees: Readonly<Record<string, string>> = {},
+): void {
   delete result.extra_blobs;
-  const top = topOf(cwd);
-  const extra = top === null ? undefined : extraBlobsFor(top, tree, files);
-  if (extra !== undefined) result.extra_blobs = extra;
+  const own = topOf(cwd);
+  const extra: Record<string, string> = {};
+  if (own !== null) {
+    Object.assign(extra, extraBlobsFor(own, tree, files));
+  } else {
+    const memo: RepoWalkMemo = new Map();
+    const groups = new Map<string, { top: string; tree: string | undefined; files: string[] }>();
+    for (const f of files) {
+      const repo = repoOfFile(f, cwd, memo);
+      if (repo === null || repo.unconfirmed === true) continue;
+      const g = groups.get(repo.realTop) ?? { top: repo.top, tree: trees[repo.realTop], files: [] };
+      g.files.push(f);
+      groups.set(repo.realTop, g);
+    }
+    for (const g of groups.values()) Object.assign(extra, extraBlobsFor(g.top, g.tree, g.files));
+  }
+  if (Object.keys(extra).length > 0) result.extra_blobs = extra;
 }
 
 export async function cmdReviewWrite(cwd: string, args: string[]): Promise<void> {
@@ -326,7 +355,12 @@ export async function cmdReviewWrite(cwd: string, args: string[]): Promise<void>
   result.reviewed_files = (result.reviewed_files ?? []).map((f) => openedPath(cwd, f));
   // (#26) The reviewed content, taken here and never from the agent, as test-write does.
   result.tree = workTreeState(cwd).tree;
-  setExtraBlobs(cwd, result, result.tree, result.reviewed_files);
+  // (#39) And the trees of the other repos the reviewed files belong to, as test-write records them (taken
+  //   from git; whatever the input carried is gone with the validator's fresh value, the delete keeps it so).
+  delete result.trees;
+  const repos = repoTrees(result.reviewed_files, cwd);
+  if (Object.keys(repos.trees).length > 0) result.trees = repos.trees;
+  setExtraBlobs(cwd, result, result.tree, result.reviewed_files, repos.trees);
   const reviewsDir = join(cwd, '.claude', 'reviews');
   ensureDir(reviewsDir);
   const outPath = uniqueJsonPath(reviewsDir, timestampToFilename(result.timestamp));
@@ -342,6 +376,9 @@ export async function cmdReviewWrite(cwd: string, args: string[]): Promise<void>
   process.stdout.write(
     JSON.stringify({ ok: true, path: outPath, timestamp: result.timestamp }) + '\n',
   );
+  if (repos.dropped.length > 0) {
+    process.stderr.write(`warning: reviewed files span more repos than goodboy hashes; no tree recorded for ${repos.dropped.join(', ')} (the review has no tree for them).\n`);
+  }
 }
 
 // ---- 명령: test-write ----
@@ -600,6 +637,47 @@ export function byTestType(suites: TestSuiteRun[]): NonNullable<TestResult['by_t
   return out;
 }
 
+/** One `cli.ts diff-coverage` output of `coverage.changed` (`label` names it in an error). False when its
+ *  basic shape is wrong, so the caller stops there. */
+function validateChangedEntry(raw: unknown, label: string, errors: string[]): boolean {
+  const ch = raw as Record<string, unknown> | null;
+  const okNum = (v: unknown) => typeof v === 'number' && Number.isInteger(v) && v >= 0;
+  if (typeof ch !== 'object' || ch === null || Array.isArray(ch) || !okNum(ch.covered) || !okNum(ch.total) || (ch.covered as number) > (ch.total as number) || !Array.isArray(ch.files_without_executed_changes)) {
+    errors.push(`${label} must be the whole \`cli.ts diff-coverage\` output: {covered, total, files_without_executed_changes, files, in_report, diff_lines, base, top}.`);
+    return false;
+  }
+  // (I1) The per-file part the test gate reads.
+  if (ch.files !== undefined) {
+    const files = ch.files as Record<string, unknown> | null;
+    const bad =
+      typeof files !== 'object' || files === null || Array.isArray(files) ||
+      Object.values(files).some((t) => {
+        const v = t as Record<string, unknown> | null;
+        return typeof v !== 'object' || v === null || !okNum(v.covered) || !okNum(v.total) || (v.covered as number) > (v.total as number);
+      });
+    if (bad) errors.push(`${label}.files must map each file to {covered, total} (whole numbers, covered ≤ total), as diff-coverage prints it.`);
+  }
+  if (ch.in_report !== undefined && (!Array.isArray(ch.in_report) || ch.in_report.some((f) => typeof f !== 'string'))) {
+    errors.push(`${label}.in_report must be the list of file paths diff-coverage prints.`);
+  }
+  if (ch.diff_lines !== undefined) {
+    const d = ch.diff_lines as Record<string, unknown> | null;
+    if (typeof d !== 'object' || d === null || Array.isArray(d) || Object.values(d).some((n) => !okNum(n))) {
+      errors.push(`${label}.diff_lines must map each file to its added lines (a whole number), as diff-coverage prints it.`);
+    }
+  }
+  if (ch.base !== undefined && (typeof ch.base !== 'string' || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(ch.base))) {
+    errors.push(`${label}.base must be the object id diff-coverage prints.`);
+  }
+  if (ch.top !== undefined && (typeof ch.top !== 'string' || ch.top.trim() === '')) {
+    errors.push(`${label}.top must be the repo path diff-coverage prints.`);
+  }
+  if (ch.base_source !== undefined && ch.base_source !== 'start' && ch.base_source !== 'head' && ch.base_source !== 'arg') {
+    errors.push(`${label}.base_source must be "start", "head" or "arg", as diff-coverage prints it.`);
+  }
+  return true;
+}
+
 function validateCoverageInput(raw: unknown, errors: string[]): void {
   const c = raw as Record<string, unknown> | null;
   if (typeof c !== 'object' || c === null || (c.status !== 'measured' && c.status !== 'unavailable')) {
@@ -615,34 +693,15 @@ function validateCoverageInput(raw: unknown, errors: string[]): void {
     }
   }
   if (c.changed !== undefined) {
-    const ch = c.changed as Record<string, unknown> | null;
-    const okNum = (v: unknown) => typeof v === 'number' && Number.isInteger(v) && v >= 0;
-    if (typeof ch !== 'object' || ch === null || !okNum(ch.covered) || !okNum(ch.total) || (ch.covered as number) > (ch.total as number) || !Array.isArray(ch.files_without_executed_changes)) {
-      errors.push('coverage.changed must be the whole `cli.ts diff-coverage` output: {covered, total, files_without_executed_changes, files, in_report, diff_lines, base}.');
-      return;
-    }
-    // (I1) The per-file part the test gate reads.
-    if (ch.files !== undefined) {
-      const files = ch.files as Record<string, unknown> | null;
-      const bad =
-        typeof files !== 'object' || files === null || Array.isArray(files) ||
-        Object.values(files).some((t) => {
-          const v = t as Record<string, unknown> | null;
-          return typeof v !== 'object' || v === null || !okNum(v.covered) || !okNum(v.total) || (v.covered as number) > (v.total as number);
-        });
-      if (bad) errors.push('coverage.changed.files must map each file to {covered, total} (whole numbers, covered ≤ total), as diff-coverage prints it.');
-    }
-    if (ch.in_report !== undefined && (!Array.isArray(ch.in_report) || ch.in_report.some((f) => typeof f !== 'string'))) {
-      errors.push('coverage.changed.in_report must be the list of file paths diff-coverage prints.');
-    }
-    if (ch.diff_lines !== undefined) {
-      const d = ch.diff_lines as Record<string, unknown> | null;
-      if (typeof d !== 'object' || d === null || Array.isArray(d) || Object.values(d).some((n) => !okNum(n))) {
-        errors.push('coverage.changed.diff_lines must map each file to its added lines (a whole number), as diff-coverage prints it.');
+    // (#39) One diff-coverage output, or a list of them (one per repo when a run covered several repos).
+    if (Array.isArray(c.changed)) {
+      if (c.changed.length === 0 || c.changed.length > MAX_CHANGED_ENTRIES) {
+        errors.push(`coverage.changed as a list needs 1 to ${MAX_CHANGED_ENTRIES} entries, one whole \`cli.ts diff-coverage\` output per repo.`);
+        return;
       }
-    }
-    if (ch.base !== undefined && (typeof ch.base !== 'string' || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(ch.base))) {
-      errors.push('coverage.changed.base must be the object id diff-coverage prints.');
+      for (const [i, e] of c.changed.entries()) if (!validateChangedEntry(e, `coverage.changed[${i}]`, errors)) return;
+    } else if (!validateChangedEntry(c.changed, 'coverage.changed', errors)) {
+      return;
     }
   }
   // (#23) Changed files the tests run only as a subprocess, which the coverage tool cannot see.
@@ -652,12 +711,43 @@ function validateCoverageInput(raw: unknown, errors: string[]): void {
       !Array.isArray(s) ||
       s.some((e) => {
         const v = e as Record<string, unknown> | null;
-        return typeof v !== 'object' || v === null || typeof v.file !== 'string' || v.file.trim() === '' || typeof v.test !== 'string' || v.test.trim() === '';
+        return (
+          typeof v !== 'object' || v === null || typeof v.file !== 'string' || v.file.trim() === '' || typeof v.test !== 'string' || v.test.trim() === '' ||
+          (v.top !== undefined && (typeof v.top !== 'string' || v.top.trim() === ''))
+        );
       })
     ) {
-      errors.push('coverage.subprocess must be a list of {file, test}: a changed file (repo-relative) and the test file that runs it as a process.');
+      errors.push('coverage.subprocess must be a list of {file, test, top?}: a changed file (repo-relative), the test file that runs it as a process, and the real top of its repo when the run covers several repos.');
     }
   }
+}
+
+/** The tested files none of whose changed lines ran: the names in `files_without_executed_changes` of the
+ *  `coverage.changed` entries of the repos the tested files belong to (`changedEntries`, #39: one entry per repo
+ *  when a run covered several). The report's names are absolute (`diff-coverage` joins the repo top), the agent's
+ *  `tested_files` as it wrote them, so both are compared as one spelling: absolute and with links resolved (a
+ *  relative tested name against the repo or the project dir, a relative reported name against the repo). Names
+ *  are returned as the report has them. */
+function idleTestedFiles(result: TestResult, spelledTested: readonly string[], cwd: string): string[] {
+  const own = topOf(cwd);
+  const ownReal = own === null ? null : realDeep(own);
+  const memo: RepoWalkMemo = new Map();
+  const repos = new Set<string>();
+  for (const f of result.tested_files ?? []) {
+    const repo = repoOfFile(f, cwd, memo);
+    const real = repo === null || repo.realTop === ownReal ? ownReal : repo.realTop;
+    if (real !== null) repos.add(real);
+  }
+  const idle: string[] = [];
+  for (const real of repos) {
+    const tested = new Set<string>([...(result.tested_files ?? []), ...spelledTested.map((t) => resolve(real, t)), ...spelledTested.map((t) => resolve(cwd, t))].map((t) => realDeep(t)));
+    for (const e of changedEntries(result, real, ownReal)) {
+      for (const f of Array.isArray(e.files_without_executed_changes) ? e.files_without_executed_changes : []) {
+        if (typeof f === 'string' && (spelledTested.includes(f) || tested.has(realDeep(resolve(real, f)))) && !idle.includes(f)) idle.push(f);
+      }
+    }
+  }
+  return idle;
 }
 
 export async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
@@ -680,6 +770,8 @@ export async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
   // The tested files as the agent spelled them (repo-relative, like the coverage report's keys):
   //   the idle-file warning below compares against them.
   const spelledTested = [...(result.tested_files ?? [])];
+  // (#39) A `top` that is no repo inside the project dir drops its coverage entry (or subprocess pair).
+  const droppedTops = result.coverage ? scopeCoverageTops(result.coverage, cwd) : [];
   // (#32) Absolute paths, resolved against the project dir here, so the Stop never resolves a
   //   relative name against its own process dir (which follows a model's `cd`).
   result.tested_files = spelledTested.map((f) => openedPath(cwd, f));
@@ -700,7 +792,7 @@ export async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
   delete result.trees;
   const repos = repoTrees(result.tested_files, cwd);
   if (Object.keys(repos.trees).length > 0) result.trees = repos.trees;
-  setExtraBlobs(cwd, result, state.tree, result.tested_files);
+  setExtraBlobs(cwd, result, state.tree, result.tested_files, repos.trees);
   const testsDir = join(cwd, '.claude', 'tests');
   ensureDir(testsDir);
   const outPath = uniqueJsonPath(testsDir, timestampToFilename(result.timestamp));
@@ -717,7 +809,8 @@ export async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
     JSON.stringify({ ok: true, path: outPath, timestamp: result.timestamp }) + '\n',
   );
   // A warning here; the test gate blocks on unrun changed lines (track I, lib/changed-coverage.ts).
-  const idle = (result.coverage?.changed?.files_without_executed_changes ?? []).filter((f) => spelledTested.includes(f));
+  for (const w of droppedTops) process.stderr.write(w + '\n');
+  const idle = idleTestedFiles(result, spelledTested, cwd);
   if (idle.length > 0) {
     process.stderr.write(`warning: no changed line of these tested files ran in the tests: ${idle.join(', ')}\n`);
   }
@@ -791,15 +884,39 @@ async function cmdRegression(cwd: string, args: string[]): Promise<void> {
 
 // ---- command: diff-coverage ----
 
-/** `diff-coverage <report> [--base <rev>|empty]`: changed lines a coverage report saw executed. */
-function cmdDiffCoverage(cwd: string, args: string[]): void {
+/** `diff-coverage <report> [--base <rev>|empty]`: changed lines a coverage report saw executed. The repo is
+ *  the one the shell is in (`shell`); `projectDir` is the session's project dir.
+ *  (#39) The base. `--base` is taken as given (`base_source: "arg"`). Without it the default is HEAD
+ *  (`"head"`), except in a nested repo of a project dir that is no repo, in a session (`CLAUDE_CODE_SESSION_ID`):
+ *  there it is the repo's start pin, read and nothing written (`"start"`: a commit, or the empty tree). HEAD
+ *  there would hide what the session changed in a repo that already had commits, and the Stop judges the repo
+ *  against its start; a repo with no pin, or an unknown one, fails with that reason. */
+function cmdDiffCoverage(shell: string, projectDir: string, args: string[], env: NodeJS.ProcessEnv = process.env): void {
   const report = args.find((a, i) => !a.startsWith('--') && args[i - 1] !== '--base');
   const b = args.indexOf('--base');
-  const base = b >= 0 ? args[b + 1] : undefined;
+  let base = b >= 0 ? args[b + 1] : undefined;
   if (!report) fail('usage: diff-coverage <coverage report> [--base <rev>|empty]');
-  const out = diffCoverageOf(cwd, report, base);
+  let baseSource: 'start' | 'head' | 'arg' = base !== undefined ? 'arg' : 'head';
+  const sid = (env.CLAUDE_CODE_SESSION_ID ?? '').trim();
+  if (base === undefined && sid !== '' && topIdentity(projectDir).id === 'nogit') {
+    const repo = topOf(shell);
+    if (repo !== null && realDeep(repo) !== realDeep(projectDir) && isUnder(repo, projectDir)) {
+      const start = readTopStart(sid, repo);
+      if (start.kind === 'commit') base = start.head;
+      else if (start.kind === 'empty') base = 'empty';
+      else {
+        const why = start.kind === 'unknown' ? `its start is unknown: ${start.reason}` : 'this session has no start pin for it (it was not in the repos found when the session started, and no hook has seen it since)';
+        fail(
+          `diff-coverage: cannot measure against the session's start in ${repo}: ${why}. Measuring against HEAD would hide what this session changed there, ` +
+            'so nothing was measured. Pass --base <rev>|empty only if the user decided to accept that base.',
+        );
+      }
+      baseSource = 'start';
+    }
+  }
+  const out = diffCoverageOf(shell, report, base);
   if ('error' in out) fail(out.error);
-  process.stdout.write(JSON.stringify(out) + '\n');
+  process.stdout.write(JSON.stringify({ ...out, base_source: baseSource }) + '\n');
 }
 
 // ---- 명령: acceptance-list ----
@@ -1302,7 +1419,7 @@ async function main(): Promise<void> {
         await cmdSkillGap(cwd, args);
         break;
       case 'diff-coverage':
-        cmdDiffCoverage(shell, args);
+        cmdDiffCoverage(shell, cwd, args);
         break;
       case 'knowledge-check': {
         // The keep-project-knowledge skill's done criteria (track H §14.3).

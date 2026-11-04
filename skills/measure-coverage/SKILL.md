@@ -26,11 +26,19 @@ every changed code line runs in a test, or the user exempted its file.
    user's decision). Stop here.
 3. Run it once over the tests of the change and take line and branch percentages from its
    summary.
-4. Changed lines: `bun "$GB/lib/cli.ts" diff-coverage <report> [--base <rev>|empty]` (the
-   base: the commit the session started from, when the task committed already; `empty` when
-   the repo had no commit then; else HEAD. The gate rejects a later base and prints the right
-   one). It prints `{covered, total, files_without_executed_changes, files, in_report,
-   diff_lines, base}`; copy it whole into a passing result made after the last edit.
+4. Changed lines: `bun "$GB/lib/cli.ts" diff-coverage <report> [--base <rev>|empty]`, run in
+   the repo the report is for. The base: the commit the session started from, when the task
+   committed already; `empty` when the repo had no commit then; else HEAD. The gate rejects a
+   later base and prints the right one. In a repo nested in a project dir that is no repo (a
+   plain folder holding `be/` and `fe/`), a session measures against that repo's start
+   by itself (`base_source: "start"`); give no `--base` there. When no start is known for
+   the repo it fails and says why: pass `--base` then only if the user decided to accept that
+   base. It prints `{covered, total, files_without_executed_changes, files, in_report,
+   diff_lines, base, top, base_source}`; copy it whole into a passing result made after the
+   last edit. When one run covers several repos, run it once in each repo and record
+   `changed` as a list with one such output per repo (`top` names the repo; keep it).
+   `coverage.subprocess` pairs name the repo the same way: `{file, test, top}`, with `top` as
+   the output's `top`.
 5. Every changed code file must be in `in_report`, with `covered` equal to `total` in `files`.
    A gap means a changed line no test ran: write the test (write-regression-test) and measure
    again. A file the report lacks ran in no test (a types-only JS/TS file and a non-code file
@@ -45,8 +53,11 @@ For record-tests:
 "coverage": {"status": "measured", "tool": "bun test --coverage", "line_pct": 81.2,
   "branch_pct": 70.5, "changed": {"covered": 52, "total": 52,
   "files_without_executed_changes": [], "files": {"src/a.ts": {"covered": 52, "total": 52}},
-  "in_report": ["src/a.ts"], "diff_lines": {"src/a.ts": 52}, "base": "<commit id>"}}
+  "in_report": ["src/a.ts"], "diff_lines": {"src/a.ts": 52}, "base": "<commit id>",
+  "top": "<repo dir>", "base_source": "head"}}
 ```
+
+Several repos in one run: `"changed": [<the output run in be/>, <the output run in fe/>]`.
 
 ## Done when
 - [ ] `coverage` is `measured` with the whole `changed`, and no changed code line is left

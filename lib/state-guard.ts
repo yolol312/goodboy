@@ -19,7 +19,7 @@ import { segmentChanging } from './outward-command';
 import { safeToolUseId } from './approval-marker';
 import { MAX_STATE_BYTES } from './safe-read';
 
-const GUARDED = /^(?:edits\.jsonl|dispatch-log\.jsonl|skill-evidence\.jsonl|commit-issue-pins\.json|marker-evidence\.jsonl|project-mode-pin\.json|coverage-pin\.json|criteria-pin\.json|criteria-seen\.json|judged-weakened\.json|worktrees\.txt|start-tips\.json|(?:start-pin|criteria-pin|criteria-seen)-[0-9a-f]{16}\.json|\.goodboy-last-(?:review|test)-[0-9a-f]+\.json|\.goodboy-validation-failed\.json)$/;
+const GUARDED = /^(?:edits\.jsonl|dispatch-log\.jsonl|skill-evidence\.jsonl|commit-issue-pins\.json|marker-evidence\.jsonl|project-mode-pin\.json|coverage-pin\.json|criteria-pin\.json|criteria-seen\.json|judged-weakened\.json|worktrees\.txt|start-tips(?:-[0-9a-f]{16})?\.json|(?:start-pin|criteria-pin|criteria-seen)-[0-9a-f]{16}\.json|\.goodboy-last-(?:review|test)-[0-9a-f]+\.json|\.goodboy-validation-failed\.json)$/;
 const CURSOR = /^\.goodboy-last-(?:review|test)-[0-9a-f]+\.json$/;
 /** Evidence logs: a line added during a model Bash call would be forged evidence (a skill run,
  *  the user's non-project answer), so these keep only their old lines, and one the call
@@ -32,10 +32,11 @@ const EVIDENCE = /^(?:skill-evidence|marker-evidence)\.jsonl$/;
  *  (I2 security review round 2: a crafted seen list failed the gate open). The worktree pin
  *  (#21) is no longer written or read since v0.36.10 (#35: a nested worktree is its own project
  *  whenever made); it stays guarded, so a session started on an older version keeps it as it was.
- *  The start pins of v0.36.7 (#33: the frozen ref tips,
- *  one start pin and one criteria baseline per checkout, the criteria a Stop required there) are
- *  the same kind: a forged one would set a checkout's start. */
-const HOOK_ONLY = /^(?:(?:project-mode-pin|coverage-pin|criteria-pin|criteria-seen|judged-weakened)\.json|worktrees\.txt|start-tips\.json|(?:start-pin|criteria-pin|criteria-seen)-[0-9a-f]{16}\.json)$/;
+ *  The start pins of v0.36.7 (#33: the frozen ref tips, one start pin and one criteria baseline per
+ *  checkout, the criteria a Stop required there) are the same kind: a forged one would set a
+ *  checkout's start. The tips are one file per repository (#39): `start-tips.json` for the session's
+ *  own, `start-tips-<hash>.json` for each nested repo of a project dir that is no repo. */
+const HOOK_ONLY = /^(?:(?:project-mode-pin|coverage-pin|criteria-pin|criteria-seen|judged-weakened)\.json|worktrees\.txt|start-tips(?:-[0-9a-f]{16})?\.json|(?:start-pin|criteria-pin|criteria-seen)-[0-9a-f]{16}\.json)$/;
 
 function keptEvidenceLine(name: string, line: string): boolean {
   if (name !== 'skill-evidence.jsonl') return false;

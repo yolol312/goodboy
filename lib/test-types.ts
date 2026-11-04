@@ -211,14 +211,21 @@ export interface TypeNeed {
 const outside = (r: string) => r === '..' || r.startsWith(`..${sep}`) || isAbsolute(r);
 
 /** The extra types a changed code file needs, or null: none, outside the repo top, or matched
- *  by one of the user's `test-type-exempt` globs (repo-top-relative, like the coverage ones). */
-export function typeNeedOf(file: string, top: string, exempt: readonly string[]): TypeNeed | null {
+ *  by one of the user's `test-type-exempt` globs (repo-top-relative, like the coverage ones). (#39) In a project
+ *  dir that is no repo `top` is the project dir (names like `be/src/x.ts`), `repoTop` the repo of the file: a
+ *  glob matches either name. */
+export function typeNeedOf(file: string, top: string, exempt: readonly string[], repoTop?: string): TypeNeed | null {
   const abs = resolvePath(file);
   const r = relative(top, abs);
   // A deleted file needs nothing (plan §15.6).
   if (r === '' || outside(r) || !existsSync(abs)) return null;
   const rel = r.split(sep).join('/');
   if (exempt.some((g) => new Bun.Glob(g).match(rel))) return null;
+  // (#39) `top` is the project dir of a repo below it: the globs match the name in the repo as well.
+  if (repoTop !== undefined) {
+    const inRepo = relative(repoTop, abs);
+    if (inRepo !== '' && !outside(inRepo) && exempt.some((g) => new Bun.Glob(g).match(inRepo.split(sep).join('/')))) return null;
+  }
   const need: TypeNeed = { abs, rel, types: [], why: {} };
   const boundary = boundaryReason(abs, rel);
   if (boundary) {
@@ -273,6 +280,8 @@ export function missingTestTypes(args: {
   top: string;
   exempt: readonly string[];
   standsAlone?: (r: TestResult) => boolean;
+  /** (#39) The repo of these edits, when `top` is the project dir of a repo below it (see `typeNeedOf`). */
+  repoTop?: string;
 }): { needs: TypeNeed[]; gaps: TypeGap[] } {
   const nowMs = Date.now();
   const alone = new Map<TestResult, boolean>();
@@ -286,7 +295,7 @@ export function missingTestTypes(args: {
   const gaps: TypeGap[] = [];
   const seen = new Set<string>();
   for (const edit of args.edits) {
-    const need = typeNeedOf(edit.file, args.top, args.exempt);
+    const need = typeNeedOf(edit.file, args.top, args.exempt, args.repoTop);
     if (!need || seen.has(need.abs)) continue;
     seen.add(need.abs);
     needs.push(need);

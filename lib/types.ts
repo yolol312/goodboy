@@ -51,6 +51,10 @@ export interface ReviewResult {
    *  keyed by absolute path) of reviewed files that `tree` lacks (git-ignored, or left out of the
    *  work-tree hash), so a file the tree cannot show is still judged by content. See `TestResult`. */
   extra_blobs?: Record<string, string>;
+  /** (#39) Set by `cli.ts review-write`, never by the agent: the working tree (as `tree`) of each other
+   *  git repo inside the project dir that a reviewed file belongs to, keyed by that repo's real top,
+   *  as `TestResult.trees`. */
+  trees?: Record<string, string>;
 }
 
 // ---- 층1 테스트 게이트 ----
@@ -111,21 +115,10 @@ export interface CoverageRecord {
   /** Line and branch coverage of the run, in percent. */
   line_pct?: number;
   branch_pct?: number;
-  /** Changed lines the run executed (`cli.ts diff-coverage`): per file (paths relative to the
-   *  repo top), the changed files the report saw at all (`in_report`), the files the diff has
-   *  and its base. */
-  changed?: {
-    covered: number;
-    total: number;
-    files_without_executed_changes: string[];
-    files?: Record<string, { covered: number; total: number }>;
-    in_report?: string[];
-    /** Every file the diff has, with its added lines (I1: an edited file outside it must equal
-     *  the base; only one with added lines can be "absent" from the report). */
-    diff_lines?: Record<string, number>;
-    /** The commit (or the empty tree) the diff ran against (I1: not after the session's start). */
-    base?: string;
-  };
+  /** Changed lines the run executed (`cli.ts diff-coverage`): one output, or a list of them with one
+   *  entry per repo when a run covered several (#39). Read only through `changedEntries`
+   *  (lib/coverage-entries.ts), which picks the entries of a repo. */
+  changed?: ChangedCoverage | ChangedCoverage[];
   /** Why coverage is unavailable (no tool, no report). */
   reason?: string;
   /** (#23) Changed files that tests run only as a subprocess (a hook or CLI entry point), which
@@ -134,7 +127,35 @@ export interface CoverageRecord {
    *  record passed, has a passing integration or e2e suite, lists that test in `test_files`, and
    *  the test's text names the file and starts a process (suites name no test files, so which
    *  suite ran the test is not checked). */
-  subprocess?: { file: string; test: string }[];
+  subprocess?: SubprocessPair[];
+}
+
+/** (#23) A changed file and the test that runs it as a process. `top` (#39): the real top of the repo
+ *  the file is in; without it the pair belongs to the project dir's own repo. */
+export interface SubprocessPair {
+  file: string;
+  test: string;
+  top?: string;
+}
+
+/** One `cli.ts diff-coverage` output: per file (paths relative to the repo top), the changed files the
+ *  report saw at all (`in_report`), the files the diff has and its base. */
+export interface ChangedCoverage {
+  covered: number;
+  total: number;
+  files_without_executed_changes: string[];
+  files?: Record<string, { covered: number; total: number }>;
+  in_report?: string[];
+  /** Every file the diff has, with its added lines (I1: an edited file outside it must equal
+   *  the base; only one with added lines can be "absent" from the report). */
+  diff_lines?: Record<string, number>;
+  /** The commit (or the empty tree) the diff ran against (I1: not after the session's start). */
+  base?: string;
+  /** (#39) The real top of the repo `diff-coverage` ran in. Without it the entry belongs to the
+   *  project dir's own repo (a record from before v0.36.14, or a hand-made one). */
+  top?: string;
+  /** (#39) Where `base` came from: `--base` (`arg`), the repo's session start (`start`), or HEAD. */
+  base_source?: 'start' | 'head' | 'arg';
 }
 
 export interface PrototypeMismatch {

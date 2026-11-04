@@ -40,6 +40,7 @@ import {
   recordMarkerEvidence,
 } from '../lib';
 import { noteSessionTop } from '../lib/changed-coverage';
+import { HOOK_CLOCK_MS, startHookClock } from '../lib/hook-clock';
 import { START_PIN_BUDGET_MS, startPinDeadline } from '../lib/start-pins';
 
 interface PostToolInput {
@@ -325,6 +326,9 @@ export function buildBashOutputWarning(
 }
 
 function main(): void {
+  // (v0.36.14, plan §15.30 item 12) One clock for the hook: the shell-write sweep's nested-repo walk and git
+  //   calls end before the 60 s hook timeout (lib/hook-clock.ts).
+  startHookClock(HOOK_CLOCK_MS.postToolUse);
   // (J3) The session for the fatal path's hook-error record (lib/gate-log.ts hookError).
   let errorSession: string | null = null;
   readStdin()

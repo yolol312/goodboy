@@ -625,6 +625,30 @@ describe('the git binary the hooks run (macOS shim)', () => {
     expect(w.xcalls()).toEqual([`${w.dir}|${w.shimDir}:/usr/bin:/bin|/opt/dev|--find git`]);
   });
 
+  test('the cwd is part of the memo key only when PATH has a relative or empty entry (v0.36.14)', async () => {
+    const { resolveGitBinary, resetGitBinary } = await import('../lib/git-binary');
+    resetGitBinary();
+    const w = world();
+    const elsewhere = tmp('cwd');
+    // Absolute PATH: another cwd is the same question, so xcrun runs once.
+    expect(resolveGitBinary(w.env(), w.dir, w.opts)).toBe(w.realGit);
+    expect(resolveGitBinary(w.env(), elsewhere, w.opts)).toBe(w.realGit);
+    expect(w.xcalls()).toHaveLength(1);
+    // A relative entry resolves against the cwd, so each cwd is asked.
+    const rel = { PATH: `bin${delimiter}${w.shimDir}${delimiter}/usr/bin` };
+    expect(resolveGitBinary(w.env(rel), w.dir, w.opts)).toBe(w.realGit);
+    expect(resolveGitBinary(w.env(rel), w.dir, w.opts)).toBe(w.realGit);
+    expect(w.xcalls()).toHaveLength(2);
+    expect(resolveGitBinary(w.env(rel), elsewhere, w.opts)).toBe(w.realGit);
+    expect(w.xcalls()).toHaveLength(3);
+    // An empty entry is the cwd as well.
+    const empty = { PATH: `${delimiter}${w.shimDir}` };
+    resolveGitBinary(w.env(empty), w.dir, w.opts);
+    resolveGitBinary(w.env(empty), elsewhere, w.opts);
+    expect(w.xcalls()).toHaveLength(5);
+    resetGitBinary();
+  });
+
   test('not darwin, or no shim first on PATH: plain git and xcrun is never run', async () => {
     const { resolveGitBinary } = await import('../lib/git-binary');
     const w = world();
@@ -680,7 +704,7 @@ describe('the git binary the hooks run (macOS shim)', () => {
     expect(w.xcalls()).toEqual([]); // the fake xcrun was never reached
   });
 
-  test('the answer is kept only while the selecting environment and the directory stay the same', async () => {
+  test('the answer is kept only while the selecting environment (and, for a relative PATH, the directory) stay the same', async () => {
     const { resolveGitBinary } = await import('../lib/git-binary');
     const w = world();
     const other = tmp('cwd');
@@ -696,14 +720,16 @@ describe('the git binary the hooks run (macOS shim)', () => {
     expect(w.xcalls().length).toBe(2);
     resolveGitBinary(w.env({ DEVELOPER_DIR: '/opt/a', SDKROOT: '/sdk' }), w.dir, w.opts);
     expect(w.xcalls().length).toBe(3);
-    resolveGitBinary(w.env({ DEVELOPER_DIR: '/opt/a', SDKROOT: '/sdk' }), other, w.opts); // another directory
-    expect(w.xcalls().length).toBe(4);
+    // (v0.36.14) Another directory is the same question while PATH holds absolute entries only (the next test
+    //   covers a relative or empty entry, which resolves against it).
+    resolveGitBinary(w.env({ DEVELOPER_DIR: '/opt/a', SDKROOT: '/sdk' }), other, w.opts);
+    expect(w.xcalls().length).toBe(3);
     resolveGitBinary(w.env({ PATH: `${w.shimDir}${delimiter}/bin` }), other, w.opts); // another PATH
-    expect(w.xcalls().length).toBe(5);
+    expect(w.xcalls().length).toBe(4);
     // A failure is kept too: a failing xcrun is not asked again for every git call.
     resolveGitBinary(w.env({ X_EXIT: '3', DEVELOPER_DIR: '/opt/b' }), w.dir, w.opts);
     resolveGitBinary(w.env({ X_EXIT: '3', DEVELOPER_DIR: '/opt/b' }), w.dir, w.opts);
-    expect(w.xcalls().length).toBe(6);
+    expect(w.xcalls().length).toBe(5);
   });
 
   test('on macOS the real answer is plain git or an absolute executable, and the test PATH skips the shim', async () => {

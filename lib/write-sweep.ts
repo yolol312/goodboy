@@ -8,7 +8,7 @@
 // such commands, so ordinary commands pay no `git status`.
 
 import { createHash } from 'node:crypto';
-import { readFileSync, statSync } from 'node:fs';
+import { lstatSync, readFileSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
 import { noteBashStart, openBashCalls, restoreProductionHosts, sweepNewMarkers, takeBashStart } from './approval-marker';
 import { bashChangedPaths } from './role-limits';
@@ -18,6 +18,11 @@ import { hookError, logGate } from './gate-log';
 import { gitOut } from './git-run';
 import { commandSegments, gitSubcommandAt } from './outward-command';
 import { envStr } from './token-habits';
+import { hookLeft } from './hook-clock';
+import { MAX_NESTED_REPOS, nestedRepos, type RepoRef } from './nested-repos';
+import { projectRoot } from './project-dir';
+import { realDeep } from './private-files';
+import { knownTops, nearestGitTop } from './start-pins';
 import { safeMtime } from './bash-read';
 
 /** At Stop: finishes the session's Bash calls that never reported back (`exit N` fires no post
@@ -120,7 +125,10 @@ export function afterBash(
       for (const dir of new Set([resolvePath(cwd), startCwd])) {
         const s = statusFiles(dir, timeoutMs);
         if (!s) {
-          swept = false;
+          // (#39) A project dir that is no repo: each repo below it is swept (within the same git budget).
+          const nested = nestedStatus(dir, timeoutMs, sessionId);
+          if (nested === null || nested.views.length === 0 || !nested.complete) swept = false;
+          for (const v of nested?.views ?? []) if (!views.has(v.top)) views.set(v.top, v.files);
           continue;
         }
         topOf.set(dir, s.top);
@@ -233,6 +241,89 @@ export function statusFiles(cwd: string, timeoutMs = 30_000): { top: string; fil
     if (!isGoodboyArtifact(abs)) files.push(abs);
   }
   return { top, files };
+}
+
+/** (#39, item 3) One walk down per project dir per hook process: the call's dir and the shell's start dir ask for the
+ *  same root, and the walk is the costly part (a stat per dir, a git call per `.git`). */
+const walks = new Map<string, ReturnType<typeof nestedRepos>>();
+function walkOnce(root: string): ReturnType<typeof nestedRepos> {
+  let w = walks.get(root);
+  if (w === undefined) {
+    w = nestedRepos(root);
+    walks.set(root, w);
+  }
+  return w;
+}
+
+/** Forgets the walks (the unit tests share one process; a hook is one). */
+export function resetWriteSweep(): void {
+  walks.clear();
+}
+
+/** The repos to sweep, in order: the ones the session already knows (a start pin or a tip snapshot names them),
+ *  then the walk's other repos, each once by its real top. The walk is capped at 64 repos in sorted order, so a
+ *  crowd of repos made later (`a000`..`a063`) could drop a real one; the known ones are never dropped. A repo
+ *  made mid-session behind 64 others can still miss the sweep (plan §15.30, known limits). */
+function sweepOrder(root: string, walked: readonly RepoRef[], sessionId?: string): RepoRef[] {
+  const spelledRoot = resolvePath(root);
+  const realRoot = realDeep(root);
+  const out: RepoRef[] = [];
+  const seen = new Set<string>();
+  const add = (ref: RepoRef): void => {
+    if (seen.has(ref.realTop)) return;
+    seen.add(ref.realTop);
+    out.push(ref);
+  };
+  for (const real of sessionId === undefined ? [] : knownTops(sessionId)) {
+    const rel = relative(realRoot, real);
+    if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) continue; // the project dir itself or outside it
+    try {
+      lstatSync(join(real, '.git')); // a pin of a repo since removed is no repo to sweep (it would read as an incomplete sweep)
+    } catch {
+      continue;
+    }
+    add({ top: join(spelledRoot, rel), realTop: real });
+  }
+  for (const ref of walked) add(ref);
+  return out;
+}
+
+/** (#39) git's status per repo below the project dir, for a call that ran in a project dir that is no repo (`dir`
+ *  is in no repo, so `statusFiles(dir)` has nothing to say): the repos the session knows first, then every other repo
+ *  `nestedRepos` finds, one `statusFiles` each, at most 64, all within `timeoutMs` in all. `complete` is false when
+ *  the walk hit a cap or the time ran out before every repo was read (the sweep then did not run in full). Null when
+ *  `dir` is not in a project dir of that kind. */
+export function nestedStatus(dir: string, timeoutMs: number, sessionId?: string): { views: { top: string; files: string[] }[]; complete: boolean } | null {
+  const root = projectRoot(dir);
+  if (nearestGitTop(root) !== null) return null;
+  // The walk counts against the same time, and nothing runs past the hook's clock (a hook killed here records no
+  //   write; the walk's confirmations are bounded by lib/nested-repos.ts, the statuses by `end`).
+  const end = Date.now() + Math.min(timeoutMs, hookLeft());
+  const views: { top: string; files: string[] }[] = [];
+  const read = new Set<string>();
+  let complete = true;
+  const sweep = (repos: readonly RepoRef[]): void => {
+    for (const repo of repos) {
+      if (read.has(repo.realTop)) continue;
+      const left = end - Date.now();
+      if (read.size >= MAX_NESTED_REPOS || left <= 0) {
+        complete = false;
+        return;
+      }
+      read.add(repo.realTop);
+      const s = statusFiles(repo.top, left);
+      if (s === null) complete = false;
+      else views.push(s);
+    }
+  };
+  // The known repos are read before the walk: planted `.git` dirs git cannot answer for cost the walk its time
+  //   (delta review: with a 3 s budget, the walk alone used it up), never the repos the session started with.
+  sweep(sweepOrder(root, [], sessionId));
+  if (end - Date.now() <= 0) return { views, complete: false };
+  const found = walkOnce(root);
+  if (found.capped) complete = false;
+  sweep(sweepOrder(root, found.repos));
+  return { views, complete };
 }
 
 /** Hashes of the content of up to 500 files of at most 1 MB each: the rest are left out, so

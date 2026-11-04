@@ -499,8 +499,9 @@ export function isMetadataNoTest(abs: string, root: string, baseline?: (rel: str
  *  (track L review), the testkit harness (#28), repository metadata (#30), documents and static
  *  previews do not. A test-named link into code, or out of the repo, is code. `baseline` reads a
  *  repo-relative path's content at the session's start (isMetadataNoTest); without it a
- *  manifest is always code. */
-export function needsTests(abs: string, root: string, previewGlobs: readonly string[] = [], baseline?: (rel: string) => string | null): boolean {
+ *  manifest is always code. `gitRoot` (#39): the repo top the metadata rule reads, when `root` is
+ *  the project dir of a repo below it. */
+export function needsTests(abs: string, root: string, previewGlobs: readonly string[] = [], baseline?: (rel: string) => string | null, gitRoot: string = root): boolean {
   if (isTestkitHarness(abs, root)) return false;
   // Seen below the root only: a repo under a tests/ dir would make every file a test file.
   const spelled = relativeInside(resolvePath(abs), resolvePath(root));
@@ -518,7 +519,9 @@ export function needsTests(abs: string, root: string, previewGlobs: readonly str
     }
     if (!shared && real !== null && testTool(real)) return false;
   }
-  if (isMetadataNoTest(abs, root, baseline)) return false;
+  // (#39) The metadata rule needs the repo (its top-level manifests, the start blob): `gitRoot` is the repo top
+  //   where `root` is a project dir that is no repo; the names above and below are the project dir's.
+  if (isMetadataNoTest(abs, gitRoot, baseline)) return false;
   return classifyFile(abs, root, previewGlobs) === 'code';
 }
 

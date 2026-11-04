@@ -7,6 +7,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve as resolvePath } from 'node:path';
 import { gitOut } from './git-run';
+import { realDeep } from './private-files';
 
 /** Per file (repo-relative): line → executed (true) or not (false), for executable lines. */
 export type LineHits = Map<string, Map<number, boolean>>;
@@ -259,6 +260,9 @@ export interface DiffCoverage {
   /** The commit, or the empty tree, the diff ran against (set by diffCoverageOf; the I1 gate
    *  checks it is not after the session's start). */
   base?: string;
+  /** (#39) The real top (`realDeep`) of the repo it ran in: a record that holds the output of several repos
+   *  names the repo of each (lib/coverage-entries.ts `changedEntries`). Set by diffCoverageOf. */
+  top?: string;
 }
 
 /** Changed executable lines the report saw executed. Lines the report does not list
@@ -321,7 +325,7 @@ export function diffCoverageOf(cwd: string, reportPath: string, base?: string): 
   if (changed === null) return { error: 'not inside a git repository' };
   if ('error' in changed) return changed;
   const known = new Set([...(git(changed.top, ['-c', 'core.quotePath=false', 'ls-files', '-z', '--cached', '--others', '--exclude-standard']) ?? '').split('\0').filter(Boolean), ...changed.files.keys()]);
-  return { ...diffCoverage(parseReport(text, format), changed.top, changed.files, known, format === 'go' ? goModules(changed.top, known) : []), base: id };
+  return { ...diffCoverage(parseReport(text, format), changed.top, changed.files, known, format === 'go' ? goModules(changed.top, known) : []), base: id, top: realDeep(changed.top) };
 }
 
 /** The `module` path of each go.mod in the repo, with its dir ('' for the top). */

@@ -6,6 +6,11 @@
 // agent's open Bash calls (lib/write-sweep.ts). Never blocks; any error is swallowed.
 
 import { appendDispatchLog, finishOpenBashCalls, hookError, outcomeOf } from '../lib';
+import { HOOK_CLOCK_MS, startHookClock } from '../lib/hook-clock';
+
+// (v0.36.14, plan §15.30 item 12) One clock for the hook: finishing the agent's open Bash calls runs the
+//   shell-write sweep, whose nested-repo walk and git calls end before the 15 s hook timeout (lib/hook-clock.ts).
+startHookClock(HOOK_CLOCK_MS.subagentStop);
 
 interface SubagentStopInput {
   session_id?: string;

@@ -27,6 +27,7 @@
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
 import { ensureSessionDir, getEditHistory } from './file-tracker';
+import { changedEntries, subprocessPairs } from './coverage-entries';
 import { currentHashBatch, OBJECT_ID as TREE_ID, spawnGit } from './git-run';
 import { knowledgeRoot, parsePolicyEntries, POLICY_FILE } from './project-knowledge';
 import { hasSpelling, sameFileSpelling } from './path-spelling';
@@ -37,7 +38,7 @@ import { commonDirOf, hasStartPin, nearestGitTop, sessionStartRan, takeStartSnap
 import { freshFor, stripLiteralsAndComments } from './test-validator';
 import type { ChangedFileEdit } from './review-validator';
 import { isTrustedTimestamp } from './trusted-time';
-import type { TestResult } from './types';
+import type { ChangedCoverage, TestResult } from './types';
 
 export type DiffCoverageMode = 'on' | 'warn' | 'off';
 
@@ -228,13 +229,14 @@ function isPinTop(pin: CoveragePin, top: string): boolean {
  *  checkout the session started in. A pin that is missing while SessionStart evidently ran (its
  *  tip snapshot or a start pin is there) is not made again: it stays missing, which is unknown.
  *  The session's first start also freezes the ref tips and pins the worktrees that exist
- *  (lib/start-pins.ts). */
-export function pinCoverageStart(sessionId: string, cwd: string): void {
+ *  (lib/start-pins.ts); in a project dir that is no repo it does so for each repo found below it.
+ *  Returns true when that walk down hit a cap (SessionStart says so). */
+export function pinCoverageStart(sessionId: string, cwd: string): boolean {
   try {
     const top = repoTop(cwd);
     const old = readPin(sessionId);
-    if (old && !isPinTop(old, top)) return;
-    if (!old && sessionStartRan(sessionId)) return;
+    if (old && !isPinTop(old, top)) return false;
+    if (!old && sessionStartRan(sessionId)) return false;
     const head = old && old.head !== undefined ? old.head : startHeadNow(top);
     const who = old ? null : topIdentity(top);
     const identity = old ? old.identity : who!.unknown === undefined && who!.id !== 'nogit' ? who!.key : undefined;
@@ -253,9 +255,10 @@ export function pinCoverageStart(sessionId: string, cwd: string): void {
       globs,
     };
     writeFileSync(join(ensureSessionDir(sessionId), PIN_FILE), JSON.stringify(pin), 'utf8');
-    if (!old) takeStartSnapshot(sessionId, top);
+    return old ? false : takeStartSnapshot(sessionId, top);
   } catch {
     // best-effort: without a pin, the policy file counts only when older than the session
+    return false;
   }
 }
 
@@ -734,6 +737,17 @@ export interface SameContentOptions {
   now?: () => number;
   maxTrees?: number;
   budgetMs?: number;
+  /** (#39) The time left of a deadline shared by several calls (the groups of one Stop,
+   *  lib/stop-groups.ts): a call takes what is left of it, never more than its own budget. */
+  until?: () => number;
+}
+
+/** The time left for a call: its own budget less what it has used, and never more than the shared deadline's. */
+function timeLeft(options: SameContentOptions, t0: number, now: () => number): () => number {
+  return () => {
+    const own = (options.budgetMs ?? TREE_BUDGET_MS) - (now() - t0);
+    return options.until === undefined ? own : Math.min(own, options.until());
+  };
 }
 
 /** A file's content and kind now: not there, a regular file (its blob id, and whether it is
@@ -849,7 +863,7 @@ export function withSameContent<T extends ChangedFileEdit, R extends Pick<TestRe
 ): T[] {
   const now = options.now ?? Date.now;
   const t0 = now();
-  const left = (): number => (options.budgetMs ?? TREE_BUDGET_MS) - (now() - t0);
+  const left = timeLeft(options, t0, now);
   // Newest first, each with its listed files resolved once (performance review).
   const records = [...results]
     .sort((a, b) => (a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0))
@@ -957,7 +971,7 @@ export function treeContent(
 ): (tree: string, abs: string) => boolean | undefined {
   const now = options.now ?? Date.now;
   const t0 = now();
-  const left = (): number => (options.budgetMs ?? TREE_BUDGET_MS) - (now() - t0);
+  const left = timeLeft(options, t0, now);
   const maxTrees = options.maxTrees ?? MAX_TREES;
   const want = new Map<string, Map<string, string>>(); // tree → abs → rel
   for (const [tree, files] of asks) {
@@ -1039,21 +1053,35 @@ function sameEntry(a: TreeEntry | undefined, b: TreeEntry | undefined): boolean 
  *  current content (`freshFor`), the best of them. (R2) A base other than the session's start
  *  HEAD is accepted for a file only when the file's entry there (mode and blob, or none) is its
  *  entry at the start: a diff against another base can list other lines, and ancestry says
- *  nothing about that. */
-export function changedLineGaps(args: { results: TestResult[]; edits: ChangedFileEdit[]; top: string; exempt: string[]; startHead?: string | null }): GapsOut {
+ *  nothing about that. (#39) A record's `coverage.changed` is one diff-coverage output or a list of them;
+ *  only the entries that belong to this repo count (`changedEntries`): `ownRealTop` is the real top of the
+ *  project dir's own repo (null: the project dir is no repo); left out it is this repo's, so an entry without
+ *  `top` belongs to it. */
+export function changedLineGaps(args: {
+  results: TestResult[];
+  edits: ChangedFileEdit[];
+  top: string;
+  exempt: string[];
+  startHead?: string | null;
+  ownRealTop?: string | null;
+  /** (#39) The repo's dir relative to the project dir (`be`), for a repo below a project dir that is no repo: the
+   *  exemption globs match a file's name in the repo (`src/x.ts`) and in the project dir (`be/src/x.ts`). */
+  exemptPrefix?: string;
+}): GapsOut {
   const nowMs = Date.now();
-  const whole = args.results.filter((r) => {
-    const ch = r.coverage?.status === 'measured' ? r.coverage.changed : undefined;
-    return (
-      r.verdict === 'pass' &&
-      isTrustedTimestamp(r.timestamp, nowMs) &&
-      !!ch &&
-      typeof ch.files === 'object' && ch.files !== null &&
-      Array.isArray(ch.in_report) &&
-      typeof ch.diff_lines === 'object' && ch.diff_lines !== null &&
-      typeof ch.base === 'string'
-    );
-  });
+  const realTop = realDeep(args.top);
+  const whole: { t: TestResult; ch: ChangedCoverage }[] = [];
+  for (const r of args.results) {
+    if (r.verdict !== 'pass' || !isTrustedTimestamp(r.timestamp, nowMs) || r.coverage?.status !== 'measured') continue;
+    for (const ch of changedEntries(r, realTop, args.ownRealTop)) {
+      if (
+        typeof ch.files === 'object' && ch.files !== null &&
+        Array.isArray(ch.in_report) &&
+        typeof ch.diff_lines === 'object' && ch.diff_lines !== null &&
+        typeof ch.base === 'string'
+      ) whole.push({ t: r, ch });
+    }
+  }
   // The files that need their lines run: inside the repo, not exempt, existing code (or a
   //   file a report measured).
   const globs = args.exempt.map((g) => new Bun.Glob(g));
@@ -1067,15 +1095,15 @@ export function changedLineGaps(args: { results: TestResult[]; edits: ChangedFil
     const r = relative(args.top, abs);
     if (r === '' || outside(r)) continue;
     const file = r.split(sep).join('/');
-    if (globs.some((g) => g.match(file))) continue;
-    const reported = existsSync(abs) && whole.some((t) => keyIn(args.top, t.coverage!.changed!.files!, file) !== null);
+    if (globs.some((g) => g.match(file) || (args.exemptPrefix ? g.match(`${args.exemptPrefix}/${file}`) : false))) continue;
+    const reported = existsSync(abs) && whole.some((w) => keyIn(args.top, w.ch.files!, file) !== null);
     if (!reported && !measurableCode(abs, readUntil)) continue;
     need.push({ abs, file, edit });
   }
   if (need.length === 0) return { measured: true, gaps: [] };
 
   if (whole.length === 0) return { measured: false, gaps: [] };
-  const tested = new Map(whole.map((t) => [t, new Set((t.tested_files ?? []).map((f) => recordPath(f)))]));
+  const tested = new Map(whole.map(({ t }) => [t, new Set((t.tested_files ?? []).map((f) => recordPath(f)))]));
 
   // (R2) A base is accepted per file: the start HEAD itself, or one where the file is what it is
   //   at the start. Each base is read once for all the files, and the start once.
@@ -1102,24 +1130,25 @@ export function changedLineGaps(args: { results: TestResult[]; edits: ChangedFil
   //   started: file-level evidence, listed apart.
   const read: SubprocessCache = { entry: new Map(), tests: new Map() };
   const acceptAsProcess = (fresh: TestResult[], file: string): boolean => {
-    if (!fresh.some((t) => subprocessEvidence(t, file, args.top, read))) return false;
+    if (!fresh.some((t) => subprocessEvidence(t, file, args.top, read, args.ownRealTop))) return false;
     subprocess.push(file);
     return true;
   };
   for (const { abs, file, edit } of need) {
-    const own = whole.filter((t) => hasPath(tested.get(t)!, abs) && freshFor(t, edit));
-    if (own.length === 0) {
+    const mine = whole.filter(({ t }) => hasPath(tested.get(t)!, abs) && freshFor(t, edit));
+    if (mine.length === 0) {
       gaps.push({ file, unmeasured: true });
       continue;
     }
-    const fresh = own.filter((t) => acceptsBase(t.coverage!.changed!.base!, file));
-    if (fresh.length === 0) {
-      gaps.push({ file, refusedBase: own[0]!.coverage!.changed!.base!, head: args.startHead ?? null });
+    const freshEntries = mine.filter(({ ch }) => acceptsBase(ch.base!, file));
+    if (freshEntries.length === 0) {
+      gaps.push({ file, refusedBase: mine[0]!.ch.base!, head: args.startHead ?? null });
       continue;
     }
+    const fresh = freshEntries.map(({ t }) => t);
     let best: { covered: number; total: number } | undefined;
-    for (const t of fresh) {
-      const files = t.coverage!.changed!.files!;
+    for (const { ch } of freshEntries) {
+      const files = ch.files!;
       const key = keyIn(args.top, files, file);
       const c = key === null ? undefined : files[key];
       if (c && (!best || c.covered / Math.max(1, c.total) > best.covered / Math.max(1, best.total))) best = c;
@@ -1128,16 +1157,16 @@ export function changedLineGaps(args: { results: TestResult[]; edits: ChangedFil
       if (best.covered < best.total && !acceptAsProcess(fresh, file)) gaps.push({ file, covered: best.covered, total: best.total });
       continue;
     }
-    if (fresh.some((t) => listed(args.top, t.coverage!.changed!.in_report!, file))) continue;
-    const added = fresh
-      .map((t) => {
-        const lines = t.coverage!.changed!.diff_lines!;
+    if (freshEntries.some(({ ch }) => listed(args.top, ch.in_report!, file))) continue;
+    const added = freshEntries
+      .map(({ ch }) => {
+        const lines = ch.diff_lines!;
         const key = keyIn(args.top, lines, file);
         return key === null ? undefined : lines[key];
       })
       .filter((n): n is number => typeof n === 'number');
     if (added.length === 0) {
-      const base = fresh[0]!.coverage!.changed!.base!;
+      const base = freshEntries[0]!.ch.base!;
       notInDiff.set(base, [...(notInDiff.get(base) ?? []), file]);
     } else if (Math.max(...added) > 0 && !acceptAsProcess(fresh, file)) {
       gaps.push({ file, absent: true });
@@ -1158,10 +1187,11 @@ const SPAWN_CALL = /\b(?:spawnSync|spawn|execFileSync|execFile|execSync|execa|fo
  *  in `coverage.subprocess`, the test is in its `test_files`, a passing integration or e2e suite
  *  ran, and the test's text names the file (its path or base name, or its stem as a quoted string
  *  next to its directory's name) and starts a process. */
-export function subprocessEvidence(t: TestResult, file: string, top: string, cache: SubprocessCache = { entry: new Map(), tests: new Map() }): boolean {
-  const pairs = (Array.isArray(t.coverage?.subprocess) ? t.coverage.subprocess.slice(0, MAX_SUBPROCESS_PAIRS) : []).filter(
-    (p) => !!p && p.file === file && typeof p.test === 'string',
-  );
+export function subprocessEvidence(t: TestResult, file: string, top: string, cache: SubprocessCache = { entry: new Map(), tests: new Map() }, ownRealTop?: string | null): boolean {
+  // (#39) The pairs of this repo (`subprocessPairs`: a pair without `top` belongs to the project dir's own repo).
+  const pairs = subprocessPairs(t, realDeep(top), ownRealTop)
+    .slice(0, MAX_SUBPROCESS_PAIRS)
+    .filter((p) => p.file === file && typeof p.test === 'string');
   if (pairs.length === 0 || t.verdict !== 'pass') return false;
   const typed = (t.suites ?? []).some((s) => !!s && (s.type === 'integration' || s.type === 'e2e') && s.passed > 0 && s.failed === 0);
   if (!typed) return false;
@@ -1219,7 +1249,24 @@ const PY_MAIN = /^\s*if\s+__name__\s*==\s*['"]__main__['"]/m;
 const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /** The model-facing reason (English): what did not run, and the only ways forward. */
-export function changedLineReason(out: GapsOut, cliPath: string): string {
+export function changedLineReason(out: GapsOut, cliPath: string, where: { repoDir?: string; loose?: boolean } = {}): string {
+  if (!out.measured && where.loose === true) {
+    // (#39) Files of a project dir that is no repo that no repo holds: diff-coverage cannot run outside a repo.
+    return (
+      'Changed-line coverage is not measured for the code files that are in no git repository (the project dir is none): ' +
+      '`diff-coverage` cannot run outside a repo, so no record can carry it. Record a `blocked` test result with the evidence ' +
+      '(why these files cannot be measured), or the user exempts them: a `decide: human` entry in .goodboy/policy.md with ' +
+      '`coverage-exempt: <glob>`, which counts from the next session. (changed-line coverage)'
+    );
+  }
+  if (!out.measured && where.repoDir !== undefined) {
+    return (
+      `Changed-line coverage is not measured for the repo \`${where.repoDir}\`: run the measure-coverage skill, then \`cd ${where.repoDir}\` ` +
+      `and run \`bun "${cliPath}" diff-coverage <report>\` there (it measures against that repo's own session start), and record its whole ` +
+      'output as an entry of `coverage.changed` (a list with one entry per repo when the run covers several) in a passing result. ' +
+      "With no coverage tool in the repo, record a `blocked` result with the evidence; adding a tool is the user's decision. (changed-line coverage)"
+    );
+  }
   if (!out.measured) {
     return (
       'Changed-line coverage is not measured: run the measure-coverage skill and record the whole ' +
@@ -1243,9 +1290,13 @@ export function changedLineReason(out: GapsOut, cliPath: string): string {
     )
     .join('; ');
   const refused = out.gaps.find((g): g is Extract<CoverageGap, { refusedBase: string }> => 'refusedBase' in g);
+  // Inside a repo nested in a project dir that is no repo `diff-coverage` takes that repo's own start as the base
+  //   (the measure-coverage skill: give no `--base` there), so the advice names no base.
   const base = refused
     ? `A coverage run against a commit other than the session's start counts for a file only where the file is the same ` +
-      `there: measure again with \`bun "${cliPath}" diff-coverage <report> --base ${refused.head ?? EMPTY_BASE}\` and record it. `
+      (where.repoDir !== undefined
+        ? `there: measure again inside \`${where.repoDir}\` with \`bun "${cliPath}" diff-coverage <report>\` (no \`--base\`: it measures against that repo's start) and record it. `
+        : `there: measure again with \`bun "${cliPath}" diff-coverage <report> --base ${refused.head ?? EMPTY_BASE}\` and record it. `)
     : '';
   const hidden = out.gaps.some((g) => 'hidden' in g)
     ? 'A file git does not show in the diff (ignored, assume-unchanged, a nested repo) has to be in it to be measured, or be the user\'s exemption. '

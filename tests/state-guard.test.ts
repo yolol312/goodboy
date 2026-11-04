@@ -112,6 +112,22 @@ describe('through the hooks', () => {
     expect(existsSync(pin)).toBe(false);
   });
 
+  // (#39, §15.30 item 2) A nested repo's tips file (`start-tips-<hash>.json`) is hook-only state like the
+  //   session's own `start-tips.json`: a rewrite is put back, one the call creates is removed.
+  test('a per-repository tips file is put back after a call, and one a call creates is removed', async () => {
+    const s = sandbox();
+    const tips = join(s.dir, 'start-tips-0123456789abcdef.json');
+    const body = JSON.stringify({ v: 1, common: '/x/.git', tips: [], worktrees: [] });
+    writeFileSync(tips, body);
+    await s.run('pre-tool-use', { tool_name: 'Bash', tool_use_id: 'toolu_s7', tool_input: { command: 'sh ./x.sh' } });
+    writeFileSync(tips, '{}');
+    const forged = join(s.dir, 'start-tips-fedcba9876543210.json');
+    writeFileSync(forged, body);
+    await s.run('post-tool-use', { tool_name: 'Bash', tool_use_id: 'toolu_s7', tool_input: { command: 'sh ./x.sh' }, tool_response: {} });
+    expect(readFileSync(tips, 'utf8')).toBe(body);
+    expect(existsSync(forged)).toBe(false);
+  });
+
   test('lines appended during the call by other hooks are kept', async () => {
     const s = sandbox();
     await s.run('pre-tool-use', { tool_name: 'Bash', tool_use_id: 'toolu_s4', tool_input: { command: 'ls' } });

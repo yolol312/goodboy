@@ -11,10 +11,11 @@
 
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
 import { stripHeredocs } from './bash-write';
 import { spawnGit } from './git-run';
 import { splitAliasValue } from './hook-git';
+import { repoOfFile, topOf as nestedTopOf, type RepoWalkMemo } from './nested-repos';
 import { isUnder, realDeep } from './private-files';
 import { agentName, ROUTE } from './routing-policy';
 import {
@@ -133,8 +134,7 @@ function git(cwd: string, args: string[], env: Record<string, string> = {}, time
 
 /** The repo's top directory in cwd's own spelling, or null outside a repo. */
 export function topOf(cwd: string): string | null {
-  const cdup = git(cwd, ['rev-parse', '--show-cdup']);
-  return cdup === null ? null : resolvePath(cwd, cdup || '.');
+  return nestedTopOf(cwd);
 }
 
 /** goodboy's own artifacts never count as content, on either side of the comparison:
@@ -214,61 +214,29 @@ const MAX_TREE_REPOS = 8;
 /** (#39) The working tree of each git repo inside `projectDir` that the files belong to, other than
  *  the project's own repo (whose tree is the record's `tree`), keyed by the repo's real top: a
  *  project dir that is no repo holds its code in nested clones, and a push from one of them hands
- *  off that repo's tree. A file outside the project dir names no repo. A file's repo is found by
- *  walking up from its dir to the project dir for a `.git` entry (no git call; the walk is shared by
- *  every file below a dir), and candidates are confirmed by one git call each until MAX_TREE_REPOS
- *  repos are found; the candidates left over are returned in `dropped`. A repo whose tree cannot be
- *  taken is left out. Relative names resolve against the project dir. */
+ *  off that repo's tree. A file's repo is `repoOfFile` (lib/nested-repos.ts: the nearest dir up to the
+ *  project dir that holds a `.git` entry the repo-top check confirms, a planted one passed over; one
+ *  walk per dir), and the first MAX_TREE_REPOS repos found are hashed; the others are returned in
+ *  `dropped`. A repo whose tree cannot be taken, or that git did not answer for, is left out. Relative names resolve against the
+ *  project dir. */
 export function repoTrees(files: readonly string[], projectDir: string): { trees: Record<string, string>; dropped: string[] } {
-  const root = realDeep(projectDir);
   const ownReal = realTopOf(projectDir);
-  const byDir = new Map<string, string | null>(); // a file's dir as spelled → its repo's real top, or null
-  const holder = new Map<string, string | null>(); // real dir → the real dir with `.git` it is in, or null
+  const memo: RepoWalkMemo = new Map();
   const candidates: string[] = [];
   for (const f of files) {
     if (typeof f !== 'string' || f === '') continue;
-    const spelled = dirname(resolvePath(projectDir, f));
-    if (!byDir.has(spelled)) byDir.set(spelled, gitHolder(realDeep(spelled), root, holder));
-    const found = byDir.get(spelled) ?? null;
+    const ref = repoOfFile(f, projectDir, memo);
+    // A dir git did not answer for is a repo with no tree (fails closed: nothing to hash, no push matches it).
+    const found = ref === null || ref.unconfirmed === true ? null : ref.realTop;
     if (found !== null && found !== ownReal && !candidates.includes(found)) candidates.push(found);
   }
-  const repos: string[] = [];
-  let next = 0;
-  for (; next < candidates.length && repos.length < MAX_TREE_REPOS; next++) {
-    if (realTopOf(candidates[next]!) === candidates[next]) repos.push(candidates[next]!);
-  }
+  const repos = candidates.slice(0, MAX_TREE_REPOS);
   const trees: Record<string, string> = {};
   for (const real of repos) {
     const tree = workTreeState(real).tree;
     if (tree !== null && OBJECT_ID.test(tree)) trees[real] = tree;
   }
-  return { trees, dropped: candidates.slice(next) };
-}
-
-/** The nearest dir from `dir` up to `root` (both real) that holds a `.git` entry, or null (also when
- *  `dir` is not inside `root`). `holder` memoises every dir walked. */
-function gitHolder(dir: string, root: string, holder: Map<string, string | null>): string | null {
-  const rel = relative(root, dir);
-  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null;
-  const walked: string[] = [];
-  let found: string | null = null;
-  for (let d = dir; ; ) {
-    const known = holder.get(d);
-    if (known !== undefined) {
-      found = known;
-      break;
-    }
-    walked.push(d);
-    if (existsSync(join(d, '.git'))) {
-      found = d;
-      break;
-    }
-    const up = dirname(d);
-    if (d === root || up === d) break;
-    d = up;
-  }
-  for (const w of walked) holder.set(w, found);
-  return found;
+  return { trees, dropped: candidates.slice(MAX_TREE_REPOS) };
 }
 
 /** The real top of the repo `dir` is in, or null outside a repo. */
