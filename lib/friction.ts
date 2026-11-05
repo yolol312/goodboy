@@ -59,6 +59,7 @@ export const STOP_BLOCK_COUNTERS: Readonly<Record<string, string>> = {
   '.goodboy-docs-retry-count.txt': 'docs',
   '.goodboy-validation-retry-count.txt': 'validation',
   '.goodboy-checkout-retry-count.txt': 'checkout',
+  '.goodboy-sweep-retry-count.txt': 'sweep',
 };
 
 /** Switches that only silence goodboy's own notices; switching them off is no friction. */

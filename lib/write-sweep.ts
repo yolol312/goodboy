@@ -8,14 +8,14 @@
 // such commands, so ordinary commands pay no `git status`.
 
 import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
 import { noteBashStart, openBashCalls, restoreProductionHosts, sweepNewMarkers, takeBashStart } from './approval-marker';
 import { bashChangedPaths } from './role-limits';
 import { restoreGateState, snapshotGateState } from './state-guard';
 import { getCurrentTurn, isGoodboyArtifact, recordEdit } from './file-tracker';
 import { hookError, logGate } from './gate-log';
-import { gitOut } from './git-run';
+import { spawnGit } from './git-run';
 import { commandSegments, gitSubcommandAt } from './outward-command';
 import { envStr } from './token-habits';
 import { hookLeft } from './hook-clock';
@@ -24,6 +24,8 @@ import { projectRoot } from './project-dir';
 import { realDeep } from './private-files';
 import { knownTops, nearestGitTop } from './start-pins';
 import { safeMtime } from './bash-read';
+import type { GitStatusSnapshot } from './approval-marker';
+import { LOST_RECORD, noteUnswept, readUnswept, replaceUnswept, writeUnswept, type UnsweptCall } from './unswept';
 
 /** At Stop: finishes the session's Bash calls that never reported back (`exit N` fires no post
  *  hook, G0 M18) as their post hook would have: markers swept, hosts restored, indirect writes
@@ -46,7 +48,9 @@ export function finishOpenBashCalls(sessionId: string, opts: { keepAgentsOpen?: 
   for (const n of open.slice(-20)) {
     if (!n.tuid) continue;
     const at = Date.now();
-    const r = afterBash(sessionId, n.tuid, n.cwd, n.command, n.agent, { skipGit: Date.now() - started > 5_000, gitTimeoutMs: 3_000 });
+    // A call kept open (below) is swept again later from its old start: no unswept record for it (#40).
+    const keepOpen = opts.keepAgentsOpen === true && n.agent !== undefined;
+    const r = afterBash(sessionId, n.tuid, n.cwd, n.command, n.agent, { skipGit: Date.now() - started > 5_000, gitTimeoutMs: 3_000, keepOpen });
     if (r.context) contexts.push(r.context);
     if (r.notice) notices.push(r.notice);
     if (opts.keepAgentsOpen && n.agent) {
@@ -67,7 +71,7 @@ export function afterBash(
   cwd: string,
   command: unknown,
   agentId: string | undefined,
-  opts: { skipGit?: boolean; gitTimeoutMs?: number } = {},
+  opts: { skipGit?: boolean; gitTimeoutMs?: number; keepOpen?: boolean } = {},
 ): { context?: string; notice?: string; swept?: false } {
   const notes: string[] = [];
   const notices: string[] = [];
@@ -108,7 +112,19 @@ export function afterBash(
       }
     }
     const sweep = envStr('GOODBOY_BASH_WRITE_GATE', 'deny') !== 'off' && typeof command === 'string' && writesIndirectly(command);
-    if (sweep && opts.skipGit) swept = false;
+    const startCwd = start.cwd ?? resolvePath(cwd);
+    const dirs = [...new Set([resolvePath(cwd), startCwd])];
+    // (#40) Writes git did not list are kept for the Stop, which tries again and blocks while they stay unlisted (they
+    //   were dropped: those writes were in no edit list). A call kept open is swept again from its start instead.
+    const keepUnlisted = (stalled: string[]): void => {
+      if (opts.keepOpen || typeof command !== 'string') return;
+      noteUnswept(sessionId, { tuid: toolUseId ?? '', since: start.since, dirs, startDir: startCwd, command, ...(agentId ? { agent: agentId } : {}), ...(start.status ? { status: start.status } : {}), stalled });
+      logGate(sessionId, 'bash-write', 'warn', `unswept: ${stalled.slice(0, 3).join(', ')}`);
+    };
+    if (sweep && opts.skipGit) {
+      swept = false;
+      keepUnlisted([startCwd]); // the Stop ran out of its sweep time: the call's writes are unknown, not none
+    }
     if (sweep && !opts.skipGit && typeof command === 'string') {
       // PostToolUse has 60 s and PostToolUseFailure 15 s; the Stop path (opts.gitTimeoutMs) less.
       //   Three signals: files changed since the start by mtime or ctime; paths new in git's
@@ -119,39 +135,11 @@ export function afterBash(
       //   uncommitted files are not this call's writes (round 6). The named targets are read
       //   from the start cwd, as the command's own `cd`s apply from there.
       const timeoutMs = opts.gitTimeoutMs ?? 12_000;
-      const startCwd = start.cwd ?? resolvePath(cwd);
-      const topOf = new Map<string, string>();
-      const views = new Map<string, string[]>();
-      for (const dir of new Set([resolvePath(cwd), startCwd])) {
-        const s = statusFiles(dir, timeoutMs);
-        if (!s) {
-          // (#39) A project dir that is no repo: each repo below it is swept (within the same git budget).
-          const nested = nestedStatus(dir, timeoutMs, sessionId);
-          if (nested === null || nested.views.length === 0 || !nested.complete) swept = false;
-          for (const v of nested?.views ?? []) if (!views.has(v.top)) views.set(v.top, v.files);
-          continue;
-        }
-        topOf.set(dir, s.top);
-        if (!views.has(s.top)) views.set(s.top, s.files);
-      }
-      const fresh: string[] = [];
-      for (const [top, files] of views) {
-        const before = start.status && start.status.top === top ? new Set(start.status.files) : null;
-        for (const f of files) {
-          try {
-            const st = statSync(f);
-            if (st.isFile() && (Math.max(st.mtimeMs, st.ctimeMs) >= start.since || (before !== null && !before.has(f)))) fresh.push(f);
-          } catch {
-            // gone
-          }
-        }
-      }
-      // (#36) A file the call put back with the content it had at the start is no write of it.
-      const same = (f: string): boolean => {
-        const h = start.status?.hashes?.[f];
-        return h !== undefined && contentHash(f) === h;
-      };
-      const written = [...new Set([...fresh, ...placedFiles(command, startCwd, topOf.get(startCwd) ?? startCwd)])].filter((f) => !same(f));
+      const v = sweepViews(sessionId, dirs, timeoutMs);
+      if (!v.complete) swept = false;
+      if (v.stalled.length > 0) keepUnlisted(v.stalled);
+      const fresh = freshFiles(v.views, start.since, start.status);
+      const written = [...new Set([...fresh, ...placedFiles(command, startCwd, v.topOf.get(startCwd) ?? startCwd)])].filter((f) => !sameAsStart(f, start.status));
       if (written.length > 0) {
         const turn = getCurrentTurn(sessionId);
         for (const f of written) recordEdit(sessionId, f, turn, agentId, safeMtime(f));
@@ -167,6 +155,106 @@ export function afterBash(
     hookError(sessionId, 'after-bash', 'sweep error', err);
   }
   return { ...(notes.length > 0 ? { context: notes.join('\n') } : {}), ...(notices.length > 0 ? { notice: notices.join('\n') } : {}), ...(swept ? {} : { swept: false as const }) };
+}
+
+/** git's view of each dir a call's sweep reads, by repo top: the dir's own repo, or for a project dir that is no repo
+ *  the repos below it (#39). `complete` is false when part could not be read; `stalled` names what git did not answer
+ *  for (#40), apart from a dir that is in no repo or a cap. */
+function sweepViews(sessionId: string, dirs: readonly string[], timeoutMs: number): { views: Map<string, string[]>; topOf: Map<string, string>; complete: boolean; stalled: string[] } {
+  const topOf = new Map<string, string>();
+  const views = new Map<string, string[]>();
+  const stalled: string[] = [];
+  let complete = true;
+  for (const dir of dirs) {
+    const s = statusOf(dir, timeoutMs);
+    if (s === 'stalled') {
+      complete = false;
+      stalled.push(dir);
+      continue;
+    }
+    if (!s) {
+      // (#39) A project dir that is no repo: each repo below it is swept (within the same git budget).
+      const nested = nestedStatus(dir, timeoutMs, sessionId);
+      if (nested === null || nested.views.length === 0 || !nested.complete) complete = false;
+      stalled.push(...(nested?.stalled ?? []));
+      for (const v of nested?.views ?? []) if (!views.has(v.top)) views.set(v.top, v.files);
+      continue;
+    }
+    topOf.set(dir, s.top);
+    if (!views.has(s.top)) views.set(s.top, s.files);
+  }
+  return { views, topOf, complete, stalled: [...new Set(stalled)] };
+}
+
+/** The listed files a call wrote: changed at or after `since` by mtime or ctime, or new since the start's status (a
+ *  directory moved into place keeps its files' times; the snapshot counts only for its own repo). */
+function freshFiles(views: ReadonlyMap<string, readonly string[]>, since: number, status: GitStatusSnapshot | undefined, named: readonly string[] = []): string[] {
+  const fresh: string[] = [];
+  const underNamed = (f: string): boolean => named.some((n) => f === n || f.startsWith(n.endsWith(sep) ? n : `${n}${sep}`));
+  for (const [top, files] of views) {
+    const before = status && status.top === top ? new Set(status.files) : null;
+    for (const f of files) {
+      try {
+        const st = statSync(f);
+        if (st.isFile() && (Math.max(st.mtimeMs, st.ctimeMs) >= since || (before !== null && !before.has(f)) || underNamed(f))) fresh.push(f);
+      } catch {
+        // gone
+      }
+    }
+  }
+  return fresh;
+}
+
+/** (#36) A file the call put back with the content it had at the start is no write of it. */
+function sameAsStart(f: string, status: GitStatusSnapshot | undefined): boolean {
+  const h = status?.hashes?.[f];
+  return h !== undefined && contentHash(f) === h;
+}
+
+/** (#40) The Stop's second try at the calls whose writes git could not list (lib/unswept.ts), oldest first, within
+ *  `budgetMs` and the hook's clock: what git now lists is recorded as the call's edits (changed since its start), and a
+ *  call is kept while git still does not answer for part of it (with what it did list recorded). Returns the calls still
+ *  kept. An unreadable record (a FIFO or a link in its place) is removed and stands as one call kept for this Stop. */
+export function retryUnswept(sessionId: string, budgetMs: number): UnsweptCall[] {
+  const { calls, refused } = readUnswept(sessionId);
+  if (refused) {
+    writeUnswept(sessionId, []);
+    logGate(sessionId, 'bash-write', 'warn', 'unswept record unreadable');
+    return [LOST_RECORD];
+  }
+  if (calls.length === 0) return [];
+  const end = Date.now() + Math.min(budgetMs, hookLeft());
+  const kept: UnsweptCall[] = [];
+  const once: UnsweptCall[] = [];
+  const turn = getCurrentTurn(sessionId);
+  // Calls in the same dirs share one look (performance review: 100 calls in one repo cleared 11 per Stop).
+  const looks = new Map<string, ReturnType<typeof sweepViews>>();
+  for (const c of calls) {
+    // A lost record (its calls are unknown) blocks this Stop once; nothing can list it later.
+    if (c.dirs.length === 0) {
+      once.push(c);
+      continue;
+    }
+    const left = end - Date.now();
+    if (left <= 0) {
+      kept.push(c);
+      continue;
+    }
+    const key = c.dirs.join('\0');
+    const v = looks.get(key) ?? sweepViews(sessionId, c.dirs, left);
+    looks.set(key, v);
+    // With no start status (it stalled too), a directory the command names as a target (`mv <dir> <project>/`) counts
+    //   whole: its files keep their old times, and nothing else shows them as new (#40 security review).
+    const named = c.status ? [] : bashChangedPaths(c.command, c.startDir ?? c.dirs[c.dirs.length - 1]!);
+    const written = freshFiles(v.views, c.since, c.status, named).filter((f) => !sameAsStart(f, c.status));
+    for (const f of written) recordEdit(sessionId, f, turn, c.agent, safeMtime(f));
+    if (written.length > 0) logGate(sessionId, 'bash-write', 'warn', `indirect-late(${written.length}) ${written.slice(0, 3).join(', ')}`);
+    if (v.stalled.length > 0) kept.push({ ...c, stalled: v.stalled });
+  }
+  // A call another hook appended during the retry stays for the next Stop (#40 delta review); a record unreadable by
+  //   now lost what was appended, and this Stop blocks for it.
+  const lost = replaceUnswept(sessionId, calls, kept, false);
+  return [...once, ...kept, ...(lost ? [LOST_RECORD] : [])];
 }
 
 const INTERPRETERS = /^(?:python[0-9.]*|node|perl|ruby|php|deno|tsx|ts-node|osascript|xargs|g?awk|parallel)$/;
@@ -207,29 +295,69 @@ export function placedFiles(command: string, cwd: string, top: string = cwd): st
   return out;
 }
 
-/** git without optional locks (a `status` refresh must not hold the user's index.lock while a
- *  parallel `git add` runs: performance review, 71 of 112 concurrent adds failed) and with a
- *  time limit below the post hooks' timeouts. It starts no program from the repo's config
- *  (lib/git-run.ts). */
-function git(cwd: string, args: string[], timeoutMs: number): string | null {
-  return gitOut(cwd, args, { timeoutMs, noOptionalLocks: true });
-}
-
 /** The project files (absolute) git sees as modified, added, renamed or untracked, with the
  *  repo top. Ignored files, deletions and goodboy's own artifacts are left out. Null outside a
- *  git repo or when git fails. */
+ *  git repo or when git fails or does not answer. */
 export function statusFiles(cwd: string, timeoutMs = 30_000): { top: string; files: string[] } | null {
+  const s = statusOf(cwd, timeoutMs);
+  return s === 'stalled' ? null : s;
+}
+
+/** git's "no repo here, nor in any dir above" (with `LC_ALL=C`), apart from "not a git repository: <path>" (a `.git`
+ *  file naming a dir that is gone), which is a repo git cannot read. Also a repo git refuses for its owner
+ *  (`safe.directory`): no git call reads it, so no goodboy gate does either; the user lets git read it, not a retry
+ *  (#40 delta review: it blocked every Stop with advice on FIFOs). A model's command cannot make a repo read so: it
+ *  takes another owner (root) or the hook's environment, and `safe.directory` is not read from the repo's config. */
+const NO_REPO_ABOVE = /not a git repository \(or any (?:of the parent directories|parent up to mount point)|detected dubious ownership in repository/;
+
+/** The dir that holds the first `.git` part of absolute `p`, or null when `p` has none. */
+function beforeGitPart(p: string): string | null {
+  const parts = p.split(sep);
+  const i = parts.findIndex((s) => /^\.git$/i.test(s));
+  return i > 0 ? parts.slice(0, i).join(sep) || sep : null;
+}
+
+/** The work tree dir that holds the `.git` dir `p` is in (`<top>/.git/hooks` → `<top>`), or null when `p` is in none.
+ *  Judged on the real path: a link spelled `.git` that leads into the project is no git dir (confirm review: the
+ *  sweep went to the link's dir, no repo, and a write in the project went unlisted). In `p`'s own spelling when that
+ *  names the same dir (the edit log keeps cwd's spelling). The owner of a real path has no `.git` part, so a caller
+ *  that recurses on it stops there. */
+function gitDirOwner(p: string): string | null {
+  const real = beforeGitPart(realDeep(p));
+  if (real === null) return null;
+  const spelled = beforeGitPart(resolvePath(p));
+  return spelled !== null && realDeep(spelled) === real ? spelled : real;
+}
+
+/** `statusFiles`, telling a dir that is in no repo (null: git said so, or the dir is gone) from a repo whose changes
+ *  git did not list ('stalled', #40): it was cut off at its limit, killed, refused for no time left on the hook's clock,
+ *  or failed (a corrupt index, a `.git` file naming a missing dir, no work tree). Only 'stalled' leaves a sweep's writes
+ *  unknown; a fast failure read as "no repo" let them pass unlisted (#40 security review). A dir inside `.git/` is
+ *  swept as the work tree that holds it: git has no work tree there, and a shell left in `.git/` writes the files
+ *  around it (#40 delta review). */
+export function statusOf(cwd: string, timeoutMs = 30_000): { top: string; files: string[] } | 'stalled' | null {
+  const owner = gitDirOwner(cwd);
+  if (owner !== null) return statusOf(owner, timeoutMs);
+  if (!existsSync(cwd)) return null;
   // The top in cwd's own spelling (`--show-cdup`), not git's real path: on macOS /var is
   //   /private/var, and the edit log must match the paths the Stop gates compare with cwd.
-  const cdup = git(cwd, ['rev-parse', '--show-cdup'], timeoutMs);
-  if (cdup === null) return null;
-  const top = resolvePath(cwd, cdup.trim() || '.');
+  //   The plain call is the one a Stop's snapshot memoizes; only a failure is asked again in English, to read why.
+  let cdup = spawnGit(cwd, ['rev-parse', '--show-cdup'], { timeoutMs, noOptionalLocks: true });
+  if (!cdup.stalled && cdup.code !== 0) cdup = spawnGit(cwd, ['rev-parse', '--show-cdup'], { timeoutMs, noOptionalLocks: true, cLocale: true });
+  if (cdup.stalled) return 'stalled';
+  if (cdup.code !== 0) return cdup.ran && NO_REPO_ABOVE.test(cdup.err) ? null : 'stalled';
+  const top = resolvePath(cwd, cdup.out.trim() || '.');
   // Every filter driver is emptied for `status` (it runs a clean filter to hash a touched file:
   //   final G1 test round; lib/git-run.ts). The sweep only needs names, so a filtered file
-  //   reading as changed is fine.
-  const out = git(top, ['status', '--porcelain=v1', '-z', '--untracked-files=all'], timeoutMs);
-  if (out === null) return null;
-  const parts = out.split('\0');
+  //   reading as changed is fine. A `.git` git cannot read in an untracked dir (a FIFO HEAD) stalls this call (#40).
+  //   No optional locks: a `status` refresh must not hold the user's index.lock while a parallel `git add` runs
+  //   (performance review, 71 of 112 concurrent adds failed). Every failure here leaves the changes unlisted.
+  const st = spawnGit(top, ['status', '--porcelain=v1', '-z', '--untracked-files=all'], { timeoutMs, noOptionalLocks: true });
+  // A `status` that fails for want of a work tree stays 'stalled' too: one `git config core.bare true` gives a project
+  //   repo that answer, and a write between it and `core.bare false` went unlisted when it read as no repo (#40 confirm
+  //   review, high). A bare repo's own dir with its worktrees beside it blocks then as well (plan §15.31, known limits).
+  if (st.stalled || st.code !== 0) return 'stalled';
+  const parts = st.out.split('\0');
   const files: string[] = [];
   for (let i = 0; i < parts.length; i++) {
     const entry = parts[i]!;
@@ -291,39 +419,47 @@ function sweepOrder(root: string, walked: readonly RepoRef[], sessionId?: string
 /** (#39) git's status per repo below the project dir, for a call that ran in a project dir that is no repo (`dir`
  *  is in no repo, so `statusFiles(dir)` has nothing to say): the repos the session knows first, then every other repo
  *  `nestedRepos` finds, one `statusFiles` each, at most 64, all within `timeoutMs` in all. `complete` is false when
- *  the walk hit a cap or the time ran out before every repo was read (the sweep then did not run in full). Null when
- *  `dir` is not in a project dir of that kind. */
-export function nestedStatus(dir: string, timeoutMs: number, sessionId?: string): { views: { top: string; files: string[] }[]; complete: boolean } | null {
+ *  the walk hit a cap or the time ran out before every repo was read (the sweep then did not run in full). `stalled`
+ *  (#40) names what git did not answer for: a repo whose status did not answer or that the time left unread, a dir
+ *  the walk could not confirm, or `root` itself when the time ran out before the walk (its other repos are unknown).
+ *  A cap is no stall (a known limit, plan §15.30). Null when `dir` is not in a project dir of that kind. */
+export function nestedStatus(dir: string, timeoutMs: number, sessionId?: string): { views: { top: string; files: string[] }[]; complete: boolean; stalled: string[] } | null {
   const root = projectRoot(dir);
   if (nearestGitTop(root) !== null) return null;
   // The walk counts against the same time, and nothing runs past the hook's clock (a hook killed here records no
   //   write; the walk's confirmations are bounded by lib/nested-repos.ts, the statuses by `end`).
   const end = Date.now() + Math.min(timeoutMs, hookLeft());
   const views: { top: string; files: string[] }[] = [];
+  const stalled: string[] = [];
   const read = new Set<string>();
   let complete = true;
   const sweep = (repos: readonly RepoRef[]): void => {
     for (const repo of repos) {
       if (read.has(repo.realTop)) continue;
-      const left = end - Date.now();
-      if (read.size >= MAX_NESTED_REPOS || left <= 0) {
+      if (read.size >= MAX_NESTED_REPOS) {
         complete = false;
         return;
       }
       read.add(repo.realTop);
-      const s = statusFiles(repo.top, left);
-      if (s === null) complete = false;
+      const left = end - Date.now();
+      const s = left > 0 ? statusOf(repo.top, left) : 'stalled';
+      if (s === 'stalled') stalled.push(repo.top);
+      if (s === 'stalled' || s === null) complete = false;
       else views.push(s);
     }
   };
   // The known repos are read before the walk: planted `.git` dirs git cannot answer for cost the walk its time
   //   (delta review: with a 3 s budget, the walk alone used it up), never the repos the session started with.
   sweep(sweepOrder(root, [], sessionId));
-  if (end - Date.now() <= 0) return { views, complete: false };
+  if (end - Date.now() <= 0) return { views, complete: false, stalled: [...stalled, resolvePath(root)] };
   const found = walkOnce(root);
   if (found.capped) complete = false;
+  if (found.unanswered.length > 0) {
+    complete = false;
+    stalled.push(...found.unanswered);
+  }
   sweep(sweepOrder(root, found.repos));
-  return { views, complete };
+  return { views, complete, stalled };
 }
 
 /** Hashes of the content of up to 500 files of at most 1 MB each: the rest are left out, so

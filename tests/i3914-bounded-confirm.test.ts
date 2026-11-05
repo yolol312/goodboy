@@ -436,6 +436,7 @@ describe('the hook clock bounds the phases after the confirmations', () => {
     const pairs: [string, number][] = [
       ['Stop', HOOK_CLOCK_MS.stop + FLUSH_PAST_CLOCK_MS],
       ['SessionStart', HOOK_CLOCK_MS.sessionStart],
+      ['PreToolUse', HOOK_CLOCK_MS.preToolUse],
       ['PostToolUse', HOOK_CLOCK_MS.postToolUse],
       ['PostToolUseFailure', HOOK_CLOCK_MS.postToolUseFailure],
       ['SubagentStop', HOOK_CLOCK_MS.subagentStop],

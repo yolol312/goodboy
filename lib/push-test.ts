@@ -297,6 +297,14 @@ export function revisionTree(cwd: string, rev: string): string | null {
   }
 }
 
+/** Whether a hand-off skill (/ship) run in `cwd` hands off HEAD: false only when git answers that there is no commit
+ *  (or no repo); a lookup git did not answer counts as a hand-off, whose check then denies on the unknown tree (#40
+ *  review: a stall here let the skill pass unchecked). */
+export function skillHandsOff(cwd: string): boolean {
+  const r = spawnGit(cwd, ['rev-parse', '--verify', '-q', '--end-of-options', 'HEAD^{tree}'], { timeoutMs: 15_000, noMemo: true });
+  return r.stalled || r.code === 0;
+}
+
 const PUSH_VALUE_OPTS = new Set(['--repo', '--receive-pack', '--exec', '-o', '--push-option']);
 /** git commands that are never a push, so their name needs no alias lookup (git never lets an
  *  alias hide a built-in; the commit issue rule uses the list the same way). */
@@ -319,8 +327,15 @@ const DEPLOY_KIND = /^(kubectl|oc|helm|terraform|pulumi|aws|aws s3|gcloud|az|rsy
 /** What `git <sub>` runs when `sub` is an alias: from `-c alias.<sub>=…` on the command line,
  *  else from the repo's config. Words of the expansion (a `!shell` alias returns its shell text
  *  as one word, prefixed with `!`), or null when it is not an alias. */
-function aliasOf(sub: string, inline: Map<string, string>, cwd: string): string[] | null {
-  const value = inline.get(sub.toLowerCase()) ?? git(cwd, ['config', '--get', `alias.${sub}`]);
+function aliasOf(sub: string, inline: Map<string, string>, cwd: string): string[] | null | 'stalled' {
+  let value = inline.get(sub.toLowerCase());
+  if (value === undefined) {
+    // (#40 security review) A lookup git did not answer (cut off, or no time left on the hook clock) is no "not an
+    //   alias": that let an alias of push through once the clock ran out.
+    const r = spawnGit(cwd, ['config', '--get', `alias.${sub}`], { timeoutMs: 15_000, noMemo: true });
+    if (r.stalled) return 'stalled';
+    value = r.code === 0 ? r.out.trim() : undefined;
+  }
   if (value === null || value === undefined || value.trim() === '') return null;
   const v = value.trim();
   return v.startsWith('!') ? [v] : splitAliasValue(v);
@@ -394,6 +409,7 @@ function gitHandoff(words: string[], cwd: string, depth: number, budget: ReadBud
       return [{ kind: 'push', what: `git ${sub}`, cwd: dir, revs: [], unclear: 'it runs too many unknown git commands to check' }];
     }
     const expansion = aliasOf(sub, inline, dir);
+    if (expansion === 'stalled') return [{ kind: 'push', what: `git ${sub}`, cwd: dir, revs: [], unclear: 'git did not answer whether it is an alias' }];
     if (expansion === null) return [];
     if (expansion[0]!.startsWith('!')) return handoffsOfAt(expansion[0]!.slice(1), dir, depth + 1, undefined, budget);
     return gitHandoff(['git', ...expansion, ...words.slice(i + 1)], dir, depth + 1, budget);

@@ -34,6 +34,7 @@ export * from './skill-rule';
 export * from './effort-advice';
 export * from './push-test';
 export * from './write-sweep';
+export * from './unswept';
 export * from './state-guard';
 export * from './commit-issue';
 export * from './project-mode';

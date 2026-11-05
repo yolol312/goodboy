@@ -278,8 +278,9 @@ function runGit(ctx: Ctx, cwd: string, args: string[]): string | null {
   // Starts no program from the repo's config (lib/git-run.ts). The command is the user's own, so
   //   replace refs apply to it as they will to the user's git (`honorReplace`).
   const r = spawnGit(cwd, args, { timeoutMs: Math.min(SPAWN_MS, left), maxBuffer: MAX_MESSAGE_BYTES, honorReplace: true });
-  if (!r.ran) return null; // no such directory: git fails the same way
+  // A stall first (#40 security review): a call refused for no time left on the hook clock has `ran: false` too.
   if (r.stalled) throw new Denied(TOO_SLOW);
+  if (!r.ran) return null; // no such directory: git fails the same way
   if (r.code !== 0) return null;
   take(ctx, r.out.length);
   return r.out;

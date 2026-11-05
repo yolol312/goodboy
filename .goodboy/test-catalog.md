@@ -3,7 +3,7 @@
 Feature → test type, generated from the test files by goodboy (`cli.ts test-catalog`).
 Regenerate it instead of editing it; the docs rule compares it with a fresh copy.
 
-Totals: unit 177 files, 2970 tests; e2e 2 files, 54 tests.
+Totals: unit 178 files, 3035 tests; e2e 2 files, 54 tests.
 
 | Feature | Type | File | Tests |
 |---|---|---|---|
@@ -80,6 +80,7 @@ Totals: unit 177 files, 2970 tests; e2e 2 files, 54 tests.
 | the Stop in a project dir that is no repo: each repo is judged under its own top; the stop_hook_active path judges the same groups as the full Stop; a record is judged by its tree for the repo; the shared deadline; shell-made changes in a repo below the project dir; the `auto` test gate counts a test runner in any repo below the project dir | unit | tests/i3914-stop-groups.test.ts | 62 |
 | boundary code; the types a file needs; missing types; the user globs | unit | tests/i3b-test-types.test.ts | 20 |
 | the whole-suite command; cli.ts regression; records and the check; the push check | unit | tests/i4-regression.test.ts | 22 |
+| spawnGit stops at the hook clock; statusOf; nestedStatus names what git did not answer for; a Bash call whose writes git could not list is kept; retryUnswept; the record file | unit | tests/i40-git-clock.test.ts | 65 |
 | the tests that load a changed file; affected gaps; weakened tests; the Stop | unit | tests/i5-existing-tests.test.ts | 50 |
 | finding 1: the project knowledge notice; findings 2–4 and 6: the push test check; finding 5: the result guard; finding 8: a local database socket | unit | tests/i6-trial-fixes.test.ts | 10 |
 | finding 1: layer 1 in JVM projects; finding 2: a full regression for Gradle and Maven; finding 3: results written from goodboy's own directory; finding 4: open Bash calls at Stop while agents run | unit | tests/i7-trial2-fixes.test.ts | 7 |

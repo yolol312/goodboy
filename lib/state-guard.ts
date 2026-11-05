@@ -19,7 +19,7 @@ import { segmentChanging } from './outward-command';
 import { safeToolUseId } from './approval-marker';
 import { MAX_STATE_BYTES } from './safe-read';
 
-const GUARDED = /^(?:edits\.jsonl|dispatch-log\.jsonl|skill-evidence\.jsonl|commit-issue-pins\.json|marker-evidence\.jsonl|project-mode-pin\.json|coverage-pin\.json|criteria-pin\.json|criteria-seen\.json|judged-weakened\.json|worktrees\.txt|start-tips(?:-[0-9a-f]{16})?\.json|(?:start-pin|criteria-pin|criteria-seen)-[0-9a-f]{16}\.json|\.goodboy-last-(?:review|test)-[0-9a-f]+\.json|\.goodboy-validation-failed\.json)$/;
+const GUARDED = /^(?:edits\.jsonl|unswept\.jsonl|dispatch-log\.jsonl|skill-evidence\.jsonl|commit-issue-pins\.json|marker-evidence\.jsonl|project-mode-pin\.json|coverage-pin\.json|criteria-pin\.json|criteria-seen\.json|judged-weakened\.json|worktrees\.txt|start-tips(?:-[0-9a-f]{16})?\.json|(?:start-pin|criteria-pin|criteria-seen)-[0-9a-f]{16}\.json|\.goodboy-last-(?:review|test)-[0-9a-f]+\.json|\.goodboy-validation-failed\.json)$/;
 const CURSOR = /^\.goodboy-last-(?:review|test)-[0-9a-f]+\.json$/;
 /** Evidence logs: a line added during a model Bash call would be forged evidence (a skill run,
  *  the user's non-project answer), so these keep only their old lines, and one the call

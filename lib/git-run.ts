@@ -13,7 +13,8 @@
 //     (or a user command's `-c`, lib/commit-issue.ts) never overrides them, and the safety
 //     environment over the caller's: only the names in OPERATIONAL_ENV pass from a caller.
 // The binary is the one lib/git-binary.ts picks. Callers keep their own limits: a time limit per
-// call (and one shared deadline), raw output, stdin, `maxBuffer`.
+// call (and one shared deadline), raw output, stdin, `maxBuffer`. Inside a hook every call also stops at the
+// hook's clock (#40, lib/hook-clock.ts).
 //
 // The memo. A Stop asks the same question of git more than once (the repo top four times, the
 // filter list five, the same start-tree listing twice). Inside a snapshot (`beginGitSnapshot`,
@@ -28,6 +29,7 @@
 
 import { resolveGitBinary } from './git-binary';
 import { filterOffArgs, HOOK_GIT_ARGS, HOOK_GIT_ENV, NO_GRAFTS } from './hook-git';
+import { hookLeft } from './hook-clock';
 
 export interface GitResult {
   /** The exit code; -1 when git did not run, was cut off or was killed. */
@@ -231,9 +233,10 @@ function filterGlobals(globals: readonly string[]): string[] {
  *  the list cannot be read (anything but a match or no match). `globals` are the caller's own
  *  options before the subcommand: the list is read as the command will see the repo and its
  *  config, so a `-c filter.X.clean=…` of the caller is listed (and emptied) too. */
-function filtersOff(cwd: string, globals: readonly string[], opts: GitOptions): string[] | null {
+function filtersOff(cwd: string, globals: readonly string[], opts: GitOptions): string[] | 'stalled' | null {
   const r = spawnGit(cwd, [...filterGlobals(globals), ...FILTER_LIST], { timeoutMs: opts.timeoutMs, left: opts.left, ...(opts.env ? { env: opts.env } : {}), keepFilters: true });
-  if (r.stalled || (r.code !== 0 && r.code !== 1)) return null;
+  if (r.stalled) return 'stalled';
+  if (r.code !== 0 && r.code !== 1) return null;
   return r.code === 0 ? filterOffArgs(r.out) : [];
 }
 
@@ -241,8 +244,11 @@ function filtersOff(cwd: string, globals: readonly string[], opts: GitOptions): 
  *  off (see `ran`, `stalled`); 128: not a repo, or a bad object. */
 export function spawnGit(cwd: string, args: readonly string[], opts: GitOptions = {}): GitResult {
   let limit = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  if (opts.left) {
-    const left = opts.left();
+  // (#40) No call runs past the hook's clock (lib/hook-clock.ts; Infinity outside a hook): a `status` that waits on a
+  //   `.git` git cannot read (a FIFO HEAD in an untracked dir) used its whole limit, and enough of them outlast the
+  //   hook, which is killed with no output (a pass). With no time left, git does not run and the call is `stalled`.
+  const left = Math.min(opts.left ? opts.left() : Infinity, hookLeft());
+  if (left !== Infinity) {
     if (!(left > 0)) return { ...NOT_RUN, stalled: true };
     limit = Math.min(limit, Math.max(1, Math.ceil(left)));
   }
@@ -252,6 +258,7 @@ export function spawnGit(cwd: string, args: readonly string[], opts: GitOptions 
   if (sub !== undefined && FILTER_COMMANDS.has(sub) && !opts.keepFilters) {
     const f = filtersOff(cwd, args.slice(0, at), opts);
     if (f === null) return NOT_RUN; // the drivers are unknown: no command that could run one
+    if (f === 'stalled') return { ...NOT_RUN, stalled: true }; // (#40) the caller learns git did not answer
     filters = f;
   }
   const safety = [...(opts.honorReplace ? [] : ['--no-replace-objects']), ...(opts.noOptionalLocks ? ['--no-optional-locks'] : []), ...HOOK_GIT_ARGS, ...filters];

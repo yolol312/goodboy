@@ -4,6 +4,7 @@
 import { existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve as resolvePath, sep } from 'node:path';
 import { addedUserGlobs, diffCoverageMode, isPolicyFile, type UserGlobKey } from '../lib/changed-coverage';
+import { HOOK_CLOCK_MS, startHookClock } from '../lib/hook-clock';
 import { checkRegression, readRegressionRecords, type RegressionOutcome, regressionMessage, regressionMode } from '../lib/regression';
 import { projectDir, projectRoot } from '../lib/project-dir';
 import { agentName, ROUTE } from '../lib/routing-policy';
@@ -96,6 +97,7 @@ import {
   handoffsOf,
   isApprovalMarkerPath,
   isHandoffSkill,
+  skillHandsOff,
   noteBashStart,
   pushTestMessage,
   revisionTree,
@@ -386,6 +388,9 @@ function riskDenyMessage(state: SessionState, sessionId: string, projectCwd: str
 }
 
 function main(): void {
+  // (#40) Every git call of this hook stops at its clock (lib/git-run.ts): the push check and the Bash start snapshot
+  //   call git, and a hook killed at its 60 s timeout emits nothing, which lets the tool call run.
+  startHookClock(HOOK_CLOCK_MS.preToolUse);
   let input: PreToolInput = {};
   readStdin()
     .then((raw) => {
@@ -804,7 +809,7 @@ function main(): void {
               ? typeof toolInput.command === 'string'
                 ? handoffsOf(toolInput.command, cwd, hostRulesNow(cwd, sessionId))
                 : []
-              : typeof toolInput.skill === 'string' && isHandoffSkill(toolInput.skill) && revisionTree(cwd, 'HEAD') !== null
+              : typeof toolInput.skill === 'string' && isHandoffSkill(toolInput.skill) && skillHandsOff(cwd)
                 ? [{ kind: 'push' as const, what: `/${toolInput.skill}`, cwd, revs: ['HEAD'] }]
                 : [];
           if (handoffs.length > 0) {

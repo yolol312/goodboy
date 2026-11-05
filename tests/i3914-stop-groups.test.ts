@@ -667,7 +667,10 @@ describe('shell-made changes in a repo below the project dir', () => {
     process.env.CLAUDE_PROJECT_DIR = w.pd;
     try {
       const none = nestedStatus(w.pd, 0, w.sid)!;
-      expect(none).toEqual({ views: [], complete: false });
+      expect(none.views).toEqual([]);
+      expect(none.complete).toBe(false);
+      // (#40) What the time left unread is named: the project dir itself stands for the repos the walk did not reach.
+      expect(none.stalled).toContain(resolve(w.pd));
       // A repo made now is found by the next call, whose walk is the first one: the call above did not walk.
       const gen = join(w.proj, 'gen');
       mkdirSync(gen);

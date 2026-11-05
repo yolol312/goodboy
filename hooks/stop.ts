@@ -156,6 +156,10 @@ import {
   restoreOrphanGateState,
   finishOpenBashCalls,
   openBashCalls,
+  replaceUnswept,
+  retryUnswept,
+  type UnsweptCall,
+  unsweptReason,
 } from '../lib';
 
 interface StopInput {
@@ -278,6 +282,16 @@ const TEST_COUNT_FILE = '.goodboy-test-retry-count.txt';
 
 // (layer 0) the citation gate: it also fires on turns without edits.
 const CLAIM_COUNT_FILE = '.goodboy-claim-retry-count.txt';
+
+// (#40) Bash calls whose writes git could not list.
+const SWEEP_COUNT_FILE = '.goodboy-sweep-retry-count.txt';
+
+/** (#40) The Stop's time for its second try at the calls whose writes git could not list (one stalled `status` uses it
+ *  all; the gates after it keep the rest of the clock). */
+const UNSWEPT_RETRY_MS = 3_000;
+
+/** (#40) The calls still unlisted after this Stop's retry. Set in main. */
+let unswept: UnsweptCall[] = [];
 
 // (track H) the docs rule.
 const DOCS_COUNT_FILE = '.goodboy-docs-retry-count.txt';
@@ -1693,6 +1707,13 @@ function main(): void {
       } catch {
         // best-effort
       }
+      // (#40) Bash calls whose writes git could not list are swept again (within UNSWEPT_RETRY_MS), before any gate
+      //   reads the edit log; what is still unlisted blocks the full Stop below (B5.95).
+      try {
+        unswept = retryUnswept(sessionId, UNSWEPT_RETRY_MS);
+      } catch (err) {
+        hookError(sessionId, 'stop', 'unswept retry error', err);
+      }
 
       // (#33) A checkout the session did not start in is pinned the first time a hook sees it, before any
       //   gate reads the edit log: the changes already in it are recorded as the session's own now
@@ -1789,6 +1810,15 @@ function main(): void {
           }
         } catch {
           // fail-open
+        }
+        // (#40) Never blocks here (loop prevention), but the user is told the writes stay unlisted; the next full Stop
+        //   tries again.
+        if (unswept.length > 0) {
+          logGate(sessionId, 'sweep', 'warn', `unswept-on-stop-active(${unswept.length})`);
+          habitWarnings.push(
+            `[goodboy] Bash 명령 ${unswept.length}개가 바꾼 파일을 확인하지 못했어요(git이 응답하지 않음). ` +
+              '그 변경은 아직 리뷰·테스트 대상에 없고, 다음 Stop에서 다시 확인해요.',
+          );
         }
         // (#33, round 10) A start that is unresolved leaves nothing to accept against: no test result,
         //   no review, no docs step runs here, so every pending flag, obligation and cursor stays, and
@@ -2038,6 +2068,22 @@ function main(): void {
       } else {
         resetRetryCount(sessionId, START_COUNT_FILE);
       }
+
+      // (B5.95) (#40) Bash calls whose writes git still could not list after this Stop's retry block every full Stop, as
+      //   an incomplete start does (B5.9): their writes are in no edit list, so no gate below would ask for them. The
+      //   user's marker passes them, and the calls are dropped then (the user let those writes go unlisted).
+      if (unswept.length > 0) {
+        if (!userPass(sessionId, cwd, 'sweep')) {
+          const count = readRetryCount(sessionId, SWEEP_COUNT_FILE) + 1;
+          writeRetryCount(sessionId, count, SWEEP_COUNT_FILE);
+          logGate(sessionId, 'sweep', 'deny', `unswept(${unswept.length}) ${[...new Set(unswept.flatMap((c) => c.stalled))].slice(0, 3).join(', ')}`);
+          emit(blockOutput(sessionId, cwd, unsweptReason(unswept, cwd), 'sweep', '', count, true));
+          return;
+        }
+        // Only the calls the user passed: one a hook appended since this Stop's retry is the next Stop's (delta review).
+        replaceUnswept(sessionId, unswept, []);
+      }
+      resetRetryCount(sessionId, SWEEP_COUNT_FILE);
 
       // (#35) Another checkout of the project (the project dir, or a linked worktree nested in it)
       //   holds edits this Stop does not judge. Blocks when this turn changed a file anywhere in the

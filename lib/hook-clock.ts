@@ -1,5 +1,6 @@
-// One clock for a whole hook process (v0.36.14, plan §15.30 item 12). The Stop, SessionStart and the two
-// post hooks have hook timeouts (hooks/hooks.json), and a hook that is killed emits nothing, which passes. The
+// One clock for a whole hook process (v0.36.14, plan §15.30 item 12). The Stop, SessionStart, the two
+// post hooks, SubagentStop and (v0.36.15, #40) PreToolUse have hook timeouts (hooks/hooks.json), and a hook that is
+// killed emits nothing, which passes. Since #40 every git call of a hook also stops at it (lib/git-run.ts). The
 // phases of a hook each keep a budget of their own (the nested-repo walk, the start pins, the test
 // groups, the review groups), so a slow git could use all of them in turn and outlast the hook.
 // Every phase also asks `hookLeft()`, so the last one to run out blocks or gives up through its own
@@ -12,8 +13,10 @@
  *  gate log, notices) needs the difference. SessionStart's start-pin budget (8 s, lib/start-pins.ts) stays whole
  *  inside its clock. The post hooks and SubagentStop (which finishes an agent's open Bash calls) run the
  *  shell-write sweep, which walks the nested repos of a project dir that is no repo (lib/write-sweep.ts
- *  `nestedStatus`): a hook killed there records no write. */
-export const HOOK_CLOCK_MS = { stop: 11_000, sessionStart: 12_000, postToolUse: 45_000, postToolUseFailure: 11_000, subagentStop: 11_000 } as const;
+ *  `nestedStatus`): a hook killed there records no write. PreToolUse (60 s) runs the push check and the Bash start
+ *  snapshot (#40): every git call stops at the clock (lib/git-run.ts), and the push check denies on a call that did
+ *  not answer. UserPromptSubmit calls no git and starts none. */
+export const HOOK_CLOCK_MS = { stop: 11_000, sessionStart: 12_000, preToolUse: 50_000, postToolUse: 45_000, postToolUseFailure: 11_000, subagentStop: 11_000 } as const;
 
 /** How long the Stop's wait for the transcript flush may run past the clock, ms (hooks/stop.ts
  *  `checkCitations`). The Stop's 15 s minus its 11 s clock leaves room for this wait and the output. */

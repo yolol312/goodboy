@@ -3142,7 +3142,7 @@ that is a repo keeps its behavior.
     Not in this release (pre-existing on main 8398c35, to be filed separately): a FIFO HEAD in an
     untracked nested `.git` inside an ordinary repo makes `git status` and `git ls-files --others`
     block (measured: both cut off by `timeout 5`, rc 124), so any gate that runs them waits for its
-    own git limit.
+    own git limit. Filed as #40, done in v0.36.15 (§15.31).
 
 Loose code files in the project dir keep today's block ("not measured"): `diff-coverage` cannot run
 outside a repo, so their exit is a `blocked` test record or a `coverage-exempt` entry; the block text
@@ -3172,6 +3172,112 @@ whose edited file is judged fresh by a `test-write` record (item 5); 64 decoy re
 start do not starve the sweep (item 8); a planted FIFO `.git` beside a real repo and inside the edited
 file's dir, many of them (item 12: the Stop blocks within the hook time, the cumulative budget caps
 the confirmations).
+
+### 15.31 v0.36.15: every hook git call stops at the hook clock; unlisted Bash writes are kept (#40)
+
+#40 (found while hardening v0.36.14, pre-existing on 8398c35): a `.git` that git cannot read inside an
+untracked dir (one whose `HEAD` is a FIFO) makes `git status` and `git ls-files --others` in the outer
+repo wait for it. Measured (scratchpad `fifo-probe2.sh`, `timeout 3`): `status -uall`, `status` with
+`core.untrackedCache=false`, `ls-files --others` with or without `--directory` all stall; `status
+--untracked-files=no`, `ls-files --others -- <dir>` for a dir that does not hold it, `diff --name-only
+HEAD` and `check-ignore` answer in 0.07 s. No git setting skips an unreadable nested repo in an
+untracked listing, so the listing cannot be made to answer; the fix bounds it and keeps what it could
+not list.
+
+1. One bound for every git call of a hook. `spawnGit` (lib/git-run.ts), the one place hooks run git,
+   gives each call `min(its limit, the caller's left(), hookLeft())`; with nothing left git does not
+   run and the call is `stalled`. A filter-list call that stalled now says so (it returned a plain
+   "not run", which a caller read as "git failed"). Outside a hook (CLI, tests) nothing changes.
+2. PreToolUse starts a clock too (50 s; its timeout is 60 s): it runs git for the push check and the
+   Bash start snapshot, and a PreToolUse killed at its timeout lets the tool call run. The push check
+   denies on a call that did not answer, for a Bash hand-off and (now) for a hand-off skill: `/ship`
+   counted as no hand-off when its HEAD lookup stalled (`skillHandsOff`, hallucination review). UserPromptSubmit calls no git and starts no clock. The
+   hooks.json room test covers the new clock.
+3. The sweep tells "unlisted" from "no repo". `statusOf` (lib/write-sweep.ts) returns null only for
+   a dir that is gone or that git (under `LC_ALL=C`) calls "not a git repository (or any of the parent
+   directories …)"; every other outcome that lists nothing is 'stalled': a cut-off, killed or refused
+   call, and a fast failure (a corrupt index, a `.git` file naming a missing dir: "not a git
+   repository: <path>"), which the first version read as "no repo" (security review, high). A repo
+   git refuses for its owner ("detected dubious ownership") is null, as before #40: no git call and so
+   no goodboy gate reads it until the user adds it to `safe.directory`, and a model's command cannot
+   make a repo read so (another owner takes root; `safe.directory` is not read from the repo's
+   config). A dir inside `.git/` is swept as the work tree that holds it (git has no work tree there,
+   and a shell left in `.git/` writes the files around it), judged on the real path: a link spelled
+   `.git` that leads into the project is no git dir, and git reads it as before (confirm review). A
+   `status` that fails for want
+   of a work tree stays 'stalled' (delta reviews: reading it as null, as a first fix did, let one
+   `git config core.bare true` before a write and `core.bare false` after it leave the write
+   unlisted). `statusFiles` keeps its old shape. `nestedStatus` adds `stalled`: a nested repo whose status
+   stalled or that the time left unread, a dir the walk could not confirm, and the project dir itself
+   when the time ran out before the walk. A cap (64 repos, the walk caps) is no stall (§15.30 known
+   limit).
+4. Unlisted writes are kept, not dropped. When the sweep after a Bash call (PostToolUse,
+   PostToolUseFailure, SubagentStop, the Stop's open calls) has a stall, or the Stop skipped the sweep
+   for time, the call goes to `unswept.jsonl` in the session dir (lib/unswept.ts: tool use id, start,
+   dirs, command, agent, the start's status, what stalled). A call the Stop keeps open for a running
+   agent is not kept there (its post hook sweeps it from its old start). The state guard keeps the file
+   append-only for a model Bash call (`GUARDED`). No cap on the calls kept (a cap that dropped the
+   oldest let forged appended lines push a genuine call out; the read refuses past 16 MB, which
+   blocks). A FIFO, link or dir in the file's place is removed before a write, and a `LOST_RECORD`
+   stands for the calls it held; an unreadable file reads as that record too.
+5. The Stop tries again before any gate reads the edit log (`retryUnswept`, 3 s within the clock): for
+   each kept call, oldest first, it sweeps the call's dirs and records what git now lists as changed
+   since the call's start (the #36 same-content rule applies); a call is dropped once nothing stalls,
+   and kept with what still stalls otherwise. With no start status, a directory the command names as a
+   target counts whole (`mv <dir> <project>/` keeps old file times). A lost record blocks one Stop and
+   is dropped. The retry writes back only in place of what it read (`replaceUnswept`): a call another
+   hook appended meanwhile (a background subagent's post hook, while the retry waited up to 3 s on a
+   stalled `status`) stays for the next Stop; writing back only the calls read lost it, and nothing
+   blocked for its writes (delta review, high). The user's marker drops only the calls it passed, the
+   same way. A record that is unreadable at that second read lost what was appended: the retry
+   returns a lost record and this Stop blocks for it. A lost record carries the time it was written,
+   so a second loss never reads as the same line as an earlier one.
+6. What stays unlisted blocks the full Stop (B5.95, after the start and checkout gates, as an
+   incomplete start does), counted in its own `sweep` counter: the reason names the commands, the dirs
+   git did not answer for, and a `find <dir> -mindepth 2 -path '*/.git/HEAD' ! -type f` that lists
+   such entries, and says to remove a `.git` that is no real repository. The stop_hook_active Stop does
+   not block for it (loop prevention); the user is told the writes stay unlisted. Only when that Stop
+   goes on to the full gates (it just accepted a test result, or saw a stale doc fixed: each once per
+   resolution) can B5.95 block there, so the blocks stay bounded. The user's Stop marker passes it and
+   drops the kept calls.
+7. Callers that read a refused call as an answer (security review, medium): the commit issue rule's
+   `runGit` checked `ran` before `stalled`, so after PreToolUse's clock ran out an alias of commit
+   (`git ci`) passed unchecked; the stall is checked first now and denies. The push check's alias
+   lookup read a stall as "not an alias"; it now returns an unclear push hand-off, which denies.
+
+Known limits: the retry's window runs from the call's start to the Stop, so a file changed in that
+window by something else (the user's editor, a later build or test run writing untracked files) is
+recorded as the session's edit (fails closed). A repo whose `git status` takes longer than the post
+hook's 12 s per call, or than the Stop's 3 s (its open-call sweep per call, and one 3 s retry budget for
+all kept calls), can block full Stops after an indirect write; the user's marker passes it. A model Bash call can still append lines to the record
+(the guard keeps it append-only, and a command naming the session dir is denied up front), which adds
+blocks, and edits: the files git lists as changed in a dir the line names since the line's start
+(fails closed, as more review and tests). A call appended in the moment between the retry's second read
+and its write can still be lost. Writes in a repo git refuses for its owner stay unlisted, as before
+#40. A project dir that is a bare repo's dir with its worktrees beside it (`.git` a file naming
+`.bare`) has no work tree: every indirect write run from there is kept and blocks the full Stops until
+the user's marker passes it (fails closed). Git's own dir moved aside across calls (`mv .git .git-off`,
+an indirect write, `mv .git-off .git`) leaves the write unlisted: in the middle call the dir is in no
+repo, and the last call's start already sees the file (pre-existing; confirm review, medium; a fix would
+keep a call whose start read a repo top and whose end reads none). A repo that sits under a plain dir
+named `.git` (`<base>/.git/proj`) is swept as `<base>`, no repo, so its indirect writes stay unlisted
+(final review, low; a fix would redirect only when the owner's `.git/HEAD` exists). A dir reached
+through a link that leaves a `.git` dir (`.git` a link to a git dir named otherwise) gets no redirect
+and reads 'stalled', so it blocks until the user's marker (fails closed). The push check's refspec config lookups still read a
+stalled git as "no config"; the hand-off's own tree lookup stalls then too and denies (delta review,
+low).
+
+Tests: `spawnGit` with a hook clock that ran out (no git runs, `stalled`) and with time left (the limit
+is cut to it); a stalled filter listing; `statusOf` stalled vs no repo; `nestedStatus` naming a stalled
+nested repo and the project dir when time ran out; a FIFO decoy in an ordinary repo: PostToolUse keeps
+the python write, the Stop blocks with the reason, the stop_hook_active Stop warns, and after the decoy is
+removed the Stop records the write and passes; the user's marker drops the calls; a kept-open agent call
+is not kept; the record replaced by a FIFO; PreToolUse's clock in hooks.json; `statusOf` on a corrupt
+index and a dangling `.git` file (unlisted) and on a missing dir (no repo); 300 appended lines evict no
+call; `mv` of an old directory with no start status; an expired clock with `git ci` (alias of commit)
+and an alias of push; a call appended during the retry and during the user's pass is kept; a refused
+second read blocks this Stop; two losses stay two; `statusOf` inside `.git/` (its work tree), with
+`core.bare` true and in a bare repo's dir (unlisted) and on dubious ownership (no repo).
 
 ## 16. J — Field reports (v0.34.0)
 
