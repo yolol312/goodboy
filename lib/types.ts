@@ -194,6 +194,9 @@ export interface TestResult {
   blocked?: { reason: string; evidence: TestEvidence[] };
   /** Coverage of the run, when measured (`measure-coverage`). */
   coverage?: CoverageRecord;
+  /** The agent's free-text notes on the run (what was left out and why, flakes seen), at most 4000 characters. No
+   *  gate reads them; they are kept for the people who read the record (test-write dropped them). */
+  notes?: string;
   /** Set by `cli.ts test-write` from `suites`: per test type, the suites, tests and wall time. */
   by_type?: Partial<Record<TestType, { suites: number; tests: number; duration_ms: number }>>;
   /** Set by `cli.ts test-write`, never by the agent: HEAD and the working tree it tested as a

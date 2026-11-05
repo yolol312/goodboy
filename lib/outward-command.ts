@@ -627,9 +627,30 @@ export function plainWord(w: string): string {
   return w.replace(/["'\\]/g, '').replace(/\/\.(?=\/)/g, '').replace(/\/{2,}/g, '/');
 }
 
+/** The program a segment runs, past the `rtk` token-filter proxy (`rtk grep …`, `rtk proxy grep …`), which runs the
+ *  command after it, and the prefix commands after that (`rtk proxy env …`). `commandSegments` has already taken the
+ *  segment's own prefixes off. A nested `rtk` stays the program (not a read). */
+function segmentProgram(words: string[]): string {
+  let rest = words;
+  if (basename(rest[0] ?? '') === 'rtk') rest = stripPrefix(rest.slice(rest[1] === 'proxy' ? 2 : 1));
+  return basename(rest[0] ?? '');
+}
+
+/** Options of a read program that write a file or run a command (v0.36.16 reviews): `find -fprint <file>` writes it
+ *  and `-rm` (bfs, the `find` Claude Code's shell runs) deletes like `-delete`; `-ok` runs a command; `rg --pre <cmd>`
+ *  and `rg --hostname-bin <cmd>` run one; `tree -o <file>` writes its output (also in a cluster, `-ao`); `file -C`
+ *  and `file --compile` (and every prefix getopt takes for it, from `--co`: measured) compile a magic file. */
+const WRITING_OPTS: Readonly<Record<string, RegExp>> = {
+  find: /^-(?:delete|rm|exec|execdir|ok|okdir|fprint0?|fprintf|fls)$/,
+  rg: /^--(?:pre|hostname-bin)(?:=|$)/,
+  tree: /^-[a-zA-Z]*o/,
+  file: /^(?:-[a-zA-Z]*C|--co)/,
+};
+
 /** The first word that `names` matches in a segment that changes it: a redirect whose target
  *  is that word, or a program outside `readProgs` that names it (`ls marker 2>/dev/null` is a
- *  read). Null when no segment does. */
+ *  read, and so is `rtk proxy grep … marker`: the program is read past the rtk proxy, where a read was taken for a
+ *  change). Null when no segment does. */
 export function segmentChanging(command: string, names: (word: string) => boolean, readProgs: ReadonlySet<string>): string | null {
   for (const words of commandSegments(command, { keepRedirects: true })) {
     const named = (w: string) => names(w) || names(plainWord(w));
@@ -643,9 +664,10 @@ export function segmentChanging(command: string, names: (word: string) => boolea
     const plainWords = dropRedirects(words);
     const hit = plainWords.find(named);
     if (!hit) continue;
-    const prog = basename(plainWords[0] ?? '');
+    const prog = segmentProgram(plainWords);
     if (!readProgs.has(prog)) return hit;
-    if (prog === 'find' && plainWords.some((w) => w === '-delete' || w === '-exec' || w === '-execdir')) return hit;
+    const writing = WRITING_OPTS[prog];
+    if (writing && plainWords.some((w) => writing.test(plainWord(w)))) return hit;
   }
   return null;
 }

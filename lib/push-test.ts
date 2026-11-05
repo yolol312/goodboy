@@ -704,7 +704,6 @@ function notPassing(r: TestResult, linesOf?: (file: string) => ReadonlySet<numbe
   if (scanForbiddenPatterns(files, linesOf).length > 0) return 'a test file has an always-true pattern';
   return null;
 }
-const passing = (r: TestResult): boolean => notPassing(r) === null;
 
 /** The always-true scan's lines for a hand-off of `rev`: per test file, the lines the push adds,
  *  i.e. added since the one commit where `rev`'s history meets the remote-tracking refs (git's
@@ -859,7 +858,6 @@ export function checkHandoff(
 ): PushTestOutcome {
   if (h.unclear) return { ok: false, why: 'unclear', rev: h.unclear, tree: null, ...(h.runFirst ? { runFirst: h.runFirst } : {}) };
   const docRevs: Record<string, string[]> = {};
-  const passed = results.filter(passing);
   // (#39) The real top of the repo handed off, the key of a result's `trees`: one git call, made
   //   only when a result has `trees` (null: every result's `tree`).
   let key: string | null | undefined;
@@ -867,20 +865,23 @@ export function checkHandoff(
     if (key === undefined) key = results.some((r) => r.trees !== undefined) ? realTopOf(h.cwd) : null;
     return key;
   };
-  // Each passing result's tree of this repo, taken once for every rev (one result per repo keeps
-  //   the five-result budget of the prose check).
-  let own: string[] | undefined;
-  const ownTrees = (): string[] => (own ??= passed.map((r) => treeForRepo(r, repoKey())).filter((t): t is string => t !== null));
   for (const rev of h.revs) {
     const tree = treeOf(h.cwd, rev);
     if (tree === null) return { ok: false, why: 'unresolved', rev, tree };
     const forTree = results.filter((r) => treesOf(r).includes(tree));
-    const linesOf = forTree.length > 0 ? pushedTestLines(h.cwd, rev) : undefined;
-    if (forTree.some((r) => notPassing(r, linesOf) === null)) continue;
+    // The always-true scan reads the lines this push adds, on every path (a pattern a test file already had, such as a
+    //   documented `test.todo`, is not this push's). The prose path scanned whole files, so a full-suite record failed on
+    //   an old todo and a README-only commit on a tested tree was refused (v0.36.15 release). Taken once per rev, when
+    //   a result needs it.
+    let lines: { of: ReturnType<typeof pushedTestLines> } | undefined;
+    const linesOf = (): ReturnType<typeof pushedTestLines> => (lines ??= { of: pushedTestLines(h.cwd, rev) }).of;
+    if (forTree.some((r) => notPassing(r, linesOf()) === null)) continue;
     const blocked = forTree.find((r) => r.verdict === 'blocked');
     if (blocked) return { ok: false, why: 'blocked', rev, tree, blocked };
+    const passed = results.filter((r) => notPassing(r, linesOf()) === null);
+    const ownTrees = passed.map((r) => treeForRepo(r, repoKey())).filter((t): t is string => t !== null);
     // Not when the tree handed off has a failed result of its own (a README doctest).
-    const bases = forTree.some((r) => r.verdict !== 'pass') ? [] : docsOnly(h.cwd, rev, tree, ownTrees());
+    const bases = forTree.some((r) => r.verdict !== 'pass') ? [] : docsOnly(h.cwd, rev, tree, ownTrees);
     if (bases.length > 0) {
       docRevs[rev] = bases;
       continue;
@@ -888,7 +889,7 @@ export function checkHandoff(
     const newestPass = passed[0];
     const base = newestPass ? treeForRepo(newestPass, repoKey()) : null;
     const differs = base !== null ? (diffOf(h.cwd, base, tree) ?? undefined) : undefined;
-    const rejected = forTree.length > 0 ? (notPassing(forTree[0]!, linesOf) ?? undefined) : undefined;
+    const rejected = forTree.length > 0 ? (notPassing(forTree[0]!, linesOf()) ?? undefined) : undefined;
     return { ok: false, why: 'no-result', rev, tree, ...(differs ? { differs } : {}), ...(rejected ? { rejected } : {}) };
   }
   return Object.keys(docRevs).length > 0 ? { ok: true, docsOnly: docRevs } : { ok: true };

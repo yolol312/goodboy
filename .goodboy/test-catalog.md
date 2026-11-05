@@ -3,7 +3,7 @@
 Feature → test type, generated from the test files by goodboy (`cli.ts test-catalog`).
 Regenerate it instead of editing it; the docs rule compares it with a fresh copy.
 
-Totals: unit 178 files, 3035 tests; e2e 2 files, 54 tests.
+Totals: unit 179 files, 3067 tests; e2e 2 files, 54 tests.
 
 | Feature | Type | File | Tests |
 |---|---|---|---|
@@ -140,6 +140,7 @@ Totals: unit 178 files, 3035 tests; e2e 2 files, 54 tests.
 | session state (A3) | unit | tests/session-state.test.ts | 10 |
 | isWorkflowSkill; validateSkillGapNote; the rule in the hooks | unit | tests/skill-rule.test.ts | 13 |
 | documents name the per-session approval marker (A3) | unit | tests/skills-approval-marker-name.test.ts | 1 |
+| S16-AC-1: checkHandoff scans the lines the push adds on the prose path; S16-AC-2: writesGateState reads the program past prefixes and rtk, and needs a separator in the name; S16-AC-3: test-write keeps `notes`, cut at 4000, and refuses one that is no string; S16-AC-4: statusOf redirects only into a `.git` dir that has a HEAD | unit | tests/small-fixes-0.36.16.test.ts | 32 |
 | who may start agents; running agents and completions; the same agent on the same prompt; caps and gate modes through the hook; runaway and the fuse through the hook (#21); headless Claude runs | unit | tests/spawn-guard-hooks.test.ts | 15 |
 | depth: only leads start agents, and only their members; main-session caps; duplicates need evidence; policy rewrite; spawnsClaudeCli (headless runs bypass the Agent guard); namedFiles | unit | tests/spawn-guard.test.ts | 39 |
 | writesGateState; through the hooks | unit | tests/state-guard.test.ts | 8 |

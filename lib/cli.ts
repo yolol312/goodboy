@@ -599,6 +599,8 @@ export function validateTestResultInput(parsed: unknown, bases: readonly string[
     }
   }
 
+  if (p.notes !== undefined && typeof p.notes !== 'string') errors.push('notes, when given, must be a string.');
+
   if (errors.length > 0) return { ok: false, errors };
 
   // review-write와 같은 이유로 timestamp는 호출자 입력을 무시하고 서버 시각을 쓴다
@@ -618,11 +620,14 @@ export function validateTestResultInput(parsed: unknown, bases: readonly string[
   }
   if (isBlocked) value.blocked = p.blocked as TestResult['blocked'];
   if (p.coverage !== undefined) value.coverage = p.coverage as TestResult['coverage'];
+  // Kept, cut at 4000 characters (they were dropped without a word); no gate reads them.
+  if (typeof p.notes === 'string' && p.notes.trim() !== '') value.notes = p.notes.slice(0, MAX_NOTES);
   if (value.suites.length > 0) value.by_type = byTestType(value.suites);
   return { ok: true, errors: [], value };
 }
 
 const TEST_TYPES: TestType[] = ['unit', 'integration', 'ui', 'e2e'];
+const MAX_NOTES = 4_000;
 
 /** Per test type: how many suites and tests ran and how long they took. */
 export function byTestType(suites: TestSuiteRun[]): NonNullable<TestResult['by_type']> {

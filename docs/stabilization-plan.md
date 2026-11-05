@@ -3261,7 +3261,7 @@ an indirect write, `mv .git-off .git`) leaves the write unlisted: in the middle 
 repo, and the last call's start already sees the file (pre-existing; confirm review, medium; a fix would
 keep a call whose start read a repo top and whose end reads none). A repo that sits under a plain dir
 named `.git` (`<base>/.git/proj`) is swept as `<base>`, no repo, so its indirect writes stay unlisted
-(final review, low; a fix would redirect only when the owner's `.git/HEAD` exists). A dir reached
+(final review, low; fixed in v0.36.16, §15.32: the redirect needs the `.git` dir's `HEAD`). A dir reached
 through a link that leaves a `.git` dir (`.git` a link to a git dir named otherwise) gets no redirect
 and reads 'stalled', so it blocks until the user's marker (fails closed). The push check's refspec config lookups still read a
 stalled git as "no config"; the hand-off's own tree lookup stalls then too and denies (delta review,
@@ -3278,6 +3278,99 @@ call; `mv` of an old directory with no start status; an expired clock with `git 
 and an alias of push; a call appended during the retry and during the user's pass is kept; a refused
 second read blocks this Stop; two losses stay two; `statusOf` inside `.git/` (its work tree), with
 `core.bare` true and in a bare repo's dir (unlisted) and on dubious ownership (no repo).
+
+### 15.32 v0.36.16: four small fixes from the v0.36.15 release and the backlog
+
+1. The push check's prose path read whole test files. A README-only commit on a tested tree
+   (the v0.36.15 release: `5d447eb`, the README row set to 배포됨) is accepted when a passing
+   result's tree differs from it in prose only (#13, `docsOnlyBases`). The passing results for that
+   path came from `notPassing(r)` with no line filter, so the always-true scan read every test
+   file of a full-suite record (180 files) and refused it for a documented `test.todo` a file
+   already had (`tests/commit-issue-l1-final.test.ts:137`). The push was denied, and the user had to
+   approve it with the one-use marker. The exact-tree path already scans only the lines the push adds
+   (`pushedTestLines`, v0.36.8). `checkHandoff` now takes those lines once per rev and uses them on
+   both paths, for the prose bases and for the "differs from the newest passing result" note. With
+   no single boundary, the whole files are scanned, as before (fails closed).
+2. The state guard took reads of the session dir for changes (`writesGateState`):
+   - **Program:** `rtk proxy grep … goodboy-session …` (the rtk token filter runs the command after it)
+     was a change: the program was `rtk`. `segmentChanging` now reads the program past `rtk` /
+     `rtk proxy` and the prefix commands after it (`stripPrefix`). A segment's own prefixes (`env`,
+     `sudo`, `timeout`) were already taken off by `commandSegments` (review: those reads passed before).
+     A nested `rtk` stays the program.
+   - **Name pattern:** it matched identifiers with no separator (`inGoodboySessionDir` in a
+     searched pattern). The pattern now needs `-` or `_` before `session` (`goodboy*` still counts).
+   - **Read programs:** `cut`, `diff`, `cmp`, `od`, `nl`, `strings`, `readlink`, `realpath`, `shasum`,
+     `md5` and `sha256sum` join the list. `less` leaves it, and `more` is not added: `less -o <file>`
+     and macOS `more -O <file>` write a log, and no session reads through a pager.
+   - **Read programs that write or run (`WRITING_OPTS`):** `find -fprint <file>` (and `-fprint0`,
+     `-fprintf`, `-fls`) wrote a state file and passed as a read. bfs, the `find` Claude Code's shell
+     runs, deletes with `-rm` as with `-delete`. `-ok`/`-okdir`, `rg --pre <cmd>` and `rg
+     --hostname-bin <cmd>` run a command, `tree -o <file>` writes its output (also clustered, `-ao`) and
+     `file -C` / `file --compile` (every prefix from `--co`, measured) compiles a magic file. They are
+     changes now, beside `-delete`/`-exec`/`-execdir` (reviews, medium: `rtk find
+     … -fprint` had been denied through `rtk` and would have passed once `rtk` was read past).
+   - The approval-marker check shares `segmentChanging`; `sudo touch <marker>` is still a change.
+3. `test-write` dropped `notes`: the record was built field by field. It now keeps a `notes`
+   string, cut at 4000 characters, and refuses a `notes` that is no string. No gate reads it. The
+   record-tests skill names the field.
+4. `gitDirOwner` (§15.31 item 3) redirects into the first dir named `.git` on the path that has a
+   `HEAD`, passing over one with none. Before, a repo under a plain dir named `.git`
+   (`<base>/.git/proj`) was swept as `<base>`, no repo, and its indirect writes stayed unlisted
+   (§15.31 known limits); from its own `.git/hooks` it is swept as `<base>/.git/proj`.
+
+Known limits: a shell left in a nested repo (or its `.git`) that writes the outer project through a
+relative path (`python3 -c "open('../../src/a.py','w')…"`) is swept in the nested repo only, since
+the sweep reads the call's start and end dirs and not the project dir. This is pre-existing
+(§15.30 design); a fix would add the project dir to the dirs a sweep reads. `time -o <file>` (a
+prefix the segment loses before the check) writes a file and passes (pre-existing, review low). A
+`HEAD` planted in a plain `.git` dir above a real repo still sends the sweep to that dir, no repo (as
+in v0.36.15). `checkHandoff` now scans per rev
+with no cache across revs: 0.22 s for one rev on a full-suite record, 0.64–0.79 s for two (review).
+
+Tests: the prose path accepts a README-only commit on a full-suite record whose test file has an old
+`test.todo`, and still refuses one whose push adds a todo; the state guard on the rtk, prefix,
+identifier and `cut` reads, and on rm/redirect/find -delete/-rm/-fprint/`rg --pre`/`--hostname-bin`/
+`tree -o`/`file -C`/pager/`sh -c` changes through the same wrappers; the marker check on `sudo ls` and `sudo touch`; `test-write` keeping, cutting and
+refusing `notes`; `statusOf` under `<base>/.git/proj`, from its `.git/hooks`, and in `<top>/.git/hooks`.
+
+### 15.33 v0.36.17 (planned): a push from a repo that keeps local-only files (#41)
+
+Field report #41 (triaged 2026-11-05, verified on the current source). The tested tree is the whole
+working tree: `workTreeState` (lib/push-test.ts) adds every untracked file that is not ignored, and
+every uncommitted edit of a tracked file, before `write-tree`. `test-write` takes that tree from the
+project dir (lib/cli.ts `cmdTestWrite`, `workTreeState(cwd)`). `regression` takes it from the shell's
+repo when that repo sits under the project dir (`regressionTop`), so a regression run from a worktree
+nested in the project dir already hashes that worktree; the layer-1 result still does not. A repo that
+keeps local-only files on purpose (local config overrides, IDE metadata, notes) therefore never has a
+layer-1 result whose tree matches the commit it pushes, and every push needs the user's one-use marker.
+Running the suites in a throwaway worktree of the commit does not help: `test-write` still takes the
+project dir's tree.
+
+1. A result recorded from a clean linked worktree of the project repo counts for the commit it holds.
+   `test-write` takes an explicit worktree (or runs from one), as `regression` does for a worktree
+   under the project dir; both accept one outside it as well. The CLI checks that it is
+   a linked worktree of the project's own repo (same common git dir), that its HEAD is the named commit,
+   and that it is clean (no untracked, no modified files, goodboy artifacts aside). It then records that
+   commit's tree (as `revisionTree` gives it) and the worktree it ran in. A dirty or foreign worktree is
+   refused. The Stop test gate keeps reading the project dir's own results; only the push check takes
+   the worktree's tree.
+2. The push denial names the files that differ (it does) and says how to keep untracked local-only
+   files out: list them in `.git/info/exclude` (ignored files are already left out of the tree), or
+   test in a clean worktree as in item 1.
+3. (#25 part 3, open since v0.36.0) A record that listed mutation runs as suites blocked the Stop as
+   failing suites: the mutants fail by design. The record-tests skill says `suites` are runs of the
+   real tree only, and a mutation run goes in its criterion's `mutation`. `test-write` warns when a
+   suite with failures looks like a mutation run (`mutant`/`mutation` in its name or command). The
+   validator does not skip such suites: a real failure would hide behind the name.
+4. (#36 part 4) The note that a test record does not count because its test file lived in a removed
+   worktree (`withoutAbsentTests`) reaches the gate log only, and the user sees it only inside a block
+   for another reason. The Stop that drops such a record shows it once as a warning line.
+
+Not planned:
+- Treating HTML under `docs/` or IDE metadata as non-content in the comparison. HTML can be served,
+  and IDE metadata can be loaded by builds.
+- A project policy of local-only paths left out of both sides. A run with local overrides does not
+  prove the pushed content.
 
 ## 16. J — Field reports (v0.34.0)
 

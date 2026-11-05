@@ -310,23 +310,29 @@ export function statusFiles(cwd: string, timeoutMs = 30_000): { top: string; fil
  *  takes another owner (root) or the hook's environment, and `safe.directory` is not read from the repo's config. */
 const NO_REPO_ABOVE = /not a git repository \(or any (?:of the parent directories|parent up to mount point)|detected dubious ownership in repository/;
 
-/** The dir that holds the first `.git` part of absolute `p`, or null when `p` has none. */
-function beforeGitPart(p: string): string | null {
+/** The first `.git` part of absolute `p` that is a git dir (it has a `HEAD`): `gitDir`, up to and with it, and the dir
+ *  that holds it (`owner`). Null when `p` has none. A dir named `.git` with no `HEAD` is passed over: a repo can sit
+ *  under one (`<base>/.git/proj`), and it was swept as `<base>`, no repo (v0.36.15 review, low). */
+function gitPart(p: string): { owner: string; gitDir: string } | null {
   const parts = p.split(sep);
-  const i = parts.findIndex((s) => /^\.git$/i.test(s));
-  return i > 0 ? parts.slice(0, i).join(sep) || sep : null;
+  for (let i = 1; i < parts.length; i++) {
+    if (!/^\.git$/i.test(parts[i]!)) continue;
+    const gitDir = parts.slice(0, i + 1).join(sep);
+    if (existsSync(join(gitDir, 'HEAD'))) return { owner: parts.slice(0, i).join(sep) || sep, gitDir };
+  }
+  return null;
 }
 
-/** The work tree dir that holds the `.git` dir `p` is in (`<top>/.git/hooks` → `<top>`), or null when `p` is in none.
+/** The work tree dir that holds the git dir `p` is in (`<top>/.git/hooks` → `<top>`), or null when `p` is in none.
  *  Judged on the real path: a link spelled `.git` that leads into the project is no git dir (confirm review: the
  *  sweep went to the link's dir, no repo, and a write in the project went unlisted). In `p`'s own spelling when that
- *  names the same dir (the edit log keeps cwd's spelling). The owner of a real path has no `.git` part, so a caller
- *  that recurses on it stops there. */
+ *  names the same dir (the edit log keeps cwd's spelling). The owner holds no git dir part before the one taken, so a
+ *  caller that recurses on it stops there. */
 function gitDirOwner(p: string): string | null {
-  const real = beforeGitPart(realDeep(p));
+  const real = gitPart(realDeep(p));
   if (real === null) return null;
-  const spelled = beforeGitPart(resolvePath(p));
-  return spelled !== null && realDeep(spelled) === real ? spelled : real;
+  const spelled = gitPart(resolvePath(p));
+  return spelled !== null && realDeep(spelled.owner) === real.owner ? spelled.owner : real.owner;
 }
 
 /** `statusFiles`, telling a dir that is in no repo (null: git said so, or the dir is gone) from a repo whose changes

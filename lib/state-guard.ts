@@ -201,10 +201,18 @@ export function restoreOrphanGateState(sessionId: string, open: readonly string[
   return out;
 }
 
-const READ_PROGS = new Set(['cat', 'ls', 'head', 'tail', 'grep', 'rg', 'wc', 'jq', 'stat', 'test', '[', 'file', 'less', 'tree', 'find', 'du', 'echo']);
+// Programs that read the files they name. Their options that write or run something (`find -fprint`, `rg --pre`,
+//   `tree -o`, `file -C`) are changes (segmentChanging). The pagers are left out: `less -o <file>` and macOS
+//   `more -O <file>` write a log, and no session reads through a pager (v0.36.16 reviews).
+const READ_PROGS = new Set(['cat', 'ls', 'head', 'tail', 'grep', 'rg', 'wc', 'jq', 'stat', 'test', '[', 'file', 'tree', 'find', 'du', 'echo', 'cut', 'diff', 'cmp', 'od', 'nl', 'strings', 'readlink', 'realpath', 'shasum', 'md5', 'sha256sum']);
+
+/** A word that names a goodboy session dir (`goodboy-session-…`) or a glob that can match one (`goodboy-s*`,
+ *  `goodboy*`). A separator is required before `session`: an identifier such as `inGoodboySessionDir` in a searched
+ *  pattern is no path (it was taken for one). */
+const SESSION_DIR_WORD = /goodboy(?:[-_](?:session|sess\*|s\*|\*)|\*)/i;
 
 /** True when a shell command changes a goodboy session dir: a segment that names
  *  `goodboy-session` (or a glob that matches it) and runs anything but a read, or redirects. */
 export function writesGateState(command: string): boolean {
-  return segmentChanging(command, (w) => /goodboy[-_]?(?:session|sess\*|s\*|\*)/i.test(w), READ_PROGS) !== null;
+  return segmentChanging(command, (w) => SESSION_DIR_WORD.test(w), READ_PROGS) !== null;
 }

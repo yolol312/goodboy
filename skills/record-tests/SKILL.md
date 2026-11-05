@@ -39,6 +39,8 @@ Record one layer-1 test result the Stop gate and the push check can read.
    prototype, anything under `docs/`): a check of the document proves the document.
 6. `prototype_diff`, when a dev-cycle prototype exists: `{prototype_path, mismatches:
    [{selector?, issue, severity}]}`. `coverage`: the measure-coverage record when measured.
+   `notes` (optional): a string for people who read the record (what was left out and why,
+   flakes seen), kept up to 4000 characters; no gate reads it.
 7. `verdict`: `pass` (all suites pass, all criteria covered, no high prototype mismatch),
    `needs-changes`, `fail` (cannot be fixed automatically), or `blocked` (the tests cannot
    run here at all) with `blocked: {reason (15+ chars), evidence: [{command, output}]}`.
