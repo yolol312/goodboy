@@ -3365,12 +3365,53 @@ project dir's tree.
 4. (#36 part 4) The note that a test record does not count because its test file lived in a removed
    worktree (`withoutAbsentTests`) reaches the gate log only, and the user sees it only inside a block
    for another reason. The Stop that drops such a record shows it once as a warning line.
+5. Lows carried from the v0.36.16 reviews:
+   - The state guard's `tree` pattern (`/^-[a-zA-Z]*o/`, lib/outward-command.ts `WRITING_OPTS`)
+     also matches a short option whose attached argument holds an `o`: `tree -Inode_modules`,
+     `-Pfoo`, `-Tfoo` (`-H` the same) count as changes, so such a read of a session dir is
+     denied (fails closed). `file -mC…` has the same shape. Read a cluster only up to the first
+     option that takes an argument.
+   - Tests: `tests/small-fixes-0.36.16.test.ts` keeps the `tree`/`file` cases under the S16-AC-2
+     describe; `tests/i40-git-clock.test.ts` writes its fake-git PATH wrapper four times, and its
+     best-effort case relies on `chmod 0o500` blocking writes, which does not hold for root (a
+     container run fails).
 
 Not planned:
 - Treating HTML under `docs/` or IDE metadata as non-content in the comparison. HTML can be served,
   and IDE metadata can be loaded by builds.
 - A project policy of local-only paths left out of both sides. A run with local overrides does not
   prove the pushed content.
+
+### 15.34 v0.36.18 (planned): the open hardening issues #12 and #27
+
+Placed 2026-11-05 by the check after the v0.36.16 release: both issues were open with no version
+(§15.5 "Older than I2" and §15.20 only point to them). Re-checked on the source of `c563d93`.
+
+1. (#12) State guard gaps:
+   - `turn.txt` (lib/file-tracker.ts) is not in `GUARDED` (lib/state-guard.ts), and not every
+     session file a hook reads goes through `lib/safe-read.ts` (a directory placed at `edits.jsonl`
+     before the first edit; a FIFO at a file a hook reads). Each file a hook reads is guarded, or read
+     as a regular file only, capped.
+   - The issue says a Stop restores the snapshot of a Bash call that is still running. Since #14 (I7)
+     the Stop keeps the snapshot of an open call it noted (`restoreOrphanGateState(…, open)`). A test
+     confirms that what such a call writes later is put back by its own post hook. If so, this part
+     closes with the test only.
+   - The snapshot index (`.index.json`) sits in the session dir that a call can write. It moves out of
+     a call's reach, or the restore checks it against the snapshot's own files.
+2. (#27) Review gate:
+   - Dimensions are judged on the union of all fresh reviews (hooks/stop.ts, `checkedDims`), not per
+     file. Each changed file's required dimensions come from reviews that cover that file.
+   - Shell scripts need no dimension: `isCodeFile` (lib/review-dimensions.ts) knows no `.sh`, `.bash`,
+     `.zsh` or `.ps1`. A script needs `error-path` and `security-injection`.
+   - The Stop uses an empty list when `requiredDimensionsFor` throws (fails open). It blocks instead.
+   - A committed private key or opaque keystore (`.key`, `.p12`, `.pfx`, `.jks`, a PEM block with
+     `PRIVATE KEY`) meets no deterministic check (`lib/secret-patterns.ts` has the PEM pattern and
+     masks text only). This is a new check: under P2 the user decides at the start of this step
+     whether it goes into v0.36.18 or waits for v1.0.
+   - Still deferred with #27: inert assets and type-only TypeScript files exempt from layer-1 tests.
+     They need classification against the baseline and a TypeScript AST.
+
+Each part has a test that fails without its fix. #12 also gets a live probe (`/verify`).
 
 ## 16. J — Field reports (v0.34.0)
 
