@@ -70,6 +70,15 @@ function write(root: string, rel: string, text: string): string {
 }
 const GIT_INIT = 'git init -q -b main && git config user.email t@e.com && git config user.name t && git config commit.gpgsign false';
 
+/** A `git` ahead of PATH (the test's afterEach restores it): `body` (shell) runs first, then the real git with the
+ *  same arguments. `dirName` is the folder under `base` that holds it. */
+function fakeGit(base: string, body: string, dirName = 'bin'): void {
+  const bin = join(base, dirName);
+  write(bin, 'git', `#!/bin/sh\n${body}\nexec '${Bun.which('git')}' "$@"\n`);
+  chmodSync(join(bin, 'git'), 0o755);
+  process.env.PATH = `${bin}:${savedPath}`;
+}
+
 /** A `.git` git cannot read: its HEAD is a FIFO, so a git call that reaches it (a status of the repo around it) blocks. */
 function plantDecoy(parent: string, name = 'zzz'): string {
   const z = join(parent, name);
@@ -126,10 +135,7 @@ describe('spawnGit stops at the hook clock', () => {
   test('a clock that ran out: git does not run, and the call is stalled (a fake git on PATH is never started)', () => {
     const w = world();
     const mark = join(w.base, 'git-ran.txt');
-    const bin = join(w.base, 'bin');
-    write(bin, 'git', `#!/bin/sh\necho "$@" >> '${mark}'\nexec '${Bun.which('git')}' "$@"\n`);
-    chmodSync(join(bin, 'git'), 0o755);
-    process.env.PATH = `${bin}:${savedPath}`;
+    fakeGit(w.base, `echo "$@" >> '${mark}'`);
     // Control: with no clock the fake runs.
     expect(spawnGit(w.r, ['rev-parse', '--show-cdup'])).toMatchObject({ code: 0, ran: true, stalled: false });
     expect(existsSync(mark)).toBe(true);
@@ -450,10 +456,7 @@ describe('retryUnswept', () => {
     const U = await unsweptLib();
     const w = world();
     const mark = join(w.base, 'git-calls.txt');
-    const bin = join(w.base, 'bin');
-    write(bin, 'git', `#!/bin/sh\necho "$@" >> '${mark}'\nexec '${Bun.which('git')}' "$@"\n`);
-    chmodSync(join(bin, 'git'), 0o755);
-    process.env.PATH = `${bin}:${savedPath}`;
+    fakeGit(w.base, `echo "$@" >> '${mark}'`);
     const other = join(w.base, 'other');
     write(other, 'a.txt', 'a\n');
     sh(other, `${GIT_INIT} && git add -A && git commit -q -m "init #40"`);
@@ -586,7 +589,8 @@ describe('the record file', () => {
 });
 
 describe('the record is best-effort', () => {
-  test('a session dir that cannot be written loses the note without throwing (the hook goes on)', async () => {
+  // chmod 0o500 stops writes for any user but root (a container run is root).
+  test.skipIf(process.getuid?.() === 0)('a session dir that cannot be written loses the note without throwing (the hook goes on)', async () => {
     const U = await unsweptLib();
     const sid = newSid();
     const dir = ensureSessionDir(sid);
@@ -860,14 +864,7 @@ describe('the other git readers read a stalled git as a stall', () => {
 /** A `git` ahead of PATH that, on a `status` call while `arm` exists, removes `arm` and appends `line` to `record`
  *  (what a parallel post hook does while a retry waits on git), then runs the real git. */
 function armedGit(base: string, arm: string, record: string, line: string): void {
-  const bin = join(base, 'bin-armed');
-  write(
-    bin,
-    'git',
-    `#!/bin/sh\ncase " $* " in *" status "*) if [ -e '${arm}' ]; then rm -f '${arm}'; printf '%s\\n' '${line}' >> '${record}'; fi;; esac\nexec '${Bun.which('git')}' "$@"\n`,
-  );
-  chmodSync(join(bin, 'git'), 0o755);
-  process.env.PATH = `${bin}:${savedPath}`;
+  fakeGit(base, `case " $* " in *" status "*) if [ -e '${arm}' ]; then rm -f '${arm}'; printf '%s\\n' '${line}' >> '${record}'; fi;; esac`, 'bin-armed');
 }
 const callOf = (tuid: string, dir: string, over: Partial<import('../lib/unswept').UnsweptCall> = {}): import('../lib/unswept').UnsweptCall => ({ tuid, since: Date.now() - 60_000, dirs: [dir], command: `cmd-${tuid}`, stalled: [dir], ...over });
 
@@ -1047,10 +1044,7 @@ describe('the lost record is dated, and a refused re-read is told to the retry',
     const arm = join(w.base, 'arm');
     writeFileSync(arm, '');
     // The fake git, on the retry's `status`, puts a FIFO where the record was (the retry already read it).
-    const bin = join(w.base, 'bin-fifo');
-    write(bin, 'git', `#!/bin/sh\ncase " $* " in *" status "*) if [ -e '${arm}' ]; then rm -f '${arm}' '${record}'; mkfifo '${record}'; fi;; esac\nexec '${Bun.which('git')}' "$@"\n`);
-    chmodSync(join(bin, 'git'), 0o755);
-    process.env.PATH = `${bin}:${savedPath}`;
+    fakeGit(w.base, `case " $* " in *" status "*) if [ -e '${arm}' ]; then rm -f '${arm}' '${record}'; mkfifo '${record}'; fi;; esac`, 'bin-fifo');
     const kept = sweep.retryUnswept(w.sid, 5_000);
     expect(kept.map((c) => c.tuid)).toEqual(['']);
     expect(kept[0]!.command).toContain('could not read its record');

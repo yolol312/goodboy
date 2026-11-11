@@ -167,6 +167,8 @@ export interface HabitState {
   checkoutGateTurns?: Record<string, number>;
   /** Layer 1 (F2): whether the "dev-cycle documents yield no acceptance criteria" warning was shown (once per session). */
   acceptanceProblemWarned?: boolean;
+  /** Layer 1 (#36 part 4): the records (`timestamp|category`) whose "not counted, its test file is gone" warning was shown. */
+  absentRecordsShown?: string[];
 }
 
 const HABIT_STATE_FILE = 'habit-state.json';

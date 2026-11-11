@@ -3333,7 +3333,7 @@ identifier and `cut` reads, and on rm/redirect/find -delete/-rm/-fprint/`rg --pr
 `tree -o`/`file -C`/pager/`sh -c` changes through the same wrappers; the marker check on `sudo ls` and `sudo touch`; `test-write` keeping, cutting and
 refusing `notes`; `statusOf` under `<base>/.git/proj`, from its `.git/hooks`, and in `<top>/.git/hooks`.
 
-### 15.33 v0.36.17 (planned): a push from a repo that keeps local-only files (#41)
+### 15.33 v0.36.17: a push from a repo that keeps local-only files (#41)
 
 Field report #41 (triaged 2026-11-05, verified on the current source). The tested tree is the whole
 working tree: `workTreeState` (lib/push-test.ts) adds every untracked file that is not ignored, and
@@ -3347,16 +3347,39 @@ Running the suites in a throwaway worktree of the commit does not help: `test-wr
 project dir's tree.
 
 1. A result recorded from a clean linked worktree of the project repo counts for the commit it holds.
-   `test-write` takes an explicit worktree (or runs from one), as `regression` does for a worktree
-   under the project dir; both accept one outside it as well. The CLI checks that it is
-   a linked worktree of the project's own repo (same common git dir), that its HEAD is the named commit,
-   and that it is clean (no untracked, no modified files, goodboy artifacts aside). It then records that
-   commit's tree (as `revisionTree` gives it) and the worktree it ran in. A dirty or foreign worktree is
-   refused. The Stop test gate keeps reading the project dir's own results; only the push check takes
-   the worktree's tree.
-2. The push denial names the files that differ (it does) and says how to keep untracked local-only
-   files out: list them in `.git/info/exclude` (ignored files are already left out of the tree), or
-   test in a clean worktree as in item 1.
+   `test-write --worktree <dir>` and `regression --worktree <dir>`, run from the project dir (so the
+   record lands where the push check reads it; a CLI run from a worktree outside the project dir takes
+   that worktree as its project), take the worktree inside or outside the project dir
+   (lib/clean-worktree.ts `cleanWorktreeFor`). The CLI checks that it is a linked worktree of the
+   project's own repo other than the project dir's checkout (`linkedWorktreeOf`, lib/git-dirs.ts: same
+   common git dir, read from git's files), that it has a commit checked out, and that it is clean (`git
+   status --porcelain -z --untracked-files=all --ignore-submodules=none` shows nothing but goodboy
+   artifacts; ignored files may stay). `test-write` then records HEAD as `commit`, HEAD's tree as
+   `revisionTree` gives it as `tree`, and the worktree's top as `worktree`, with no `trees`. Every tested
+   and test file must be inside the worktree (relative names resolve there), so the Stop never takes the
+   record for evidence of the project dir's files: their tree is not the commit's. `regression` runs
+   the whole suite in the worktree and records it with `worktree`. A dirty or foreign worktree is
+   refused, before the input is read; the test files must exist in the worktree (relative names
+   resolve there only). A result whose `tree` is the pushed commit's counts, and its test files must
+   still exist (keep the worktree until the push). The push check's always-true scan reads a worktree
+   record's test files at their repo path in that worktree (`pushedTestLines` takes the record's
+   `worktree` as the root): measured from the project top, a nested worktree's file was never in the
+   diff (scan skipped) and an outside one was read whole (hallucination review). The clean check counts
+   a rename's old path too (security review: `git mv a.test.ts .claude/pending/` in the worktree read
+   as clean while HEAD's tree still held the file), keeps the repo's clean filters as `workTreeState`
+   does (an LFS repo read every filtered file as modified), and refuses a HEAD that moved while it ran.
+   Known limits: what `git status` does not show reads clean, as it does for a project-dir record
+   (assume-unchanged and skip-worktree bits, a sparse checkout, a file `.git/info/exclude` hides);
+   the Stop warning shows the record's category and test path as the record holds them.
+2. The push denial for a commit (not a deploy of the working tree) that differs from the newest passing
+   result says how to keep untracked local-only files out: list them in `.git/info/exclude` (ignored
+   files are already left out of the tree), or record the run from a clean worktree as in item 1. The
+   main session makes that worktree (`git worktree add --detach <dir> <commit>`): the live /verify
+   (sonnet, a project with an untracked `local.cfg` and a local bare remote) showed the test agent's
+   `git worktree add` denied by its role limits (`test-unit writes test files only, not .git`). The
+   model then took the first route (`local.cfg` into `.git/info/exclude`), the tests were recorded
+   again, and the push landed with `local.cfg` kept. The denial, agents/test-unit.md and the
+   record-tests skill say who makes the worktree; the role limits stay as they are.
 3. (#25 part 3, open since v0.36.0) A record that listed mutation runs as suites blocked the Stop as
    failing suites: the mutants fail by design. The record-tests skill says `suites` are runs of the
    real tree only, and a mutation run goes in its criterion's `mutation`. `test-write` warns when a
@@ -3364,17 +3387,22 @@ project dir's tree.
    validator does not skip such suites: a real failure would hide behind the name.
 4. (#36 part 4) The note that a test record does not count because its test file lived in a removed
    worktree (`withoutAbsentTests`) reaches the gate log only, and the user sees it only inside a block
-   for another reason. The Stop that drops such a record shows it once as a warning line.
+   for another reason. The Stop that drops such a record shows it once per session as a warning line
+   (Korean, `absentRecordWarnings` in lib/test-validator.ts, the keys in the habit state), when the
+   record tested a file edited since the test cursor. A dropped record of other files (a worktree
+   record after the worktree was removed) stays in the gate log only: it was no evidence for this change.
 5. Lows carried from the v0.36.16 reviews:
    - The state guard's `tree` pattern (`/^-[a-zA-Z]*o/`, lib/outward-command.ts `WRITING_OPTS`)
      also matches a short option whose attached argument holds an `o`: `tree -Inode_modules`,
      `-Pfoo`, `-Tfoo` (`-H` the same) count as changes, so such a read of a session dir is
-     denied (fails closed). `file -mC…` has the same shape. Read a cluster only up to the first
-     option that takes an argument.
+     denied (fails closed). `file -mC…` has the same shape. A cluster is now read only up to its
+     first option that takes an argument (`tree`: `-L`, `-P`, `-I`, `-H`, `-T`; `file`: `-e`, `-f`,
+     `-F`, `-m`, `-M`, `-P`): `tree -ao` and `file -zC` stay changes.
    - Tests: `tests/small-fixes-0.36.16.test.ts` keeps the `tree`/`file` cases under the S16-AC-2
      describe; `tests/i40-git-clock.test.ts` writes its fake-git PATH wrapper four times, and its
      best-effort case relies on `chmod 0o500` blocking writes, which does not hold for root (a
-     container run fails).
+     container run fails). The cases move to their own describe, the wrapper to one helper, and the
+     best-effort case is skipped as root.
 
 Not planned:
 - Treating HTML under `docs/` or IDE metadata as non-content in the comparison. HTML can be served,
@@ -3410,6 +3438,12 @@ Placed 2026-11-05 by the check after the v0.36.16 release: both issues were open
      whether it goes into v0.36.18 or waits for v1.0.
    - Still deferred with #27: inert assets and type-only TypeScript files exempt from layer-1 tests.
      They need classification against the baseline and a TypeScript AST.
+3. (Found 2026-11-11 while building v0.36.17) The result-writer guard (lib/role-limits.ts
+   `resultCliWrite`) takes any command with a JS runtime that names `lib/regression.ts` anywhere for a
+   test-result write, so the main session's `bun …/lib/cli.ts review-axes … lib/regression.ts` was
+   denied as a test record. It fails closed. The name check is broad on purpose (a heredoc fed to
+   `bun -`, a variable), so the narrowing must keep those: a `lib/cli.ts` segment whose literal
+   subcommand is no writer, with the name only among its file operands, is no write.
 
 Each part has a test that fails without its fix. #12 also gets a live probe (`/verify`).
 

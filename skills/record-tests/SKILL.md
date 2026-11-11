@@ -25,6 +25,8 @@ Record one layer-1 test result the Stop gate and the push check can read.
    runs (the gate counts types per file: boundary code needs `integration` or `e2e`, UI code
    `ui` or `e2e`); `duration_ms` is the run's
    wall time (from the runner's report, or `date +%s%N`-style timing around the command).
+   `suites` are runs of the real tree only: a mutation run fails by design, so it goes in its
+   criterion's `mutation`, never in `suites` (test-write warns on a failing suite named like one).
 5. `acceptance`: one entry per criterion from `bun "$GB/lib/cli.ts" acceptance-list` and
    per criterion a Stop block message listed (acceptance-list shows the documents now; the
    block message lists the uncovered criteria of the whole session, up to 20, with the rows
@@ -45,7 +47,10 @@ Record one layer-1 test result the Stop gate and the push check can read.
    `needs-changes`, `fail` (cannot be fixed automatically), or `blocked` (the tests cannot
    run here at all) with `blocked: {reason (15+ chars), evidence: [{command, output}]}`.
 8. Write it: `cat <<'JSON' | bun "$GB/lib/cli.ts" test-write` … `JSON`. On exit 1, fix and
-   retry.
+   retry. A run in a clean linked worktree of the project's repo (made for a push by the main
+   session, when the project dir keeps local-only files): run test-write from the project dir with
+   `--worktree <dir>`, listing the tested and test files as the worktree has them; the record
+   then holds that worktree's commit. Keep the worktree until the push.
 
 ## Output
 - `{"ok":true,"path":".claude/tests/<ts>.json",…}`; the file gains `by_type` (suites, tests

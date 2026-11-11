@@ -639,12 +639,15 @@ function segmentProgram(words: string[]): string {
 /** Options of a read program that write a file or run a command (v0.36.16 reviews): `find -fprint <file>` writes it
  *  and `-rm` (bfs, the `find` Claude Code's shell runs) deletes like `-delete`; `-ok` runs a command; `rg --pre <cmd>`
  *  and `rg --hostname-bin <cmd>` run one; `tree -o <file>` writes its output (also in a cluster, `-ao`); `file -C`
- *  and `file --compile` (and every prefix getopt takes for it, from `--co`: measured) compile a magic file. */
+ *  and `file --compile` (and every prefix getopt takes for it, from `--co`: measured) compile a magic file.
+ *  A cluster is read only up to its first option that takes an argument, which is the rest of the word (v0.36.17):
+ *  `tree -Inode_modules`, `-Pfoo`, `-Tfoo`, `-Hfoo`, `-Lfoo` and `file -mC…` (`-e`, `-f`, `-F`, `-m`, `-M`, `-P`)
+ *  are reads. */
 const WRITING_OPTS: Readonly<Record<string, RegExp>> = {
   find: /^-(?:delete|rm|exec|execdir|ok|okdir|fprint0?|fprintf|fls)$/,
   rg: /^--(?:pre|hostname-bin)(?:=|$)/,
-  tree: /^-[a-zA-Z]*o/,
-  file: /^(?:-[a-zA-Z]*C|--co)/,
+  tree: /^-(?:(?![LPIHTo])[a-zA-Z])*o/,
+  file: /^(?:-(?:(?![efFmMPC])[a-zA-Z])*C|--co)/,
 };
 
 /** The first word that `names` matches in a segment that changes it: a redirect whose target

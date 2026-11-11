@@ -33,7 +33,7 @@ import { START_PIN_BUDGET_MS, startPinDeadline } from '../lib/start-pins';
 import { nestedCheckoutOf } from '../lib/git-dirs';
 import { realDeep } from '../lib/private-files';
 import { setRecordBase } from '../lib/record-paths';
-import { withoutAbsentTests } from '../lib/test-validator';
+import { absentRecordWarnings, withoutAbsentTests } from '../lib/test-validator';
 import {
   affectedGaps,
   affectedReason,
@@ -807,6 +807,21 @@ type TestEvaluation =
  * that ran. An evidence-backed BLOCKED result ends the turn as unverified only when the results
  * that did run pass: a failing unit run next to an e2e run that could not start is a failure.
  */
+/** (#36 part 4) The user sees a record `withoutAbsentTests` dropped that tested a file edited now, once per session. */
+function warnDroppedRecords(sessionId: string, dropped: Parameters<typeof absentRecordWarnings>[0], edited: readonly string[]): void {
+  if (dropped.length === 0) return;
+  try {
+    const habit = readHabitState(sessionId);
+    const w = absentRecordWarnings(dropped, edited, habit.absentRecordsShown ?? []);
+    if (w.lines.length === 0) return;
+    habit.absentRecordsShown = w.shown;
+    writeHabitState(sessionId, habit);
+    habitWarnings.push(...w.lines);
+  } catch {
+    // best-effort: the gate log keeps the notes
+  }
+}
+
 function evaluateTestResults(
   results: TestResult[],
   acceptance: AcceptanceReading,
@@ -826,8 +841,9 @@ function evaluateTestResults(
   let unverified: TestResult | null = null;
   // (v0.36.6, R3) A passing record whose test files are gone is no evidence: dropped once, here, for
   //   every rule below; the notes go in the block that says a file is still unverified.
-  const { kept, notes } = withoutAbsentTests(results);
+  const { kept, notes, dropped } = withoutAbsentTests(results);
   for (const n of notes) logGate(sessionId, 'test', 'warn', n);
+  warnDroppedRecords(sessionId, dropped, files);
   try {
     // (#23) The edits with the record trees that hold their content, per group, within one deadline (#39).
     const deadline = newDeadline();

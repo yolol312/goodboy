@@ -59,6 +59,8 @@ export interface RegressionRecord {
   changed_files?: string[];
   /** Where the commands came from (`package.json scripts.test`, `go.mod` …). */
   source: string;
+  /** (#41) `regression --worktree`: the clean linked worktree of the project's repo the run took place in. */
+  worktree?: string;
   runs: RegressionRun[];
   duration_ms: number;
   verdict: 'pass' | 'fail';

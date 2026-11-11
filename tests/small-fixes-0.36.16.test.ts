@@ -228,7 +228,7 @@ describe('S16-AC-2: writesGateState reads the program past prefixes and rtk, and
     }
   });
 
-  test('a read program option that writes a file or runs a command is a change: find -fprint/-rm/-ok, rg --pre, tree -o, file -C, pagers, also through rtk', () => {
+  test('a read program option that writes a file or runs a command is a change: find -fprint/-rm/-ok, rg --pre, pagers, also through rtk', () => {
     const dir = '/tmp/goodboy-session-a';
     for (const c of [
       `find ${dir} -fprint ${dir}/out`,
@@ -248,17 +248,6 @@ describe('S16-AC-2: writesGateState reads the program past prefixes and rtk, and
       `rtk proxy rg --pre ./x pattern ${dir}`,
       `rg --hostname-bin ./x pattern ${dir}`,
       `rg --hostname-bin=./x pattern ${dir}`,
-      `tree -o /tmp/out ${dir}`,
-      `tree -oout ${dir}`,
-      `tree -ao /tmp/out ${dir}`,
-      `tree -fao /tmp/out ${dir}`,
-      `file --compile -m /tmp/magic ${dir}`,
-      `file --comp -m /tmp/magic ${dir}`,
-      `file --com -m /tmp/magic ${dir}`,
-      `file --co -m /tmp/magic ${dir}`,
-      `rtk proxy tree -ao /tmp/out ${dir}`,
-      `file -C -m /tmp/magic ${dir}`,
-      `file -bC ${dir}`,
       `less -o /tmp/log ${dir}/gate-log.jsonl`,
       `more -O /tmp/log ${dir}/gate-log.jsonl`,
     ]) {
@@ -271,13 +260,6 @@ describe('S16-AC-2: writesGateState reads the program past prefixes and rtk, and
       `rg -n pattern ${dir}`,
       `rg -n host ${dir}`,
       `rtk proxy find ${dir} -name x`,
-      `tree -a ${dir}`,
-      `file ${dir}/x`,
-      `file -b ${dir}/x`,
-      `file --brief ${dir}/x`,
-      `file --checking-printout ${dir}/x`,
-      `tree --noreport ${dir}`,
-      `tree -fa ${dir}`,
     ]) {
       expect([c, writesGateState(c)]).toEqual([c, false]);
     }
@@ -324,6 +306,73 @@ describe('S16-AC-2: writesGateState reads the program past prefixes and rtk, and
     const change = await pre('rtk proxy rm -rf $TMPDIR/goodboy-session-x');
     expect(change.denied).toBe(true);
     expect(change.reason).toContain("goodboy's own session state");
+  });
+});
+
+describe('S16-AC-2b: writesGateState on `tree` and `file`: -o and -C write, an attached argument is no option', () => {
+  const dir = '/tmp/goodboy-session-a';
+
+  test('`tree -o`, `file -C` and `file --compile` (and the prefixes getopt takes) write a file: changes, also in a cluster and through rtk', () => {
+    for (const c of [
+      `tree -o /tmp/out ${dir}`,
+      `tree -oout ${dir}`,
+      `tree -ao /tmp/out ${dir}`,
+      `tree -fao /tmp/out ${dir}`,
+      `rtk proxy tree -ao /tmp/out ${dir}`,
+      `file --compile -m /tmp/magic ${dir}`,
+      `file --comp -m /tmp/magic ${dir}`,
+      `file --com -m /tmp/magic ${dir}`,
+      `file --co -m /tmp/magic ${dir}`,
+      `file -C -m /tmp/magic ${dir}`,
+      `file -bC ${dir}`,
+      `file -zC ${dir}`,
+    ]) {
+      expect([c, writesGateState(c)]).toEqual([c, true]);
+    }
+  });
+
+  test('plain reads of the two programs are no change', () => {
+    for (const c of [
+      `tree -a ${dir}`,
+      `tree -fa ${dir}`,
+      `tree --noreport ${dir}`,
+      `file ${dir}/x`,
+      `file -b ${dir}/x`,
+      `file --brief ${dir}/x`,
+      `file --checking-printout ${dir}/x`,
+    ]) {
+      expect([c, writesGateState(c)]).toEqual([c, false]);
+    }
+  });
+
+  test('v0.36.17: a cluster is read only up to its first option that takes an argument; what follows is that argument, not -o or -C', () => {
+    for (const c of [
+      `tree -Inode_modules ${dir}`,
+      `tree -Pfoo ${dir}`,
+      `tree -Tfoo ${dir}`,
+      `tree -Hfoo ${dir}`,
+      `tree -Lfoo ${dir}`,
+      `tree -aIo ${dir}`,
+      `tree -aLo ${dir}`,
+      `rtk proxy tree -Inode_modules ${dir}`,
+      `file -mC ${dir}/x`,
+      `file -mCfoo ${dir}/x`,
+      `file -bmC ${dir}/x`,
+      `file -eC ${dir}/x`,
+      `file -fC ${dir}/x`,
+      `file -FC ${dir}/x`,
+      `file -MC ${dir}/x`,
+      `file -PC ${dir}/x`,
+      `rtk proxy file -mC ${dir}/x`,
+    ]) {
+      expect([c, writesGateState(c)]).toEqual([c, false]);
+    }
+  });
+
+  test('an option that takes no argument before the -o or -C keeps the cluster a change; a separate -o word is one too', () => {
+    for (const c of [`tree -ao ${dir}`, `tree -ifo out ${dir}`, `tree -I foo -o out ${dir}`, `tree -ofoo ${dir}`, `file -zC ${dir}/x`, `file -sbC ${dir}/x`, `file -m /tmp/m -C ${dir}/x`]) {
+      expect([c, writesGateState(c)]).toEqual([c, true]);
+    }
   });
 });
 

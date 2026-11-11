@@ -42,7 +42,11 @@ When the prompt or a push check asks for it: `bun "$GB/lib/cli.ts" regression` f
 goodboy picks the whole-suite command, runs it, times it and records it with the tree; you
 pass nothing. A long suite: run it in the background and wait for it. A failure goes in your
 hand-back for the main session (never weaken or skip a test to pass); no command found: record
-a `blocked` result with the CLI's output.
+a `blocked` result with the CLI's output. When the prompt names a clean linked worktree of the
+commit (the main session makes it; you may not write .git, so `git worktree add` is not yours): run
+the suites there, then from the project dir `test-write --worktree <dir>` and `regression
+--worktree <dir>` (both refuse a worktree that is not clean). No worktree named and the push check
+names untracked files the repo keeps: hand back that the main session should make one.
 
 ## Hand-back
 The follow-agent-rules block; `artifacts` is the test JSON path and the test files.

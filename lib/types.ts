@@ -213,6 +213,10 @@ export interface TestResult {
    *  hash). The Stop compares one with the file's content now, so an edited ignored code file can
    *  be evidenced by a record (bounded in count and bytes: lib/changed-coverage.ts extraBlobsFor). */
   extra_blobs?: Record<string, string>;
+  /** (#41) Set by `cli.ts test-write --worktree`, never by the agent: the top of the clean linked worktree the
+   *  run happened in. `commit` and `tree` are then that worktree's HEAD and its tree, and every tested and
+   *  test file is in it. */
+  worktree?: string;
 }
 
 /** A layer-1 test verdict: a review verdict, or `blocked` when the tests could not run. */

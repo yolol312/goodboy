@@ -148,7 +148,7 @@ const ARTIFACT_DIRS = ['.claude/tests', '.claude/reviews', '.claude/pending'];
 const GOODBOY_FILES = ['.goodboy/policy.md', '.goodboy/docs.json', '.goodboy/test-catalog.md', '.goodboy/hosts', '.goodboy/commit-issue'];
 
 /** A path (repo-relative) that may be goodboy's own and never content. */
-function isArtifactPath(p: string): boolean {
+export function isArtifactPath(p: string): boolean {
   return ARTIFACT_DIRS.some((a) => p === a || p.startsWith(`${a}/`)) || GOODBOY_FILES.includes(p) || p.startsWith('.claude/.goodboy-');
 }
 
@@ -687,7 +687,7 @@ export function treeDiff(cwd: string, a: string, b: string): string[] | null {
  *  checks, so the two cannot drift), or null when it is: verdict pass, a well-formed tree, at
  *  least one suite that ran, no failing suite, test files that exist, red-green evidence, no
  *  always-true test patterns. A hand-made JSON with only `verdict` and `tree` is not one. */
-function notPassing(r: TestResult, linesOf?: (file: string) => ReadonlySet<number> | null): string | null {
+function notPassing(r: TestResult, linesOf?: (file: string, root?: string) => ReadonlySet<number> | null): string | null {
   if (r.verdict !== 'pass') return `its verdict is ${String(r.verdict)}`;
   if (treesOf(r).length === 0) return 'it records no tested tree';
   const suites = Array.isArray(r.suites) ? r.suites : [];
@@ -701,7 +701,11 @@ function notPassing(r: TestResult, linesOf?: (file: string) => ReadonlySet<numbe
       ? 'it has no acceptance criterion with red-green evidence'
       : "an acceptance criterion's red-green evidence does not hold (its red run, green run or mutation probe)";
   }
-  if (scanForbiddenPatterns(files, linesOf).length > 0) return 'a test file has an always-true pattern';
+  // (#41) A worktree record's test files sit in that worktree: their lines are read at their path there, so a
+  //   nested one is not passed over as unchanged and an outside one is not read whole.
+  const wt = typeof r.worktree === 'string' && isAbsolute(r.worktree) ? r.worktree : undefined;
+  const lines = linesOf && wt !== undefined ? (f: string) => linesOf(f, wt) : linesOf;
+  if (scanForbiddenPatterns(files, lines).length > 0) return 'a test file has an always-true pattern';
   return null;
 }
 
@@ -712,7 +716,7 @@ function notPassing(r: TestResult, linesOf?: (file: string) => ReadonlySet<numbe
  *  report, v0.36.8 release). A file the push leaves unchanged has no lines; a changed file whose
  *  hunks cannot be read counts whole, and so does everything when there is no single boundary
  *  (a new repo, an unknown remote state, several boundaries) or git fails. */
-export function pushedTestLines(cwd: string, rev: string): ((file: string) => ReadonlySet<number> | null) | undefined {
+export function pushedTestLines(cwd: string, rev: string): ((file: string, root?: string) => ReadonlySet<number> | null) | undefined {
   const top = topOf(cwd);
   if (top === null) return undefined;
   const head = git(cwd, ['rev-parse', '--verify', '--quiet', '--end-of-options', `${rev}^{commit}`]);
@@ -751,8 +755,10 @@ export function pushedTestLines(cwd: string, rev: string): ((file: string) => Re
     memo.set(rel, lines);
     return lines;
   };
-  return (file: string): ReadonlySet<number> | null => {
-    const rel = relative(top, resolvePath(cwd, file)).split(sep).join('/');
+  // `root`: the checkout of the same repo the file lives in, when it is not the one handed off from (a record
+  //   of `test-write --worktree`, #41): its path there is the repo path the diff names.
+  return (file: string, root: string = top): ReadonlySet<number> | null => {
+    const rel = relative(root, resolvePath(cwd, file)).split(sep).join('/');
     if (rel === '' || rel.startsWith('../') || isAbsolute(rel)) return null;
     if (!changed.has(rel)) return new Set();
     return addedIn(rel);
@@ -832,7 +838,14 @@ function pushTestText(what: string, o: Exclude<PushTestOutcome, { ok: true }>): 
   const differs =
     o.differs && o.differs.length > 0
       ? ` It differs from the newest passing result in: ${o.differs.slice(0, 5).join(', ')}${o.differs.length > 5 ? ` and ${o.differs.length - 5} more` : ''}` +
-        ' (edited after the tests, or untracked files present at test time that are not committed).'
+        ' (edited after the tests, or untracked files present at test time that are not committed).' +
+        (o.rev === WORKTREE
+          ? ''
+          : ' Untracked files the repo keeps on purpose (local config, IDE files, notes) are part of the tested tree: list them in ' +
+            '`.git/info/exclude` (ignored files are left out), or record the run from a clean linked worktree of the commit ' +
+            '(the main session makes it, `git worktree add --detach <dir> <commit>`, since test agents may not write .git; the ' +
+            'test agent runs the tests there, then from the project dir `test-write --worktree <dir>` and ' +
+            '`regression --worktree <dir>`; remove the worktree after the push).')
       : '';
   const rev = o.rev === WORKTREE ? 'the working tree as it is' : o.rev;
   const rejected = o.rejected ? ` A result for exactly this tree exists but does not count: ${o.rejected}.` : '';

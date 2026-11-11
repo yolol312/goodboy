@@ -523,9 +523,14 @@ export function missingTestFiles(results: TestResult[]): string | null {
  *  filter never suppresses an obligation, and the notes go in the block that says so. The
  *  deletion and weakening checks of existing tests (lib/existing-tests.ts) read the repo, not
  *  these records, and stay apart. */
-export function withoutAbsentTests(results: readonly TestResult[]): { kept: TestResult[]; notes: string[] } {
+export function withoutAbsentTests(results: readonly TestResult[]): {
+  kept: TestResult[];
+  notes: string[];
+  dropped: { record: TestResult; file: string }[];
+} {
   const kept: TestResult[] = [];
   const notes: string[] = [];
+  const dropped: { record: TestResult; file: string }[] = [];
   for (const r of results) {
     const absent = r.verdict === 'pass' ? (r.test_files ?? []).find((f) => typeof f === 'string' && f.trim() !== '' && !existsSync(recordPath(f))) : undefined;
     if (absent === undefined) {
@@ -533,9 +538,47 @@ export function withoutAbsentTests(results: readonly TestResult[]): { kept: Test
       continue;
     }
     notes.push(`The ${r.category} test record of ${r.timestamp} is not counted: its test file ${absent} is not in the working tree.`);
+    dropped.push({ record: r, file: absent });
   }
-  return { kept, notes };
+  return { kept, notes, dropped };
 }
+
+/** Most dropped records whose warning a session remembers having shown. */
+const MAX_SHOWN_ABSENT = 200;
+
+/** (#36 part 4) The user's warning lines (Korean, a systemMessage) for the records `withoutAbsentTests` dropped
+ *  that tested a file edited now (`edited`, absolute paths), each record once per session: `shown` holds the keys
+ *  of those already shown, and the new list comes back. Before, the note reached the gate log only, and the user
+ *  saw it only inside a block for another reason. A dropped record of other files (a worktree's, removed after its
+ *  push) stays silent: it was no evidence for this change anyway. */
+export function absentRecordWarnings(
+  dropped: readonly { record: TestResult; file: string }[],
+  edited: readonly string[],
+  shown: readonly string[],
+): { lines: string[]; shown: string[] } {
+  const now = new Set(edited.map((f) => recordPath(f)));
+  const seen = new Set(shown);
+  const lines: string[] = [];
+  const added: string[] = [];
+  for (const { record, file } of dropped) {
+    const key = `${String(record.timestamp)}|${String(record.category)}`;
+    if (seen.has(key)) continue;
+    if (!(record.tested_files ?? []).some((f) => typeof f === 'string' && now.has(recordPath(f)))) continue;
+    seen.add(key);
+    added.push(key);
+    if (lines.length >= MAX_ABSENT_LINES) continue;
+    lines.push(
+      `[goodboy] ${String(record.timestamp)} 테스트 기록(${String(record.category)})은 증거로 세지 않았어요: 테스트 파일 ${file} 이(가) 없어요 ` +
+        '(지운 worktree에서 쓴 기록일 수 있어요). 그 기록이 다루던 변경 파일은 새 테스트 기록이 필요해요.',
+    );
+  }
+  // At most MAX_ABSENT_LINES lines per Stop; the others are counted (performance review: 1000 such records gave 1000 lines).
+  if (added.length > lines.length) lines.push(`[goodboy] 같은 이유로 세지 않은 테스트 기록이 ${added.length - lines.length}건 더 있어요.`);
+  return { lines, shown: [...shown, ...added].slice(-MAX_SHOWN_ABSENT) };
+}
+
+/** Most warning lines one Stop shows for dropped records (the rest are counted in one more line). */
+const MAX_ABSENT_LINES = 5;
 
 /** 수용 기준 중 커버되지 않은 것. required가 비면 빈 배열(= 강제 없음). */
 export function uncoveredCriteria(

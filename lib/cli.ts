@@ -22,6 +22,7 @@ import type {
   Verdict,
 } from './types';
 import { regressionTop, repoTrees, topOf, treeDiff, treesOf, workTreeState } from './push-test';
+import { cleanWorktreeFor, type CleanWorktree, worktreeArg } from './clean-worktree';
 import { cliProjectDir } from './project-dir';
 import { openedPath } from './file-tracker';
 import { DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, outputSummary, type RegressionRecord, regressionCommands, runCommands, writeRegressionRecord } from './regression';
@@ -755,8 +756,38 @@ function idleTestedFiles(result: TestResult, spelledTested: readonly string[], c
   return idle;
 }
 
-export async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
-  const raw = await readInput(args[0], 'TestResult');
+/** (#25 part 3) Failing suites that look like a mutation run (`mutant` or `mutation` in the name or command):
+ *  the mutants fail by design, and the Stop counts every failing suite as a failing test. A warning, never a
+ *  skip: a real failure would hide behind the name. */
+export function mutationSuiteWarnings(suites: readonly TestResult['suites'][number][] | undefined): string[] {
+  const out: string[] = [];
+  for (const s of suites ?? []) {
+    if (typeof s?.failed !== 'number' || s.failed <= 0) continue;
+    if (!/mutant|mutation/i.test(`${s.name ?? ''} ${s.command ?? ''}`)) continue;
+    out.push(
+      `warning: suite "${s.name}" has ${s.failed} failure(s) and looks like a mutation run. \`suites\` are runs of the real tree; ` +
+        "the Stop counts these failures as failing tests. Put a mutation run in its criterion's `mutation` ({command, output, detected: true, file}) instead.",
+    );
+  }
+  return out;
+}
+
+/** (#41) `--worktree <dir>` of `cmd`, taken out of `args` and checked (lib/clean-worktree.ts): the clean linked
+ *  worktree, or null without the flag, and the other args. Fails with why otherwise. */
+function worktreeOrFail(cmd: string, cwd: string, args: readonly string[], shell: string): { wt: Extract<CleanWorktree, { ok: true }> | null; rest: string[] } {
+  const a = worktreeArg(args);
+  if (a.error) fail(`${cmd}: ${a.error}.`);
+  if (a.dir === null) return { wt: null, rest: a.rest };
+  const c = cleanWorktreeFor(cwd, a.dir, shell);
+  if (!c.ok) fail(`${cmd} --worktree: ${c.why}.`);
+  return { wt: c, rest: a.rest };
+}
+
+export async function cmdTestWrite(cwd: string, args: string[], shell: string = process.cwd()): Promise<void> {
+  // (#41) `--worktree <dir>`: the run happened in a clean linked worktree of the project's repo; its commit's
+  //   tree is the tested one (lib/clean-worktree.ts). Checked before the input is read.
+  const { wt, rest } = worktreeOrFail('test-write', cwd, args, shell);
+  const raw = await readInput(rest[0], 'TestResult');
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -764,7 +795,8 @@ export async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
     fail(`JSON 파싱 실패: ${String(err)}`);
   }
 
-  const validated = validateTestResultInput(parsed, [cwd, process.cwd()]);
+  // (#41) A worktree record's test files are the worktree's: they must exist there.
+  const validated = validateTestResultInput(parsed, wt !== null ? [wt.top] : [cwd, process.cwd()]);
   if (!validated.ok || !validated.value) {
     fail('TestResult 스키마 검증 실패:\n' + validated.errors.map((e) => `  - ${e}`).join('\n'));
   }
@@ -776,28 +808,39 @@ export async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
   //   the idle-file warning below compares against them.
   const spelledTested = [...(result.tested_files ?? [])];
   // (#39) A `top` that is no repo inside the project dir drops its coverage entry (or subprocess pair).
-  const droppedTops = result.coverage ? scopeCoverageTops(result.coverage, cwd) : [];
+  // (#41) With --worktree, the files and coverage belong to the worktree: its top stands for the project dir.
+  const base = wt !== null ? wt.top : cwd;
+  const droppedTops = result.coverage ? scopeCoverageTops(result.coverage, base) : [];
   // (#32) Absolute paths, resolved against the project dir here, so the Stop never resolves a
   //   relative name against its own process dir (which follows a model's `cd`).
-  result.tested_files = spelledTested.map((f) => openedPath(cwd, f));
-  //   A test file is found from the project dir first, then from the shell's dir.
+  result.tested_files = spelledTested.map((f) => openedPath(base, f));
+  //   A test file is found from the project dir first, then from the shell's dir (with --worktree: the worktree only).
   result.test_files = (result.test_files ?? []).map((f) => {
     if (typeof f !== 'string' || f.trim() === '') return f;
-    const at = openedPath(cwd, f);
-    return existsSync(at) ? at : openedPath(process.cwd(), f);
+    const at = openedPath(base, f);
+    return existsSync(at) || wt !== null ? at : openedPath(process.cwd(), f);
   });
+  // (#41) A worktree record names the worktree's files only, so the Stop never takes it for evidence of
+  //   the project dir's files: its tree is the commit's, not theirs.
+  delete result.worktree;
+  if (wt !== null) {
+    const out = [...result.tested_files, ...result.test_files].find((f) => typeof f === 'string' && f.trim() !== '' && !isUnder(f, wt.top));
+    if (out !== undefined) fail(`test-write --worktree: ${out} is not in the worktree ${wt.top}; list the tested and test files as the worktree has them.`);
+    result.worktree = wt.top;
+  }
   // The tested content, taken here and never from the agent (lib/push-test.ts): the push
   //   test check matches a hand-off against `tree`.
-  const state = workTreeState(cwd);
+  const state = wt !== null ? { commit: wt.commit, tree: wt.tree } : workTreeState(cwd);
   result.commit = state.commit;
   result.tree = state.tree;
   // (#39) And the trees of the other repos the tested files belong to (nested clones, or every repo
   //   when the project dir is none): a push from one hands off that repo's tree. The validator
   //   already keeps no `trees` of the agent's; the delete keeps it so if that ever changes.
+  //   A worktree record has none: its files are all in the worktree.
   delete result.trees;
-  const repos = repoTrees(result.tested_files, cwd);
+  const repos = wt !== null ? { trees: {}, dropped: [] as string[] } : repoTrees(result.tested_files, cwd);
   if (Object.keys(repos.trees).length > 0) result.trees = repos.trees;
-  setExtraBlobs(cwd, result, state.tree, result.tested_files, repos.trees);
+  setExtraBlobs(base, result, state.tree, result.tested_files, repos.trees);
   const testsDir = join(cwd, '.claude', 'tests');
   ensureDir(testsDir);
   const outPath = uniqueJsonPath(testsDir, timestampToFilename(result.timestamp));
@@ -815,10 +858,11 @@ export async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
   );
   // A warning here; the test gate blocks on unrun changed lines (track I, lib/changed-coverage.ts).
   for (const w of droppedTops) process.stderr.write(w + '\n');
-  const idle = idleTestedFiles(result, spelledTested, cwd);
+  const idle = idleTestedFiles(result, spelledTested, base);
   if (idle.length > 0) {
     process.stderr.write(`warning: no changed line of these tested files ran in the tests: ${idle.join(', ')}\n`);
   }
+  for (const w of mutationSuiteWarnings(result.suites)) process.stderr.write(w + '\n');
   if (repos.dropped.length > 0) {
     process.stderr.write(`warning: tested files span more repos than goodboy hashes; no tree recorded for ${repos.dropped.join(', ')} (a push from them needs a test run of their own).\n`);
   }
@@ -831,16 +875,19 @@ export async function cmdTestWrite(cwd: string, args: string[]): Promise<void> {
 
 // ---- command: regression (track I, I4) ----
 
-/** `regression [--timeout-min <n>]`: runs the project's whole test command from the repo top
- *  and records it under the cwd (lib/regression.ts). The agent supplies nothing but the call
- *  (a timeout can only make a run fail): goodboy picks the commands, times them and takes the
- *  tree. A run that changes the working tree fails. Exit 0 on a pass, 1 otherwise. */
-async function cmdRegression(cwd: string, args: string[]): Promise<void> {
+/** `regression [--timeout-min <n>] [--worktree <dir>]`: runs the project's whole test command from the repo top
+ *  (or the clean linked worktree, #41) and records it under the cwd (lib/regression.ts). The agent supplies nothing
+ *  but the call (a timeout can only make a run fail): goodboy picks the commands, times them and takes the
+ *  tree. A run that changes the working tree fails. Exit 0 on a pass, 1 otherwise. Exported for in-process tests. */
+export async function cmdRegression(cwd: string, args: string[]): Promise<void> {
   const t = args.indexOf('--timeout-min');
   const minutes = t >= 0 ? Number(args[t + 1]) : NaN;
   const timeoutMs = Number.isFinite(minutes) && minutes > 0 ? Math.min(minutes * 60_000, MAX_TIMEOUT_MS) : DEFAULT_TIMEOUT_MS;
+  // (#41) `--worktree <dir>`: a clean linked worktree of the project's repo, run from the project dir so the
+  //   record lands where the push check reads it.
+  const worktree = worktreeOrFail('regression', cwd, args, process.cwd()).wt?.top;
   // (#39) A project dir that is no repo: the nested repo the shell is in.
-  const top = regressionTop(cwd, process.cwd());
+  const top = worktree ?? regressionTop(cwd, process.cwd());
   if (top === null) {
     fail(
       'regression: not inside a git repository; the push check compares git trees. When the project dir is no repository, ' +
@@ -868,6 +915,7 @@ async function cmdRegression(cwd: string, args: string[]): Promise<void> {
     tree_after: after.tree,
     ...(changed ? { changed_files: (after.tree ? (treeDiff(top, before.tree, after.tree) ?? []) : []).slice(0, 50) } : {}),
     source: found.source,
+    ...(worktree !== undefined ? { worktree } : {}),
     runs,
     duration_ms: Date.now() - t0,
     verdict: runs.every((r) => r.exit_code === 0) && !changed ? 'pass' : 'fail',

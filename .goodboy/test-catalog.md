@@ -3,7 +3,7 @@
 Feature → test type, generated from the test files by goodboy (`cli.ts test-catalog`).
 Regenerate it instead of editing it; the docs rule compares it with a fresh copy.
 
-Totals: unit 179 files, 3067 tests; e2e 2 files, 54 tests.
+Totals: unit 180 files, 3121 tests; e2e 2 files, 54 tests.
 
 | Feature | Type | File | Tests |
 |---|---|---|---|
@@ -80,7 +80,7 @@ Totals: unit 179 files, 3067 tests; e2e 2 files, 54 tests.
 | the Stop in a project dir that is no repo: each repo is judged under its own top; the stop_hook_active path judges the same groups as the full Stop; a record is judged by its tree for the repo; the shared deadline; shell-made changes in a repo below the project dir; the `auto` test gate counts a test runner in any repo below the project dir | unit | tests/i3914-stop-groups.test.ts | 62 |
 | boundary code; the types a file needs; missing types; the user globs | unit | tests/i3b-test-types.test.ts | 20 |
 | the whole-suite command; cli.ts regression; records and the check; the push check | unit | tests/i4-regression.test.ts | 22 |
-| spawnGit stops at the hook clock; statusOf; nestedStatus names what git did not answer for; a Bash call whose writes git could not list is kept; retryUnswept; the record file | unit | tests/i40-git-clock.test.ts | 65 |
+| spawnGit stops at the hook clock; statusOf; nestedStatus names what git did not answer for; a Bash call whose writes git could not list is kept; retryUnswept; the record file | unit | tests/i40-git-clock.test.ts | 64 |
 | the tests that load a changed file; affected gaps; weakened tests; the Stop | unit | tests/i5-existing-tests.test.ts | 50 |
 | finding 1: the project knowledge notice; findings 2–4 and 6: the push test check; finding 5: the result guard; finding 8: a local database socket | unit | tests/i6-trial-fixes.test.ts | 10 |
 | finding 1: layer 1 in JVM projects; finding 2: a full regression for Gradle and Maven; finding 3: results written from goodboy's own directory; finding 4: open Bash calls at Stop while agents run | unit | tests/i7-trial2-fixes.test.ts | 7 |
@@ -140,7 +140,7 @@ Totals: unit 179 files, 3067 tests; e2e 2 files, 54 tests.
 | session state (A3) | unit | tests/session-state.test.ts | 10 |
 | isWorkflowSkill; validateSkillGapNote; the rule in the hooks | unit | tests/skill-rule.test.ts | 13 |
 | documents name the per-session approval marker (A3) | unit | tests/skills-approval-marker-name.test.ts | 1 |
-| S16-AC-1: checkHandoff scans the lines the push adds on the prose path; S16-AC-2: writesGateState reads the program past prefixes and rtk, and needs a separator in the name; S16-AC-3: test-write keeps `notes`, cut at 4000, and refuses one that is no string; S16-AC-4: statusOf redirects only into a `.git` dir that has a HEAD | unit | tests/small-fixes-0.36.16.test.ts | 32 |
+| S16-AC-1: checkHandoff scans the lines the push adds on the prose path; S16-AC-2: writesGateState reads the program past prefixes and rtk, and needs a separator in the name; S16-AC-2b: writesGateState on `tree` and `file`: -o and -C write, an attached argument is no option; S16-AC-3: test-write keeps `notes`, cut at 4000, and refuses one that is no string; S16-AC-4: statusOf redirects only into a `.git` dir that has a HEAD | unit | tests/small-fixes-0.36.16.test.ts | 36 |
 | who may start agents; running agents and completions; the same agent on the same prompt; caps and gate modes through the hook; runaway and the fuse through the hook (#21); headless Claude runs | unit | tests/spawn-guard-hooks.test.ts | 15 |
 | depth: only leads start agents, and only their members; main-session caps; duplicates need evidence; policy rewrite; spawnsClaudeCli (headless runs bypass the Agent guard); namedFiles | unit | tests/spawn-guard.test.ts | 39 |
 | writesGateState; through the hooks | unit | tests/state-guard.test.ts | 8 |
@@ -183,6 +183,7 @@ Totals: unit 179 files, 3067 tests; e2e 2 files, 54 tests.
 | user-prompt-submit — riskReason in the session state (A4); user-prompt-submit -> pre-tool-use risk gate chain (A4); concurrent sessions in one repo (A3) | unit | tests/user-prompt-submit-risk-reason.test.ts | 10 |
 | a new category command when the repo-level state cannot be written (A3); another session's category command (A3); the risk gate on a malformed state (A3) | unit | tests/user-prompt-submit-state-write.test.ts | 4 |
 | user-prompt-submit argument-free category commands (G1; B1 used to block them); user-prompt-submit self-attestation checklist (#3); resolveSkillPath cwd opt-in (2-C) | unit | tests/user-prompt-submit.test.ts | 11 |
+| V17-AC-1: test-write --worktree records the clean worktree\; V17-AC-2: refusals, and what is no dirt; V17-AC-2 (in process): cleanWorktreeFor, worktreeArg and cmdTestWrite; V17-AC-3: regression --worktree; V17-AC-4: the push denial names the way out for a commit; V17-AC-5: mutationSuiteWarnings | unit | tests/v0.36.17-local-only.test.ts | 51 |
 | the start time a pass record keeps (A3); the 5-minute clock-skew bound (A3) | unit | tests/validation-pass-record.test.ts | 7 |
 | a pass lifts an older failure only in the same project (A3) | unit | tests/validation-pass-scope.test.ts | 4 |
 | validation failure marker (A3) | unit | tests/validation-state.test.ts | 15 |
