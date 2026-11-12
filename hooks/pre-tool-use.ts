@@ -101,6 +101,7 @@ import {
   skillHandsOff,
   noteBashStart,
   pushTestMessage,
+  outsideRepoTop,
   revisionTree,
   commitIssueDenial,
   inGoodboySessionDir,
@@ -814,7 +815,9 @@ function main(): void {
                 ? [{ kind: 'push' as const, what: `/${toolInput.skill}`, cwd, revs: ['HEAD'] }]
                 : [];
           if (handoffs.length > 0) {
-            const results = findRecentTestFiles(resolvePath(projectCwd, '.claude', 'tests'), envInt('GOODBOY_TEST_WINDOW_MIN', 1440));
+            // (#42) With the records of repos outside the project dir, stored here by test-write.
+            const resultsDir = resolvePath(projectCwd, '.claude', 'tests');
+            const results = findRecentTestFiles(resultsDir, envInt('GOODBOY_TEST_WINDOW_MIN', 1440), true);
             // One tree hash per revision for both checks: a deploy hashes the whole working tree,
             //   and two hashes could overrun the hook timeout (I4 review).
             const trees = new Map<string, string | null>();
@@ -825,6 +828,9 @@ function main(): void {
             };
             for (const h of handoffs) {
               const o = checkHandoff(h, results, treeOf);
+              // (#42) The repo handed off when it is outside the project dir (its real top, as test-write and
+              //   regression note it), else null.
+              const outsideTop = outsideRepoTop(h.cwd, projectCwd);
               // (I4, lib/regression.ts) Then a full regression goodboy ran on each tree handed off,
               //   from this session's records only (another checkout's are not guarded).
               let reg: Extract<RegressionOutcome, { ok: false }> | null = null;
@@ -833,10 +839,10 @@ function main(): void {
                 let relaxed = false;
                 for (const rev of h.revs) {
                   const tree = treeOf(h.cwd, rev);
-                  let r: RegressionOutcome = tree === null ? { ok: false, why: 'none', rev, tree: '' } : checkRegression(rev, tree, records);
+                  let r: RegressionOutcome = tree === null ? { ok: false, why: 'none', rev, tree: '' } : checkRegression(rev, tree, records, outsideTop);
                   // (#13) Prose on top of a passing tree: that tree's regression counts too, unless
                   //   the tree handed off has a failed run of its own (a README doctest).
-                  if (!r.ok && r.why === 'none' && o.docsOnly?.[rev]?.some((b) => checkRegression(rev, b, records).ok)) r = { ok: true };
+                  if (!r.ok && r.why === 'none' && o.docsOnly?.[rev]?.some((b) => checkRegression(rev, b, records, outsideTop).ok)) r = { ok: true };
                   if (!r.ok) {
                     reg = r;
                     break;
@@ -863,7 +869,7 @@ function main(): void {
               const msg =
                 reg !== null
                   ? regressionMessage(h.what, reg, CLI_PATH, agentName(ROUTE.test)) + (markerRel ? handoffApprovalAsk(markerRel) : '')
-                  : pushTestMessage(h.what, failed!, markerRel);
+                  : pushTestMessage(h.what, failed!, markerRel, { dir: resultsDir, outside: outsideTop !== null });
               const why = reg !== null ? `regression-${reg.why}` : failed!.why;
               if (warnOnly) {
                 logGate(sessionId, 'push-test', 'warn', `${why} ${h.what}`);

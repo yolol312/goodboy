@@ -61,6 +61,9 @@ export interface RegressionRecord {
   source: string;
   /** (#41) `regression --worktree`: the clean linked worktree of the project's repo the run took place in. */
   worktree?: string;
+  /** (#42) The real top of the repo outside the session's project dir the run took place in, on the copy of the
+   *  record stored in the project dir. */
+  repo?: string;
   runs: RegressionRun[];
   duration_ms: number;
   verdict: 'pass' | 'fail';
@@ -241,11 +244,14 @@ export type RegressionOutcome =
 
 /** Whether `tree` (handed off as `rev`) has a passing full regression. Past the one-hour tier
  *  (the newest passing regression goodboy timed took over an hour, on any tree) the layer-1
- *  result suffices: `relaxed`. A failing run proves no length: a crafted one could be slow. */
-export function checkRegression(rev: string, tree: string, records: readonly RegressionRecord[]): RegressionOutcome {
+ *  result suffices: `relaxed`. A failing run proves no length: a crafted one could be slow.
+ *  (#42) The tier is per repo: only the records of the repo handed off count for it (`repo`, the real top of
+ *  a repo outside the project dir, or null for the project dir's own repos), so one repo's slow suite never
+ *  relaxes another's. */
+export function checkRegression(rev: string, tree: string, records: readonly RegressionRecord[], repo: string | null = null): RegressionOutcome {
   const forTree = records.filter((r) => r.tree === tree);
   if (forTree.some(regressionPassed)) return { ok: true };
-  const lastPass = records.find(regressionPassed);
+  const lastPass = records.find((r) => regressionPassed(r) && (typeof r.repo === 'string' ? r.repo : null) === repo);
   if (lastPass && lastPass.duration_ms > ONE_HOUR_MS) return { ok: true, relaxed: true };
   const failed = forTree.find((r) => !regressionPassed(r));
   return failed ? { ok: false, why: 'failed', rev, tree, failed } : { ok: false, why: 'none', rev, tree };

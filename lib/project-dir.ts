@@ -71,10 +71,18 @@ export function noteProjectDir(sessionId: string, env: NodeJS.ProcessEnv = proce
  *  noted for CLAUDE_CODE_SESSION_ID; with the same rules as projectDir (the cwd must be inside
  *  it; a nested work tree is its own project). Otherwise the cwd. */
 export function cliProjectDir(cwd: string, env: NodeJS.ProcessEnv = process.env): string {
-  const sid = (env.CLAUDE_CODE_SESSION_ID ?? '').trim() || undefined;
-  if ((env.CLAUDE_PROJECT_DIR ?? '').trim() !== '') return projectDir(cwd, env);
-  if (sid === undefined) return cwd;
+  const p = knownProjectDir(env);
+  return p === null ? cwd : projectDir(cwd, { CLAUDE_PROJECT_DIR: p });
+}
+
+/** (#42) The session's project dir as the goodboy CLI knows it, wherever the shell is: CLAUDE_PROJECT_DIR when
+ *  set (null unless absolute and not `/`), else the dir the hooks noted for CLAUDE_CODE_SESSION_ID, else null. */
+export function knownProjectDir(env: NodeJS.ProcessEnv = process.env): string | null {
+  const p = (env.CLAUDE_PROJECT_DIR ?? '').trim();
+  if (p !== '') return isAbsolute(p) && resolve(p) !== sep ? resolve(p) : null;
+  const sid = (env.CLAUDE_CODE_SESSION_ID ?? '').trim();
+  if (sid === '') return null;
   const r = readRegular(join(sessionDir(sid), PROJECT_FILE), 4096, true);
   const noted = typeof r === 'object' ? r.text.trim() : '';
-  return noted !== '' && isAbsolute(noted) && isDir(noted) ? projectDir(cwd, { CLAUDE_PROJECT_DIR: noted }) : cwd;
+  return noted !== '' && isAbsolute(noted) && isDir(noted) && resolve(noted) !== sep ? resolve(noted) : null;
 }

@@ -3,7 +3,7 @@
 Feature → test type, generated from the test files by goodboy (`cli.ts test-catalog`).
 Regenerate it instead of editing it; the docs rule compares it with a fresh copy.
 
-Totals: unit 183 files, 3273 tests; e2e 2 files, 54 tests.
+Totals: unit 184 files, 3316 tests; e2e 2 files, 54 tests.
 
 | Feature | Type | File | Tests |
 |---|---|---|---|
@@ -187,6 +187,7 @@ Totals: unit 183 files, 3273 tests; e2e 2 files, 54 tests.
 | V18-AC-7 shell scripts: required dimensions and review axes; V18-AC-6 missingDimensionsByFile (unit); V18-AC-6 validateReviewCoverage byFile; V18-AC-6 the Stop judges dimensions per file; V18-AC-6 the stop_hook_active acceptance path judges per file too; V18-AC-8 a failure while working the dimensions out blocks the Stop | unit | tests/v0.36.18-review-dims.test.ts | 28 |
 | V18-AC-9 resultCliWrite: the CLI reading a file named lib/regression.ts is no test record; V18-AC-10 bashChangedPaths: read-only git commands are no .git write; V18-AC-10 through the PreToolUse hook | unit | tests/v0.36.18-role-limits.test.ts | 22 |
 | V18-AC-1 readStateText; V18-AC-1 callers neither hang nor crash on a FIFO or a directory at their file; V18-AC-2 turn.txt is guarded: it never goes down; V18-AC-3 a guarded name a call created as no regular file is removed; V18-AC-4 the snapshot index is sealed; V18-AC-4 the key file and the notes are under the session dir name write gates | unit | tests/v0.36.18-state-guard.test.ts | 102 |
+| V19-AC-1: outsideRepo gives the copy target only when every condition holds; V19-AC-2: test-write from the sibling repo keeps its record there and copies it to the project dir; V19-AC-2b: a copy that cannot be written warns and the command still succeeds; V19-AC-3: regression from the sibling repo keeps its record there and copies it to the project dir; V19-AC-4: test-write --worktree from the sibling repo copies too; V19-AC-5: findRecentTestFiles leaves repo records out unless asked | unit | tests/v0.36.19-sibling-repo.test.ts | 43 |
 | the start time a pass record keeps (A3); the 5-minute clock-skew bound (A3) | unit | tests/validation-pass-record.test.ts | 7 |
 | a pass lifts an older failure only in the same project (A3) | unit | tests/validation-pass-scope.test.ts | 4 |
 | validation failure marker (A3) | unit | tests/validation-state.test.ts | 15 |

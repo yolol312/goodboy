@@ -217,6 +217,10 @@ export interface TestResult {
    *  run happened in. `commit` and `tree` are then that worktree's HEAD and its tree, and every tested and
    *  test file is in it. */
   worktree?: string;
+  /** (#42) Set by `cli.ts test-write`, never by the agent: the real top of the repo outside the session's
+   *  project dir the run happened in (a sibling repo), on the copy of the record test-write stores in the project
+   *  dir, where the push check reads it; `commit` and `tree` are that repo's. Only the push check reads such a copy. */
+  repo?: string;
 }
 
 /** A layer-1 test verdict: a review verdict, or `blocked` when the tests could not run. */

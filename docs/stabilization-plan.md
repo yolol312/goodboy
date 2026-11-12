@@ -3410,7 +3410,7 @@ Not planned:
 - A project policy of local-only paths left out of both sides. A run with local overrides does not
   prove the pushed content.
 
-### 15.34 v0.36.18 (planned): the open hardening issues #12 and #27
+### 15.34 v0.36.18: the open hardening issues #12 and #27
 
 Placed 2026-11-05 by the check after the v0.36.16 release: both issues were open with no version
 (§15.5 "Older than I2" and §15.20 only point to them). Re-checked on the source of `c563d93`.
@@ -3550,6 +3550,72 @@ Placed 2026-11-05 by the check after the v0.36.16 release: both issues were open
    show`), a hole older than this change: the role limits now count its target as a changed path.
 
 Each part has a test that fails without its fix. #12 also gets a live probe (`/verify`).
+
+### 15.35 v0.36.19: a push from a repo outside the project dir (#42)
+
+Placed 2026-11-12 by the triage of field report #42 (user's choice: fix in v0.36.19). Verified on
+`84a3cb7` with a probe: the session's project dir is repo A; the work and the push happen in a
+sibling repo B (not inside A). Claude Code puts the shell back in A after a `cd` outside the
+project dir, so every call is `cd B && …`. `test-write` and `regression` run there resolve their
+dir through `cliProjectDir` (lib/project-dir.ts), whose `projectRoot` returns the shell's dir when
+it is not under the project dir: the record lands in `B/.claude/tests`. The push check
+(hooks/pre-tool-use.ts) reads `A/.claude/tests` only, so the push is denied `no-result` however
+often the tests run. The other half of the report (untracked files in the tested tree) is the #41
+decision of v0.36.17: the denial already names `.git/info/exclude` and the worktree route.
+
+Reading `B/.claude/tests` in the push check is no fix: the result guards (the Write gate and the
+Bash result guard, `ownsResultDir`) protect only the result dirs of the cwd's project, so a model
+could plant a record there. Moving the record to A alone is no fix either (design review
+2026-11-12T04-06-38): when B is a directory added to the session, the shell stays in B, and the
+hooks read B (`projectDir` of a cwd outside the project dir is that cwd), which works today. So a
+record keeps its place and gains a copy in the project dir:
+
+1. A copy for a repo outside the project dir. `test-write` and `regression` write their record
+   where they do today (the shell's dir, `cliProjectDir`), and also a copy in the session's project
+   dir (`.claude/tests`, `.claude/tests/regression`) with a new field `repo`, the real top of the
+   shell's repo (`realDeep`, so it compares with the spelled test files), when all of these hold:
+   - the session's project dir is known (CLAUDE_PROJECT_DIR, or the dir the hooks noted for the
+     session, `knownProjectDir`) and so is the session id;
+   - the shell's dir is not inside the project dir (`outsideRepoTop`, lib/push-test.ts; a shell
+     inside a project dir that is a subdir of its repo stays a project-dir record, review high);
+   - the shell is in a repo;
+   - the session's edit log (hook-written, guarded) has an edit inside that repo: an Edit/Write,
+     or a Bash write the hooks' sweep saw (hallucination review 2026-11-12T04-18-20). A temp repo a
+     test or probe runs the CLI in is no work of the session. Measured: a Bun child spawned
+     without its own env keeps the parent's original `CLAUDE_CODE_SESSION_ID` even after the parent
+     deleted it from `process.env`, so a suite run inside a session would otherwise write copies
+     into the real project (and the regression dir's pruning dropped real records there).
+   `--worktree` records get the copy too (a worktree of B, made and recorded from B, landed in B
+   only: review medium). `review-write` is unchanged: the Stop gates no edit outside the project dir.
+2. The push check reads the project dir's records with the `repo` copies and matches them by tree
+   (`treesOf`), as any record; its test files' added lines are read in the repo handed off. The
+   one-hour regression relaxation counts only the records of the repo handed off: `repo` equal to
+   its real top for a repo outside the project dir, no `repo` for any repo inside it (its own and
+   #39's nested ones), so a slow suite of one repo no longer relaxes another's.
+3. Every other reader of `.claude/tests` (the Stop's test gate, whose `effective` fallback takes the
+   newest record; the test backfill's `evidenceProblem`) leaves `repo` copies out: their files are
+   outside the project dir, whose edits are the only ones the Stop gates. `findRecentTestFiles`
+   leaves them out unless the caller asks (the push check).
+4. A `no-result` denial names the dir it read results from; for a repo outside the project dir it
+   adds that `test-write` run there stores a copy here, and that a record only in that repo's own
+   `.claude/tests` (goodboy 0.36.18 and older) is not read.
+
+Known limits: a repo the session changed only in ways the edit log does not show (a Bash write the
+sweep did not see, such as a git-ignored file) gets no copy; the denial then names the dir it read.
+The edit-log condition guards against accidents, not a model: the project dir, the session id and
+TMPDIR come from the Bash call's env (security review 2026-11-12T04-21-04), as a `cd` elsewhere
+already chose where a record went. A copy is no stronger than any record: goodboy computes its tree.
+A copy that cannot be written leaves a warning, not a failed command (the record itself is written).
+A copy matches only a push of exactly its content. The regression dir keeps its newest 20 records
+over all repos. Records read from the hook's cwd when the shell stays in a nested linked worktree of
+the project (`projectDir`) are that worktree's, not the copy's dir.
+
+Each item has a test that fails without its fix (tests/v0.36.19-sibling-repo.test.ts: 32 of 41 fail
+on `84a3cb7`, the rest are controls). A live probe (`/verify`, haiku): a session in A fixed, tested and
+committed B; the push was denied `no-result` naming A's `.claude/tests`, then `test-write` and
+`regression` run in B left copies with `repo` in A, and the push passed. Review lows left for the
+test file's next edit: every test builds two repos with remotes (about 45 s for the file), repeated
+helper lines, and `sh -c` strings with the test's own temp paths.
 
 ## 16. J — Field reports (v0.34.0)
 

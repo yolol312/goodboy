@@ -75,8 +75,11 @@ function safeReadTest(path: string): TestResult | null {
   }
 }
 
-/** testsDir 안의 유효 테스트 결과를 최신순으로 반환 (withinMinutes 이내만). */
-export function findRecentTestFiles(testsDir: string, withinMinutes: number): TestResult[] {
+/** testsDir 안의 유효 테스트 결과를 최신순으로 반환 (withinMinutes 이내만).
+ *  (#42) A record for a repo outside the project dir (`repo`) is push evidence of that repo only: left out
+ *  unless `withOutside` (the push check). Its files are outside the project dir, whose edits are the only
+ *  ones the Stop gates. */
+export function findRecentTestFiles(testsDir: string, withinMinutes: number, withOutside = false): TestResult[] {
   try {
     const now = Date.now();
     const candidates: Array<{ path: string; mtime: number }> = [];
@@ -96,7 +99,7 @@ export function findRecentTestFiles(testsDir: string, withinMinutes: number): Te
     const out: TestResult[] = [];
     for (const c of candidates) {
       const r = safeReadTest(c.path);
-      if (r !== null) out.push(r);
+      if (r !== null && (withOutside || r.repo === undefined)) out.push(r);
     }
     return out;
   } catch {

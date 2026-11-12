@@ -21,10 +21,10 @@ import type {
   TestVerdict,
   Verdict,
 } from './types';
-import { regressionTop, repoTrees, topOf, treeDiff, treesOf, workTreeState } from './push-test';
+import { outsideRepoTop, regressionTop, repoTrees, topOf, treeDiff, treesOf, workTreeState } from './push-test';
 import { cleanWorktreeFor, type CleanWorktree, worktreeArg } from './clean-worktree';
-import { cliProjectDir } from './project-dir';
-import { openedPath } from './file-tracker';
+import { cliProjectDir, knownProjectDir } from './project-dir';
+import { getEditHistory, openedPath } from './file-tracker';
 import { DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, outputSummary, type RegressionRecord, regressionCommands, runCommands, writeRegressionRecord } from './regression';
 import { diffCoverageOf } from './diff-coverage';
 import { criteriaNow } from './session-criteria';
@@ -772,6 +772,49 @@ export function mutationSuiteWarnings(suites: readonly TestResult['suites'][numb
   return out;
 }
 
+/** (#42) The copy's path, or undefined with a warning when it could not be written: the record itself is written
+ *  already, so the command does not fail (a retry would record the run twice); the push check then finds none. */
+function recordCopy(write: () => string): string | undefined {
+  try {
+    return write();
+  } catch (err) {
+    process.stderr.write(`warning: the copy of this record for the session's project dir was not written (${String(err)}); a push from this repo will find no result.\n`);
+    return undefined;
+  }
+}
+
+/** A test record written under `dir`'s `.claude/tests`, under a new name; its path. */
+function writeTestRecord(dir: string, result: TestResult): string {
+  const testsDir = join(dir, '.claude', 'tests');
+  ensureDir(testsDir);
+  const outPath = uniqueJsonPath(testsDir, timestampToFilename(result.timestamp));
+  const resolvedTests = resolve(testsDir);
+  const resolvedOut = resolve(outPath);
+  // A guard only: timestampToFilename keeps the name inside (one line, so the moved check is measured as run).
+  if (resolvedOut !== resolvedTests && !resolvedOut.startsWith(resolvedTests + sep)) fail(`출력 경로가 tests 디렉터리를 벗어납니다: ${resolvedOut}`);
+  writeJson(outPath, result);
+  return outPath;
+}
+
+/** (#42) Where `test-write` and `regression` store a copy of a record made in a repo outside the session's
+ *  project dir (a sibling repo): the project dir, which the push check reads when the shell went back there
+ *  after a `cd` outside it (that repo's own result dir is then neither read nor guarded), and that repo's real
+ *  top for the copy's `repo`. Only for a repo the session's edit log has an edit in: a temp repo a test or a
+ *  probe runs the CLI in is no work of the session, and a CLI spawned with no env of its own keeps its parent's
+ *  session id however the parent changed `process.env` (measured, Bun 1.x). This guards against accidents,
+ *  not a model: the project dir, the session id and TMPDIR (where the log is) come from the Bash call's env
+ *  (security review 2026-11-12T04-21-04). A copy is no stronger than any record: goodboy computes its tree,
+ *  and it matches only a push of exactly that content. Null otherwise, and when no project dir or session id
+ *  is known, the shell is inside the project dir, or the shell is in no repo. */
+export function outsideRepo(shell: string, env: NodeJS.ProcessEnv = process.env): { project: string; repo: string } | null {
+  const project = knownProjectDir(env);
+  const sid = (env.CLAUDE_CODE_SESSION_ID ?? '').trim();
+  if (project === null || sid === '') return null;
+  const repo = outsideRepoTop(shell, project);
+  if (repo === null) return null;
+  return getEditHistory(sid).files.some((f) => isUnder(f, repo)) ? { project, repo } : null;
+}
+
 /** (#41) `--worktree <dir>` of `cmd`, taken out of `args` and checked (lib/clean-worktree.ts): the clean linked
  *  worktree, or null without the flag, and the other args. Fails with why otherwise. */
 function worktreeOrFail(cmd: string, cwd: string, args: readonly string[], shell: string): { wt: Extract<CleanWorktree, { ok: true }> | null; rest: string[] } {
@@ -823,6 +866,7 @@ export async function cmdTestWrite(cwd: string, args: string[], shell: string = 
   // (#41) A worktree record names the worktree's files only, so the Stop never takes it for evidence of
   //   the project dir's files: its tree is the commit's, not theirs.
   delete result.worktree;
+  delete result.repo;
   if (wt !== null) {
     const out = [...result.tested_files, ...result.test_files].find((f) => typeof f === 'string' && f.trim() !== '' && !isUnder(f, wt.top));
     if (out !== undefined) fail(`test-write --worktree: ${out} is not in the worktree ${wt.top}; list the tested and test files as the worktree has them.`);
@@ -841,20 +885,17 @@ export async function cmdTestWrite(cwd: string, args: string[], shell: string = 
   const repos = wt !== null ? { trees: {}, dropped: [] as string[] } : repoTrees(result.tested_files, cwd);
   if (Object.keys(repos.trees).length > 0) result.trees = repos.trees;
   setExtraBlobs(base, result, state.tree, result.tested_files, repos.trees);
-  const testsDir = join(cwd, '.claude', 'tests');
-  ensureDir(testsDir);
-  const outPath = uniqueJsonPath(testsDir, timestampToFilename(result.timestamp));
-  const resolvedTests = resolve(testsDir);
-  const resolvedOut = resolve(outPath);
-  if (resolvedOut !== resolvedTests && !resolvedOut.startsWith(resolvedTests + sep)) {
-    fail(`출력 경로가 tests 디렉터리를 벗어납니다: ${resolvedOut}`);
-  }
-  writeJson(outPath, result);
+  const outPath = writeTestRecord(cwd, result);
+  // (#42) A run in a repo outside the session's project dir: a copy marked with that repo is stored in the project
+  //   dir too. The hooks read the project dir when the shell went back there after a `cd` outside it, and the
+  //   shell's dir when it stays there (a directory added to the session); the record serves both.
+  const away = outsideRepo(shell);
+  const copy = away !== null ? recordCopy(() => writeTestRecord(away.project, { ...result, repo: away.repo })) : undefined;
   // The project's test profile, for the tier advice (track H §14.7).
   recordTestProfile(knowledgeRoot(cwd).root, result.by_type, result.timestamp);
 
   process.stdout.write(
-    JSON.stringify({ ok: true, path: outPath, timestamp: result.timestamp }) + '\n',
+    JSON.stringify({ ok: true, path: outPath, ...(copy !== undefined ? { copy } : {}), timestamp: result.timestamp }) + '\n',
   );
   // A warning here; the test gate blocks on unrun changed lines (track I, lib/changed-coverage.ts).
   for (const w of droppedTops) process.stderr.write(w + '\n');
@@ -888,6 +929,9 @@ export async function cmdRegression(cwd: string, args: string[]): Promise<void> 
   const worktree = worktreeOrFail('regression', cwd, args, process.cwd()).wt?.top;
   // (#39) A project dir that is no repo: the nested repo the shell is in.
   const top = worktree ?? regressionTop(cwd, process.cwd());
+  // (#42) A run in a repo outside the project dir (the suite runs there, as `cwd` is the shell's dir then): a
+  //   copy marked with that repo is stored in the project dir too (as test-write does).
+  const away = outsideRepo(process.cwd());
   if (top === null) {
     fail(
       'regression: not inside a git repository; the push check compares git trees. When the project dir is no repository, ' +
@@ -921,8 +965,9 @@ export async function cmdRegression(cwd: string, args: string[]): Promise<void> 
     verdict: runs.every((r) => r.exit_code === 0) && !changed ? 'pass' : 'fail',
   };
   const path = writeRegressionRecord(cwd, rec);
+  const copy = away !== null ? recordCopy(() => writeRegressionRecord(away.project, { ...rec, repo: away.repo })) : undefined;
   process.stdout.write(
-    JSON.stringify({ ok: rec.verdict === 'pass', path, verdict: rec.verdict, source: rec.source, commands: found.commands, duration_ms: rec.duration_ms, tree: rec.tree }) + '\n',
+    JSON.stringify({ ok: rec.verdict === 'pass', path, ...(copy !== undefined ? { copy } : {}), verdict: rec.verdict, source: rec.source, commands: found.commands, duration_ms: rec.duration_ms, tree: rec.tree }) + '\n',
   );
   const bad = runs.find((r) => r.exit_code !== 0);
   if (bad) process.stderr.write(`regression failed: \`${bad.command}\` exited ${bad.exit_code}\n${outputSummary(bad.output_tail, 1500, 500)}\n`);

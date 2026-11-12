@@ -254,6 +254,13 @@ export function regressionTop(projectDir: string, shell: string): string | null 
   return topOf(projectDir);
 }
 
+/** (#42) The real top of the repo `dir` is in when `dir` is outside the project dir (a sibling repo, or a repo
+ *  above it), else null (inside it, or in no repo). One rule for `test-write` and `regression` (which store
+ *  such a repo's record in the project dir, with `repo` set to this) and for the push check. */
+export function outsideRepoTop(dir: string, projectDir: string): string | null {
+  return isUnder(dir, projectDir) ? null : realTopOf(dir);
+}
+
 /** The tested trees of a result: `tree` and the trees of the other repos it tested (#39). */
 export function treesOf(r: TestResult): string[] {
   const out: string[] = [];
@@ -808,11 +815,30 @@ export function handoffApprovalAsk(marker: string): string {
 
 /** The model-facing denial for a failed hand-off check (English, per the repo rule). `marker`:
  *  the user's one-use approval path, for the main session (#13: the model guessed it). */
-export function pushTestMessage(what: string, o: Exclude<PushTestOutcome, { ok: true }>, marker?: string): string {
-  return pushTestText(what, o) + (marker ? handoffApprovalAsk(marker) : '');
+export function pushTestMessage(what: string, o: Exclude<PushTestOutcome, { ok: true }>, marker?: string, read?: ResultsRead): string {
+  return pushTestText(what, o, read) + (marker ? handoffApprovalAsk(marker) : '');
 }
 
-function pushTestText(what: string, o: Exclude<PushTestOutcome, { ok: true }>): string {
+/** (#42) Where the push check read results from, and whether the repo handed off is outside the project dir. */
+export interface ResultsRead {
+  dir: string;
+  outside: boolean;
+}
+
+/** (#42) A `no-result` denial names the dir results were read from; for a repo outside the project dir, that an
+ *  older goodboy stored its record in that repo, where it is not read. */
+function whereRead(read: ResultsRead | undefined): string {
+  if (read === undefined) return '';
+  return (
+    ` goodboy reads test results from ${read.dir} only.` +
+    (read.outside
+      ? ' The repo handed off is outside the session\'s project dir: `test-write` run there stores a copy of its record ' +
+        'here once the session has edited a file in that repo; a record that only sits in that repo\'s own .claude/tests is not read, so record the run again.'
+      : '')
+  );
+}
+
+function pushTestText(what: string, o: Exclude<PushTestOutcome, { ok: true }>, read?: ResultsRead): string {
   if (o.runFirst) {
     return (
       `This command runs \`${o.runFirst}\` before \`${what}\`. goodboy checks a push before the command runs, so it would ` +
@@ -851,7 +877,7 @@ function pushTestText(what: string, o: Exclude<PushTestOutcome, { ok: true }>): 
   const rejected = o.rejected ? ` A result for exactly this tree exists but does not count: ${o.rejected}.` : '';
   return (
     `${what} hands off ${rev} without a passing test result for exactly that content ` +
-    `(tree ${o.tree?.slice(0, 10) ?? '?'}).${rejected}${differs} Run the layer-1 tests (${agentName(ROUTE.test)}; \`test-write\` records the tested tree) ` +
+    `(tree ${o.tree?.slice(0, 10) ?? '?'}).${rejected}${differs}${o.why === 'no-result' ? whereRead(read) : ''} Run the layer-1 tests (${agentName(ROUTE.test)}; \`test-write\` records the tested tree) ` +
     'on what you hand off, then try again. A commit made after the tests still matches; any edit after them does not. ' +
     (o.rev === WORKTREE
       ? ''
