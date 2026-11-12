@@ -22,9 +22,10 @@
 // name is only a sanitized id.
 
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
+import { readStateText } from './safe-read';
 
 export interface ReviewCursor {
   turn: number;
@@ -79,7 +80,7 @@ function readCursorFile(cwd: string, sessionId: string, base: string): ReviewCur
   try {
     const path = join(ensureSessionDir(sessionId), cursorFileName(base, cwd));
     if (!existsSync(path)) return null;
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<ReviewCursor>;
+    const parsed = JSON.parse(readStateText(path)) as Partial<ReviewCursor>;
     if (
       parsed &&
       typeof parsed.turn === 'number' &&

@@ -8,6 +8,7 @@
 // 의도적으로 단순하게 유지한다 — 오탐(필요 없는 차원 요구)은 retry-cap escape로
 // 영구 차단되지 않고, 미탐(필요한데 안 잡음)이 더 위험하므로 넓게 잡는다.
 
+import type { ReviewResult } from './types';
 import { classifyPath, isRequirementsDoc } from './verification-scope';
 
 export type ReviewDimension =
@@ -115,6 +116,14 @@ function isServerFile(lower: string): boolean {
 /** 코드 파일 일반(스크립트). 데이터 경로/입력 파싱 휴리스틱에 사용. */
 function isCodeFile(lower: string): boolean {
   return /\.(t|j)sx?$|\.(m|c)?js$|\.py$|\.go$|\.rb$|\.rs$|\.java$/.test(lower);
+}
+
+/** (#27) Shell scripts: `.sh`, `.bash`, `.zsh`, `.ps1`. By extension only, as the rest of this file reads
+ *  names and not content. They are no `isCodeFile` (no performance or refactoring dimension), but a script
+ *  runs commands built from its arguments and its environment, so it needs `error-path` and
+ *  `security-injection`. */
+function isShellScript(lower: string): boolean {
+  return /\.(sh|bash|zsh|ps1)$/.test(lower);
 }
 
 /** 외부 입력(쿠키/헤더/URL/쿼리/바디)을 파싱하거나 사용자 입력으로 객체를 키잉할 법한 파일.
@@ -278,10 +287,61 @@ export function requiredDimensionsFor(changedFiles: string[]): ReviewDimension[]
       required.add('security-authz');
     }
 
+    if (isShellScript(lower)) {
+      required.add('error-path');
+      required.add('security-injection');
+    }
+
     if (isDependencyManifest(lower)) {
       required.add('dependency-risk');
     }
   }
 
   return Array.from(required).sort();
+}
+
+/** A changed file and the required dimensions that no review covering that file checked. */
+export interface FileMissingDimensions {
+  file: string;
+  missing: ReviewDimension[];
+}
+
+/**
+ * (#27) The dimension check per file. Each file's own required dimensions
+ * (`requiredDimensionsFor([file])`) must appear in `dimensions_checked` of a fresh review that covers
+ * that file (`reviewsOf`), not in the union over all reviews: a review of file A that checked a
+ * dimension does not satisfy it for file B. `reviewsOf` is the coverage check's own answer (the
+ * reviews that list the file and are newer than its last edit), so no path rule is repeated here. A file
+ * `reviewsOf` gives no reviews for has every required dimension missing. Throws are not caught: the
+ * caller fails closed.
+ * @returns the files with something missing, in the order of `changedFiles` (a file once)
+ */
+export function missingDimensionsByFile(
+  changedFiles: readonly string[],
+  reviewsOf: (file: string) => readonly Pick<ReviewResult, 'dimensions_checked'>[] | undefined,
+): FileMissingDimensions[] {
+  const out: FileMissingDimensions[] = [];
+  const seen = new Set<string>();
+  for (const file of changedFiles) {
+    if (typeof file !== 'string' || file.trim() === '' || seen.has(file)) continue;
+    seen.add(file);
+    const required = requiredDimensionsFor([file]);
+    if (required.length === 0) continue;
+    const checked = new Set<string>();
+    for (const r of reviewsOf(file) ?? []) {
+      if (Array.isArray(r.dimensions_checked)) for (const d of r.dimensions_checked) checked.add(d);
+    }
+    const missing = required.filter((d) => !checked.has(d));
+    if (missing.length > 0) out.push({ file, missing });
+  }
+  return out;
+}
+
+/** The missing dimensions as one text for a block reason: `file: a, b; file2: c` (up to five files). */
+export function describeMissingDimensions(missing: readonly FileMissingDimensions[]): string {
+  const shown = missing
+    .slice(0, 5)
+    .map((m) => `${m.file}: ${m.missing.join(', ')}`)
+    .join('; ');
+  return missing.length > 5 ? `${shown}; and ${missing.length - 5} more file(s)` : shown;
 }

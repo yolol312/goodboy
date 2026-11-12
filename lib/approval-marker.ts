@@ -11,6 +11,7 @@
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve as resolvePath } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
+import { readStateTail, readStateText } from './safe-read';
 import { hostsFilesFrom, parseHostRules, segmentChanging } from './outward-command';
 
 /** `outward`: one use of a command aimed at a host listed as production (track G, R2).
@@ -182,7 +183,7 @@ export function takeBashStart(sessionId: string, toolUseId: string | undefined, 
   if (toolUseId) {
     const file = noteFile(sessionId, toolUseId);
     try {
-      const rec = JSON.parse(readFileSync(file, 'utf8')) as Partial<BashStartNote>;
+      const rec = JSON.parse(readStateText(file)) as Partial<BashStartNote>;
       if (typeof rec.t === 'number') {
         since = rec.t - 1000;
         recordBashWindow(sessionId, rec.t, Date.now());
@@ -264,7 +265,7 @@ export function rememberProduction(sessionId: string, now: string[]): string[] {
   const file = join(ensureSessionDir(sessionId), PRODUCTION_SEEN_FILE);
   let seen: string[] = [];
   try {
-    const parsed = JSON.parse(readFileSync(file, 'utf8')) as unknown;
+    const parsed = JSON.parse(readStateText(file)) as unknown;
     if (Array.isArray(parsed)) seen = parsed.filter((h): h is string => typeof h === 'string');
   } catch {
     seen = [];
@@ -296,7 +297,7 @@ function openBashStarts(sessionId: string, exceptToolUseId?: string): BashStartN
     for (const name of readdirSync(dir)) {
       if (!name.startsWith(BASH_START_PREFIX) || name === except) continue;
       try {
-        const rec = JSON.parse(readFileSync(join(dir, name), 'utf8')) as Partial<BashStartNote>;
+        const rec = JSON.parse(readStateText(join(dir, name))) as Partial<BashStartNote>;
         if (typeof rec.t === 'number' && Date.now() - rec.t < 30 * 60_000) {
           out.push({
             t: rec.t,
@@ -334,7 +335,7 @@ export function recordBashWindow(sessionId: string, start: number, end: number):
 
 function bashWindows(sessionId: string): Array<{ s: number; e: number }> {
   try {
-    return readFileSync(join(ensureSessionDir(sessionId), WINDOWS_FILE), 'utf8')
+    return readStateTail(join(ensureSessionDir(sessionId), WINDOWS_FILE))
       .split('\n')
       .slice(-2000)
       .flatMap((l) => {
@@ -461,7 +462,7 @@ export function ensureApprovalDir(cwd: string): void {
 function notedPaths(file: string): string[] {
   let text: string;
   try {
-    text = readFileSync(file, 'utf8');
+    text = readStateText(file);
   } catch {
     return [];
   }

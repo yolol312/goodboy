@@ -3,7 +3,7 @@
 Feature → test type, generated from the test files by goodboy (`cli.ts test-catalog`).
 Regenerate it instead of editing it; the docs rule compares it with a fresh copy.
 
-Totals: unit 180 files, 3121 tests; e2e 2 files, 54 tests.
+Totals: unit 183 files, 3273 tests; e2e 2 files, 54 tests.
 
 | Feature | Type | File | Tests |
 |---|---|---|---|
@@ -184,6 +184,9 @@ Totals: unit 180 files, 3121 tests; e2e 2 files, 54 tests.
 | a new category command when the repo-level state cannot be written (A3); another session's category command (A3); the risk gate on a malformed state (A3) | unit | tests/user-prompt-submit-state-write.test.ts | 4 |
 | user-prompt-submit argument-free category commands (G1; B1 used to block them); user-prompt-submit self-attestation checklist (#3); resolveSkillPath cwd opt-in (2-C) | unit | tests/user-prompt-submit.test.ts | 11 |
 | V17-AC-1: test-write --worktree records the clean worktree\; V17-AC-2: refusals, and what is no dirt; V17-AC-2 (in process): cleanWorktreeFor, worktreeArg and cmdTestWrite; V17-AC-3: regression --worktree; V17-AC-4: the push denial names the way out for a commit; V17-AC-5: mutationSuiteWarnings | unit | tests/v0.36.17-local-only.test.ts | 51 |
+| V18-AC-7 shell scripts: required dimensions and review axes; V18-AC-6 missingDimensionsByFile (unit); V18-AC-6 validateReviewCoverage byFile; V18-AC-6 the Stop judges dimensions per file; V18-AC-6 the stop_hook_active acceptance path judges per file too; V18-AC-8 a failure while working the dimensions out blocks the Stop | unit | tests/v0.36.18-review-dims.test.ts | 28 |
+| V18-AC-9 resultCliWrite: the CLI reading a file named lib/regression.ts is no test record; V18-AC-10 bashChangedPaths: read-only git commands are no .git write; V18-AC-10 through the PreToolUse hook | unit | tests/v0.36.18-role-limits.test.ts | 22 |
+| V18-AC-1 readStateText; V18-AC-1 callers neither hang nor crash on a FIFO or a directory at their file; V18-AC-2 turn.txt is guarded: it never goes down; V18-AC-3 a guarded name a call created as no regular file is removed; V18-AC-4 the snapshot index is sealed; V18-AC-4 the key file and the notes are under the session dir name write gates | unit | tests/v0.36.18-state-guard.test.ts | 102 |
 | the start time a pass record keeps (A3); the 5-minute clock-skew bound (A3) | unit | tests/validation-pass-record.test.ts | 7 |
 | a pass lifts an older failure only in the same project (A3) | unit | tests/validation-pass-scope.test.ts | 4 |
 | validation failure marker (A3) | unit | tests/validation-state.test.ts | 15 |

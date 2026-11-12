@@ -9,9 +9,10 @@
 //   - 스팸 금지: 경고는 세션당/단계당 1회. "이미 경고함"을 habit-state.json에 기록한다.
 //   - env 토글: 각 기능은 GOODBOY_ 접두사 env로 끄거나 임계값을 조정할 수 있다.
 
-import { appendFileSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
+import { readStateTail, readStateText } from './safe-read';
 
 // --- H2-02 임계 기본값(출력 크기 기반) --------------------------------------
 // Bash 실행 후 실제 출력이 이 크기를 넘으면 사후 경고한다(사후 교정).
@@ -179,7 +180,7 @@ export function readHabitState(sessionId: string): HabitState {
     const dir = ensureSessionDir(sessionId);
     const p = join(dir, HABIT_STATE_FILE);
     if (!existsSync(p)) return {};
-    const raw = readFileSync(p, 'utf8');
+    const raw = readStateText(p);
     const parsed = JSON.parse(raw) as HabitState;
     return parsed && typeof parsed === 'object' ? parsed : {};
   } catch {
@@ -412,7 +413,7 @@ export function wasUrlFetched(sessionId: string, url: string): boolean {
     const path = join(ensureSessionDir(sessionId), WEBFETCH_LOG_FILE);
     if (!existsSync(path)) return false;
     const target = normalizeWebKey(url);
-    for (const line of readFileSync(path, 'utf8').split(/\r?\n/)) {
+    for (const line of readStateTail(path).split(/\r?\n/)) {
       const trimmed = line.trim();
       if (trimmed === '') continue;
       try {

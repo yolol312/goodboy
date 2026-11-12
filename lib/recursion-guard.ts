@@ -19,9 +19,10 @@
 //   recursion-guard.jsonl 로 기록. 각 줄: { t: number(epoch ms), h: string(prompt hash) }.
 
 import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
+import { readStateTail } from './safe-read';
 
 // ---- 보수적 임계값 (재귀 폭주 방어 강화 기준) --------------------------------
 /** 슬라이딩 윈도우 (밀리초). 60초. */
@@ -74,7 +75,8 @@ export function hashPrompt(prompt: string): string {
 function readRecords(path: string): GuardRecord[] {
   try {
     if (!existsSync(path)) return [];
-    const raw = readFileSync(path, 'utf8');
+    // The newest records of a log past the cap, never none: the window is the last minute (#12).
+    const raw = readStateTail(path);
     const out: GuardRecord[] = [];
     for (const line of raw.split(/\r?\n/)) {
       const trimmed = line.trim();

@@ -16,12 +16,12 @@
 //   (judged-weakened.json), so a later change does not ask again for the same state.
 
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, extname, isAbsolute, join, posix, relative, resolve as resolvePath, sep } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
 import { spawnGit } from './git-run';
 import type { ChangedFileEdit } from './review-validator';
-import { MAX_STATE_BYTES, readRegular } from './safe-read';
+import { readRegular, readStateText } from './safe-read';
 import { JVM_CASE, TEST_FILE } from './test-catalog';
 import { JS_SPECIFIER, recordStandsAlone } from './test-types';
 import { freshFor, stripLiteralsAndComments } from './test-validator';
@@ -622,8 +622,8 @@ const MAX_JUDGED = 1000;
 export function judgedWeakened(sessionId: string): Set<string> {
   try {
     const p = join(ensureSessionDir(sessionId), JUDGED_FILE);
-    if (!existsSync(p) || statSync(p).size > MAX_STATE_BYTES) return new Set();
-    const v = JSON.parse(readFileSync(p, 'utf8')) as unknown;
+    if (!existsSync(p)) return new Set();
+    const v = JSON.parse(readStateText(p)) as unknown;
     return new Set(Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
   } catch {
     return new Set();

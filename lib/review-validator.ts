@@ -270,6 +270,11 @@ export interface CoverageResult extends ValidationResult {
    *  차원을 "누락"으로 오판하고 영구 차단된다. 차원·가정 검증은 "했다"는 누적 사실이므로
    *  합집합이 맞다. 대체(supersede) 의미론이 필요한 finding 평가는 currentFindings가 담당한다. */
   effective: ReviewResult[];
+  /** (#27) Per changed file (its `ChangedFileEdit.file`): the fresh reviews that cover that file, newest
+   *  first. A file with no fresh covering review has no entry. The dimension check reads each file's own
+   *  reviews here and not the union in `effective`, so a review of file A cannot satisfy a dimension for
+   *  file B. */
+  byFile?: Map<string, ReviewResult[]>;
 }
 
 /** 리뷰 timestamp가 유효한 ISO이고 미래(+스큐)가 아닌지. 미래면 위조 의심으로 제외. */
@@ -319,6 +324,7 @@ export function validateReviewCoverage(
   const unverified: string[] = [];
   const failed: string[] = [];
   const effective = new Set<ReviewResult>();
+  const byFile = new Map<string, ReviewResult[]>();
   let unhashed = false; // a covering review had `tree: null`
   for (const edit of changedEdits) {
     const key = normalizePath(edit.file);
@@ -355,6 +361,7 @@ export function validateReviewCoverage(
       continue;
     }
     for (const r of freshCovering) effective.add(r);
+    byFile.set(edit.file, freshCovering);
   }
   const futureNote = rejectedFuture > 0 ? ` (미래 timestamp 리뷰 ${rejectedFuture}개는 위조 의심으로 무시됨)` : '';
   if (missing.length > 0) {
@@ -362,6 +369,7 @@ export function validateReviewCoverage(
       ok: false,
       reason: `리뷰되지 않은 변경 파일 ${missing.length}개: ${missing.slice(0, 3).join(', ')}${missing.length > 3 ? ' …' : ''}${futureNote}`,
       effective: Array.from(effective),
+      byFile,
       missing,
       stale,
     };
@@ -371,6 +379,7 @@ export function validateReviewCoverage(
       ok: false,
       reason: `리뷰가 마지막 편집보다 오래된 파일 ${stale.length}개: ${stale.slice(0, 3).join(', ')}${stale.length > 3 ? ' …' : ''}. 해당 파일을 다시 리뷰하세요.${futureNote}`,
       effective: Array.from(effective),
+      byFile,
       stale,
     };
   }
@@ -382,6 +391,7 @@ export function validateReviewCoverage(
         "A review's tree could not be read or compared with the file's content now (a missing or malformed tree, or the check ran out of time), " +
         `or an older review's checkout has changed since: this is not "never reviewed". ${unhashed ? NULL_TREE_NOTE : ''}Run the review again so a new result is written${futureNote}`,
       effective: Array.from(effective),
+      byFile,
       unverified,
     };
   }
@@ -390,9 +400,10 @@ export function validateReviewCoverage(
       ok: false,
       reason: `최신 리뷰 verdict이 fail인 파일 ${failed.length}개: ${failed.slice(0, 3).join(', ')}${failed.length > 3 ? ' …' : ''}`,
       effective: Array.from(effective),
+      byFile,
     };
   }
-  return { ok: true, effective: Array.from(effective) };
+  return { ok: true, effective: Array.from(effective), byFile };
 }
 
 export function highSeverityFindings(result: ReviewResult): ReviewFinding[] {

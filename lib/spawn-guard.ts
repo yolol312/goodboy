@@ -18,9 +18,10 @@
 // call) and SubagentStop (completion).
 // Inside a subagent the guard fails closed; in the main session it fails open.
 
-import { appendFileSync, existsSync, readFileSync, statSync } from 'node:fs';
+import { appendFileSync, existsSync, statSync } from 'node:fs';
 import { basename, join, resolve as resolvePath } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
+import { readStateTail } from './safe-read';
 import { commandSegments } from './outward-command';
 import { hashPrompt } from './recursion-guard';
 import {
@@ -65,7 +66,8 @@ export function readDispatchLog(sessionId: string): DispatchRecord[] {
     const p = join(ensureSessionDir(sessionId), LOG_FILE);
     if (!existsSync(p)) return [];
     const out: DispatchRecord[] = [];
-    for (const line of readFileSync(p, 'utf8').split(/\r?\n/)) {
+    // The newest records of a log past the cap, never none (#12).
+    for (const line of readStateTail(p).split(/\r?\n/)) {
       if (line.trim() === '') continue;
       try {
         const r = JSON.parse(line) as DispatchRecord;

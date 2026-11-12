@@ -33,7 +33,7 @@ import { knowledgeRoot, parsePolicyEntries, POLICY_FILE } from './project-knowle
 import { hasSpelling, sameFileSpelling } from './path-spelling';
 import { realDeep } from './private-files';
 import { recordPath } from './record-paths';
-import { readRegular } from './safe-read';
+import { readRegular, readStateText } from './safe-read';
 import { commonDirOf, hasStartPin, nearestGitTop, sessionStartRan, takeStartSnapshot, topIdentity, topStart } from './start-pins';
 import { freshFor, stripLiteralsAndComments } from './test-validator';
 import type { ChangedFileEdit } from './review-validator';
@@ -191,7 +191,7 @@ const stringList = (v: unknown): v is string[] => Array.isArray(v) && v.every((g
 
 function readPin(sessionId: string): CoveragePin | null {
   try {
-    const p = JSON.parse(readFileSync(join(ensureSessionDir(sessionId), PIN_FILE), 'utf8')) as CoveragePin;
+    const p = JSON.parse(readStateText(join(ensureSessionDir(sessionId), PIN_FILE))) as CoveragePin;
     const headOk = p?.head === undefined || p.head === null || typeof p.head === 'string';
     const globsOk = p?.globs === undefined || (typeof p.globs === 'object' && p.globs !== null && Object.values(p.globs).every(stringList));
     return typeof p?.top === 'string' && headOk && stringList(p.exemptions) && globsOk ? p : null;

@@ -9,6 +9,7 @@
 import { basename, relative, resolve as resolvePath, sep } from 'node:path';
 import { openedPath, type RealpathMemo } from './file-tracker';
 import { commandSegments, dropRedirects, gitSubcommandAt, plainWord, readCommand, xargsCommandAt } from './outward-command';
+import { changesCommits } from './push-test';
 import { namesOwnResultDir } from './result-dir';
 import { agentName, LEGACY_AGENTS, roleOf, ROUTE, type RoleSpec } from './routing-policy';
 import { isTestFile, TEST_RUNNER_CONFIG } from './test-validator';
@@ -58,6 +59,19 @@ const GIT_MUTATING = new Set([
   'merge-file', 'mv', 'pull', 'read-tree', 'rebase', 'reset', 'restore', 'revert', 'rm', 'stash', 'switch', 'tag',
   'update-index', 'update-ref', 'worktree',
 ]);
+
+/** (v0.36.18, plan §15.34 item 4) A GIT_MUTATING subcommand that only reads with these arguments: `branch` and
+ *  `tag` in a read mode or with listing flags, `config` with a reading flag (the push check's rule,
+ *  lib/push-test.ts `changesCommits`), `stash list|show`, `worktree list`. Every such command was taken for a
+ *  `.git` write, so a review or test agent's `git branch -r` was denied. */
+function gitOnlyReads(sub: string, args: readonly string[]): boolean {
+  if (sub === 'branch' || sub === 'tag' || sub === 'config') return !changesCommits(sub, args);
+  // The operation is the first word: `git stash -m list` is a push with the message "list" (review, low).
+  const op = args[0];
+  if (sub === 'stash') return op === 'list' || op === 'show';
+  if (sub === 'worktree') return op === 'list';
+  return false;
+}
 
 /** The value of a short flag that ends a cluster (`-sSLo file` → file for `o`), or undefined. */
 function clusterValue(words: string[], flag: string): string | undefined {
@@ -141,7 +155,17 @@ export function bashChangedPaths(command: string, cwd: string, opts: { skip?: Re
     } else if ((prog === 'perl' || prog === 'ruby') && words.some((w) => /^-[a-zA-Z]*i/.test(w))) {
       for (const a of args.slice(1)) if (literal(a)) out.push(opened(base, a)); // the first is the script
     } else if (prog === 'git') {
-      if (GIT_MUTATING.has(words[gitSubcommandAt(words)] ?? '')) out.push(resolvePath(base, '.git'));
+      const at = gitSubcommandAt(words);
+      const sub = words[at] ?? '';
+      const rest = words.slice(at + 1);
+      if (GIT_MUTATING.has(sub) && !gitOnlyReads(sub, rest)) out.push(resolvePath(base, '.git'));
+      // (v0.36.18 security review, low) `--output <file>` writes that file from any diff-like command (`log`, `diff`,
+      //   `show`, `stash show`, `format-patch`), reads included.
+      for (let k = 0; k < rest.length; k++) {
+        const o = /^--output(?:=(.*))?$/.exec(rest[k]!);
+        const target = o ? (o[1] ?? rest[k + 1]) : undefined;
+        if (target !== undefined && target !== '' && literal(target)) out.push(opened(base, target));
+      }
     }
   }
   return out;
@@ -149,6 +173,16 @@ export function bashChangedPaths(command: string, cwd: string, opts: { skip?: Re
 
 const JS_RUNTIMES = /^(?:bun|node|nodejs|tsx|ts-node|deno|bunx|npx)$/;
 const UNREADABLE = /[$`*?[]/;
+const RESULT_WRITERS = new Set(['test-write', 'review-write', 'regression']);
+
+/** A segment `<runtime> [run] <…/lib/cli.ts> <subcommand> …` whose subcommand is literal and writes no result. */
+function plainCliRead(words: readonly string[]): boolean {
+  if (!JS_RUNTIMES.test(basename(words[0] ?? ''))) return false;
+  const i = words[1] === 'run' ? 2 : 1;
+  if (!/(?:^|\/)lib\/cli\.ts$/.test(plainWord(words[i] ?? ''))) return false;
+  const sub = words[i + 1];
+  return sub !== undefined && !UNREADABLE.test(sub) && !RESULT_WRITERS.has(sub) && !words.slice(i + 1).some((w) => RESULT_WRITERS.has(w));
+}
 
 /** Which goodboy result a shell command records through the CLI (`bun … lib/cli.ts test-write`
  *  or `review-write`), 'unknown' when its subcommand cannot be read, or null. Only a JS runtime
@@ -161,8 +195,15 @@ export function resultCliWrite(command: string): 'test' | 'review' | 'unknown' |
   //   variable, a heredoc fed to `bun -`); a grep or a commit message naming it, with no JS
   //   runtime, does not (round-2 review, closing check). Code read from a file at run time
   //   (`bun -e "$(cat x)"`) is a same-user limit (plan §15.7).
+  //   (v0.36.18, plan §15.34 item 3) A runtime segment that only runs goodboy's CLI with a literal subcommand that
+  //   writes no result (`bun …/lib/cli.ts review-axes … lib/regression.ts`), the script right after the runtime
+  //   (no runtime flags, which could preload code), loads nothing by naming the module among its operands: the
+  //   main session's `review-axes` on a changed lib/regression.ts was denied as a test record.
+  //   A runtime options variable (`BUN_OPTIONS=--preload …`, `NODE_OPTIONS`) can load code the segment does not name
+  //   (security review, low): with one in the command no segment is excused.
   const segments = commandSegments(command);
-  if (/\bwriteRegressionRecord\b|\blib\/regression(?:\.ts)?\b/.test(command) && segments.some((w) => JS_RUNTIMES.test(basename(w[0] ?? '')))) {
+  const optionsEnv = /\b(?:BUN_OPTIONS|NODE_OPTIONS|BUN_CONFIG_\w*|BUN_INSTALL\w*)=/.test(command);
+  if (/\bwriteRegressionRecord\b|\blib\/regression(?:\.ts)?\b/.test(command) && segments.some((w) => JS_RUNTIMES.test(basename(w[0] ?? '')) && (optionsEnv || !plainCliRead(w)))) {
     return 'test';
   }
   for (const words of segments) {

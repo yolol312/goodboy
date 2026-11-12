@@ -11,6 +11,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
+import { readStateText } from './safe-read';
 import type { GateEvent } from './gate-log';
 import { effortRank, type Effort } from './routing-policy';
 
@@ -84,7 +85,7 @@ export function readLastAdvice(sessionId: string): AdviceState | null {
   try {
     const p = join(ensureSessionDir(sessionId), ADVICE_FILE);
     if (!existsSync(p)) return null;
-    const v = JSON.parse(readFileSync(p, 'utf8')) as AdviceState;
+    const v = JSON.parse(readStateText(p)) as AdviceState;
     return typeof v.level === 'string' && typeof v.ts === 'string' ? v : null;
   } catch {
     return null;

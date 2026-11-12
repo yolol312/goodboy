@@ -27,10 +27,11 @@
 // 마커를 못 읽으면 차단하지 않는다.
 
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve as resolvePath } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
+import { readStateText } from './safe-read';
 import { isTrustedTimestamp } from './trusted-time';
 
 export interface ValidationFailureState {
@@ -76,7 +77,7 @@ function projectStateDir(root: string): string | null {
 function readPasses(dir: string): Record<string, string> {
   const out: Record<string, string> = {};
   try {
-    const p = JSON.parse(readFileSync(join(dir, VALIDATION_PASS_FILE), 'utf8')) as { passes?: unknown } | null;
+    const p = JSON.parse(readStateText(join(dir, VALIDATION_PASS_FILE))) as { passes?: unknown } | null;
     if (p && typeof p.passes === 'object' && p.passes !== null && !Array.isArray(p.passes)) {
       for (const [cmd, startedAt] of Object.entries(p.passes as Record<string, unknown>)) {
         if (typeof startedAt === 'string') out[cmd] = startedAt;
@@ -146,7 +147,7 @@ export function readValidationFailure(sessionId: string): ValidationFailureState
   try {
     const path = markerPath(sessionId);
     if (!existsSync(path)) return null;
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<ValidationFailureState> | null;
+    const parsed = JSON.parse(readStateText(path)) as Partial<ValidationFailureState> | null;
     if (!parsed || typeof parsed !== 'object') return null;
     if (parsed.sessionId !== sessionId) return null;
     if (typeof parsed.timestamp !== 'string') return null;

@@ -3426,6 +3426,75 @@ Placed 2026-11-05 by the check after the v0.36.16 release: both issues were open
      closes with the test only.
    - The snapshot index (`.index.json`) sits in the session dir that a call can write. It moves out of
      a call's reach, or the restore checks it against the snapshot's own files.
+
+   As built (#12):
+   - Reads: `readStateText` (lib/safe-read.ts) is `readFileSync` for a regular file within a cap, and
+     throws what `readFileSync` would for anything else, so each caller's `catch` keeps its meaning.
+     A FIFO is refused unopened. Every session-dir file a hook reads now goes through it or through
+     `readRegular` (which `commit-issue`, `project-dir`, `session-criteria`, `friction`, `retry-counter`,
+     `unswept` and `start-pins` already used): the edit and read logs, the knowledge epoch and the
+     turn counter (`file-tracker`), the review cursors, the validation failure and pass records
+     (`validation-state`, also under `$TMPDIR/goodboy-project-<key>`), the session state, coverage pin,
+     project-mode pin and marker evidence, the judged-weakened list, the dispatch log, the skill
+     evidence, the recursion-guard log, the habit and WebFetch records, the effort advice, the status
+     snapshot, the reasoning deny count and the outward-advised list (`pre-tool-use`), and the bash
+     start notes, production-seen list, bash windows and risk-approval paths (`approval-marker`).
+     Not changed: the `.goodboy/hosts` file and other project files (not session state).
+   - Writes: `appendRecord` and `incrementTurn` remove a non-regular file at their path first (a
+     directory lost the record, a FIFO made the open wait for a reader; the Stop's counter write runs
+     before the state restore).
+   - `turn.txt` is guarded. The Stop writes it before it restores a call's snapshot (and takes a running
+     call's snapshot again, #14), so the value a call leaves stands only between the snapshot's and two
+     above it (`TURN_SLACK`); lower, gone, no counter or a jump goes back to the snapshot's. A counter is
+     at most 12 digits (`parseTurn`, `MAX_TURN`; the security review raised one to 15 digits, the Stop's
+     increment made 16, which no longer read as a counter, and a later 0 put every edit before a cursor
+     of 1e15). A counter that is no counter reads as the edit log's highest turn (`turnFloor`), never 0.
+     One a call created is removed when it is no counter, and then set to that floor.
+   - A guarded name a call created as no plain file (a directory at `edits.jsonl` before the first
+     edit, a FIFO) is removed after the call, by name, like the cursors.
+   - Snapshot index: the index carries a keyed hash (HMAC-SHA256) over the call id, the names, the copies'
+     sha256 and the names that existed. The key (`.seal-key`) and the snapshot notes (`.seal-notes/<call>`)
+     live in the session dir, this user's 0700 dir, outside the snapshot dir and under the session path
+     write gates (round-2 delta review: in a shared /tmp another user could take the key's name, and a link
+     at a notes dir there made the Stop delete the files it pointed to; a note dir that is a link or not
+     this user's is never written, listed or emptied). The key is used only when it is this user's regular
+     file with no group or other bits; a bad one (a link, a dir, junk) is removed and made again, so a
+     snapshot always has one. Trusted: an index whose seal matches the copies, read once (the verified
+     bytes are the ones restored; refactoring review). Not trusted: a missing, unsealed, unparsable or
+     forged index, one that names anything but a guarded file (security review: a sealed `../../x` was
+     written outside the session dir), a changed or missing copy, and a snapshot dir gone while its note
+     stays (the review deleted the dir and kept a cursor it created; the Stop's orphan restore reads the
+     notes too). An unsealed index is never trusted (a round-2 version trusted one on a note, which made
+     the downgrade one write away). The untrusted restore (reviews: a call that deleted the index and
+     planted copies had them written back) writes no cursor or evidence copy back and removes every cursor
+     and evidence log (but its skill-gap lines) now there (the gates ask again); a hook-only file (a start,
+     coverage or criteria pin) stays, and one the call removed comes back from the copy (delta security
+     review: removing the pins made the gates skip what they compare with them, fail open); a validation
+     failure the call removed comes back; the edit and unswept logs keep their lines plus the copy's (a
+     union only adds obligations); the dispatch log keeps its own lines (its prompt lines reset the
+     delegation caps); the turn counter takes the highest valid value of the copy, the file and the edit
+     log. A snapshot taken again for the same call (#14) starts from an empty dir. Oversized append-only
+     logs read their newest part from a line boundary (`readStateTail`, a window starting on a boundary
+     keeps its first line), never as empty (security review: an `edits.jsonl` over 16 MB read as no
+     edits). Padding is caught instead of read around: a guarded log past the 16 MB state cap is larger
+     than any real session, so every full Stop blocks on it (B5.96, `oversizedLogs`; the user's marker
+     passes and clears the flag below). A snapshot does not copy such a log; it first writes the log's
+     name into `oversized-logs.json`, a small hook-only file that is copied and guarded, so a call that
+     pads a log under the cap, lets a hook append cross it and then deletes the log still leaves the Stop
+     the flag (round-3 delta review). The flag is written under a new name and renamed into place, after
+     a dir or FIFO there is removed (round 4: a link was followed, a FIFO hung the hook, a dir aborted the
+     snapshot), and an untrusted restore joins the copy's names to the flag's (round 4: a call that
+     rewrote it to `[]` with the index gone kept it so). The round-2 delta review measured a 256 MB read cap: the Stop ran
+     into its hook timeout near 150 MB. A key made by two first snapshots at once is not removed under a
+     parallel hook that just made a good one (round 3, low). The model runs as the same user and can read the key, a call that
+     removes both the snapshot dir and its note reads as one that took none, a pin it forges while the
+     index is gone stays (or is lost with the snapshot dir, and so are the oversized flag and log when a
+     call removes the snapshot dir, the flag and the log together), and a glob that names the session dirs
+     without `goodboy` (`$TMPDIR/*-session-*`) passes the name gate: this raises the bar only.
+   - Still running call: no code change. Since #14 the Stop re-snapshots an open call after its own
+     counter write, so the call's post hook cannot lower the counter. Known residual (not changed): a
+     file the Stop itself writes after that snapshot (a review cursor, a start pin) is put back by that
+     call's later post hook; this fails closed (the next Stop asks again), it forges nothing.
 2. (#27) Review gate:
    - Dimensions are judged on the union of all fresh reviews (hooks/stop.ts, `checkedDims`), not per
      file. Each changed file's required dimensions come from reviews that cover that file.
@@ -3434,16 +3503,51 @@ Placed 2026-11-05 by the check after the v0.36.16 release: both issues were open
    - The Stop uses an empty list when `requiredDimensionsFor` throws (fails open). It blocks instead.
    - A committed private key or opaque keystore (`.key`, `.p12`, `.pfx`, `.jks`, a PEM block with
      `PRIVATE KEY`) meets no deterministic check (`lib/secret-patterns.ts` has the PEM pattern and
-     masks text only). This is a new check: under P2 the user decides at the start of this step
-     whether it goes into v0.36.18 or waits for v1.0.
+     masks text only). This is a new check: under P2 the user decided on 2026-11-11 that it waits for
+     v1.0 (not in v0.36.18).
    - Still deferred with #27: inert assets and type-only TypeScript files exempt from layer-1 tests.
      They need classification against the baseline and a TypeScript AST.
+
+   As built (the three code parts; no private-key check):
+   - Per file: `validateReviewCoverage` (lib/review-validator.ts) now also returns `byFile`, each changed
+     file's fresh covering reviews (the same `listsFile` and `freshness` decision as the coverage check;
+     no new path rule). `missingDimensionsByFile` (lib/review-dimensions.ts) takes
+     `requiredDimensionsFor([file])` per file and checks it against the `dimensions_checked` of that
+     file's reviews only. A file with no entry has all its dimensions missing.
+     `describeMissingDimensions` words the block reason as `file: a, b; file2: c`. hooks/stop.ts
+     (`reviewCoverage` merges `byFile` over the repo groups) only calls these, in the full Stop's F2
+     check and in `tryAcceptPendingReview`.
+   - Scripts: `.sh`, `.bash`, `.zsh` and `.ps1` need `error-path` and `security-injection` (an
+     `isShellScript` rule by extension; no content or shebang read, as the classifier reads names only).
+     They are no `isCodeFile`, so they add no `performance`, `refactoring-quality` or `security-secrets`.
+     `review-axes` follows (both dimensions are on the security axis).
+   - Fail closed: in the full Stop, a throw in the per-file check logs a hook error and blocks with a
+     reason (the user's marker passes it, as for a missing dimension), where it used `[]` before. In
+     `tryAcceptPendingReview` a throw already left the review unaccepted (outer catch); that stays.
 3. (Found 2026-11-11 while building v0.36.17) The result-writer guard (lib/role-limits.ts
    `resultCliWrite`) takes any command with a JS runtime that names `lib/regression.ts` anywhere for a
    test-result write, so the main session's `bun …/lib/cli.ts review-axes … lib/regression.ts` was
    denied as a test record. It fails closed. The name check is broad on purpose (a heredoc fed to
    `bun -`, a variable), so the narrowing must keep those: a `lib/cli.ts` segment whose literal
-   subcommand is no writer, with the name only among its file operands, is no write.
+   subcommand is no writer, with the name only among its file operands, is no write. As built
+   (`plainCliRead`): the name counts unless every JS-runtime segment is `<runtime> [run] <…/lib/cli.ts>
+   <literal subcommand>` with no runtime flag before the script (a `--preload` could load code) and no
+   result writer (`test-write`, `review-write`, `regression`) among its words. `bun -e`, a heredoc to
+   `bun -`, a second runtime segment and a subcommand in a variable still count, and so does any command
+   that sets a runtime options variable (`BUN_OPTIONS`, `NODE_OPTIONS`: a preload the segment does not
+   show; security review, low).
+4. (Found 2026-11-11 in the v0.36.17 README review) The role limits (lib/role-limits.ts
+   `bashChangedPaths`, `GIT_MUTATING`) take every `git branch`, `tag`, `config`, `stash` and `worktree`
+   for a `.git` write, whatever its flags, so a review or test agent's `git branch -r`, `git tag -l`,
+   `git config --get`, `git stash list` or `git worktree list` is denied. It fails closed. The push check
+   already tells listing flags from changes for some of them (lib/push-test.ts `changesCommits`, its
+   `REF_READ_MODE` and `REF_LISTING` tables); the role limits read those with the same rule. As built
+   (`gitOnlyReads`): `branch`, `tag` and `config` read when `changesCommits` says so (`git branch -r`,
+   `--show-current`, `tag -l`, `config --get`); `stash list|show` and `worktree list` read when that
+   operation is the first word (`git stash -m list` is a push); every other form (`branch new`,
+   `branch -D`, `stash`, `worktree add`, `config k v`) is still a `.git` write. The reviews found that
+   git's `--output <file>` writes that file from any diff-like command (`log`, `diff`, `show`, `stash
+   show`), a hole older than this change: the role limits now count its target as a changed path.
 
 Each part has a test that fails without its fix. #12 also gets a live probe (`/verify`).
 

@@ -90,7 +90,7 @@ function runFirstHandoff(h: Handoff, moved: string): Handoff {
  *  when they only read, `checkout` not when it restores paths (after a `--`), `reset` not
  *  without an operand or with paths, `stash` not unless it makes a branch, `remote` not when it
  *  shows, `config` not when it reads, `fetch` not without a `src:dst` refspec or refmap. */
-function changesCommits(sub: string, args: readonly string[]): boolean {
+export function changesCommits(sub: string, args: readonly string[]): boolean {
   // A flag that runs a program (closing check: `fetch --upload-pack=…`, `grep -O…`).
   if (args.some((w) => /^(?:--upload-pack|--exec|--open-files-in-pager|-O)/.test(w))) return true;
   if (READ_ONLY_GIT.has(sub)) return false;

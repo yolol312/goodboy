@@ -16,10 +16,10 @@
 //
 // fail-open: 로그/스냅샷 기록 실패는 절대 게이트 동작을 막지 않는다(전부 삼킴).
 
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
-import { MAX_STATE_BYTES, readRegular } from './safe-read';
+import { MAX_STATE_BYTES, readRegular, readStateText } from './safe-read';
 
 export type GateDecision = 'deny' | 'warn' | 'fail-open';
 
@@ -142,7 +142,7 @@ export function readStatusSnapshot(sessionId: string): StatusSnapshot | null {
   try {
     const path = statusFilePath(sessionId);
     if (!existsSync(path)) return null;
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as StatusSnapshot;
+    const parsed = JSON.parse(readStateText(path)) as StatusSnapshot;
     if (!parsed || typeof parsed !== 'object') return null;
     if (typeof parsed.updatedAt !== 'string') return null;
     return parsed;

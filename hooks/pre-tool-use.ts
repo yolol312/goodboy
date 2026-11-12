@@ -5,6 +5,7 @@ import { existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSy
 import { join, resolve as resolvePath, sep } from 'node:path';
 import { addedUserGlobs, diffCoverageMode, isPolicyFile, type UserGlobKey } from '../lib/changed-coverage';
 import { HOOK_CLOCK_MS, startHookClock } from '../lib/hook-clock';
+import { readStateText } from '../lib/safe-read';
 import { checkRegression, readRegressionRecords, type RegressionOutcome, regressionMessage, regressionMode } from '../lib/regression';
 import { projectDir, projectRoot } from '../lib/project-dir';
 import { agentName, ROUTE } from '../lib/routing-policy';
@@ -229,7 +230,7 @@ function readReasoningDenyCount(sessionId: string, scope: string): number {
   try {
     const p = join(ensureSessionDir(sessionId), scopedStateFile('reasoning-deny-count', scope));
     if (!existsSync(p)) return 0;
-    const n = parseInt(readFileSync(p, 'utf8').trim(), 10);
+    const n = parseInt(readStateText(p, 64).trim(), 10);
     return Number.isFinite(n) && n > 0 ? n : 0;
   } catch {
     return 0;
@@ -963,7 +964,7 @@ function main(): void {
               const seenFile = join(ensureSessionDir(sessionId), 'outward-advised.json');
               let seen: string[] = [];
               try {
-                seen = JSON.parse(readFileSync(seenFile, 'utf8')) as string[];
+                seen = JSON.parse(readStateText(seenFile)) as string[];
               } catch {
                 seen = [];
               }

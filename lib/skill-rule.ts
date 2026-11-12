@@ -13,10 +13,11 @@
 // Doc files, files outside the project and goodboy's own artifacts are exempt, and so are
 // subagents (they use tool skills under the role limits).
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
+import { readStateText } from './safe-read';
 import { bareSkillName } from './role-limits';
 
 /** Workflow skills that count as evidence (the G3 names). */
@@ -68,7 +69,7 @@ export function readSkillEvidence(sessionId: string): SkillEvidence[] {
     const p = join(ensureSessionDir(sessionId), EVIDENCE_FILE);
     if (!existsSync(p)) return [];
     const out: SkillEvidence[] = [];
-    for (const line of readFileSync(p, 'utf8').split(/\r?\n/)) {
+    for (const line of readStateText(p).split(/\r?\n/)) {
       if (line.trim() === '') continue;
       try {
         const r = JSON.parse(line) as SkillEvidence;

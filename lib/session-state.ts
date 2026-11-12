@@ -9,9 +9,10 @@
 // and it is the gates' fallback when the session copy is missing or unusable (see
 // readSessionState).
 
-import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
+import { readStateText } from './safe-read';
 
 export interface SessionState {
   category?: string;
@@ -83,7 +84,7 @@ export function readSessionState(cwd: string, sessionId: string): SessionState |
  *  malformed file cannot crash the gate that formats its deny message from them. */
 function parseState(path: string, sessionId: string): SessionState | null {
   try {
-    const p = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown> | null;
+    const p = JSON.parse(readStateText(path)) as Record<string, unknown> | null;
     if (!p || typeof p !== 'object' || p.sessionId !== sessionId) return null;
     const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
     return {

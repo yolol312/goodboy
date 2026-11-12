@@ -137,8 +137,9 @@ import {
   readReviewCursor,
   readSessionState,
   readValidationFailure,
-  requiredDimensionsFor,
   resetRetryCount,
+  describeMissingDimensions,
+  missingDimensionsByFile,
   validateReviewCoverage,
   writeHabitState,
   writeRetryCount,
@@ -154,6 +155,9 @@ import {
   useUserMarker,
   ensureApprovalDir,
   restoreOrphanGateState,
+  oversizedLogs,
+  oversizedLogsReason,
+  clearOversizedLogs,
   finishOpenBashCalls,
   openBashCalls,
   replaceUnswept,
@@ -285,6 +289,8 @@ const CLAIM_COUNT_FILE = '.goodboy-claim-retry-count.txt';
 
 // (#40) Bash calls whose writes git could not list.
 const SWEEP_COUNT_FILE = '.goodboy-sweep-retry-count.txt';
+// (B5.96) oversized gate logs.
+const STATE_COUNT_FILE = '.goodboy-state-retry-count.txt';
 
 /** (#40) The Stop's time for its second try at the calls whose writes git could not list (one stalled `status` uses it
  *  all; the gates after it keep the rest of the clock). */
@@ -1240,8 +1246,14 @@ function reviewCoverage(sessionId: string, cwd: string, edits: Edit[], reviews: 
   const missing = lists((v) => v.missing);
   const stale = lists((v) => v.stale);
   const unverified = lists((v) => v.unverified);
+  // (#27) Each file's own covering reviews (a file is in one group), as the records themselves.
+  const byFile = new Map<string, ReviewResult[]>();
+  parts.forEach((v, i) => {
+    for (const [file, rs] of v.byFile ?? []) byFile.set(file, rs.map((r) => judged[i]!.origOf.get(r) ?? r));
+  });
   return {
     ...union,
+    byFile,
     ...(missing !== undefined ? { missing } : {}),
     ...(stale !== undefined ? { stale } : {}),
     ...(unverified !== undefined ? { unverified } : {}),
@@ -1631,11 +1643,8 @@ function tryAcceptPendingReview(
     );
     if (declaredUnknowns > 0 && checkedAssumptions === 0) return null;
     // (F2 상당) 필수 차원 누락이면 수락 보류.
-    const requiredDims = requiredDimensionsFor(recentEdits);
-    const checkedDims = new Set(
-      effective.flatMap((r) => (Array.isArray(r.dimensions_checked) ? r.dimensions_checked : [])),
-    );
-    if (requiredDims.some((d) => !checkedDims.has(d))) return null;
+    //   (#27) Per file; a throw leaves the review unaccepted (the outer catch), as a gap does.
+    if (missingDimensionsByFile(recentEdits, (f) => v.byFile?.get(f)).length > 0) return null;
     // (I5) A weakened existing test needs a finding first (warn mode: the user is told).
     const weakMode = existingTestsMode();
     const weak = weakMode === 'off' ? [] : unjudgedWeakenedNow(sessionId, cwd, reviews);
@@ -2101,6 +2110,22 @@ function main(): void {
       }
       resetRetryCount(sessionId, SWEEP_COUNT_FILE);
 
+      // (B5.96) (v0.36.18 delta review) An append-only gate log past the state cap is larger than any real session: a
+      //   Bash call padded it, to push real records out of the part the gates read or to make every Stop read it until
+      //   the hook timeout. Blocks every full Stop; the user's marker passes it.
+      const padded = oversizedLogs(sessionId);
+      if (padded.length > 0) {
+        if (!userPass(sessionId, cwd, 'state')) {
+          const count = readRetryCount(sessionId, STATE_COUNT_FILE) + 1;
+          writeRetryCount(sessionId, count, STATE_COUNT_FILE);
+          logGate(sessionId, 'state', 'deny', `oversized ${padded.join(', ')}`);
+          emit(blockOutput(sessionId, cwd, oversizedLogsReason(padded), 'state', '', count, true));
+          return;
+        }
+        clearOversizedLogs(sessionId);
+      }
+      resetRetryCount(sessionId, STATE_COUNT_FILE);
+
       // (#35) Another checkout of the project (the project dir, or a linked worktree nested in it)
       //   holds edits this Stop does not judge. Blocks when this turn changed a file anywhere in the
       //   project; on a turn that changed none, a one-line warning (as F1).
@@ -2421,19 +2446,20 @@ function main(): void {
       // (F2) 차원 커버리지 검사 — 변경 파일이 요구하는 품질 차원을 리뷰가 실제로 평가했는지.
       //   리뷰의 dimensions_checked에 누락된 필수 차원이 있으면 BLOCK.
       //   Like high severity, only the user's marker passes it (track G).
-      const requiredDims = (() => {
+      //   (#27) Per file: each changed file's required dimensions must be checked by a fresh review
+      //   that covers that file (v.byFile), not by the union of all reviews. When the computation
+      //   throws, the gate fails closed.
+      const dimCheck = (() => {
         try {
-          return requiredDimensionsFor(recentEdits);
-        } catch {
-          return [];
+          return { missing: missingDimensionsByFile(recentEdits, (f) => v.byFile?.get(f)), error: null };
+        } catch (err) {
+          hookError(sessionId, 'stop', 'review dimensions per file', err);
+          return { missing: [], error: String(err) };
         }
       })();
-      const checkedDims = new Set(
-        effectiveReviews.flatMap((r) => (Array.isArray(r.dimensions_checked) ? r.dimensions_checked : [])),
-      );
-      const missingDims = requiredDims.filter((d) => !checkedDims.has(d));
-      if (missingDims.length > 0) {
-        const dimList = missingDims.join(', ');
+      const dimList =
+        dimCheck.error !== null ? `(could not be worked out: ${dimCheck.error})` : describeMissingDimensions(dimCheck.missing);
+      if (dimCheck.error !== null || dimCheck.missing.length > 0) {
         if (!userPass(sessionId, cwd, 'review')) {
           if (carryReview(`missing-dimensions: ${dimList}`)) return;
           const count = readRetryCount(sessionId) + 1;
@@ -2443,10 +2469,14 @@ function main(): void {
             blockOutput(
               sessionId,
               cwd,
-              `The review did not assess the quality dimensions this change needs. ` +
-                `Missing: ${dimList}. ` +
-                `Run ${agentName(ROUTE.review)} for them (with runtime or observation probes), ` +
-                `add them to dimensions_checked, and review again.`,
+              (dimCheck.error !== null
+                ? `The quality dimensions this change needs could not be worked out, so the review cannot be judged: ${dimCheck.error}. ` +
+                  `Run ${agentName(ROUTE.review)} again; if this keeps happening, report it.`
+                : `The review did not assess the quality dimensions this change needs, per file ` +
+                  `(each file needs its own review to cover its dimensions; another file's review does not count). ` +
+                  `Missing: ${dimList}. ` +
+                  `Run ${agentName(ROUTE.review)} for them (with runtime or observation probes), ` +
+                  `add them to dimensions_checked, and review again.`),
               'review',
               '',
               count,
@@ -2458,7 +2488,12 @@ function main(): void {
         acceptReview(sessionId, cwd);
         statusSnapshot.reviewPending = false;
         emit({
-          systemMessage: withForeignNote(`리뷰가 다음 품질 차원을 평가하지 않았어요: ${dimList}`, foreignFindings),
+          systemMessage: withForeignNote(
+            dimCheck.error !== null
+              ? `리뷰가 요구하는 품질 차원을 계산하지 못했어요: ${dimCheck.error}`
+              : `리뷰가 다음 품질 차원을 평가하지 않았어요: ${dimList}`,
+            foreignFindings,
+          ),
         });
         return;
       }

@@ -10,15 +10,16 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
-  readFileSync,
   readlinkSync,
   realpathSync,
+  rmSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { nestedCheckoutOf } from './git-dirs';
+import { readStateTail, readStateText } from './safe-read';
 
 interface TrackRecord {
   file: string;
@@ -180,6 +181,13 @@ function normalize(filePath: string): string {
 function appendRecord(dir: string, fileName: string, record: TrackRecord): void {
   try {
     const path = join(dir, fileName);
+    // A directory or a FIFO at a record file (put there by a model Bash call) would lose the record
+    //   or wait for a reader: it goes, and the record is written (#12).
+    try {
+      if (!lstatSync(path).isFile()) rmSync(path, { recursive: true, force: true });
+    } catch {
+      // absent
+    }
     appendFileSync(path, JSON.stringify(record) + '\n', 'utf8');
   } catch {
     // best-effort
@@ -190,7 +198,8 @@ function readRecords(dir: string, fileName: string): TrackRecord[] {
   try {
     const path = join(dir, fileName);
     if (!existsSync(path)) return [];
-    const raw = readFileSync(path, 'utf8');
+    // The newest part of a log past the cap, never empty (#12): the gates ask for the recent records.
+    const raw = readStateTail(path);
     const out: TrackRecord[] = [];
     for (const line of raw.split(/\r?\n/)) {
       const trimmed = line.trim();
@@ -388,27 +397,69 @@ export function wasFileEditedRecently(
   return false;
 }
 
-/** 현재 턴 번호 조회. 없으면 0. */
+/** The turn counter's file name; only the Stop writes it, and the state guard keeps it from
+ *  going down, or up by more than a Stop's worth, during a model Bash call (lib/state-guard.ts, #12). */
+export const TURN_FILE = 'turn.txt';
+
+/** The largest value a turn counter holds: 12 digits (a Stop adds one per turn, so it is never reached by
+ *  use; it keeps every value a safe integer and lets the Stop's increment stay a counter). */
+export const MAX_TURN = 999_999_999_999;
+
+/** A turn counter's value: only digits, at most MAX_TURN. Null for anything else (junk, a sign, a
+ *  fraction, 13+ digits). */
+export function parseTurn(text: string | null): number | null {
+  if (text === null) return null;
+  const t = text.trim();
+  return /^[0-9]{1,12}$/.test(t) ? Number(t) : null;
+}
+
+/** The highest turn a record of the edit log carries, or 0. The counter only goes up, so no record is
+ *  ahead of it: the floor a hook uses when the counter file is no counter (a running call left junk in it). */
+export function turnFloor(dir: string): number {
+  let best = 0;
+  for (const r of readRecords(dir, 'edits.jsonl')) {
+    if (Number.isSafeInteger(r.turn) && r.turn > best && r.turn <= MAX_TURN) best = r.turn;
+  }
+  return best;
+}
+
+/** 현재 턴 번호 조회. 없으면 0. A file that is no counter (junk, 13+ digits, a FIFO, a directory) reads as
+ *  the highest turn the edit log holds, never as 0 (a counter that fell to 0 put later edits before the
+ *  review cursor, #12); the state guard puts the real value back after the call that left it. */
 export function getCurrentTurn(sessionId: string): number {
   try {
     const dir = ensureSessionDir(sessionId);
-    const path = join(dir, 'turn.txt');
-    if (!existsSync(path)) return 0;
-    const raw = readFileSync(path, 'utf8').trim();
-    const n = parseInt(raw, 10);
-    return Number.isFinite(n) ? n : 0;
+    const path = join(dir, TURN_FILE);
+    let raw: string;
+    try {
+      raw = readStateText(path, 64);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 0; // no counter yet
+      return turnFloor(dir);
+    }
+    const n = parseTurn(raw);
+    return n ?? turnFloor(dir);
   } catch {
     return 0;
   }
 }
 
-/** Stop hook에서 호출, 턴 카운터 증가 */
+/** Stop hook에서 호출, 턴 카운터 증가. Never past MAX_TURN: a counter there stays (it cannot become a value the
+ *  guard no longer reads as a counter). */
 export function incrementTurn(sessionId: string): number {
   try {
     const dir = ensureSessionDir(sessionId);
     const current = getCurrentTurn(sessionId);
-    const next = current + 1;
-    writeFileSync(join(dir, 'turn.txt'), String(next), 'utf8');
+    const next = Math.min(current + 1, MAX_TURN);
+    const path = join(dir, TURN_FILE);
+    // Opening a FIFO for writing waits for a reader (#12): whatever is there but a regular
+    //   file goes first (this runs before the Stop's state restore).
+    try {
+      if (!lstatSync(path).isFile()) rmSync(path, { recursive: true, force: true });
+    } catch {
+      // absent
+    }
+    writeFileSync(path, String(next), 'utf8');
     return next;
   } catch {
     return getCurrentTurn(sessionId);
@@ -443,7 +494,7 @@ const KNOWLEDGE_EPOCH_FILE = 'knowledge-epoch.txt';
 
 function knowledgeEpoch(dir: string): string {
   try {
-    return readFileSync(join(dir, KNOWLEDGE_EPOCH_FILE), 'utf8').trim();
+    return readStateText(join(dir, KNOWLEDGE_EPOCH_FILE), 1024).trim();
   } catch {
     return '';
   }

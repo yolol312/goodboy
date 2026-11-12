@@ -16,6 +16,7 @@
 import { appendFileSync, lstatSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve as resolvePath } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
+import { readStateText } from './safe-read';
 import { commandSegments, plainWord } from './outward-command';
 
 export const NON_PROJECT_MARKER = 'goodboy: non-project';
@@ -59,7 +60,7 @@ interface ModePins {
 
 function readModePins(sessionId: string): ModePins | null {
   try {
-    const p = JSON.parse(readFileSync(join(ensureSessionDir(sessionId), PIN_FILE), 'utf8')) as ModePins;
+    const p = JSON.parse(readStateText(join(ensureSessionDir(sessionId), PIN_FILE))) as ModePins;
     return typeof p?.since === 'number' && p.modes && typeof p.modes === 'object' ? p : null;
   } catch {
     return null;
@@ -109,7 +110,7 @@ export function recordMarkerEvidence(sessionId: string, how: 'typed' | 'answered
 
 export function hasMarkerEvidence(sessionId: string): boolean {
   try {
-    return readFileSync(join(ensureSessionDir(sessionId), EVIDENCE_FILE), 'utf8').trim() !== '';
+    return readStateText(join(ensureSessionDir(sessionId), EVIDENCE_FILE)).trim() !== '';
   } catch {
     return false;
   }
