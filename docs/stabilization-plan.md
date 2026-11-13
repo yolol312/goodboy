@@ -51,7 +51,7 @@ so work is released in batches:
 | v0.36.2 | the review gate judges net change and content (#26, §15.18). Released 2026-10-22 |
 | v0.36.3 | testkit harness files need no layer-1 test (#28, §15.19). Released 2026-10-26 |
 | v0.36.4 | repository metadata and version-only manifests need no test record (#30), `..` after a link is recorded as opened (#29), §15.20. Released 2026-10-26 |
-| v0.36.5–v0.36.19 | gate fixes from field reports and reviews, one release each (§15.21–§15.35; #25, #31–#42). Released 2026-10-26 to 2026-11-12. The 2026-10-26 proposal to ship N1–N8 (§20.3) as v0.36.5 did not happen: v0.36.5 shipped §15.21 instead |
+| v0.36.5–v0.36.19 | gate fixes from field reports and reviews, one release each (§15.21–§15.35; #12, #25, #27, #31–#42). Released 2026-10-26 to 2026-11-12. The 2026-10-26 proposal to ship N1–N8 (§20.3) as v0.36.5 did not happen: v0.36.5 shipped §15.21 instead |
 | v0.37.0 | track M (full tests in an isolated container sandbox: a real database copy, dummy external services, no egress; 100% line and branch coverage, every screen and action in e2e), §19 |
 | v0.38.0 | proposed: track N (fewer repeated runs, a project test inventory, task criteria, §20.4–§20.6), with a push judged by the test results gathered since the last push (§21, N24–N29, #43); its order against v0.37.0 is the user's decision |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
@@ -4603,10 +4603,72 @@ Design:
   The test records carry the sandbox check, bound to the run that made it (`sandbox: {run}`,
   filled in by `test-write` from that run's result).
 - M5 trials: g2bsale with its real dump (JVM, Thymeleaf, LDAP, mail, external API), then one
-  Node project.
-- M6 release v0.37.0 (M; L shipped as v0.36.0).
+  Node project. Session 3 (the next real-dump run) waits for M6 below.
+- M6 personal data stays in the sandbox (added 2026-10-27 at the user's request; reviewed with
+  Codex the same day). Tests may and should run against the restored dump, but no personal value
+  from it, from production logs or from screenshots reaches a tracked file (tests, fixtures,
+  snapshots), a goodboy record or the chat. Threat model, stated in the README and the skill:
+  accidental leaks in ordinary work (a value the model saw and copied, a failure message, a
+  snapshot, a log, a trace). It does not stop a model that deliberately writes a program to
+  exfiltrate data: the model runs as the user, with Docker and file access. Every value from the
+  restored DB counts as sensitive. The primary boundary withholds output; detection is a second net.
+  - M6a output boundary: a run against a restored dump prints no stdout or stderr of the suites,
+    the app or the DB. It exports a bounded structured result (per-suite counts, assertion ids of
+    failures, fixed diagnostic codes, durations, coverage numbers); failure text, restore and reset
+    errors, `--app-logs`, `why` and `failTail` are withheld. Raw logs, screenshots, traces, videos,
+    HAR files, DOM snapshots, the Playwright report and the proxy access log stay in a Docker volume
+    of the sandbox, not in the checkout's `out/`. A passing run's raw artifacts are deleted once its
+    result is recorded; a failing run's after a fixed expiry, also after a crash. goodboy's own
+    outputs never echo raw input when validation or masking fails.
+  - M6b restricted data access: no model-facing SQL. `cli.ts sandbox-data` offers fixed
+    operations (schema, shape categories per column, aggregate counts with a minimum group size,
+    opaque per-run handles for records matching a condition built from those operations) through a
+    least-privilege DB role with statement, output and time limits, and never returns DB error
+    text. Raw primary keys are values too: tests use handles. A PreToolUse rule denies, for the
+    sandbox's real-data containers and volumes, docker or compose `exec`, `cp`, `logs`, `inspect`,
+    `attach`, `export`, `commit`, `run` with its volumes or network, DB clients pointed at it, the
+    Docker socket path, and reads of the dump and registered input logs (advisory against a
+    determined program; it closes the ordinary paths).
+  - M6c data helper: `sandbox-init` renders `pick(condition) -> handle`, `fillFrom(page, selector,
+    handle, column)`, `assertMatches(actual, handle, column, assertionId)` and
+    `expectedCount(condition)` for the runner and e2e containers. A failure reports the assertion
+    id, never a value. Expected sides come from the DB or a relation, not from the value itself.
+    New inputs come from per-schema generators in a sandbox namespace with transactional
+    allocation and collision checks; only generated values are stored. The tester agents and
+    skills require handles and the helper.
+  - M6d records: `test-write`, `review-write` and `regression` sanitize every string and key of a
+    record (redacting before truncation, secrets masked too). Real-data runs record only the M6a
+    result. Records must be safe even when tracked or force-added.
+  - M6e catalog and fingerprints (may mature after the release): after restore, inside the DB
+    container, columns are classed by name and sampled shape, and HMAC-SHA-256 fingerprints of
+    normalized values are built with bounded memory. Key and set stay in protected storage outside
+    the checkout, bound to the dump, schema and normalization version. A capped or failed build is
+    "detection incomplete" and never relaxes the boundary.
+  - M6f commit and push scan: on `git commit`, the complete new and modified blobs of the exact
+    proposed tree, the message and the paths; on push, every outgoing ref and newly reachable
+    object. Detectors: PII shapes with checksums (resident and business numbers, Luhn cards,
+    phones, emails outside reserved domains) and the M6e fingerprints (a fingerprint hit overrides
+    any exception). Binary and unknown formats are "unscanned", not clean; an exhausted budget
+    denies. A hit names file, line and kind, never the value; exceptions are user-approved and
+    bound to the exact content. `cli.ts git-hooks install` (run by the user) adds pre-commit and
+    pre-push hooks for commits outside Claude Code; `--no-verify` still bypasses them (stated).
+  - M6g privacy review: a `data-privacy` review of the sandbox setup and the tests (data access,
+    output channels, artifact mounts, helper assertions, exports), judged on capabilities and
+    evidence.
+  - Order, all before M5 session 3: M6a, M6b, M6c, M6d, M6g, M6f (with the git hooks when IDE
+    commits are in scope), then synthetic canary tests pass. Templates restored earlier must not
+    skip the new initialization checks because their completion marker exists.
+  - Release criterion: no canary value from a synthetic dump reaches model-visible tool output,
+    records or candidate git content. Canaries: short and common names, Korean NFC/NFD forms,
+    addresses, nested JSON, encoded values and values across truncation boundaries; assertion
+    failures, stack traces, dynamic test names, restore failures, screenshots, traces and proxy
+    URLs; other DB clients, Docker paths, link aliases, arbitrary SQL and malformed classifier
+    output; partial staging, path-specific commits, binary blobs, multi-ref pushes, missing
+    catalogs, timeouts and crash cleanup.
+  - Source: the design v2 of 2026-10-27 (kept outside the repo with the Codex round-7 notes).
+- M7 release v0.37.0 (M; L shipped as v0.36.0).
 
-As built (M1-M4; M5 and M6 are open):
+As built (M1-M4; M5, M6 and M7 are open):
 - `lib/sandbox-scan.ts` (`sandbox-scan`): read-only scan of build, port, data stores and outbound
   hosts (call sites apart from literals); `lib/sandbox-types.ts` holds the shared shapes.
 - `lib/sandbox-render.ts` and `lib/sandbox-parts.ts`: pure text of `.goodboy/sandbox/` (compose
@@ -4889,9 +4951,16 @@ yet.
     behavior or scenario, but the answer stays in the conversation. The test agent numbers its
     own `AC-n` entries, and no gate checks that the scenario is covered (N15).
 
-### 20.3 v0.36.5: quick fixes (proposed)
+### 20.3 Quick fixes (proposed; first planned as v0.36.5)
+
+Note (2026-11-13): v0.36.5 shipped §15.21 instead; these items did not ship under that number.
+Parts were covered later: N2's line scoping by v0.36.9 (§15.25) and v0.36.16 (§15.32), but its
+message still says "always-true pattern" (`lib/push-test.ts`); N7 for Bash paths by v0.36.13
+(§15.29). Each item is checked against the code when track N is scheduled.
+
 - **N1, Codex second opinion.** The review run must pass `GOODBOY_CODEX_MODEL` every time,
-  preflight the model once per session and record a skip with its reason.
+  preflight the model once per session and record a skip with its reason. Passing the model is
+  a fix; the preflight is new behavior.
   - Seen: every run fell back to `~/.codex/config.toml`, which pins a model the account cannot
     use (HTTP 400).
   - The local config itself is the user's to change.
@@ -4903,9 +4972,9 @@ yet.
 - **N3, harness output cleanup.** The tests role may remove output only inside the testkit
   harness's run dir `.testkit-run/` (marker as in §15.19), with containment and link checks.
   No general `rm -rf`. Seen: 3 denies in the field report.
-  - M's removal rule (§19, `lib/role-limits.ts` on `feat/m-sandbox`) is not on `main`, so
-    v0.36.5 builds a small rule for `.testkit-run/` alone. M's general removal rule absorbs it
-    when M merges.
+  - M's removal rule (§19, `lib/role-limits.ts`) allows only a fixed list of test output dirs,
+    and `.testkit-run/` is not in it, so N3 adds `.testkit-run/` (with the marker check) to that
+    rule rather than building its own.
 - **N4, result reading.** Add a read-only `cli.ts results show|query` with bounded JSON
   selection. Writes stay protected. Seen: 7 denies for reading result JSON with scripts.
 - **N5, server templates are UI.** `.jsp`, `.jspf` and the template dirs of server-side
@@ -5051,9 +5120,9 @@ These come from the gaps the field report lists, with Codex's split.
   with `/backfill-tests`.
 
 ### 20.8 Order (proposed)
-The user decides this order. v0.36.5 is proposed to ship first, from `main`, since it fixes
-blocks seen in real use; where track N proper goes against M (v0.37.0) is open.
-1. v0.36.5: N1–N8.
+The user decides this order. The quick fixes were proposed to ship first, from `main`, since they
+fix blocks seen in real use; where track N proper goes against M (v0.37.0) is open.
+1. N1–N8, the parts not yet shipped (§20.3 note).
 2. N18 (the eval set), so that N19–N23 are measured.
 3. N9–N14 (tests), then N15–N17 (criteria).
 4. N19–N23 (structure), each judged by N18.
