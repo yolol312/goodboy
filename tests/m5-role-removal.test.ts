@@ -115,6 +115,15 @@ describe('a tests-role agent removes test output', () => {
     expect((await run(d, 'rm -rf mod/build/reports')).denied).toBe(false);
   }, 60_000);
 
+  test('a leading brace, bracket or wildcard expands where the command runs: denied (M rebase security review)', async () => {
+    const d = project();
+    mkdirSync(join(d, 'docs'), { recursive: true });
+    for (const c of ['rm -rf {src,docs}', 'rm -rf [s]rc', 'rm -rf ?rc', 'rm -rf *', 'rm -rf *.ts', 'rmdir {a,b}', 'unlink *', 'cd build/test-results && rm -rf *']) {
+      const r = await run(d, c);
+      expect([c, r.denied]).toEqual([c, true]);
+    }
+  }, 60_000);
+
   test('a pure variable or home operand cannot be resolved and is skipped, as before (mktemp cleanup)', async () => {
     const d = project();
     for (const c of ['rm -rf "$D"', 'rm -rf "$D/x"', 'rm -rf $D/x', 'rm -rf "${TMP}"/probe', 'rm -rf ~/probe', 'D=$(mktemp -d); rm -rf "$D"']) {
@@ -161,6 +170,10 @@ describe('bashChangedPaths and isTestOutputPath', () => {
     expect(bashChangedPaths('rm -rf tests/{x,../src/a.ts} tests/$X/../src/a.ts "$D" "$D/x" ../y tests/../src/b.ts', '/p', { removed, expanded })).toEqual([]);
     expect(expanded).toEqual(['/p/tests', '/p/tests', '/y', '/p/src/b.ts']);
     expect(removed).toEqual([]);
+    // a leading pattern counts at the dir it runs in; a leading variable, backtick or `~` is skipped
+    const e2: string[] = [];
+    expect(bashChangedPaths('rm -rf {src,docs} [s]rc ?rc * "$D" `x` ~/y', '/p', { removed, expanded: e2 })).toEqual([]);
+    expect(e2).toEqual(['/p', '/p', '/p', '/p']);
   });
 
   test('the dirs: at the repo top, or in a module dir that holds a build file; never under node_modules or src', () => {

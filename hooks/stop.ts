@@ -1240,6 +1240,10 @@ function sandboxEditsSince(sessionId: string, cwd: string, cursorTurn: number): 
   if (known) return known;
   const s = scopeOf(sessionId, cwd);
   const own = sandboxTestEdits(getEditsWithLastTimestampSince(sessionId, cursorTurn, cwd), s.top, () => sandboxUsersOf(sessionId, cwd));
+  if (own.length === 0) {
+    sandboxEditsMemo.set(key, []);
+    return [];
+  }
   const out = netChangedEdits(own, s.top, sessionCoverageStart(sessionId, cwd, s.top).head).map((e) => {
     const lastEdit = Date.parse(e.lastEditTimestamp);
     return { rel: e.rel, lastEdit: Number.isFinite(lastEdit) ? lastEdit : Date.now() };
@@ -1405,7 +1409,7 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
         logGate(sessionId, 'test', 'warn', `carried (no code change this turn): ${reason}`);
         habitWarnings.push(
           `[goodboy] 이번 턴에는 코드 변경이 없어 테스트 게이트가 막지 않았어요. 앞서 바뀐 코드 ` +
-            `${recentEdits.length}개 파일은 아직 검증되지 않았고, 다음에 코드를 바꾸는 턴이나 push 전에 다시 확인해요.`,
+            `${recentEdits.length + sandboxEditsSince(sessionId, cwd, cursorTurn).length}개 파일은 아직 검증되지 않았고, 다음에 코드를 바꾸는 턴이나 push 전에 다시 확인해요.`,
         );
         return null;
       }

@@ -52,6 +52,49 @@ export function sessionDir(sessionId: string): string {
   return join(tmpdir(), `goodboy-session-${safe}`);
 }
 
+/** The most symbolic links the OS follows for one path (Linux 40, macOS 32): past it an open fails. */
+export const MAX_LINK_HOPS = 40;
+
+/** The real path the OS reaches for an absolute path, links followed the way it follows them:
+ *  each component in turn, a link's target read against the real dir that holds the link, a
+ *  dangling link followed to where it points (the file is created there), a `..` taken after the
+ *  prefix is real. A component that does not exist is kept by name. Null past `MAX_LINK_HOPS`
+ *  links (the OS refuses such a path; a guard treats it as unknown). M rebase security review: a
+ *  realpath of the nearest existing ancestor missed a dangling link and a relative target under a
+ *  linked dir, so a Write through them landed in a result dir. */
+export function followedPath(absPath: string, maxHops: number = MAX_LINK_HOPS): string | null {
+  const split = sep === '\\' ? /[\\/]/ : /\//;
+  const parts = (p: string): string[] => p.slice(parse(p).root.length).split(split).filter((s) => s !== '' && s !== '.');
+  // Not `resolve` for an absolute path: it would collapse `lnk/..` by name before the link is followed.
+  const start = isAbsolute(absPath) ? absPath : resolve(absPath);
+  let cur = parse(start).root;
+  // The components still to walk, last first (a stack: `pop` and `push` keep a long path linear).
+  const todo = parts(start).reverse();
+  let hops = 0;
+  while (todo.length > 0) {
+    const seg = todo.pop()!;
+    if (seg === '..') {
+      cur = dirname(cur); // `cur` holds no link, so its parent by name is its real parent
+      continue;
+    }
+    const next = join(cur, seg);
+    let link: string | null = null;
+    try {
+      if (lstatSync(next).isSymbolicLink()) link = readlinkSync(next);
+    } catch {
+      // not there: kept by name
+    }
+    if (link === null) {
+      cur = next;
+      continue;
+    }
+    if (++hops > maxHops) return null;
+    if (isAbsolute(link)) cur = parse(link).root;
+    todo.push(...parts(isAbsolute(link) ? link : `${sep}${link}`).reverse());
+  }
+  return cur;
+}
+
 /** True for a path inside any goodboy session state dir (`$TMPDIR/goodboy-session-*`), also
  *  through the real path of $TMPDIR (`/var` is `/private/var` on macOS). */
 export function inGoodboySessionDir(absPath: string): boolean {
@@ -82,8 +125,11 @@ export function inGoodboySessionDir(absPath: string): boolean {
       // the dir does not exist yet: compare the spelled path
     }
   }
+  // `realpathSync` collapses `lnk/..` by name before it resolves anything; the OS follows `lnk` first
+  //   (followedPath; M rebase delta review: `<cwd>/lnk/../x` with `lnk` into a session dir was missed).
+  const followed = followedPath(absPath);
   for (const root of roots) {
-    for (const p of [absPath, linked, target]) {
+    for (const p of [absPath, linked, target, ...(followed === null ? [] : [followed])]) {
       const rel = relative(root, p);
       if (!rel.startsWith('..') && !isAbsolute(rel) && /^goodboy-session-[^/\\]*(?:[/\\]|$)/.test(rel)) return true;
     }

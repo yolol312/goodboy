@@ -207,17 +207,21 @@ export function bashChangedPaths(command: string, cwd: string, opts: { skip?: Re
         //   removal: `rm tests/{x,../src/a.ts}` deletes what the text does not name. When the
         //   text before the first such character is a path (`build/test-results/`, `tests/`,
         //   `./`) the operand counts as expanded at that path (a `..` in it: at the cwd), whatever
-        //   the path is. When that prefix is empty (a pure variable, `~`, a leading wildcard:
-        //   `"$D"`, `$D/x`) nothing can be resolved and the operand is skipped, as before (a
-        //   tester's `rm -rf "$D"` of a mktemp dir stays allowed; the plan lists this limit).
+        //   the path is. A leading brace, bracket or wildcard (`{src,docs}`, `[s]rc`, `*`) expands
+        //   at the dir the command runs in, so it counts as expanded there. Only a leading variable,
+        //   backtick or `~` (`"$D"`, `$D/x`, `~/x`) cannot be resolved: that operand is skipped, as
+        //   before (a tester's `rm -rf "$D"` of a mktemp dir stays allowed; the plan lists this limit).
         //   A `..` in a plain operand counts as expanded too: the kernel follows a link before it
         //   applies `..`, the text cannot know.
-        //   Paths are spelled as the OS opens them (`opened`, #31): a linked prefix counts where it leads.
+        //   Paths are spelled as the OS opens them (`opened`, #31: a `..` after a link resolves through
+        //   it); a link inside a test output dir is caught by writeDenial's no-link check.
         const expands = removing ? UNREADABLE_OPERAND.exec(a) : null;
         if (expands !== null) {
           if (expands.index > 0) {
             const prefix = a.slice(0, expands.index);
             (opts.expanded ?? out).push(prefix.split('/').includes('..') ? resolvePath(base) : opened(base, prefix));
+          } else if (!/^[$`~]/.test(a)) {
+            (opts.expanded ?? out).push(resolvePath(base));
           }
         } else if (removing && a.split('/').includes('..')) (opts.expanded ?? out).push(opened(base, a));
         else if (literal(a)) (removing ? opts.removed! : out).push(opened(base, a));

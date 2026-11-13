@@ -1413,6 +1413,9 @@ export interface ScanOptions {
   /** `false`: read the build and config files only (stack, port, context path, stores), not the
    *  source files, so no outbound hosts. The UI inventory asks for the context path this way. */
   sources?: boolean;
+  /** Test seam: the config parser (default `parseConfig`). The parsers never throw on any input tried, so
+   *  only a replaced one reaches the guard that turns a throw into a question. */
+  parseConfig?: (rel: string, text: string) => Parsed;
 }
 
 /** Scan a project root for the test sandbox. Read-only: it runs no project tool and writes
@@ -1492,7 +1495,7 @@ export function scanSandbox(root: string, opts: ScanOptions = {}): SandboxScan {
       }
       let parsed: Parsed;
       try {
-        parsed = parseConfig(rel, text);
+        parsed = (opts.parseConfig ?? parseConfig)(rel, text);
       } catch {
         questions.push(`${rel} could not be parsed: its hosts and stores are unknown`);
         continue;

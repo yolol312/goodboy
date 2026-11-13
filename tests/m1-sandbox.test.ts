@@ -1225,7 +1225,7 @@ describe('sandbox-run (fake docker)', () => {
     const reset = calls.findIndex((l) => l.includes('exec -T db sh /goodboy-db/reset.sh'));
     const run = calls.findIndex((l) => l.includes('run --rm -T --no-deps --name') && l.includes(' runner'));
     const probe = calls.findIndex((l) => l.includes(' probe '));
-    expect(probe).toBeGreaterThanOrEqual(0);
+    expect(probe).not.toBe(-1); // the check's probe ran (findIndex gives -1 for a call that never happened)
     expect(reset).toBeGreaterThan(probe);
     expect(run).toBeGreaterThan(reset);
     expect(calls[run]).toContain(`-p ${f.ctx.project}`);

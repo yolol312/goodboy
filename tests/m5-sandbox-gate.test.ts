@@ -226,6 +226,10 @@ describe('sandboxUsers fails closed on too many changed files', () => {
     expect(few.all).toBe(false);
     const many = sandboxUsers(d, files);
     expect(many.all).toBe(true);
+    // a changed code file it cannot read (over 512 KB) may use any layout file: fail closed; a deleted one uses none
+    const big = write(d, 'src/big.ts', `export const s = '${'x'.repeat(600 * 1024)}';\n`);
+    expect(sandboxUsers(d, [big]).all).toBe(true);
+    expect(sandboxUsers(d, [join(d, 'src', 'gone.ts')]).all).toBe(false);
     expect(sandboxTestEdits([{ file: write(d, '.goodboy/sandbox/compose.yml', 'x: 1\n') }], d, () => many)).toEqual([]);
   });
 });
@@ -286,6 +290,15 @@ describe('Stop, end to end: a session that changed only sandbox files', () => {
       expect([what, out.reason]).toEqual([what, expect.stringMatching(why)]);
     }
   }, 120_000);
+
+  test('a turn with no change after a sandbox-only block is carried, and the notice counts the sandbox files', async () => {
+    const { d, s } = project();
+    sandboxEdit(d, s, 'compose.yml');
+    expect((await stop(d, s)).reason).toMatch(SANDBOX_ASKED);
+    const again = await stop(d, s);
+    expect(testGateSilent(again)).toBe(true);
+    expect(`${again.systemMessage ?? ''} ${again.reason ?? ''}`).toContain('앞서 바뀐 코드 1개 파일은 아직 검증되지 않았고');
+  }, 60_000);
 
   test('a record without the sandbox claim, or a blocked one, is no proof', async () => {
     // One project per case: a second Stop with no change since the first does not block again (v0.36.8).

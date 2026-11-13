@@ -63,6 +63,8 @@ const toPosix = (p: string) => p.split('\\').join('/');
  *  is code; nor is one out of it), and not a hard link (which may share its content with code);
  *  else null. */
 export function sandboxRel(abs: string, top: string): string | null {
+  // The spelled path must hold the dir (checked below); most files do not, and skip the real paths.
+  if (!toPosix(resolve(abs)).includes(`/${SANDBOX_PREFIX}`)) return null;
   const real = toPosix(relative(realish(top), realish(abs)));
   if (!real.startsWith(SANDBOX_PREFIX)) return null;
   // The spelled path, against the top as the caller spells it and as it resolves.
@@ -123,7 +125,13 @@ export function sandboxUsers(top: string, changed: readonly string[]): SandboxUs
     const rel = toPosix(relative(root, realish(abs)));
     if (rel === '' || rel.startsWith('..') || rel.startsWith('/')) continue;
     const text = readRegular(abs, MAX_USER_BYTES);
-    if (typeof text !== 'object') continue;
+    if (text === 'refused') {
+      // Too large (a generated bundle over 512 KB counts too) or no regular file: what it uses is unknown, so
+      //   every layout file counts as used (fail closed) and needs its layer-1 test.
+      all = true;
+      break;
+    }
+    if (text === 'absent') continue; // deleted: it uses nothing
     read++;
     const test = isTestFile(rel) || /(?:^|\/)e2e\//.test(rel);
     if (JS_EXT.has(ext)) {

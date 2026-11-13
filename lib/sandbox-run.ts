@@ -524,16 +524,20 @@ const ensureLive = (ctx: Ctx): void => ensureRealDir(ctx.root, `${SANDBOX_DIR}/o
 async function waitHealth(ctx: Ctx, url: string, waitS: number, withLogs = false): Promise<string | null> {
   const script = 'wget -S -T 3 -O /dev/null "$0" 2>&1 | grep -E "HTTP/[0-9.]+ (2|3|401|403)" >/dev/null';
   const until = Date.now() + waitS * 1000;
-  for (;;) {
+  // A `do … while` with the answer after it: Bun's line coverage never counts the closing brace of a
+  //   `for (;;)` that only exits by `return` (M rebase test record).
+  let up = false;
+  let late = false;
+  do {
     const h = await comp(ctx, ['run', '--rm', '-T', '--no-deps', 'probe', 'sh', '-c', script, url], 2 * SHORT_MS);
-    if (h.code === 0) return null;
-    if (Date.now() > until) {
-      if (!withLogs) return "the app's log is not shown; pass --app-logs to sandbox-up to include its last lines";
-      const logs = await comp(ctx, ['logs', '--tail', '40', 'app'], SHORT_MS);
-      return (logs.stdout + logs.stderr).slice(-3000);
-    }
-    await Bun.sleep(3000);
-  }
+    up = h.code === 0;
+    late = !up && Date.now() > until;
+    if (!up && !late) await Bun.sleep(3000);
+  } while (!up && !late);
+  if (up) return null;
+  if (!withLogs) return "the app's log is not shown; pass --app-logs to sandbox-up to include its last lines";
+  const logs = await comp(ctx, ['logs', '--tail', '40', 'app'], SHORT_MS);
+  return (logs.stdout + logs.stderr).slice(-3000);
 }
 
 /** A regular file at `p` under `base` with no link on the way (noLinksUnder): a `coverage/` that

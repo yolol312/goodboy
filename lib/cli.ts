@@ -872,9 +872,9 @@ export async function cmdTestWrite(cwd: string, args: string[], shell: string = 
     fail(`JSON 파싱 실패: ${String(err)}`);
   }
 
-  // (#41) A worktree record's test files are the worktree's: they must exist there. (M) Its sandbox run is read
-  //   under the same top.
-  const validated = validateTestResultInput(parsed, wt !== null ? [wt.top] : [cwd, process.cwd()], wt !== null ? wt.top : repoTop(cwd));
+  // (#41) A worktree record's test files are the worktree's: they must exist there. (M) A sandbox run is read
+  //   under the project's top, where `sandbox-run` writes it and the Stop reads it, also for a `--worktree` record.
+  const validated = validateTestResultInput(parsed, wt !== null ? [wt.top] : [cwd, process.cwd()], repoTop(cwd));
   if (!validated.ok || !validated.value) {
     fail('TestResult 스키마 검증 실패:\n' + validated.errors.map((e) => `  - ${e}`).join('\n'));
   }

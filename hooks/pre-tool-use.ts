@@ -105,6 +105,8 @@ import {
   revisionTree,
   commitIssueDenial,
   inGoodboySessionDir,
+  followedPath,
+  MAX_LINK_HOPS,
   isRequiredKnowledgeFile,
   markerWriteDenial,
   policyReadDenial,
@@ -1288,7 +1290,9 @@ function main(): void {
       //   Write of marker-evidence.jsonl passed; only Bash was bracketed by the state guard).
       if (isEditTool || toolName === 'NotebookEdit') {
         const target = typeof toolInput.file_path === 'string' ? toolInput.file_path : typeof toolInput.notebook_path === 'string' ? toolInput.notebook_path : '';
-        if (target && inGoodboySessionDir(resolvePath(cwd, target))) {
+        // Both spellings, as the result-dir guard below (`lnk/..` taken after the link, and collapsed by name).
+        const rawTarget = target.startsWith(sep) ? target : `${resolvePath(cwd)}${sep}${target}`;
+        if (target && (inGoodboySessionDir(resolvePath(cwd, target)) || inGoodboySessionDir(rawTarget))) {
           logGate(sessionId, 'state-write', 'deny', target.slice(-80));
           emit(deny("This edits goodboy's own session state (goodboy-session-*). The gates decide from it; leave it alone and satisfy the gate instead."));
           return;
@@ -1306,35 +1310,36 @@ function main(): void {
           const cwdAbs = resolvePath(cwd);
           // The comparison runs on real paths (a link to a result dir is the result dir) and, on
           //   macOS where the file system ignores case, on lower-cased ones (.GOODBOY/sandbox/OUT).
-          const keyOf = (p: string): string => {
-            const rest: string[] = [];
-            let cur = p;
-            let real = p;
-            for (;;) {
-              try {
-                real = join(realpathSync(cur), ...rest.reverse());
-                break;
-              } catch {
-                const parent = dirname(cur);
-                if (parent === cur) break;
-                rest.push(basename(cur));
-                cur = parent;
-              }
-            }
+          //   Links are followed as the OS follows them, dangling ones too (`followedPath`; M rebase security
+          //   review: a Write through `lnk -> .goodboy/sandbox/out/<ts>/result.json` forged a run). A path past
+          //   the OS's link limit is refused: it cannot be opened, and where it leads is unknown.
+          const keyOf = (p: string): string | null => {
+            const real = followedPath(p);
+            if (real === null) return null;
             return process.platform === 'darwin' ? real.toLowerCase() : real;
           };
-          const absKey = keyOf(abs);
-          const cwdKey = keyOf(cwdAbs);
-          const resultDir = (kind: string): boolean => {
-            const at = absKey.indexOf(`${sep}.claude${sep}${kind}${sep}`);
-            return at >= 0 && ownsResultDir(absKey.slice(0, at) || sep, cwdKey);
-          };
-          const inTests = resultDir('tests');
-          const inReviews = resultDir('reviews');
+          // Both spellings are judged: the path as given, whose `lnk/..` the OS takes after following `lnk`, and the
+          //   one with `..` collapsed by name, as a caller that normalizes the path first would write it (delta
+          //   review: `resolve` alone turned `lnk/../result.json` into a path next to the link).
+          const raw = filePath.startsWith(sep) ? filePath : `${cwdAbs}${sep}${filePath}`;
+          const keys = [...new Set([abs, raw])].map(keyOf);
+          const cwdKey = keyOf(cwdAbs) ?? cwdAbs;
+          if (keys.some((k) => k === null)) {
+            logGate(sessionId, 'artifact-write', 'deny', `too many links: ${filePath.slice(-80)}`);
+            emit(deny(`This path goes through more than ${MAX_LINK_HOPS} symbolic links, so where it leads cannot be told: ${filePath}. Write to the real path instead. (artifact write gate — off: GOODBOY_ARTIFACT_WRITE_GATE=off)`));
+            return;
+          }
+          const absKeys = keys as string[];
+          const under = (marker: string): boolean =>
+            absKeys.some((k) => {
+              const at = k.indexOf(marker);
+              return at >= 0 && ownsResultDir(k.slice(0, at) || sep, cwdKey);
+            });
+          const inTests = under(`${sep}.claude${sep}tests${sep}`);
+          const inReviews = under(`${sep}.claude${sep}reviews${sep}`);
           // Track M fix A8: the run results a test record is checked against are written by
           //   `sandbox-run` only; one written here would make a sandbox claim without a run.
-          const outAt = absKey.indexOf(`${sep}.goodboy${sep}sandbox${sep}out${sep}`);
-          if (outAt >= 0 && ownsResultDir(absKey.slice(0, outAt) || sep, cwdKey)) {
+          if (under(`${sep}.goodboy${sep}sandbox${sep}out${sep}`)) {
             const rel = abs.startsWith(cwdAbs + sep) ? abs.slice(cwdAbs.length + 1) : abs;
             logGate(sessionId, 'artifact-write', 'deny', rel);
             emit(

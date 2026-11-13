@@ -3,7 +3,7 @@
 Feature → test type, generated from the test files by goodboy (`cli.ts test-catalog`).
 Regenerate it instead of editing it; the docs rule compares it with a fresh copy.
 
-Totals: unit 184 files, 3316 tests; e2e 2 files, 54 tests.
+Totals: unit 210 files, 3829 tests; e2e 2 files, 54 tests.
 
 | Feature | Type | File | Tests |
 |---|---|---|---|
@@ -35,7 +35,7 @@ Totals: unit 184 files, 3316 tests; e2e 2 files, 54 tests.
 | GAP-D2: a deploy is compared where it runs, not where the command ends; GAP-F: a `function name { … }` body is read by every classifier; GAP-RS: the result guard and role limits follow cd scopes (`( … )`, `sh -c`, `cd -`, pushd); GAP-NS: sibling nested shells and evals each get their own scope; GAP-OD: writers whose target is not the result dir word itself; LOW-FP: "inside a result dir" holds only while the shell is there | unit | tests/g1-reader-scopes.test.ts | 23 |
 | program names as the system finds them; shells that read their script from stdin; alias values split as git splits them; hook git settings; state guard restore; commit rule caps | unit | tests/g1-round4-fixes.test.ts | 13 |
 | D1: a hook git that reads a missing object starts a promisor fetch (remote.<r>.uploadpack); D2: git spelled with quotes, another letter case or its dashed program; D3: alias values are split on spaces, not as git splits them (quotes, backslashes); D4: `git send-pack` pushes without being a push to the push gate or R2; D5: the post hook's write sweep runs a clean filter (git status hashes a touched file); D6: a guarded file replaced by a directory stops the state guard from restoring the rest | unit | tests/g1-round4-l1-gaps.test.ts | 10 |
-| the 24 agents; the 27 tool skills (23 from G2, keep-project-knowledge from H2, report-goodboy from J1, cli-update-check from K1d, setup-test-infra from L); the renames are complete | unit | tests/g2-agents-skills.test.ts | 4 |
+| the 24 agents; the 28 tool skills (23 from G2, keep-project-knowledge from H2, report-goodboy from J1, cli-update-check from K1d, setup-test-infra from L, run-sandbox from M); the renames are complete | unit | tests/g2-agents-skills.test.ts | 4 |
 | PostToolUse: skill effort notice; legacy result writer, hook level; changed-line coverage from a real report, into test-write; role limits of the test agents, through the PreToolUse hook | unit | tests/g2-e2e-hooks.test.ts | 6 |
 | test results: suites per type; test results: coverage, recorded not gated; review results: Codex; changed-line coverage; skill effort notice; agent outcomes | unit | tests/g2-results.test.ts | 16 |
 | workflow skills | unit | tests/g3-workflow-skills.test.ts | 4 |
@@ -95,6 +95,32 @@ Totals: unit 184 files, 3316 tests; e2e 2 files, 54 tests.
 | problems that were already there, kept apart from regressions; projects to suggest for the registry; the session probe; the model probes; the CLI; the comparison, check by check (layer-1 additions) | unit | tests/k1d-update-check.test.ts | 49 |
 | L2: Java and Kotlin test files; L1: the survey; L3: the backfill state | e2e | tests/l-test-backfill.test.ts | 29 |
 | T5-1: an unknown repo matters only to a command that may commit; T5-3: chmod modes are no paths | unit | tests/l-trial5-fixes.test.ts | 3 |
+| A8: the sandbox run results are written only by sandbox-run; A8: the shell command families that write a result dir also cover the sandbox out dir; followedPath: where the OS lands for a path (in-process) | unit | tests/m-fix-a-guard.test.ts | 16 |
+| A6: the DB restore fails closed and never prints a row of the dump | unit | tests/m-fix-a-restore.test.ts | 8 |
+| A1: a start command with a glob is resolved through a shell; A2: the health URL joins the context path once; A3: no wrapper means the official build image, and the offline test run is prepared; the gateway probe runs its attempts side by side | unit | tests/m-fix-a-runtime.test.ts | 17 |
+| A5: the prep services do not see the sandbox dir; A5: sandbox-local refuses a dump that is in the repo or outside the home directory; lows: the private keys are 0600 before openssl writes them | unit | tests/m-fix-a-security.test.ts | 12 |
+| B4: the uiTest fixture gives each test its own nonce; B-low: the JVM coverage script keeps a dir name in one word | unit | tests/m-fix-b-e2e.test.ts | 7 |
+| resolveDefaults (was /\\$\\{[^}:]*:([^}]*)\\}/g); stringLiterals (was a regex over "…", \; markupOf (was TAG_RE over the whole text); segment matching (was one regex per segment); RouteIndex (was routeMatches against every route); findClose (was a scan from each open bracket) | unit | tests/m-fix-b-linear.test.ts | 15 |
+| B1: the scan and the plan are linear in the text they read; B1: the UI inventory is linear in the text it reads; B1: the UI check is linear in items plus requests | unit | tests/m-fix-b-perf.test.ts | 3 |
+| B2: the scan reads the files test-survey lists as own; B1: the scan has a time budget, and the inventory asks for the context path without reading sources; round 2: a question when there is no health route to find; B1: what the faster lookups must keep | unit | tests/m-fix-b-scan-opts.test.ts | 8 |
+| B3: configKeyAt reads a line the way the scan does; round 2: configEntryAt keeps a few files, not one; B2: one file lister for the scan, the UI inventory and the coverage gate | unit | tests/m-fix-b-scan.test.ts | 12 |
+| B1/B2: the inventory reads the files test-survey lists, with a time budget and an honest limit note; round 2: constants stay short, FastAPI routers are still read; round 3: the inventory has a size, and says when it was cut; the inventory reads only js/jsx/ts/tsx/mjs/cjs as JavaScript; B5: ids of route-less items are claimable whatever the file path holds | unit | tests/m-fix-b-ui.test.ts | 23 |
+| the scan reads a JSON config file and the kind of a bare host literal; the config cache holds a bounded amount; the UI check reads an access log line that is not JSON; xhr.open is read as an ajax call; the inventory stops at the size of source text it reads | unit | tests/m-gap-coverage.test.ts | 7 |
+| scanSandbox when a config parser fails; uiInventory when the sandbox scan fails and none is saved | unit | tests/m-rebase-line-coverage.test.ts | 2 |
+| M1 sandbox scan: Spring Boot Gradle app; M1 sandbox scan: Spring variants; M1 sandbox scan: Node app; M1 sandbox scan: FastAPI app; M1 sandbox scan: no usable project; M1 sandbox scan: malformed config fails closed | unit | tests/m1-sandbox-scan.test.ts | 23 |
+| compose networks; compose content; the config override; the saved scan and the config root; sandbox-local; sandbox-check (fake docker) | unit | tests/m1-sandbox.test.ts | 129 |
+| coverageCheck: one report passes; coverageCheck: gaps; coverageCheck: merging reports; coverageCheck: which files are required; coverageCheck: exemptions; coverageCheck: malformed and unusual input | unit | tests/m2-coverage-check.test.ts | 39 |
+| the proxy and the e2e service; the uiTest fixture and the Playwright config; coverage across the unit and the e2e run | unit | tests/m3-sandbox-e2e.test.ts | 17 |
+| uiCheck; uiCheck: a request counts for the one test that sent it; an empty inventory is a pass only for a project with no UI source; a log of garbage; malformed input fails closed; ui-check command | unit | tests/m3-ui-check.test.ts | 38 |
+| Spring controllers; Thymeleaf templates; JSP; Next and React; Express and FastAPI; the inventory command and limits | unit | tests/m3-ui-inventory.test.ts | 27 |
+| M4: backfill evidence with a sandbox; M4: test-write and the sandbox object; M4: the run-sandbox skill | unit | tests/m4-backfill-sandbox.test.ts | 25 |
+| a tests-role agent removes test output; bashChangedPaths and isTestOutputPath; writeDenial with removal and expanded (in-process) | unit | tests/m5-role-removal.test.ts | 17 |
+| the sandbox dir and what a sandbox file is; sandboxGaps (in-process); sandboxGaps and sandboxGapReason say what is missing (in-process); sandboxUsers fails closed on too many changed files; Stop, end to end: a session that changed only sandbox files; only the files the sandbox commands write are exempt | unit | tests/m5-sandbox-gate.test.ts | 31 |
+| jsLoads: type-only imports do not load a module; result-guard log reason | unit | tests/m5-type-imports.test.ts | 4 |
+| inGoodboySessionDir | unit | tests/m6-file-tracker-coverage.test.ts | 1 |
+| planSandbox hosts and stores; the scan, the local file and the ledger of a project that is not what goodboy wrote; sandboxCommand in this process; checkSandbox | unit | tests/m6-sandbox-line-coverage.test.ts | 11 |
+| config readers: YAML corners, .env and JSON that do not parse; IPv6 URLs and string literals in code; Node: the port, Prisma stores; JVM: a WAR with no Spring Boot, a module with settings.gradle above it; Python layouts; caps and the time budget | unit | tests/m6-sandbox-scan-coverage.test.ts | 14 |
+| jsxActions; jsCalls and addCalls; scanTemplate; springRoutes on Kotlin and odd annotations; parseReport shapes; cmdUiCheck | unit | tests/m6-ui-line-coverage.test.ts | 7 |
 | marker names and Bash writes; PreToolUse; a marker made during a model Bash call that never reported back (`exit N`, G0 M18); a marker made in another directory during a finished call (security review round 2); round 3; PostToolUse sweep | unit | tests/marker-guard.test.ts | 14 |
 | redirections; shellSegments; hostOf; curl, wget, httpie; ssh family; git push | unit | tests/outward-command.test.ts | 22 |
 | unlisted external hosts; production hosts; gate modes | unit | tests/outward-gate-hooks.test.ts | 12 |
