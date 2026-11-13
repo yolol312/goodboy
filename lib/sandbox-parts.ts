@@ -389,11 +389,19 @@ userPassword: test
 `;
 }
 
+/** The lines that make `/out` the run's dir of the `runout` volume: `sandbox-run` passes GOODBOY_OUT
+ *  (`/outroot/<ts>`) and the test hooks, the coverage data and coverage.sh keep writing to `/out`. */
+const OUT_LINK = `if [ -n "\${GOODBOY_OUT:-}" ]; then
+  mkdir -p "$GOODBOY_OUT"
+  ln -sfn "$GOODBOY_OUT" /out
+fi
+`;
+
 export function entrypoint(stack: SandboxStack, jdk: string): string {
   const head = `#!/bin/sh
-# Makes the container trust the sandbox CA, then runs the command (goodboy sandbox-init).
+# Makes the container trust the sandbox CA and /out the run's dir in the runout volume, then runs the command (goodboy sandbox-init).
 set -eu
-`;
+${OUT_LINK}`;
   if (stack !== 'jvm') return head + 'exec "$@"\n';
   const store = Number(jdk) <= 8 ? '-keystore "$JAVA_HOME/jre/lib/security/cacerts"' : '-cacerts';
   return (

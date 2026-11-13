@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { IMAGES, planSandbox } from '../lib/sandbox-render';
 import { C8_VERSION, caddyfile, COVERAGE_PY_VERSION, JACOCO_VERSION, lcovMergeScript, PLAYWRIGHT_DEFAULT, playwrightVersion, uiFixture } from '../lib/sandbox-e2e';
 import { staticProblems } from '../lib/sandbox-run';
+import { outDirMounts } from '../lib/sandbox-volumes';
 import type { SandboxLocal, SandboxScan, SandboxStack } from '../lib/sandbox-types';
 import { parseAccessLog } from '../lib/ui-check';
 
@@ -89,7 +90,8 @@ describe('the proxy and the e2e service', () => {
     const proxy = compose(p).services.proxy!;
     expect(proxy.image).toBe(IMAGES.proxy);
     expect(IMAGES.proxy).toMatch(/^caddy:\d+\.\d+\.\d+-alpine$/);
-    expect(proxy.volumes).toEqual(['./proxy/Caddyfile:/etc/caddy/Caddyfile:ro', './out/live:/live']);
+    // /live is a named volume since M6a: the access log is not in the checkout
+    expect(proxy.volumes).toEqual(['./proxy/Caddyfile:/etc/caddy/Caddyfile:ro', 'live:/live']);
     const cf = p.files.get('proxy/Caddyfile')!;
     expect(cf).toContain('reverse_proxy app:9090');
     expect(cf).toContain('output file /live/access.log');
@@ -107,7 +109,8 @@ describe('the proxy and the e2e service', () => {
     expect(e2e.image).toBe(`mcr.microsoft.com/playwright:v${PLAYWRIGHT_DEFAULT}-jammy`);
     expect(e2e.profiles).toEqual(['tools']);
     expect(e2e.environment).toMatchObject({ GOODBOY_BASE_URL: 'http://proxy:8080', GOODBOY_E2E_DIR: '/work/e2e' });
-    expect(e2e.volumes).toEqual(['../..:/work', 'e2edeps:/work/node_modules']);
+    // the run's dir and the test output dirs are volumes since M6a (lib/sandbox-volumes.ts)
+    expect(e2e.volumes).toEqual(['../..:/work', 'e2edeps:/work/node_modules', 'runout:/outroot', ...outDirMounts()]);
     expect(e2e.command).toEqual(['/work/node_modules/.bin/playwright', 'test', '--config', '/work/.goodboy/sandbox/e2e/playwright.config.ts']);
     expect(e2e.depends_on).toEqual({ proxy: { condition: 'service_started' } });
     expect(compose(p).volumes).toHaveProperty('e2edeps');
@@ -181,11 +184,12 @@ describe('the uiTest fixture and the Playwright config', () => {
     const f = p.files.get('e2e/playwright.config.ts')!;
     expect(f).toContain("baseURL: process.env.GOODBOY_BASE_URL ?? 'http://proxy:8080'");
     expect(f).toContain("testDir: process.env.GOODBOY_E2E_DIR ?? '/work/e2e'");
-    expect(f).toContain("outputDir: '/out/e2e-artifacts'");
+    expect(f).toContain("const OUT = process.env.GOODBOY_OUT ?? '/tmp/goodboy-out';");
+    expect(f).toContain('outputDir: `${OUT}/e2e-artifacts`');
     expect(f).toContain("preserveOutput: 'failures-only'");
     expect(f).toContain("trace: 'retain-on-failure'");
     expect(f).toContain("screenshot: 'only-on-failure'");
-    expect(f).toContain("outputFile: '/out/playwright-report.json'");
+    expect(f).toContain('outputFile: `${OUT}/playwright-report.json`');
     expect(f).toContain('retries: 0');
   });
 });
@@ -200,8 +204,8 @@ describe('coverage across the unit and the e2e run', () => {
     expect(prep).toContain('sha1sum -c -');
     expect(prep).toMatch(/jacocoagent\.jar org\.jacoco\.agent\/[\d.]+\/\S+ [0-9a-f]{40}/);
     expect(c.services.prep!.volumes).toContain('jacoco:/jacoco');
-    expect(c.services.app!.volumes).toEqual(expect.arrayContaining(['jacoco:/jacoco:ro', './out/live:/live']));
-    expect(c.services.runner!.volumes).toEqual(expect.arrayContaining(['jacoco:/jacoco', 'build:/build:ro', './out/live:/live', './runtime/coverage.sh:/sandbox/coverage.sh:ro']));
+    expect(c.services.app!.volumes).toEqual(expect.arrayContaining(['jacoco:/jacoco:ro', 'live:/live']));
+    expect(c.services.runner!.volumes).toEqual(expect.arrayContaining(['jacoco:/jacoco', 'build:/build:ro', 'live:/live', 'runout:/outroot', ...outDirMounts(), './runtime/coverage.sh:/sandbox/coverage.sh:ro']));
     expect(c.services.app!.environment).toMatchObject({ GOODBOY_COVERAGE_OUT: '/live/jacoco-e2e.exec', GOODBOY_COVERAGE_APPEND: 'false' });
     expect(c.services.runner!.environment).toMatchObject({ GOODBOY_COVERAGE_OUT: '/out/coverage-raw/unit/jacoco.exec', GOODBOY_COVERAGE_APPEND: 'true' });
     const entry = p.files.get('runtime/entrypoint.sh')!;

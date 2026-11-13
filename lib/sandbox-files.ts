@@ -4,10 +4,11 @@
 // directory that is a real directory (a linked `.goodboy` would send the write outside the repo).
 
 import { randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, type Stats, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, mkdtempSync, realpathSync, renameSync, rmSync, type Stats, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { runBounded } from './bounded';
+import { realDataOf } from './sandbox-boundary';
 import { KEYSTORE_PASSWORD, planSandbox, SANDBOX_DIR, SCAN_FILE, type SandboxPlan } from './sandbox-render';
 import { MAX_DOC_BYTES, readRegular } from './safe-read';
 import { isStrings, sha } from './sandbox-proof';
@@ -81,11 +82,55 @@ export function readLocal(root: string): SandboxLocal | Error {
     const l = JSON.parse(r.text) as SandboxLocal;
     const okDump = l.dump === null || (typeof l.dump === 'string' && isAbsolute(l.dump));
     const okFormat = l.dumpFormat === null || l.dumpFormat === 'sql' || l.dumpFormat === 'custom';
-    if (okDump && okFormat) return { dump: l.dump, dumpFormat: l.dumpFormat };
+    // `realData` is true, false or absent; anything else is a file goodboy did not write (fail closed)
+    const okReal = l.realData === undefined || typeof l.realData === 'boolean';
+    if (okDump && okFormat && okReal) return { dump: l.dump, dumpFormat: l.dumpFormat, realData: l.realData === true };
   } catch {
     // below
   }
   return new Error(`${p} is not a local file goodboy wrote; run sandbox-local --dump <path> again`);
+}
+
+/** Whether a project holds real data by its local file alone: the flag or a dump, and a file that cannot
+ *  be read counts as real (fail closed). The one rule `loadCtx` and `ui-check` share; the commands that
+ *  talk to docker may also find a database volume (`preflight` in lib/sandbox-run.ts). */
+export function realDataOfRoot(root: string): boolean {
+  const local = readLocal(root);
+  return local instanceof Error || realDataOf(local);
+}
+
+/** Whether raw host files of a run that may have held real data can still be there, for a command that
+ *  cannot ask docker (`ui-check`): the old `out/live/` dir, or a run dir whose `result.json` does not say
+ *  `realData: false` (a run before M6a has no such field, a real-data run says true). A dir with no
+ *  result (a run that stopped at once) says nothing. Bounded: 200 dirs, 64 KiB each. */
+function rawMayRemain(root: string): boolean {
+  const out = join(root, SANDBOX_DIR, 'out');
+  let names: string[];
+  try {
+    names = readdirSync(out);
+  } catch {
+    return false;
+  }
+  if (names.includes('live')) return true;
+  for (const n of names.filter((x) => /^\d{8}T\d{6}Z$/.test(x)).slice(0, 200)) {
+    const r = readRegular(join(out, n, 'result.json'), 64 * 1024, true);
+    if (typeof r !== 'object') continue;
+    try {
+      if ((JSON.parse(r.text) as { realData?: unknown } | null)?.realData !== false) return true;
+    } catch {
+      return true; // a result goodboy cannot read may be any run's
+    }
+  }
+  return false;
+}
+
+/** The mode for reading what a run left behind, without docker: the rule of `realDataOfRoot`, and, when
+ *  `local.json` is gone (the file is untracked and goes with `git clean -xfd`), real data as well while raw
+ *  host files that may have held it can remain (`rawMayRemain`): the mode is then decided fail-closed
+ *  the way the sandbox commands do with the project's database volume. */
+export function realDataForReading(root: string): boolean {
+  if (realDataOfRoot(root)) return true;
+  return !existsSync(join(root, LOCAL_FILE)) && rawMayRemain(root);
 }
 
 /** `root/rel` made a real directory, each part of it: an Error when one is a link or a file
@@ -184,7 +229,8 @@ export function dumpProblem(root: string, dump: string, opts: { kind?: DockerKin
   return `${dump} is outside your home directory (${home}); ${who}, so the sandbox would see an empty file: move the dump there${kind === 'colima' ? " or add its directory to Colima's mounts" : ''}`;
 }
 
-/** Writes `.goodboy/sandbox/local.json` (mode 0600): the dump path and format. */
+/** Writes `.goodboy/sandbox/local.json` (mode 0600): the dump path and format, and `realData`
+ *  (M6a: from now on the sandbox holds real data, whatever happens to the dump file). */
 export function writeLocal(root: string, dump: string, format: 'sql' | 'custom' | null): { path: string; local: SandboxLocal } | Error {
   if (!isAbsolute(dump)) return new Error('--dump needs an absolute path');
   let st: Stats;
@@ -197,13 +243,28 @@ export function writeLocal(root: string, dump: string, format: 'sql' | 'custom' 
   const problem = dumpProblem(root, dump);
   if (problem !== null) return new Error(problem);
   const fmt: 'sql' | 'custom' = format ?? (/\.(dump|custom|backup|pgdump)$/i.test(dump) ? 'custom' : 'sql');
-  const local: SandboxLocal = { dump: resolve(dump), dumpFormat: fmt };
+  const local: SandboxLocal = { dump: resolve(dump), dumpFormat: fmt, realData: true };
   ensureRealDir(root, SANDBOX_DIR);
   const ignore = join(root, SANDBOX_DIR, '.gitignore');
   if (!existsSync(ignore)) writeAtomic(ignore, 'local.json\nout/\nca/*.key\n*.p12\n');
   const path = join(root, LOCAL_FILE);
   writeAtomic(path, JSON.stringify(local, null, 2) + '\n', 0o600);
   return { path, local };
+}
+
+/** `sandbox-down --volumes` dropped the database volumes: nothing of the real data is left in
+ *  them, so `realData` goes back to false (a dump still set keeps the mode, as `realDataOf` says).
+ *  An Error when local.json cannot be read or written; nothing to do without one. */
+export function clearRealData(root: string): Error | null {
+  const local = readLocal(root);
+  if (local instanceof Error) return local;
+  if (!existsSync(join(root, LOCAL_FILE)) || local.realData !== true) return null;
+  try {
+    writeAtomic(join(root, LOCAL_FILE), JSON.stringify({ dump: local.dump, dumpFormat: local.dumpFormat, realData: false }, null, 2) + '\n', 0o600);
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err : new Error(String(err));
+  }
 }
 
 interface Ledger {

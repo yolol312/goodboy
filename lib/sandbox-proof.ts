@@ -54,7 +54,8 @@ export interface RunProof {
  *  following a link (not the file, not a directory above it), or an Error saying what is wrong.
  *  The check flags a record carries come from here, never from the agent. */
 export function readRunResult(root: string, run: string): RunProof | Error {
-  if (!RUN_NAME.test(run)) return new Error(`sandbox.run must be the run's directory name (like 20261022T031816Z), not ${JSON.stringify(run).slice(0, 60)}`);
+  // never echoes what it was given: a wrong value may be text the model copied from somewhere sensitive (M6a)
+  if (!RUN_NAME.test(run)) return new Error("sandbox.run must be the run's directory name (like 20261022T031816Z)");
   const dirParts = ['.goodboy', 'sandbox', 'out', run];
   const cur = join(root, ...dirParts);
   if (!noLinksUnder(root, dirParts, 'dir')) return new Error(`${cur} does not exist, or it or a directory above it is a link: no sandbox-run wrote run ${run} in this repository`);

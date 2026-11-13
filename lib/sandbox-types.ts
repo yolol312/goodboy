@@ -93,6 +93,9 @@ export interface SandboxLocal {
   dump: string | null;
   /** Dump format: `sql` (plain) or `custom` (pg_dump -Fc). */
   dumpFormat: 'sql' | 'custom' | null;
+  /** The sandbox holds real data (M6a): set by `sandbox-local --dump`, kept when the dump is
+   *  removed, cleared by `sandbox-down --volumes`. Absent means false. */
+  realData?: boolean;
 }
 
 /** What `sandbox-run` checks before a suite runs; a test record carries it. */

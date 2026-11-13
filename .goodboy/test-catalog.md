@@ -3,7 +3,7 @@
 Feature → test type, generated from the test files by goodboy (`cli.ts test-catalog`).
 Regenerate it instead of editing it; the docs rule compares it with a fresh copy.
 
-Totals: unit 210 files, 3829 tests; e2e 2 files, 54 tests.
+Totals: unit 213 files, 3910 tests; e2e 2 files, 54 tests.
 
 | Feature | Type | File | Tests |
 |---|---|---|---|
@@ -121,6 +121,9 @@ Totals: unit 210 files, 3829 tests; e2e 2 files, 54 tests.
 | planSandbox hosts and stores; the scan, the local file and the ledger of a project that is not what goodboy wrote; sandboxCommand in this process; checkSandbox | unit | tests/m6-sandbox-line-coverage.test.ts | 11 |
 | config readers: YAML corners, .env and JSON that do not parse; IPv6 URLs and string literals in code; Node: the port, Prisma stores; JVM: a WAR with no Spring Boot, a module with settings.gradle above it; Python layouts; caps and the time budget | unit | tests/m6-sandbox-scan-coverage.test.ts | 14 |
 | jsxActions; jsCalls and addCalls; scanTemplate; springRoutes on Kotlin and odd annotations; parseReport shapes; cmdUiCheck | unit | tests/m6-ui-line-coverage.test.ts | 7 |
+| writeAtomic; clearRealData; the sweep of host raw files and of a broken context; a ui-check verdict that cannot be stored | unit | tests/m6a-gaps.test.ts | 4 |
+| the text policy (lib/sandbox-boundary.ts); the counts of a run (lib/sandbox-summary.ts); the volume scripts and what they print (lib/sandbox-volumes.ts); expiry (lib/sandbox-expiry.ts); the ui-check verdict without titles (lib/ui-check.ts); the real-data flag in local.json | unit | tests/m6a-parts.test.ts | 47 |
+| real data: a full run prints and records no canary; real data: every failure prints a code, never the words of what failed; without real data the old output stays; raw artifacts expire; raw files of runs before M6a and of non-real-data runs; real data found in the volumes when local.json is gone | unit | tests/m6a-run.test.ts | 30 |
 | marker names and Bash writes; PreToolUse; a marker made during a model Bash call that never reported back (`exit N`, G0 M18); a marker made in another directory during a finished call (security review round 2); round 3; PostToolUse sweep | unit | tests/marker-guard.test.ts | 14 |
 | redirections; shellSegments; hostOf; curl, wget, httpie; ssh family; git push | unit | tests/outward-command.test.ts | 22 |
 | unlisted external hosts; production hosts; gate modes | unit | tests/outward-gate-hooks.test.ts | 12 |

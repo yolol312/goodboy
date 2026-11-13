@@ -4866,6 +4866,126 @@ As built:
 - Known limit: a sandbox script a model changed that still passes a run (say a coverage script
   that fakes its results) is caught only by the review.
 
+M6a output boundary, as built (2026-11-13, #19; review round 1 the same day). The user's decisions on
+the design's three open points: (1) the structured result is per-suite counts, from JUnit XML (JVM)
+and the Playwright JSON stats; any other runner gives exit code and duration; no test-case names,
+and assertion ids come with M6c; (2) `/work` stays read-write, the known test output dirs get a
+Docker volume each over them, any other path is a stated residual; (3) a failing run's raw
+artifacts expire after 24 h (the environment may lower it, never raise it), swept by the next
+goodboy sandbox command, crash leftovers too.
+- Real-data mode (`lib/sandbox-boundary.ts`): `local.json` has `realData`, set by `sandbox-local
+  --dump`, kept when the dump is removed. `loadCtx` takes the flag or a set dump; a local file that
+  cannot be read is an error there and counts as real data in `ui-check` (`realDataOfRoot`, the
+  one rule both use). Every command but scan and init then asks docker once (`preflight`): the
+  project's volumes (`docker volume ls`, by the compose project's label). A database volume
+  (`<project>_db<n>data`, `<project>_mongodata`), or a docker that cannot answer, makes the project
+  real-data whatever `local.json` says (the file is untracked and goes with `git clean -xfd`); the
+  mode is only ever made stricter, before any text of the command is built. A remote daemon is
+  refused first and is not asked. `sandbox-down --volumes` ends the mode when, after the down,
+  no database volume is left and no dump is named: it clears the flag and prints `realData:
+  cleared`, else `kept`. `result.json` has `realData` once; its proof fields keep their meaning
+  (`ts`, `check`, `exit`, `command`, `suite`, `e2e.{exit,timedOut}`; `playwrightReport` stays a
+  string, a `volume:runout/<ts>/…` marker when the report is in the volume only), so `sandboxProof`,
+  `test-write`, the Stop rule and `backfill-mark` are unchanged.
+- One object decides (`boundary(realData)`, in `Ctx.out`, the only place the mode lives): `text`,
+  `tail`, `why`, `fail` (a docker step's note and diagnostic from one code), `err`, and named
+  capabilities for the rest (`appLogs`, `hostCopies`, `reportRef`), so no call site tests the
+  mode. Text that goodboy formed from its own facts stays; anything built from a suite, the app,
+  the database, docker or the probe goes through it. In real-data mode: `tail` is empty; a failure
+  is a code from one list (`step-failed`, `timed-out`, `restore-failed`, `reset-failed`,
+  `proxy-failed`, `app-failed`, `app-down`, `live-failed`, `artifacts-not-removed`,
+  `coverage-failed`, `volume-failed`, `sweep-failed`, `docker-failed`, `check-failed`, `internal`,
+  `withheld`) with a `diagnostic {code, step, exit?, timedOut?}`; a restore failure is the code
+  only; `sandbox-check` problems that name a container, a network or an address are `check-failed
+  (step)`; an exception is `<command>: internal (<error class>)`; `sandbox-up --app-logs` is
+  refused. `sandbox-prepare` keeps its tails (the preparation step never sees the dump). Without
+  real data the output is as before.
+- Counts (`lib/sandbox-summary.ts`): `result.json` and the printed result have `summary.unit`
+  (exit, duration, and from the JUnit XML in the output dirs `suites [{name, tests, failures,
+  errors, skipped, time}]`) and `summary.e2e` (exit, duration, the report's `stats`, and `files
+  [{file, passed, failed}]`, `file` relative to the project, else `file-<n>`). A suite's `name`
+  is kept only when it is a Java or Kotlin class name, else `suite-<n>`. The JUnit scanner is one
+  forward pass (comments, CDATA, processing instructions and quoted attribute values are skipped
+  where they stand; a suite that wraps others is not counted with them; nothing that is not closed
+  is read), so it is linear in the text. `unreadable` for a file that is not JUnit; a file over the
+  2 MiB cap or not a regular file is skipped and counted (`skipped_files`); `partial` when the read
+  budget (16 MiB in all) was hit; `truncated` over 500 files or 2000 suites; `counts: "missing"`
+  when a JVM run left no JUnit XML in a volume (any other runner has exit and duration only). No
+  case name, message, title or annotation is read.
+- Raw artifacts live in Docker volumes (`lib/sandbox-volumes.ts`): `runout` (`/outroot`, one dir
+  per run; `/out` in the runner is a link to it, made by its entrypoint from `GOODBOY_OUT`, which
+  `sandbox-run` sets for the runner and e2e containers), `live` (`/live`, was the bind
+  `./out/live`) and one `tout_<dir>` volume over each of `build/test-results`, `build/reports`,
+  `target/surefire-reports`, `target/failsafe-reports`, `test-results` and `playwright-report` in
+  `/work`, and, for each module the scan's test command names (`:mod:test`, `-pl mod`,
+  `--project-dir mod`, at most 8), over that module's four JVM dirs. A `reader` service (pinned
+  busybox, `network_mode: none`, the volumes, no bind; the static check allows `none` for it
+  alone) is the only way the host reads, writes or removes them, through fixed POSIX scripts that
+  name their kind in a first line: a link, a non-regular file, a link in the path or a file over
+  the limit is refused; output is base64 framed, parsed in memory and never printed; every call that
+  reads has a byte budget the script keeps (`@@PARTIAL`) and the host caps its capture at. One
+  reader call per phase: after the unit step (output.log in, JUnit out), after the e2e step
+  (e2e-output.log in, report and access log out, traces looked up and removed), the coverage
+  report out, and one remove-and-clear at the end (plus the sweep's list). The host keeps in
+  `out/<ts>/`: `result.json`, `state.json`, `ui-check.json` and the coverage report (paths and line
+  numbers; copied out of the volume). Only where the mode allows host copies (not real-data mode) it
+  also keeps `output.log`, `e2e-output.log`, `access.log` and `playwright-report.json`, as before,
+  and `ui-check --run` judges the raw files again.
+- `ui-check.json` (`StoredUiCheck`) is the verdict at the end of an e2e step: gaps by inventory
+  item id, counts, `unknown_claims` as a count, and problems that name a test by `spec-<12 hex of
+  sha256(file, title)>` (`redactTitles`). In real-data mode `ui-check --run` prints it and refuses
+  `--log`, `--report` and `--inventory`.
+- Expiry (`lib/sandbox-expiry.ts`, `lib/sandbox-store.ts`): `out/<ts>/state.json` `{status
+  running|passed|failed, started, finished?}`. A run's age is the older of `started` and the time
+  in its name (a `started` ahead of the clock is ignored; a name more than an hour ahead, or a
+  `started` that does not parse, counts as expired). A passing run's `/outroot/<ts>` and the
+  scratch volumes (`/live` data, the output dirs) are removed in one call once `result.json`, the
+  summary and the verdict are written (`cleanup: removed`, else `not-removed`). The sweep runs at
+  the start of every `sandbox-*` command except `sandbox-scan` and `sandbox-init`, on the
+  command's own daemon and compose checks, and only when the runs volume exists (a `sandbox-down`
+  of a project that never ran starts no container and makes no network or volume): it removes a
+  run whose state is `passed`, or `failed` or `running` older than the TTL, or with no readable
+  state and older by its name, and any foreign entry; when the last run dir goes and no run is in
+  progress (a `running` state that has not expired) the scratch volumes are cleared too. Where the
+  host keeps no raw copy (real-data mode) it also removes the raw files that earlier runs left in
+  `out/<ts>/` (output.log, e2e-output.log, access.log, playwright-report.json, e2e-artifacts) and
+  the old `out/live/`. A sweep that fails is `sweep: {code: "sweep-failed"}` next to the output,
+  never a crash. The scratch volumes also start every run empty.
+- Docker calls (fake docker, `--suite all` of a real-data project): 35 invocations before the
+  review round (12 reader, 2 `context inspect`, 2 `compose config`), 28 after (6 reader, 1 of each
+  of those, 1 `volume ls`). `sandbox-down` of a project that never ran: 5 (and a network and the
+  volumes made) before, 3 after.
+- goodboy's own echoes: `readRunResult` no longer quotes the run name it was given.
+- Tests: `tests/m6a-parts.test.ts` (policy, counts and the scanner's timing, volume scripts run under
+  `sh`, expiry rules, stored verdict, flag, compose), `tests/m6a-run.test.ts` (canaries on every
+  channel through a fake docker, the stop matrix, expiry, the flag's life, the volumes found when
+  `local.json` is gone, call counts), the fake docker in `tests/m6a-fake.ts` also serves
+  `tests/m1-sandbox.test.ts` (volumes as directories under its state dir).
+- An existing sandbox needs `sandbox-init --force` (new compose: the `reader` service, the volumes,
+  `GOODBOY_OUT`; the entrypoint, the Playwright config and the Caddyfile comment changed too:
+  `sandbox-init` lists a file goodboy wrote and nobody edited as `stale` until `--force`, and an
+  edited one as drift, never overwritten) and `sandbox-down` before the next `sandbox-up`; a run
+  against the old compose has no `reader` and stops with `volume-failed`.
+- Stated limits: a module the test command does not name, and anything a test writes elsewhere
+  under `/work` (a snapshot, a report in another dir), stay in the checkout; mounting a volume over
+  a path that is not in the checkout makes an empty dir there, owned by whoever runs the daemon
+  (a host `gradle clean` can trip on a root-owned one on Linux); the threat model is accidental
+  leaks, not a program a model writes on purpose.
+- Stated limits of the expiry and the counts: a run name up to 1 hour ahead of the clock is honoured
+  (a slack for clocks that differ a little), so a run with no state, or an edited `started`, can
+  live up to 25 h instead of 24; a very small `GOODBOY_SANDBOX_RAW_TTL_HOURS` in the environment of
+  one command can expire a run that another command still has in progress. A suite name that is a
+  dotted identifier (`john.smith`) passes the class-name filter and is shown, as a name that
+  looks like a class cannot be told from one. A raw `<!--` inside an attribute of a tag the scanner
+  does not read whole (invalid XML) can hide the suites up to the next `-->`.
+- Review round 2: the host raw files are removed entry by entry (one that cannot be removed makes
+  the sweep report `sweep-failed` after the rest and the runs volume were swept) and only when every
+  part of the path from the project top to `out/` is a real directory. With no `local.json`,
+  `ui-check` treats the project as real data while `out/live/` or a run dir whose `result.json` does
+  not say `realData: false` exists (the sandbox commands look for the database volume instead). A
+  suite that wraps others and has `<testcase>` elements of its own is counted for those cases, once.
+  `network_mode: none` passes the static check for a service named `reader` only.
+
 ## 20. N — Fewer repeated runs, a project test inventory, task criteria (proposed, 2026-10-26)
 
 Status: proposed. The user asked for these to be planned (2026-10-26). What ships first and

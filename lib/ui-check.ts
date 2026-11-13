@@ -27,10 +27,13 @@
 // Evidence strength: the test code can set any header itself, and the access log lives in a dir
 // the test run can write; this check judges what the files say, as the coverage gate does.
 
+import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { readRegular } from './safe-read';
+import { realDataForReading } from './sandbox-files';
 import { SANDBOX_DIR } from './sandbox-render';
+import { MAX_READ_BYTES } from './sandbox-volumes';
 import { uiInventory } from './ui-inventory';
 import {
   ACCESS_LOG_FILE,
@@ -79,6 +82,8 @@ export interface Req {
 
 interface TestClaims {
   title: string;
+  /** How a problem names the test with `redact`: its spec id (else the quoted title is used). */
+  ref?: string;
   passed: boolean;
   claims: string[];
   /** The test's `goodboy-test` nonce; null when it has none. */
@@ -186,8 +191,16 @@ interface RawTest {
   results?: unknown;
 }
 
-/** The tests of one Playwright JSON report; a report of another shape is a problem. */
-export function parseReport(text: string, label: string, problems: string[]): TestClaims[] {
+/** A stable id for a spec that holds none of its title: `spec-` and 12 hex digits of the SHA-256 of
+ *  its file and full title (the same test keeps its id from run to run). */
+export function specId(file: string, title: string): string {
+  return `spec-${createHash('sha256').update(file).update('\0').update(title).digest('hex').slice(0, 12)}`;
+}
+
+/** The tests of one Playwright JSON report; a report of another shape is a problem. With `redact`
+ *  the problems name a test by its spec id, never by its title (a title can hold a row of a real
+ *  database). */
+export function parseReport(text: string, label: string, problems: string[], redact = false): TestClaims[] {
   let j: unknown;
   try {
     j = JSON.parse(text);
@@ -201,24 +214,26 @@ export function parseReport(text: string, label: string, problems: string[]): Te
     return [];
   }
   const out: TestClaims[] = [];
-  const walk = (suite: unknown, path: string[]): void => {
-    const s = suite as { title?: unknown; suites?: unknown; specs?: unknown } | null;
+  const walk = (suite: unknown, path: string[], inheritedFile: string): void => {
+    const s = suite as { title?: unknown; suites?: unknown; specs?: unknown; file?: unknown } | null;
     if (typeof s !== 'object' || s === null) {
       problems.push(`${label} has a suite that is not an object`);
       return;
     }
     const here = typeof s.title === 'string' && s.title !== '' ? [...path, s.title] : path;
+    const suiteFile = typeof s.file === 'string' ? s.file : inheritedFile;
     if (s.specs !== undefined && !Array.isArray(s.specs)) problems.push(`${label} has a suite whose specs are not a list`);
     for (const spec of Array.isArray(s.specs) ? s.specs : []) {
-      const sp = spec as { title?: unknown; tests?: unknown; annotations?: unknown } | null;
+      const sp = spec as { title?: unknown; tests?: unknown; annotations?: unknown; file?: unknown } | null;
       if (typeof sp !== 'object' || sp === null || !Array.isArray(sp.tests)) {
         problems.push(`${label} has a spec with no tests list`);
         continue;
       }
       const title = [...here, typeof sp.title === 'string' ? sp.title : '?'].join(' > ');
+      const ref = redact ? specId(typeof sp.file === 'string' ? sp.file : suiteFile, title) : `"${title}"`;
       for (const t of sp.tests as RawTest[]) {
         if (typeof t !== 'object' || t === null) {
-          problems.push(`${label}: a test of "${title}" is not an object`);
+          problems.push(`${label}: a test of ${ref} is not an object`);
           continue;
         }
         const results = Array.isArray(t.results) ? (t.results as { status?: unknown }[]) : [];
@@ -230,38 +245,38 @@ export function parseReport(text: string, label: string, problems: string[]): Te
         for (const list of [t.annotations, sp.annotations]) {
           if (list === undefined) continue;
           if (!Array.isArray(list)) {
-            problems.push(`${label}: the annotations of "${title}" are not a list`);
+            problems.push(`${label}: the annotations of ${ref} are not a list`);
             continue;
           }
           for (const a of list as { type?: unknown; description?: unknown }[]) {
             if (typeof a !== 'object' || a === null) continue;
             if (a.type === NONCE_ANNOTATION) {
-              if (typeof a.description !== 'string' || !NONCE_RE.test(a.description.trim())) problems.push(`${label}: "${title}" has a ${NONCE_ANNOTATION} annotation that is not a nonce`);
+              if (typeof a.description !== 'string' || !NONCE_RE.test(a.description.trim())) problems.push(`${label}: ${ref} has a ${NONCE_ANNOTATION} annotation that is not a nonce`);
               else nonces.add(a.description.trim());
               continue;
             }
             if (a.type !== 'goodboy-ui') continue;
-            if (typeof a.description !== 'string' || parseClaim(a.description) === null) problems.push(`${label}: "${title}" has a goodboy-ui annotation that is not <id>:ok|error`);
+            if (typeof a.description !== 'string' || parseClaim(a.description) === null) problems.push(`${label}: ${ref} has a goodboy-ui annotation that is not <id>:ok|error`);
             else claims.push(a.description.trim());
           }
         }
-        if (nonces.size > 1) problems.push(`${label}: "${title}" has several ${NONCE_ANNOTATION} nonces`);
-        out.push({ title, passed, claims, nonce: nonces.size === 1 ? [...nonces][0]! : null });
+        if (nonces.size > 1) problems.push(`${label}: ${ref} has several ${NONCE_ANNOTATION} nonces`);
+        out.push({ title, ...(redact ? { ref } : {}), passed, claims, nonce: nonces.size === 1 ? [...nonces][0]! : null });
       }
     }
     if (s.suites !== undefined && !Array.isArray(s.suites)) problems.push(`${label} has a suite whose suites are not a list`);
-    for (const child of Array.isArray(s.suites) ? s.suites : []) walk(child, here);
+    for (const child of Array.isArray(s.suites) ? s.suites : []) walk(child, here, suiteFile);
   };
-  for (const s of root.suites) walk(s, []);
+  for (const s of root.suites) walk(s, [], '');
   return out;
 }
 
 /** Judges the e2e run against the inventory. `accessLogs` and `playwrightReports` are the texts of
- *  the files (JSON lines; JSON). */
-export function uiCheck(inventory: UiInventory, accessLogs: string[], playwrightReports: string[]): UiCheckResult {
+ *  the files (JSON lines; JSON). With `redactTitles` a problem names a test by its spec id. */
+export function uiCheck(inventory: UiInventory, accessLogs: string[], playwrightReports: string[], opts: { redactTitles?: boolean } = {}): UiCheckResult {
   const problems: string[] = [];
   const tests: TestClaims[] = [];
-  playwrightReports.forEach((t, i) => tests.push(...parseReport(t, playwrightReports.length === 1 ? 'Playwright report' : `Playwright report ${i + 1}`, problems)));
+  playwrightReports.forEach((t, i) => tests.push(...parseReport(t, playwrightReports.length === 1 ? 'Playwright report' : `Playwright report ${i + 1}`, problems, opts.redactTitles === true)));
   if (accessLogs.length === 0) problems.push('no access log was given');
   // An inventory a cap or the time cut short lists fewer items than the app has: a pass on it would
   //   be a pass on the items it kept.
@@ -284,11 +299,11 @@ export function uiCheck(inventory: UiInventory, accessLogs: string[], playwright
   for (const t of tests) {
     if (!t.passed || t.claims.length === 0) continue;
     if (t.nonce === null) {
-      if (++unbound <= MAX_PROBLEMS) problems.push(`"${t.title}" passed with ui claims but has no ${NONCE_ANNOTATION} nonce, so its requests cannot be told from another test's: regenerate the e2e fixture (sandbox-init --force) and run again`);
+      if (++unbound <= MAX_PROBLEMS) problems.push(`${t.ref ?? `"${t.title}"`} passed with ui claims but has no ${NONCE_ANNOTATION} nonce, so its requests cannot be told from another test's: regenerate the e2e fixture (sandbox-init --force) and run again`);
       continue;
     }
     if (testOf.has(t.nonce)) {
-      problems.push(`two passing tests share the ${NONCE_ANNOTATION} nonce ${t.nonce} ("${t.title}"): the requests cannot be told apart`);
+      problems.push(`two passing tests share the ${NONCE_ANNOTATION} nonce ${t.nonce} (${t.ref ?? `"${t.title}"`}): the requests cannot be told apart`);
       continue;
     }
     testOf.add(t.nonce);
@@ -362,11 +377,50 @@ export function uiCheck(inventory: UiInventory, accessLogs: string[], playwright
   return { ok: problems.length === 0 && gaps.length === 0, items: inventory.items.length, covered, gaps, unknown_claims: [...unknown].sort(), problems };
 }
 
+// ---- the stored result (M6a) ----
+
+/** The file `sandbox-run` stores in `out/<ts>/` at the end of an e2e step: the verdict of `uiCheck`
+ *  with no title and no claim text. The access log and the Playwright report stay in a Docker volume
+ *  (a request URI and a test title can hold a row of a real database), so `ui-check --run` reads this. */
+export const STORED_FILE = 'ui-check.json';
+
+export interface StoredUiCheck {
+  schema: 1;
+  run: string;
+  ok: boolean;
+  items: number;
+  covered: number;
+  gaps: UiGap[];
+  /** How many claims named no item; their text is not kept. */
+  unknown_claims: number;
+  /** Problems with tests named by spec id (run `uiCheck` with `redactTitles`). */
+  problems: string[];
+}
+
+/** The verdict as it is stored: counts and ids, no claim text. */
+export const storedUiCheck = (run: string, r: UiCheckResult): StoredUiCheck => ({ schema: 1, run, ok: r.ok, items: r.items, covered: r.covered, gaps: r.gaps, unknown_claims: r.unknown_claims.length, problems: r.problems });
+
+const isCount = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0;
+
+/** A stored verdict read back, or null when the text is not one goodboy wrote (never echoed). */
+export function parseStoredUiCheck(text: string): StoredUiCheck | null {
+  try {
+    const j = JSON.parse(text) as Record<string, unknown> | null;
+    if (typeof j !== 'object' || j === null || j.schema !== 1 || typeof j.run !== 'string' || typeof j.ok !== 'boolean') return null;
+    if (!isCount(j.items) || !isCount(j.covered) || !isCount(j.unknown_claims)) return null;
+    if (!Array.isArray(j.problems) || !j.problems.every((p) => typeof p === 'string')) return null;
+    if (!Array.isArray(j.gaps) || !j.gaps.every((g) => typeof g === 'object' && g !== null && typeof (g as UiGap).id === 'string' && Array.isArray((g as UiGap).missing) && (g as UiGap).missing.every((m) => m === 'ok' || m === 'error' || m === 'request'))) return null;
+    return { schema: 1, run: j.run, ok: j.ok, items: j.items, covered: j.covered, gaps: j.gaps as UiGap[], unknown_claims: j.unknown_claims, problems: j.problems as string[] };
+  } catch {
+    return null;
+  }
+}
+
 // ---- the command ----
 
-/** The most of an access log read: the copy `sandbox-run` makes into the run dir refuses a larger one. */
-const MAX_LOG_BYTES = 64 * 1024 * 1024;
-const MAX_REPORT_BYTES = 64 * 1024 * 1024;
+/** The most of an access log or a report read: the cap the reader of the volumes applies (lib/sandbox-volumes.ts). */
+const MAX_LOG_BYTES = MAX_READ_BYTES;
+const MAX_REPORT_BYTES = MAX_READ_BYTES;
 const KINDS = new Set(['screen', 'action', 'api']);
 
 /** All the values of a repeatable option; an Error when one has no value. */
@@ -381,7 +435,7 @@ function optValues(args: string[], name: string): string[] | Error {
   return out;
 }
 
-/** The newest `out/<ts>` dir that has an access log and a report, or null. */
+/** The newest `out/<ts>` dir that has an access log and a report, or a stored verdict, or null. */
 function latestRun(root: string): string | null {
   const out = join(root, SANDBOX_DIR, 'out');
   let names: string[];
@@ -390,7 +444,7 @@ function latestRun(root: string): string | null {
   } catch {
     return null;
   }
-  const runs = names.filter((n) => /^\d{8}T\d{6}Z$/.test(n) && existsSync(join(out, n, ACCESS_LOG_FILE)) && existsSync(join(out, n, PLAYWRIGHT_REPORT_FILE)));
+  const runs = names.filter((n) => /^\d{8}T\d{6}Z$/.test(n) && ((existsSync(join(out, n, ACCESS_LOG_FILE)) && existsSync(join(out, n, PLAYWRIGHT_REPORT_FILE))) || existsSync(join(out, n, STORED_FILE))));
   runs.sort();
   return runs.length > 0 ? runs[runs.length - 1]! : null;
 }
@@ -416,7 +470,9 @@ function readInventory(file: string): UiInventory | Error {
 
 /** `ui-check [--run <ts>] [--log <file>]... [--report <file>]... [--inventory <file>]`: judges an
  *  e2e run. By default the newest run under `.goodboy/sandbox/out/` and a fresh inventory. The
- *  exit code is 0 only when every item is covered and every file was readable. */
+ *  exit code is 0 only when every item is covered and every file was readable. In a real-data
+ *  sandbox (M6a) the raw files are not on the host: the run's stored verdict is printed, and
+ *  `--log`, `--report` and `--inventory` are refused (a model must not point the check at raw files). */
 export function cmdUiCheck(root: string, args: string[]): { out: unknown; code: number } | { error: string } {
   const known = new Set(['--run', '--log', '--report', '--inventory']);
   for (let i = 0; i < args.length; i++) {
@@ -431,6 +487,11 @@ export function cmdUiCheck(root: string, args: string[]): { out: unknown; code: 
   for (const v of [runs, logOpts, reportOpts, invOpts]) if (v instanceof Error) return { error: `ui-check: ${v.message}` };
   const inv0 = invOpts as string[];
   if ((runs as string[]).length > 1 || inv0.length > 1) return { error: 'ui-check: --run and --inventory take one value' };
+  // the rule of `loadCtx` (the flag or a dump; a local file that cannot be read counts as real data), and, with
+  // no local.json (it goes with `git clean -xfd`), real data too while raw host files of a run that may have
+  // held it remain: this command cannot ask docker for the database volume as the sandbox commands do
+  const real = realDataForReading(root);
+  if (real && (logOpts as string[]).length + (reportOpts as string[]).length + inv0.length > 0) return { error: 'ui-check: --log, --report and --inventory are not read in a sandbox that holds real data; use --run <ts>, which prints the verdict stored by sandbox-run' };
   let run: string | null = null;
   let logs = logOpts as string[];
   let reports = reportOpts as string[];
@@ -445,6 +506,15 @@ export function cmdUiCheck(root: string, args: string[]): { out: unknown; code: 
       return { error: `ui-check: ${dir} is not a run dir` };
     }
     run = dir;
+    const raw = !real && existsSync(join(dir, ACCESS_LOG_FILE)) && existsSync(join(dir, PLAYWRIGHT_REPORT_FILE));
+    if (!raw) {
+      // the raw files are in the sandbox's volume: the verdict `sandbox-run` stored at the end of its e2e step
+      const r = readRegular(join(dir, STORED_FILE), 1024 * 1024, true);
+      if (typeof r !== 'object') return { error: real || r === 'refused' ? `ui-check: run ${name} has no stored verdict (its e2e step did not finish, or it ran no e2e suite)` : `ui-check: the access log ${join(dir, ACCESS_LOG_FILE)} does not exist` };
+      const stored = parseStoredUiCheck(r.text);
+      if (stored === null) return { error: `ui-check: ${join(dir, STORED_FILE)} is not a verdict goodboy wrote` };
+      return { out: { ...stored, run, stored: true }, code: stored.ok ? 0 : 1 };
+    }
     logs = [join(dir, ACCESS_LOG_FILE)];
     reports = [join(dir, PLAYWRIGHT_REPORT_FILE)];
   } else if ((runs as string[]).length > 0) return { error: 'ui-check: --run cannot be combined with --log or --report' };

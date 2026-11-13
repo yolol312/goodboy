@@ -4,8 +4,9 @@
 // touches the disk or docker; lib/sandbox-render.ts puts the text into the compose project.
 //
 // The layout inside the containers:
-//   /live     out/live of the host: the app writes its e2e coverage data, the proxy its access log
-//   /out      out/<ts> of the run (mounted by `sandbox-run` for the runner and the e2e service)
+//   /live     the `live` volume: the app writes its e2e coverage data, the proxy its access log
+//   /out      the run's dir in the `runout` volume (`/outroot/<ts>`, M6a): the entrypoint of the runner
+//             links /out to it from GOODBOY_OUT, which `sandbox-run` sets for the runner and the e2e service
 //   /work     the project source; the e2e service runs the project's e2e dir from /work/e2e
 //   /build    the build volume the preparation step filled (the app runs from it)
 
@@ -59,7 +60,7 @@ export function playwrightVersion(read: (rel: string) => string | null): string 
  *  headers (`X-Goodboy-Ui` among them) and the status. */
 export function caddyfile(appPort: number): string {
   return `# The sandbox's logging proxy (goodboy sandbox-init, track M3). The browser tests reach the app
-# only through it; every request is logged to /live/access.log (out/live/ on the host).
+# only through it; every request is logged to /live/access.log (the live volume).
 {
 	admin off
 	auto_https off
@@ -110,18 +111,20 @@ export function playwrightConfig(): string {
   return `// The Playwright config of the sandbox's e2e service (goodboy sandbox-init, track M3). It runs the
 // project's e2e dir against the logging proxy and writes the JSON report \`ui-check\` reads.
 // Traces and screenshots are kept for failing tests only, and \`sandbox-run\` removes what is left
-// when the run passes.
+// when the run passes. They go into the run's dir of the \`runout\` volume (GOODBOY_OUT), not the checkout.
 import { defineConfig } from '@playwright/test';
+
+const OUT = process.env.GOODBOY_OUT ?? '/tmp/goodboy-out';
 
 export default defineConfig({
   testDir: process.env.GOODBOY_E2E_DIR ?? '/work/${E2E_DIR}',
-  outputDir: '/out/e2e-artifacts',
+  outputDir: \`\${OUT}/e2e-artifacts\`,
   preserveOutput: 'failures-only',
   retries: 0,
   workers: 1,
   fullyParallel: false,
   forbidOnly: true,
-  reporter: [['list'], ['json', { outputFile: '/out/playwright-report.json' }]],
+  reporter: [['list'], ['json', { outputFile: \`\${OUT}/playwright-report.json\` }]],
   use: {
     baseURL: process.env.GOODBOY_BASE_URL ?? 'http://proxy:${PROXY_PORT}',
     trace: 'retain-on-failure',

@@ -58,12 +58,17 @@ Run suites where nothing can leave the machine, and prove it in the record.
    check flags and its hash into the record. A record without a run, with a run that failed
    its check or exited non-zero, or whose result.json changed afterwards, does not count for
    a backfill target. Never write or edit anything under `.goodboy/sandbox/out/`.
-7. What you see is what the commands print: a passing step prints no output tail, a failing
-   one at most 2000 characters, and a failed restore only code and line. The full output, the
-   traces and the screenshots stay in `.goodboy/sandbox/out/<ts>/` (never added to git); do not
-   open them unless the user asks, they can hold rows of the database copy. Show the app's own
-   log (`sandbox-up --app-logs`) only when the user asks. `sandbox-run` removes a passing run's
-   traces and screenshots (`artifacts: removed`); if one still shows `kept`, delete them.
+7. What you see is what the commands print: a passing step prints no output tail, a failing one at
+   most 2000 characters, a failed restore only code and line. The raw output, traces, screenshots,
+   Playwright report and access log can hold rows of the database copy: never open them, in the
+   volumes or in `out/<ts>/` (real data keeps them in volumes only). `sandbox-up --app-logs` only when asked.
+8. With real data (`sandbox-local --dump` ran, `local.json` says `realData: true`, or a database volume
+   exists) the commands print no text of the suites, app, database or docker: a failure is a fixed code
+   and its step (`reset-failed`, `app-down`, ...), `tail` is empty, `--app-logs` is refused. `summary` has
+   the counts instead (JUnit tests, failures, errors, skipped, `counts: "missing"` when a JVM run left
+   none; Playwright stats and passed and failed per spec file); `ui-check --run <ts>` prints the stored
+   verdict (gap ids and counts). Raw artifacts are deleted when a run passes, else after 24 h; what a test
+   writes outside the test output dirs (root and named modules) stays in the checkout, out of git.
 
 ## Output
 - Per run: the result path, the exit code, and the two gate results with their gaps.
@@ -79,6 +84,6 @@ Run suites where nothing can leave the machine, and prove it in the record.
   or directory server, nor a package registry during a run (preparation is not yours).
 - Never put rows or personal data from the database copy into tests, fixtures, records,
   comments or reports; refer to data by screen, route or id only.
-- Never keep the traces of a passing run, or move anything out of `.goodboy/sandbox/`.
+- Never keep the traces of a passing run, move anything out of `.goodboy/sandbox/` or read a volume.
 - Never weaken a test, skip it or add a coverage exemption to pass a gate: an exemption is
   the user's decision.

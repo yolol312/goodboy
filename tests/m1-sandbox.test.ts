@@ -10,6 +10,7 @@ import { checkSandbox, type Ctx, loadCtx, parseNslookup, probeScript, projectNam
 import { RESTORE_TAG } from '../lib/sandbox-parts';
 import { configKeyAt, IMAGES, planSandbox, renderSandbox, SANDBOX_DIR, SCAN_FILE } from '../lib/sandbox-render';
 import { initSandbox, outOfDate, readLocal, readScan, writeLocal, writeScan } from '../lib/sandbox-files';
+import { FAKE_DOCKER } from './m6a-fake';
 import type { SandboxLocal, SandboxOutbound, SandboxScan, SandboxStore } from '../lib/sandbox-types';
 
 // Each CLI run starts bun and loads the whole CLI: a test with a few of them takes seconds.
@@ -129,10 +130,16 @@ const netOpts = (s: Compose['services'][string], net: string) => (s.networks && 
 describe('compose networks', () => {
   test('every service outside the prep profile is on internal networks only, without published ports', () => {
     const c = parse(read(jvmScan(), { dump: '/data/shop.sql', dumpFormat: 'sql' }));
-    expect(Object.keys(c.services).sort()).toEqual(['app', 'db', 'e2e', 'e2e-prep', 'ldap', 'mail', 'prep', 'probe', 'proxy', 'redis', 'runner', 'stubs']);
+    expect(Object.keys(c.services).sort()).toEqual(['app', 'db', 'e2e', 'e2e-prep', 'ldap', 'mail', 'prep', 'probe', 'proxy', 'reader', 'redis', 'runner', 'stubs']);
     for (const [name, s] of Object.entries(c.services)) {
       expect(s.ports).toBeUndefined();
       if (s.profiles?.includes('prep')) continue;
+      // the reader has no network at all (M6a): nothing to be internal
+      if ((s as { network_mode?: string }).network_mode === 'none') {
+        expect(name).toBe('reader');
+        expect(s.networks).toBeUndefined();
+        continue;
+      }
       const nets = netNames(s);
       expect(nets.length).toBeGreaterThan(0);
       for (const n of nets) expect({ name, net: n, internal: c.networks[n]?.internal }).toEqual({ name, net: n, internal: true });
@@ -219,7 +226,7 @@ describe('compose networks', () => {
   test('no dummy service is made for a kind the project does not use', () => {
     const s = jvmScan();
     s.outbound = [out('api.partner.example', 'http', {}, 'base-url')];
-    expect(Object.keys(parse(read(s)).services).sort()).toEqual(['app', 'db', 'e2e', 'e2e-prep', 'prep', 'probe', 'proxy', 'redis', 'runner', 'stubs']);
+    expect(Object.keys(parse(read(s)).services).sort()).toEqual(['app', 'db', 'e2e', 'e2e-prep', 'prep', 'probe', 'proxy', 'reader', 'redis', 'runner', 'stubs']);
   });
 });
 
@@ -741,9 +748,10 @@ describe('sandbox-local', () => {
     expect(r.exitCode).toBe(0);
     const p = join(root, SANDBOX_DIR, 'local.json');
     expect(statSync(p).mode & 0o777).toBe(0o600);
-    expect(JSON.parse(readFileSync(p, 'utf8'))).toEqual({ dump, dumpFormat: 'sql' });
+    // `realData` is set by --dump (M6a) and stays when the dump is removed
+    expect(JSON.parse(readFileSync(p, 'utf8'))).toEqual({ dump, dumpFormat: 'sql', realData: true });
     expect(readFileSync(join(root, SANDBOX_DIR, '.gitignore'), 'utf8')).toContain('local.json');
-    expect(readLocal(root)).toEqual({ dump, dumpFormat: 'sql' });
+    expect(readLocal(root)).toEqual({ dump, dumpFormat: 'sql', realData: true });
   });
 
   test('the format is taken from the option, else from the file name', () => {
@@ -787,70 +795,6 @@ interface Fake {
   calls: () => string[];
 }
 
-const FAKE = `#!/bin/sh
-d="$FAKE_DOCKER_DIR"
-echo "$*" >> "$d/calls.log"
-# What a test running as root in a container with the run dir at /out can do: leave links in it
-# that point at a file of the host (the first argument lists the file names, FAKE_VICTIM is the
-# target; FAKE_PLANT_RUNNER, _E2E and _COVERAGE say what each container leaves).
-plant() {
-  names="$1"; shift
-  out=""; prev=""
-  for a in "$@"; do if [ "$prev" = "-v" ]; then out="\${a%%:*}"; fi; prev="$a"; done
-  if [ -n "$out" ] && [ -n "$names" ]; then
-    for n in $names; do ln -sf "$FAKE_VICTIM" "$out/$n"; done
-  fi
-  if [ -n "$out" ]; then for n in \${FAKE_PLANT_DIRS:-}; do mkdir -p "$out/$n" && touch "$out/$n/x"; done; fi
-}
-case " $* " in
-  *" context "*) cat "$d/context.txt" 2>/dev/null ;;
-  *" network ls "*) cat "$d/netls.txt" 2>/dev/null ;;
-  *" network inspect "*) cat "$d/network.json" ;;
-  *" inspect "*)
-    case " $* " in
-      *" id-intruder "*) cat "$d/intruder.json" ;;
-      *) cat "$d/inspect.json" ;;
-    esac ;;
-  *" config "*) cat "$d/config.json" ;;
-  *" ps -q app "*|*" ps -q app") cat "$d/ps-app.txt" 2>/dev/null ;;
-  *" ps "*) cat "$d/ps.txt" ;;
-  *" exec "*)
-    case " $* " in
-      *restore.sh*)
-        [ -f "$d/restore-out.txt" ] && cat "$d/restore-out.txt"
-        [ -f "$d/restore-err.txt" ] && cat "$d/restore-err.txt" >&2
-        exit "\${FAKE_RESTORE_EXIT:-0}" ;;
-    esac
-    exit "\${FAKE_EXEC_EXIT:-0}" ;;
-  *" logs "*) cat "$d/app-logs.txt" 2>/dev/null ;;
-  *" run "*)
-    case " $* " in
-      *" probe "*)
-        case " $* " in *"wget -S"*) exit "\${FAKE_HEALTH_EXIT:-0}" ;; esac
-        cat "$d/probe.txt" ;;
-      *" e2e "*|*" e2e")
-        out=""; prev=""
-        for a in "$@"; do if [ "$prev" = "-v" ]; then out="\${a%%:*}"; fi; prev="$a"; done
-        echo "e2e output line"
-        if [ -n "$out" ]; then
-          [ -f "$d/playwright-report.json" ] && cp "$d/playwright-report.json" "$out/playwright-report.json"
-          mkdir -p "$out/e2e-artifacts" && echo trace > "$out/e2e-artifacts/trace.zip"
-        fi
-        plant "\${FAKE_PLANT_E2E:-}" "$@"
-        exit "\${FAKE_E2E_EXIT:-0}" ;;
-      *"coverage.sh "*)
-        out=""; prev=""
-        for a in "$@"; do if [ "$prev" = "-v" ]; then out="\${a%%:*}"; fi; prev="$a"; done
-        if [ "\${FAKE_COVERAGE_EXIT:-0}" = 0 ] && [ -n "$out" ]; then mkdir -p "$out/coverage" && echo "<report/>" > "$out/coverage/jacoco.xml"; fi
-        if [ -n "\${FAKE_COVERAGE_LINK:-}" ] && [ -n "$out" ]; then rm -rf "$out/coverage"; ln -s "$FAKE_COVERAGE_LINK" "$out/coverage"; fi
-        plant "\${FAKE_PLANT_COVERAGE:-}" "$@"
-        echo "coverage mode: $*"; exit "\${FAKE_COVERAGE_EXIT:-0}" ;;
-      *" runner "*|*" runner") plant "\${FAKE_PLANT_RUNNER:-}" "$@"; echo "runner output line"; exit "\${FAKE_RUNNER_EXIT:-0}" ;;
-    esac ;;
-esac
-exit 0
-`;
-
 type Tweak = { handAttached?: boolean; gatewayPing?: boolean; gatewayTcp?: boolean; noPingTool?: boolean; noInhibit?: boolean; withGateway?: boolean; bridgeContainer?: boolean; externalNetwork?: boolean; reachOut?: boolean; brokenTool?: boolean; wrongHost?: boolean; cfgPorts?: boolean; cfgDefaultNet?: boolean; noDummyRunning?: boolean; wrongLiteral?: boolean; probeFails?: boolean };
 
 function nslookup(name: string, ips: string[]): string {
@@ -861,7 +805,7 @@ function fake(t: Tweak = {}, scan: SandboxScan = jvmScan()): Fake {
   const root = repo(scan);
   const state = dir('goodboy-m1-fake-');
   const bin = join(state, 'docker');
-  writeFileSync(bin, FAKE);
+  writeFileSync(bin, FAKE_DOCKER);
   chmodSync(bin, 0o755);
   writeFileSync(join(root, SANDBOX_DIR, 'compose.yml'), 'services: {}\n');
   const ctx = loadCtx(root, true);
@@ -1295,7 +1239,8 @@ describe('sandbox-run (fake docker)', () => {
     expect(f.calls().at(-1)).toContain('down --remove-orphans');
     expect(f.calls().at(-1)).not.toContain(' -v');
     expect(json(withFake(f, ['sandbox-down', '--volumes'])).volumes).toBe('removed');
-    expect(f.calls().at(-1)).toContain(' -v');
+    // the last call is the look at the project's volumes after the down, which decides on the real-data flag
+    expect(f.calls().filter((l) => l.includes(' down ')).at(-1)).toContain(' -v');
   });
 
   test('sandbox-prepare also installs the e2e packages in their own step; sandbox-up starts the proxy and waits on it', () => {
@@ -1311,7 +1256,8 @@ describe('sandbox-run (fake docker)', () => {
     expect(calls.filter((l) => l.includes(' probe sh -c'))).toHaveLength(2);
     expect(calls.filter((l) => l.includes(' probe sh -c')).at(-1)).toContain('http://proxy:8080/actuator/health');
     expect(json(r).proxyUrl).toBe('http://proxy:8080/actuator/health');
-    expect(existsSync(join(f.root, SANDBOX_DIR, 'out', 'live'))).toBe(true);
+    // /live is a named volume since M6a: nothing of it is made in the checkout
+    expect(existsSync(join(f.root, SANDBOX_DIR, 'out', 'live'))).toBe(false);
   });
 });
 
@@ -1376,8 +1322,8 @@ function e2eFake(t: Tweak = {}, scan?: SandboxScan): Fake {
   mkdirSync(join(f.root, 'e2e'), { recursive: true });
   writeFileSync(join(f.root, 'e2e', 'a.spec.ts'), 'export {};\n');
   writeFileSync(join(f.state, 'playwright-report.json'), REPORT);
-  mkdirSync(join(f.root, SANDBOX_DIR, 'out', 'live'), { recursive: true });
-  writeFileSync(join(f.root, SANDBOX_DIR, 'out', 'live', 'access.log'), ACCESS);
+  // what the proxy writes while the e2e container runs: the fake copies it into the `live` volume then
+  writeFileSync(join(f.state, 'access.log'), ACCESS);
   return f;
 }
 
@@ -1395,7 +1341,7 @@ describe('sandbox-run --suite e2e (fake docker)', () => {
     const o = json(r);
     const ts = o.ts as string;
     const runDir = join(f.root, SANDBOX_DIR, 'out', ts);
-    expect(calls[at(' e2e')]).toContain(`-v ${runDir}:/out e2e`);
+    expect(calls[at(' e2e')]).toContain(`-e GOODBOY_OUT=/outroot/${ts} e2e`);
     expect(o.accessLog).toBe(join(runDir, 'access.log'));
     expect(readFileSync(o.accessLog, 'utf8')).toBe(ACCESS);
     expect(o.playwrightReport).toBe(join(runDir, 'playwright-report.json'));
@@ -1409,14 +1355,16 @@ describe('sandbox-run --suite e2e (fake docker)', () => {
   });
 
   test('a passing run deletes its traces and screenshots; a failing run keeps them and exits with the failure', () => {
+    // the traces are in the run's dir of the runout volume (the fake keeps it under its state dir)
     const pass = e2eFake();
     const p = json(withFake(pass, ['sandbox-run', '--suite', 'e2e']));
-    expect(existsSync(join(dirname(p.result), 'e2e-artifacts'))).toBe(false);
+    expect(existsSync(join(pass.state, 'vol', 'outroot', p.ts, 'e2e-artifacts'))).toBe(false);
+    expect(p.e2e.artifacts).toBe('removed');
     const fail = e2eFake();
     const r = withFake(fail, ['sandbox-run', '--suite', 'e2e'], { FAKE_E2E_EXIT: '1' });
     expect(r.exitCode).toBe(1);
     const o = json(r);
-    expect(readFileSync(join(dirname(o.result), 'e2e-artifacts', 'trace.zip'), 'utf8')).toContain('trace');
+    expect(readFileSync(join(fail.state, 'vol', 'outroot', o.ts, 'e2e-artifacts', 'trace.zip'), 'utf8')).toContain('trace');
     expect(JSON.parse(readFileSync(o.result, 'utf8')).e2e).toMatchObject({ exit: 1, artifacts: 'kept' });
   });
 
@@ -1447,14 +1395,14 @@ describe('sandbox-run --suite e2e (fake docker)', () => {
     expect(res).toMatchObject({ exit: 3, unit: { exit: 3 }, e2e: { exit: 1 } });
   });
 
-  test('the unit runner gets the run dir at /out, and a unit-only run takes no e2e data into its coverage report', () => {
+  test('the unit runner gets the run dir of the volume as GOODBOY_OUT, and a unit-only run takes no e2e data into its coverage report', () => {
     const f = e2eFake();
     const r = withFake(f, ['sandbox-run', '--suite', 'unit']);
     expect(r.exitCode).toBe(0);
     const o = json(r);
     const calls = f.calls();
     const runDir = dirname(o.result);
-    expect(calls.find((l) => l.includes('-runner-') && l.includes(' runner'))).toContain(`-v ${runDir}:/out runner`);
+    expect(calls.find((l) => l.includes('-runner-') && l.includes(' runner'))).toContain(`-e GOODBOY_OUT=/outroot/${o.ts} runner`);
     const cov = calls.find((l) => l.includes('coverage.sh'))!;
     expect(cov).toContain('coverage.sh report');
     expect(cov).not.toContain('report-e2e');
@@ -1508,19 +1456,23 @@ describe('sandbox-run --suite e2e (fake docker)', () => {
     expect(g.calls().find((l) => l.includes('-runner-'))).toContain('runner ./gradlew test');
   });
 
-  test('links a test left in the run dir are replaced, never written through', () => {
+  test('links a test left in the run dir of the volume are replaced, never written through; the host copies are plain files', () => {
     const f = e2eFake();
     const victim = join(f.state, 'victim.txt');
     writeFileSync(victim, 'VICTIM-ORIGINAL');
-    const r = withFake(f, ['sandbox-run', '--suite', 'all'], { FAKE_PLANT_RUNNER: 'output.log', FAKE_PLANT_E2E: 'e2e-output.log access.log', FAKE_PLANT_COVERAGE: 'result.json', FAKE_VICTIM: victim });
+    // a failing run keeps its dir in the volume, so the files in it can be looked at
+    const r = withFake(f, ['sandbox-run', '--suite', 'all'], { FAKE_PLANT_RUNNER: 'output.log', FAKE_PLANT_E2E: 'e2e-output.log', FAKE_PLANT_COVERAGE: 'result.json', FAKE_VICTIM: victim, FAKE_RUNNER_EXIT: '1' });
     expect(readFileSync(victim, 'utf8')).toBe('VICTIM-ORIGINAL');
-    const dirAbs = dirname(json(r).result);
-    for (const n of ['output.log', 'e2e-output.log', 'access.log', 'result.json']) expect([n, lstatSync(join(dirAbs, n)).isFile()]).toEqual([n, true]);
-    expect(readFileSync(join(dirAbs, 'output.log'), 'utf8')).toContain('runner output line');
-    expect(readFileSync(join(dirAbs, 'e2e-output.log'), 'utf8')).toContain('e2e output line');
-    expect(readFileSync(join(dirAbs, 'access.log'), 'utf8')).toBe(ACCESS);
-    const res = JSON.parse(readFileSync(join(dirAbs, 'result.json'), 'utf8'));
-    expect(res.coverageReports.length).toBe(1);
+    const o = json(r);
+    const hostDir = dirname(o.result);
+    const volDir = join(f.state, 'vol', 'outroot', o.ts);
+    for (const base of [hostDir, volDir]) for (const n of ['output.log', 'e2e-output.log']) expect([base, n, lstatSync(join(base, n)).isFile()]).toEqual([base, n, true]);
+    expect(readFileSync(join(volDir, 'output.log'), 'utf8')).toContain('runner output line');
+    expect(readFileSync(join(volDir, 'e2e-output.log'), 'utf8')).toContain('e2e output line');
+    expect(readFileSync(join(hostDir, 'access.log'), 'utf8')).toBe(ACCESS);
+    // the host's own result is untouched by what the container left under that name in the volume
+    expect(lstatSync(join(hostDir, 'result.json')).isFile()).toBe(true);
+    expect(JSON.parse(readFileSync(join(hostDir, 'result.json'), 'utf8')).coverageReports.length).toBe(1);
   });
 
   test('a coverage dir that became a link makes no report: every part below the run dir is checked', () => {
@@ -1548,24 +1500,21 @@ describe('sandbox-run --suite e2e (fake docker)', () => {
     expect(readFileSync(victim, 'utf8')).toBe('VICTIM-ORIGINAL');
   });
 
-  test('a directory where a result file goes stops the run with the reason and writes nothing outside', () => {
+  test('a directory where the log goes in the volume does not stop the run: the log is lost, said in the result, and nothing is written outside', () => {
     const f = e2eFake();
     const victim = join(f.state, 'victim.txt');
     writeFileSync(victim, 'VICTIM-ORIGINAL');
     const r = withFake(f, ['sandbox-run', '--suite', 'unit'], { FAKE_PLANT_DIRS: 'output.log', FAKE_VICTIM: victim });
-    expect(r.exitCode).toBe(1);
-    expect(r.stderr.toString()).toContain('sandbox-run:');
+    expect(r.exitCode).toBe(0);
+    expect(JSON.parse(readFileSync(json(r).result, 'utf8')).problems).toContain('output.log could not be written to the run volume');
     expect(readFileSync(victim, 'utf8')).toBe('VICTIM-ORIGINAL');
   });
 
-  test('an access log that is a link is refused, not followed or copied', () => {
+  test('an access log that is a link in the volume is refused, not followed or copied', () => {
     const f = e2eFake();
-    const log = join(f.root, SANDBOX_DIR, 'out', 'live', 'access.log');
     const elsewhere = join(f.state, 'secret.txt');
     writeFileSync(elsewhere, 'host secret');
-    rmSync(log);
-    symlinkSync(elsewhere, log);
-    const r = withFake(f, ['sandbox-run', '--suite', 'e2e']);
+    const r = withFake(f, ['sandbox-run', '--suite', 'e2e'], { FAKE_PLANT_LIVE: 'access.log', FAKE_VICTIM: elsewhere });
     const res = JSON.parse(readFileSync(json(r).result, 'utf8'));
     expect(res.accessLog).toBeNull();
     expect(res.e2e.problems.some((p: string) => p.includes('access log') && p.includes('not a regular file'))).toBe(true);
@@ -1574,7 +1523,7 @@ describe('sandbox-run --suite e2e (fake docker)', () => {
 
   test('a missing access log is a problem in the result, not a crash', () => {
     const f = e2eFake();
-    rmSync(join(f.root, SANDBOX_DIR, 'out', 'live', 'access.log'));
+    rmSync(join(f.state, 'access.log'));
     const r = withFake(f, ['sandbox-run', '--suite', 'e2e']);
     const res = JSON.parse(readFileSync(json(r).result, 'utf8'));
     expect(res.accessLog).toBeNull();
@@ -1956,9 +1905,9 @@ describe('sandbox-run (in this process)', () => {
     const f = e2eFake();
     for (const [fail, said] of [
       [' up -d proxy', 'starting the proxy failed'],
-      ['rm -rf /live', 'cleaning /live failed'],
+      [' proxy sh -c rm -rf /live', 'cleaning /live failed'],
       [' up -d app', 'starting the app failed'],
-      [': > /live/access.log', 'truncating the access log failed'],
+      [' proxy sh -c : > /live/access.log', 'truncating the access log failed'],
     ] as const) {
       const r = await inproc(f, 'sandbox-run', ['--suite', 'e2e'], { FAKE_FAIL: fail });
       expect({ fail, code: r.code, stopped: String(r.out.stopped).includes(said) }).toEqual({ fail, code: 1, stopped: true });
@@ -1972,7 +1921,7 @@ describe('sandbox-run (in this process)', () => {
 
   test('problems of the e2e run that do not stop it are in the result: the app that did not stop, no access log, no Playwright report', async () => {
     const f = e2eFake();
-    rmSync(join(f.root, SANDBOX_DIR, 'out', 'live', 'access.log'));
+    rmSync(join(f.state, 'access.log'));
     rmSync(join(f.state, 'playwright-report.json'));
     const r = await inproc(f, 'sandbox-run', ['--suite', 'e2e'], { FAKE_FAIL: ' stop -t 60' });
     expect(r.code).toBe(0);
@@ -1984,12 +1933,12 @@ describe('sandbox-run (in this process)', () => {
     expect(r.out.playwrightReport).toBeNull();
   });
 
-  test('a directory planted where a result file goes stops the run with the reason and writes nothing outside', async () => {
+  test('a directory planted where the log goes in the volume is a problem of the run, and nothing is written outside', async () => {
     const f = e2eFake();
     const victim = join(f.state, 'victim.txt');
     writeFileSync(victim, 'VICTIM-ORIGINAL');
     const r = await inproc(f, 'sandbox-run', ['--suite', 'unit'], { FAKE_PLANT_DIRS: 'output.log', FAKE_VICTIM: victim });
-    expect(r.error).toContain('sandbox-run:');
+    expect(r.out.problems).toContain('output.log could not be written to the run volume');
     expect(readFileSync(victim, 'utf8')).toBe('VICTIM-ORIGINAL');
   });
 });
