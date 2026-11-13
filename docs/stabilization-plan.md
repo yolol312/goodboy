@@ -49,6 +49,7 @@ so work is released in batches:
 | v0.36.0 | track L (test backfill for existing projects, §18; #18), with the fixes of the fifth real-use trial (§18 "Trial 5") and of the field reports #20–#22 (§15.15, §15.16). Released 2026-10-22; track M moved to v0.37.0 |
 | v0.36.1 | the test-gate fixes of #23 (§15.17). Released 2026-10-22 |
 | v0.37.0 | track M (full tests in an isolated container sandbox: a real database copy, dummy external services, no egress; 100% line and branch coverage, every screen and action in e2e), §19 |
+| v0.38.0 | proposed: track N (§20, on `feat/m-sandbox` until M rebases), with a push judged by the test results gathered since the last push (§21, N24–N29, #43); its order against v0.37.0 is the user's decision |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
 
 ## 4. A — Fix silent failures and deadlocks
@@ -4521,6 +4522,129 @@ Fixed from the trial:
 
 Seen, not changed: the result guard denies a reviewer's `python3` read of a test record, as in
 trial 4.
+
+## 21. Push by the test results gathered since the last push (proposed, 2026-11-12, #43)
+
+Status: proposed, planned at the user's request on 2026-11-12. §19 (track M) and §20 (track N)
+live on `feat/m-sandbox` until M rebases onto `main`; this section continues track N's numbering
+(N24–N29). It changes the push check, so it waits for its place in the order like the rest of N.
+It also changes N9's push rule: the user's 2026-10-26 point "before a push the whole project suite
+runs" becomes "before a push every change is covered by the results gathered since the last push;
+the whole suite runs only when a global file changed" (N26). Two other N9 push rules stay where a
+full run is needed: with an inventory, goodboy launches the declared suites itself and binds each
+report to its suite, tree and run, and the one-hour tier does not apply to declared suites. The
+gathered results are the test role's `test-write` records, as layer-1 records are today (§21.4).
+
+### 21.1 Why
+- A push needs a passing layer-1 record (`checkHandoff`, lib/push-test.ts) and a passing full
+  regression (`checkRegression`, lib/regression.ts) of exactly the tree pushed; a docs-only
+  difference from a passing tree is allowed (§15.7). An edit just before the push changes the
+  tree, so both run again from the start. This repo's suite took 931 s on 2026-11-12 (record
+  `2026-11-12T09-38-27.717Z`).
+- The Stop already works by increments: changed-line coverage against the session start, and the
+  existing tests that load a changed file, run after its last edit (I5, `affectedGaps` in
+  lib/existing-tests.ts).
+- Nothing is cleaned after a push. The push check reads layer-1 records of the last 24 h
+  (`GOODBOY_TEST_WINDOW_MIN`, hooks/pre-tool-use.ts), and the regression dir keeps its newest 20
+  (`KEEP`, lib/regression.ts).
+
+### 21.2 The cycle the user asked for
+A push starts a cycle. Every test run until the next push adds to the cycle's results. A push
+attempt checks whether those results cover every change it carries. If they do not, only the
+uncovered part is tested, and the attempt repeats. A covered push goes through, and its success
+clears the cycle's records; the next push starts a new cycle.
+
+The user's answers (2026-11-12), each the recommended option:
+1. The full regression runs only in a cycle that changed a global file (N26). Otherwise the
+   gathered results decide.
+2. The tests that depend on a changed file are found by imports (today's I5) and by child
+   processes, that is a test that runs the file as a process (N25).
+3. After a successful push the cycle's records are deleted and one push summary is kept (N27).
+
+### 21.3 Steps (proposed)
+- **N24, the range and "covered".**
+  - Base: the commit of the newest push summary (N27) for the same repo and destination,
+    taken as its merge base with the pushed commit. With no summary yet, today's rule applies
+    (exact tree plus full regression). The remote-tracking ref is not the base: `git
+    update-ref` can move it to the pushed commit and empty the range. A push made outside
+    goodboy leaves the base older, so the range is larger, which is the safe direction.
+  - Each file changed between the base and the pushed commit counts at its pushed content (its
+    blob):
+    - a code file is covered when its changed lines ran in passing records whose tree holds the
+      file's pushed blob, and every test that loads or runs it (N25) passed in a record whose
+      tree holds the pushed blobs of both the file and the test;
+    - a test file is covered when it passed at its pushed content;
+    - a doc needs nothing, as today's docs-only rule;
+    - any other file is global (N26).
+  - A record's tree is a written git tree object (`write-tree` in lib/push-test.ts), so `git
+    ls-tree` gives each file's blob in it. Records keep counts against the session start, not
+    line numbers: changed lines covered per file (`coverage.changed.files`), added lines per file
+    (`diff_lines`) and the files the report saw (`in_report`). N24 adds per tested file
+    the lines the coverage tool instruments and the lines that ran, numbered in the record's
+    content of the file, so a record whose blob equals the pushed blob proves lines of the range
+    directly. A pruned tree object (git gc, two weeks by default) makes its record count for
+    nothing.
+- **N25, tests that run a file as a process.** `affectedTests` (lib/existing-tests.ts) maps a
+  changed file to the start tests whose relative imports load it (JS/TS, Python; Go by dir).
+  It misses a test that spawns the file; this repo's hook tests name it as `join(ROOT, 'hooks',
+  'stop.ts')`. N25 adds that a test runs a file when its text names the file's repo path in one
+  string, or in consecutive string arguments of a `join` or `resolve` call. The push check uses
+  it. The Stop keeps its import-only rule unless the user decides otherwise, since the change
+  would add Stop blocks.
+  A changed code file that no record measures and no test loads or runs counts as global
+  (N26). An example is a P5-exempt hook file with no test that spawns it.
+- **N26, global files and the full regression.** A range that changed a global file needs a
+  passing full regression (§15.7) of the pushed tree, as today. Global files are:
+  - package manifests and lockfiles;
+  - the runner's config and setup or preload files (`bunfig.toml` and its `preload`, jest,
+    vitest and playwright configs, `pytest.ini`, `conftest.py`, `tox.ini`, `pyproject.toml`,
+    `go.mod`, `go.sum`, `Cargo.toml`, `Cargo.lock`) and `tsconfig*`;
+  - any changed file that is neither code, a test nor a doc (data, fixtures, snapshots, env and
+    CI files);
+  - N25's unmapped code files.
+
+  The one-hour tier stays for detected suites (a suite over an hour: the gathered results
+  suffice, per repo as in v0.36.19). It does not apply to N9's declared suites.
+- **N27, cleanup after a successful push.** When the push check lets a push through, it notes the
+  records it counted in hook-written session state. PostToolUse of that Bash call deletes them
+  (the `repo` copies of v0.36.19 included) once the command exited 0. It then writes one summary,
+  `.claude/tests/pushes/<ts>.json`, with:
+  - the repo, the remote, the branch, the base and the pushed commit;
+  - each covered file and the tests that covered it;
+  - whether a full regression ran;
+  - the names of the records used.
+
+  A denied or failed push deletes nothing. Records the push did not count stay under today's
+  window. The result guards protect the summary dir as they protect the record dirs. In the Stop,
+  a file whose current content equals its content in a summary counts as tested, so the cleanup
+  does not reopen the Stop's test gate for work already pushed.
+- **N28, the denial names only the gaps.** A push that is not covered is denied with the
+  uncovered files and lines, the tests to run for each file, and any global file that asks for
+  the full regression. The hand-off to `test-unit` names exactly these, and
+  `agents/test-unit.md` says to run the gaps, not the whole suite, unless the denial asks for
+  it.
+- **N29, tests and a live probe.** Each step has a test that fails without it. The live probe
+  (`/verify`) runs one cycle:
+  1. edit, test, push: the push is denied with the gaps only;
+  2. run the gaps: the push passes, the records are gone and a summary is written;
+  3. a second cycle starts empty;
+  4. an edit of a global file asks for the full regression.
+
+### 21.4 What it gives up (known limits)
+- **Weaker trust than N9.** Outside a full run, the push is judged by the test role's
+  `test-write` records, not by suites goodboy launched itself and bound to their reports (N9).
+  goodboy computes each record's tree and checks its fields, as for layer-1 records today.
+- **Untested combinations.** A test proves a file only with the contents both had in that
+  record. Some effects are seen through neither imports nor process runs: a file read at run
+  time by a computed path, an env var, state shared between test files in one process, a dynamic
+  import of a computed name. They are missed unless the file is global.
+- **Unmeasured files.** A file the coverage tool cannot measure is covered only by N25's tests,
+  or else it is global.
+- **Shared records.** A record deleted at cleanup that another unpushed branch also counted must
+  be run again there.
+- **A failed push with exit 0.** A push command whose failure still exits 0 (`git push || true`)
+  deletes records that were still needed. The summary claims only that the content was covered,
+  and that stays true.
 
 ## Appendix — mutation set (2026-10-12 review)
 
