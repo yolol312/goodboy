@@ -16,7 +16,7 @@
 
 import { statSync } from 'node:fs';
 import { extname, relative, resolve } from 'node:path';
-import { jsLoads } from './existing-tests';
+import { jsLoadGroups } from './existing-tests';
 import { realish } from './review-scope';
 import { MAX_DOC_BYTES, readRegular } from './safe-read';
 import { RUN_NAME } from './sandbox-mode';
@@ -42,6 +42,7 @@ const SANDBOX_LAYOUT: readonly RegExp[] = [
   /^dummies\/ldap\/[\w.-]+\.ldif$/,
   /^proxy\/Caddyfile$/,
   /^e2e\/(?:goodboy-ui\.ts|playwright\.config\.ts)$/,
+  /^data\/(?:goodboy-data\.ts|goodboy-data\.cjs|GoodboyData\.java)$/,
   /^ca\/(?:ca\.crt|ca\.key|server\.crt|server\.key|server\.p12|server\.sans)$/,
 ];
 /** `sandbox-run`'s own output, `out/<run>/…` (git-ignored): no test applies, and no run starts
@@ -49,8 +50,9 @@ const SANDBOX_LAYOUT: readonly RegExp[] = [
 const RUN_OUTPUT = new RegExp(`^out/${RUN_NAME.source.slice(1, -1)}/`);
 /** Files only the e2e path uses: a run that did not run the e2e step does not exercise them. */
 const E2E_ONLY = /^(?:e2e\/|proxy\/|runtime\/e2e-prep\.sh$)/;
-/** The one layout file a test may import. */
-const E2E_FIXTURE = 'e2e/goodboy-ui';
+/** The layout files a test may import: the e2e fixture and the data helper (M6c; a JVM test uses a copy of
+ *  `GoodboyData.java` in its own test sources, which no import path names). */
+const IMPORTABLE: ReadonlySet<string> = new Set(['e2e/goodboy-ui', 'data/goodboy-data']);
 
 /** Whether a path below the sandbox dir is one the sandbox commands write. */
 export function isSandboxLayout(rel: string): boolean {
@@ -105,12 +107,15 @@ const JS_EXT = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.mts', '.
 const MAX_USERS_READ = 400;
 const MAX_USER_BYTES = 512 * 1024;
 const noExt = (rel: string) => rel.replace(/\.[cm]?[jt]sx?$/, '');
+/** The module a specifier names, as Node resolves it: the extension taken off once, then one `/index` (a file `m.ts`, a
+ *  directory `m/index.ts`). A directory that merely looks like the fixture (`goodboy-ui.js/index`) is another module. */
+const bareModule = (rel: string): string => noExt(rel).replace(/\/index$/, '');
 
 /** The sandbox layout files that the changed files (absolute paths) of the project import: a
  *  relative specifier (as lib/existing-tests.ts reads them, comments ignored) that resolves into
  *  the sandbox dir. A file that is no test and names the dir otherwise (a path in a string, a
  *  Python `sys.path` entry, a `require` built at run time) makes `all`. The e2e fixture
- *  `e2e/goodboy-ui` may be imported by tests. Files of the sandbox dir are not users. */
+ *  `e2e/goodboy-ui` and the data helper `data/goodboy-data` (M6c) may be imported by tests. Files of the sandbox dir are not users. */
 export function sandboxUsers(top: string, changed: readonly string[]): SandboxUsers {
   const files = new Set<string>();
   let all = false;
@@ -136,18 +141,21 @@ export function sandboxUsers(top: string, changed: readonly string[]): SandboxUs
     read++;
     const test = isTestFile(rel) || /(?:^|\/)e2e\//.test(rel);
     if (JS_EXT.has(ext)) {
-      for (const k of jsLoads(text.text, rel)) {
-        if (k === SANDBOX_PREFIX.slice(0, -1)) all = true; // the dir itself
-        if (!k.startsWith(SANDBOX_PREFIX)) continue;
-        const below = k.slice(SANDBOX_PREFIX.length);
-        if (test && noExt(below).replace(/\/index$/, '') === E2E_FIXTURE) continue;
-        files.add(below);
+      for (const g of jsLoadGroups(text.text, rel)) {
+        // a specifier is exempt as a whole, by the module it names (its keys also hold the dir-index forms of other modules)
+        const named = g.target.startsWith(SANDBOX_PREFIX) ? g.target.slice(SANDBOX_PREFIX.length) : null;
+        const exempt = test && named !== null && IMPORTABLE.has(bareModule(named));
+        for (const k of g.keys) {
+          if (k === SANDBOX_PREFIX.slice(0, -1)) all = true; // the dir itself
+          if (!k.startsWith(SANDBOX_PREFIX) || exempt) continue;
+          files.add(k.slice(SANDBOX_PREFIX.length));
+        }
       }
     }
     if (!test) {
       // A mention the specifier check did not read: what is left once the import specifiers (read
       //   above) and the fixture's path are taken out.
-      const rest = withoutComments(text.text).replace(JS_SPECIFIER, '').replace(/\.goodboy\/sandbox\/e2e\/goodboy-ui/g, '');
+      const rest = withoutComments(text.text).replace(JS_SPECIFIER, '').replace(/\.goodboy\/sandbox\/(?:e2e\/goodboy-ui|data\/goodboy-data)/g, '');
       if (rest.includes(SANDBOX_PREFIX.slice(0, -1))) all = true;
     }
   }

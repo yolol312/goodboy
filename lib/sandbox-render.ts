@@ -46,7 +46,8 @@ import {
   toYaml,
 } from './sandbox-parts';
 import { SANDBOX_DIR } from './sandbox-mode';
-import { META_DIR, outDirMounts, outputDirsFor, readerMounts, volumeNames } from './sandbox-volumes';
+import { DATA_DIR, DATA_FILE, DATA_VOLUME, META_DIR, outDirMounts, outputDirsFor, readerMounts, volumeNames } from './sandbox-volumes';
+import { dataHelperCjs, dataHelperJava, dataHelperTs } from './sandbox-data-helper';
 import type { OutboundKind, SandboxLocal, SandboxOutbound, SandboxScan, SandboxStore } from './sandbox-types';
 
 export { CA_MOUNT, configKeyAt, KEYSTORE_PASSWORD };
@@ -226,7 +227,8 @@ export function planSandbox(scan: SandboxScan, local: SandboxLocal, opts: Render
     const first = i === 0;
     if (!first) notes.push(`${store.kind} store ${i + 1} (${store.where.file}:${store.where.line}) is an empty database: only the first SQL store gets the dump`);
     if (first && hasDump && store.kind !== 'postgres' && local.dumpFormat === 'custom') notes.push('a custom-format dump is for Postgres only; MySQL and MariaDB load plain SQL');
-    const vols = [`${svc}data:${store.kind === 'postgres' ? (major(v) >= 18 ? '/var/lib/postgresql' : '/var/lib/postgresql/data') : '/var/lib/mysql'}`, `./db/${svc}:/goodboy-db:ro`];
+    // the `data` volume (M6c): where the resolve step writes the values the tests read, before the suites
+    const vols = [`${svc}data:${store.kind === 'postgres' ? (major(v) >= 18 ? '/var/lib/postgresql' : '/var/lib/postgresql/data') : '/var/lib/mysql'}`, `./db/${svc}:/goodboy-db:ro`, `${DATA_VOLUME}:${DATA_DIR}`];
     volumes[`${svc}data`] = {};
     if (first && hasDump) vols.push('${GOODBOY_DUMP}:/dump/' + dumpFile + ':ro');
     const scripts = store.kind === 'postgres' ? pgScripts(sql, first ? local.dumpFormat : null, first && hasDump) : mysqlScripts(sql, first && hasDump);
@@ -478,6 +480,12 @@ export function planSandbox(scan: SandboxScan, local: SandboxLocal, opts: Render
       depends_on: depends,
     };
   } else notes.push('the scan has no start command: no app service');
+  // the resolved values of data.json (M6c): read-only in the test containers, which name the file in GOODBOY_DATA
+  const dataMount = `${DATA_VOLUME}:${DATA_DIR}:ro`;
+  const dataFile = `${DATA_DIR}/${DATA_FILE}`;
+  files.set('data/goodboy-data.ts', dataHelperTs());
+  files.set('data/goodboy-data.cjs', dataHelperCjs());
+  files.set('data/GoodboyData.java', dataHelperJava());
   if (scan.build.testCommand.length > 0) {
     services.runner = {
       image: runnerImage,
@@ -485,9 +493,9 @@ export function planSandbox(scan: SandboxScan, local: SandboxLocal, opts: Render
       working_dir: '/work',
       entrypoint: ['sh', '/sandbox/entrypoint.sh'],
       command: scan.build.testCommand,
-      environment: { ...runtimeEnv, ...runnerCoverage },
+      environment: { ...runtimeEnv, ...runnerCoverage, GOODBOY_DATA: dataFile },
       ...(envFile ? { env_file: envFile } : {}),
-      volumes: ['../..:/work', ...cacheMounts, ...profile.runtimeVols('/work'), 'build:/build:ro', 'live:/live', 'runout:/outroot', ...outDirMounts(outDirs), './runtime/coverage.sh:/sandbox/coverage.sh:ro', ...(stack === 'node' ? ['./runtime/lcov-merge.cjs:/sandbox/lcov-merge.cjs:ro'] : []), ...coverageFiles, ...trust],
+      volumes: ['../..:/work', ...cacheMounts, ...profile.runtimeVols('/work'), 'build:/build:ro', 'live:/live', 'runout:/outroot', dataMount, ...outDirMounts(outDirs), './runtime/coverage.sh:/sandbox/coverage.sh:ro', ...(stack === 'node' ? ['./runtime/lcov-merge.cjs:/sandbox/lcov-merge.cjs:ro'] : []), ...coverageFiles, ...trust],
       networks: Object.keys(netsOf('runner')),
       depends_on: depends,
     };
@@ -512,9 +520,9 @@ export function planSandbox(scan: SandboxScan, local: SandboxLocal, opts: Render
       image: playwrightImage(pwVersion),
       profiles: ['tools'],
       working_dir: `/work/${E2E_DIR}`,
-      environment: { GOODBOY_BASE_URL: `http://proxy:${PROXY_PORT}`, GOODBOY_E2E_DIR: `/work/${E2E_DIR}`, CI: 'true' },
+      environment: { GOODBOY_BASE_URL: `http://proxy:${PROXY_PORT}`, GOODBOY_E2E_DIR: `/work/${E2E_DIR}`, GOODBOY_DATA: dataFile, CI: 'true' },
       command: ['/work/node_modules/.bin/playwright', 'test', '--config', '/work/.goodboy/sandbox/e2e/playwright.config.ts'],
-      volumes: ['../..:/work', 'e2edeps:/work/node_modules', 'runout:/outroot', ...outDirMounts(outDirs)],
+      volumes: ['../..:/work', 'e2edeps:/work/node_modules', 'runout:/outroot', dataMount, ...outDirMounts(outDirs)],
       networks: ['inner'],
       depends_on: { proxy: { condition: 'service_started' } },
     };
@@ -545,7 +553,7 @@ export function planSandbox(scan: SandboxScan, local: SandboxLocal, opts: Render
   // The reader: the one way the host reaches the volumes of raw artifacts (it reads, removes and writes
   // through the scripts of lib/sandbox-volumes.ts); it has no network at all (`network_mode: none`, which
   // the static check allows for a service of this name alone) and no bind of the checkout.
-  services.reader = { image: IMAGES.probe, profiles: ['tools'], command: ['sleep', '3600'], volumes: ['runout:/outroot', 'live:/live', `meta:${META_DIR}`, ...readerMounts(outDirs)], network_mode: 'none' };
+  services.reader = { image: IMAGES.probe, profiles: ['tools'], command: ['sleep', '3600'], volumes: ['runout:/outroot', 'live:/live', `meta:${META_DIR}`, `${DATA_VOLUME}:${DATA_DIR}`, ...readerMounts(outDirs)], network_mode: 'none' };
 
   const header = [
     '# Generated by goodboy sandbox-init (track M). A file you changed is never overwritten.',

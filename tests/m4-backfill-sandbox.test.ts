@@ -434,6 +434,14 @@ describe('M4: the run-sandbox skill', () => {
     expect(t).toContain('Never keep the traces of a passing run');
   });
 
+  test('it keeps two clauses a tightening dropped once: a record without a run does not count, and real data keeps raw artifacts in volumes only', () => {
+    const flat = skill().replace(/\s+/g, ' ');
+    expect(flat).toContain('A record without a run, or whose run failed its check, exited non-zero or changed afterwards, does not count for a backfill target');
+    expect(flat).toContain('(real data keeps them in volumes only)');
+    // the skill cap of tests/g2-agents-skills.test.ts, counted the way it counts
+    expect(skill().split('\n').length).toBeLessThanOrEqual(90);
+  });
+
   test('backfill-tests and setup-test-infra point to the sandbox', () => {
     const bf = readFileSync(join(ROOT, 'skills', 'backfill-tests', 'SKILL.md'), 'utf8');
     for (const need of ['sandbox-scan', 'sandbox-local --dump', 'sandbox-init', 'sandbox-prepare', 'sandbox-up', 'sandbox-check', 'run-sandbox', 'coverage-check', 'ui-check', 'ui-inventory', 'coverage-exempt:', 'keep-project-knowledge']) {

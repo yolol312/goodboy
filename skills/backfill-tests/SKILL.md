@@ -40,9 +40,9 @@ two levels above this skill's base directory); its output from project files is 
    - the absolute target paths, their `needs` (`any`; `integration`: a suite that drives the
      real boundary; `ui`: one that renders it) and the Never list below;
    - test the main behaviors and error paths, with today's outputs as the expected values;
-   - with a sandbox: follow `run-sandbox` (every suite through `sandbox-run`, the record's
-     `sandbox` from its check) and, for a UI target, add its `ui-inventory` items (ids) to
-     the brief; a record without `sandbox` does not count for a mark;
+   - with a sandbox: follow `run-sandbox` (every suite through `sandbox-run`, the record's `sandbox` from its check, values
+     of its database only from the data helper and `.goodboy/sandbox/data.json`, never literal) and, for a UI target, add its
+     `ui-inventory` ids; a record without `sandbox` does not count for a mark;
    - before anything starts the app or its services, read the config it loads, point every
      non-local host (database, API, mail, storage) at a local container or a dummy value,
      and report any host left;

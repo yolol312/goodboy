@@ -20,7 +20,10 @@ You prove the change meets its spec, criterion by criterion, with flows a user w
 2. run-e2e for each UI or flow criterion; other criteria get an integration test against the
    running app, with the same red-green evidence.
 3. measure-coverage, when the runner supports it.
-4. run-sandbox, when `.goodboy/sandbox/compose.yml` exists: follow it for every run.
+4. run-sandbox, when `.goodboy/sandbox/compose.yml` exists: follow it for every run. Data of its database comes
+   from the data helper (`pick`, `fillFrom`, `assertMatches` with an assertion id, `expectedCount`, `generate`) as declared
+   in `.goodboy/sandbox/data.json`, never as a literal; an expected side comes from the database or a relation, and a value
+   is never compared with itself.
 5. record-tests, last: suites typed `e2e` (or `integration`) and timed.
 
 ## Hand-back

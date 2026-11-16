@@ -104,7 +104,7 @@ describe('the text policy (lib/sandbox-boundary.ts)', () => {
   test('the codes are one fixed list, and the preparation step keeps its tails', () => {
     expect(DIAG_CODES).toEqual([
       'step-failed', 'timed-out', 'restore-failed', 'reset-failed', 'proxy-failed', 'app-failed', 'app-down', 'live-failed',
-      'artifacts-not-removed', 'coverage-failed', 'data-failed', 'data-refused', 'volume-failed', 'sweep-failed', 'registry-failed', 'docker-failed', 'check-failed', 'internal', 'withheld',
+      'artifacts-not-removed', 'coverage-failed', 'data-failed', 'data-refused', 'data-resolve-failed', 'data-collision', 'volume-failed', 'sweep-failed', 'registry-failed', 'docker-failed', 'check-failed', 'internal', 'withheld',
     ]);
     expect(OPEN.realData).toBe(false);
     expect(OPEN.tail(bounded(), 100)).toContain('out');
@@ -494,7 +494,7 @@ describe('the volume scripts and what they print (lib/sandbox-volumes.ts)', () =
     expect(outDirVolume('build/test-results')).toBe('tout_build_test_results');
     expect(outDirMounts()).toContain('tout_build_test_results:/work/build/test-results');
     expect(readerMounts()).toContain('tout_build_test_results:/outdirs/tout_build_test_results');
-    expect(volumeNames()).toEqual(['runout', 'live', 'meta', ...OUTPUT_DIRS.map(outDirVolume)]);
+    expect(volumeNames()).toEqual(['runout', 'live', 'meta', 'data', ...OUTPUT_DIRS.map(outDirVolume)]);
     expect(volumeMarker('20261113T010101Z', 'playwright-report.json')).toBe('volume:runout/20261113T010101Z/playwright-report.json');
     expect(MAX_JUNIT_BYTES).toBe(2 * 1024 * 1024);
   });
@@ -812,7 +812,7 @@ describe('the compose file keeps raw artifacts out of the checkout', () => {
     const reader = c.services.reader!;
     expect(reader.image).toMatch(/^busybox:\d+\.\d+$/);
     expect(reader.profiles).toEqual(['tools']);
-    expect(reader.volumes).toEqual(['runout:/outroot', 'live:/live', 'meta:/meta', ...readerMounts()]);
+    expect(reader.volumes).toEqual(['runout:/outroot', 'live:/live', 'meta:/meta', 'data:/goodboy-data', ...readerMounts()]);
     expect(reader.network_mode).toBe('none');
     expect(reader.networks).toBeUndefined();
     const inner = { inner: { internal: true, driver_opts: { 'com.docker.network.bridge.inhibit_ipv4': 'true' } } };
@@ -834,7 +834,7 @@ describe('the compose file keeps raw artifacts out of the checkout', () => {
     for (const v of volumeNames(dirs)) expect([v, Object.keys(c.volumes).includes(v)]).toEqual([v, true]);
     for (const svc of ['runner', 'e2e']) expect(c.services[svc]!.volumes).toEqual(expect.arrayContaining(outDirMounts(dirs)));
     expect(c.services.runner!.volumes).toContain(`${outDirVolume('app/build/test-results')}:/work/app/build/test-results`);
-    expect(c.services.reader!.volumes).toEqual(['runout:/outroot', 'live:/live', 'meta:/meta', ...readerMounts(dirs)]);
+    expect(c.services.reader!.volumes).toEqual(['runout:/outroot', 'live:/live', 'meta:/meta', 'data:/goodboy-data', ...readerMounts(dirs)]);
     // the plain project has only the root's dirs
     expect(Object.keys(compose().volumes).filter((v) => v.startsWith('tout_'))).toHaveLength(OUTPUT_DIRS.length);
   });

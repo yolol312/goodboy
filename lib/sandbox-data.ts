@@ -35,21 +35,21 @@ const MAX_DEPTH = 4;
 const MAX_NODES = 20;
 const MAX_CHILDREN = 10;
 const MAX_STRING = 64;
-const MAX_PICK = 20;
+export const MAX_PICK = 20;
 const DEFAULT_PICK = 5;
 const MAX_TABLES = 500;
 const TABLE_CHUNK = 50;
 const SCHEMA_ROWS = 20_000;
 const ENUM_MAX = 50;
-/** Rows `shape` and the enum check look at, per column. */
-const SAMPLE_ROWS = 100_000;
-const EXEC_MS = 60_000;
-const MAX_STDOUT = 4 * 1024 * 1024;
+/** Rows `shape`, the enum check and the generators' collision check look at, per column. */
+export const SAMPLE_ROWS = 100_000;
+export const EXEC_MS = 60_000;
+export const MAX_STDOUT = 4 * 1024 * 1024;
 const MAX_HEX = 4096;
 
 const ID = '[A-Za-z_][A-Za-z0-9_$]{0,62}';
 const IDENT_SRC = `^${ID}$`;
-const IDENT = new RegExp(IDENT_SRC);
+export const IDENT = new RegExp(IDENT_SRC);
 
 // ---- refusals: a field path and a fixed reason, never the input ----
 
@@ -74,6 +74,12 @@ const REASONS = [
   'no-primary-key',
   'too-few-rows', // a pick whose condition matches fewer than 10 rows
   'no-sql-store', // the project has no Postgres, MySQL or MariaDB store
+  // the manifest `.goodboy/sandbox/data.json` of M6c (lib/sandbox-resolve.ts)
+  'unreadable', // not a regular file of at most 64 KB
+  'bad-version', // `version` is not 1
+  'unknown-kind', // a generator kind that is not email, phone, text or number
+  'too-many', // more entries or columns than the manifest takes
+  'too-narrow', // a number generator's column cannot hold its values (a 64-bit integer, or a decimal of 13 integer digits, can)
 ] as const;
 type Reason = (typeof REASONS)[number];
 
@@ -81,8 +87,8 @@ export interface Refusal {
   field: string;
   reason: Reason;
 }
-const refuse = (field: string, reason: Reason): Refusal => ({ field, reason });
-const isRefusal = (v: unknown): v is Refusal => typeof v === 'object' && v !== null && 'reason' in v && 'field' in v;
+export const refuse = (field: string, reason: Reason): Refusal => ({ field, reason });
+export const isRefusal = (v: unknown): v is Refusal => typeof v === 'object' && v !== null && 'reason' in v && 'field' in v;
 
 // ---- the grammar ----
 
@@ -130,7 +136,7 @@ function plainString(s: string): boolean {
   return !/[\\\u0000-\u001f\u007f]/.test(s);
 }
 
-const has = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
+export const has = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
 
 /** The condition JSON as a tree, or the field and reason it was refused for. */
 export function parseWhere(text: string): Cond | Refusal {
@@ -183,7 +189,7 @@ export function parseWhere(text: string): Cond | Refusal {
 }
 
 /** A table reference: `name`, or `schema.name` (Postgres). */
-const TABLE_REF = new RegExp(`^${ID}(?:\\.${ID})?$`);
+export const TABLE_REF = new RegExp(`^${ID}(?:\\.${ID})?$`);
 
 /** `<op> …` as an operation, or the refusal. Options are `--name value` or `--name=value`. */
 export function parseOp(args: readonly string[]): Op | Refusal {
@@ -231,7 +237,7 @@ export function parseOp(args: readonly string[]): Op | Refusal {
 // ---- the dialects ----
 
 /** The SQL words that differ between the engines. `expr` arguments are SQL goodboy built. */
-interface Dialect {
+export interface Dialect {
   engine: Engine;
   q(name: string): string;
   text(expr: string): string;
@@ -278,9 +284,11 @@ export function dialect(engine: Engine): Dialect {
   };
 }
 
-/** The first line of every script: the fake docker of the tests, and a reader of the log, tell them apart by it. */
-type Tag = 'schema' | 'rowcounts' | 'enum' | 'shape' | 'count' | 'pick';
-const script = (d: Dialect, tag: Tag, body: string[]): string => [`-- goodboy-data: ${tag}`, ...d.head, ...body, ...d.tail, ''].join('\n');
+/** The first line of every script: the fake docker of the tests, and a reader of the log, tell them apart by it. The last four
+ *  are the run's resolve step of M6c (lib/sandbox-resolve.ts): `matches`, `precision` and `collision` answer counts only,
+ *  `resolve` writes values into a file inside the database container and answers nothing. */
+type Tag = 'schema' | 'rowcounts' | 'enum' | 'shape' | 'count' | 'pick' | 'matches' | 'precision' | 'collision' | 'resolve';
+export const script = (d: Dialect, tag: Tag, body: string[]): string => [`-- goodboy-data: ${tag}`, ...d.head, ...body, ...d.tail, ''].join('\n');
 
 // What text looks like each category (no backslash, so no escaping differs between the engines). The first
 // that matches wins.
@@ -468,7 +476,7 @@ export const parseRowCounts = (stdout: string, n: number): number[] | null => in
 // ---- conditions in SQL ----
 
 /** The SQL of a validated condition over one table (every leaf checked by `checkCond`). */
-function renderWhere(d: Dialect, t: Table, c: Cond): string {
+export function renderWhere(d: Dialect, t: Table, c: Cond): string {
   if (c.kind !== 'leaf') return `(${c.items.map((i) => renderWhere(d, t, i)).join(c.kind === 'and' ? ' AND ' : ' OR ')})`;
   const col = d.q(c.col);
   if (c.op === 'is-null') return `(${col} IS NULL)`;
@@ -521,11 +529,14 @@ export function checkCond(t: Table, c: Cond): Refusal | { enumCols: Map<string, 
 // ---- the operations' SQL and answers ----
 
 /** `E<TAB>index<TAB>n`: how many distinct values (up to 51) the first rows of each column hold, counted over the md5 of
- *  the text so a wide column is not sorted whole. */
-export function enumSql(d: Dialect, t: Table, cols: readonly string[]): string {
-  const sel = cols.map((c, i) => `SELECT 'E', ${i}, (SELECT count(*) FROM (SELECT DISTINCT ${d.md5(d.text(d.q(c)))} FROM (SELECT ${d.q(c)} FROM ${t.ref} LIMIT ${SAMPLE_ROWS}) s LIMIT ${ENUM_MAX + 1}) x)`);
+ *  the text so a wide column is not sorted whole. One line for each (table, column) of `items`, in one statement. */
+export function enumSqlFor(d: Dialect, items: readonly { t: Table; col: string }[]): string {
+  const sel = items.map(({ t, col }, i) => `SELECT 'E', ${i}, (SELECT count(*) FROM (SELECT DISTINCT ${d.md5(d.text(d.q(col)))} FROM (SELECT ${d.q(col)} FROM ${t.ref} LIMIT ${SAMPLE_ROWS}) s LIMIT ${ENUM_MAX + 1}) x)`);
   return script(d, 'enum', [`${sel.join(' UNION ALL ')};`]);
 }
+
+/** The same for columns of one table. */
+export const enumSql = (d: Dialect, t: Table, cols: readonly string[]): string => enumSqlFor(d, cols.map((col) => ({ t, col })));
 
 /** Whether each column has at most 50 distinct values, from the `E` lines. */
 export function parseEnum(stdout: string, n: number): boolean[] | null {
@@ -685,24 +696,31 @@ export function clientArgv(t: DataTarget): string[] {
   return [t.engine === 'mariadb' ? 'mariadb' : 'mysql', '-N', '-B', '--default-character-set=utf8mb4', '--connect-timeout=5', '-u', MY_READER, t.db];
 }
 
+/** The error codes of a statement that ran into its time limit (`statement_timeout` of Postgres is SQLSTATE 57014, MySQL's
+ *  `max_execution_time` error 3024, MariaDB's `max_statement_time` error 1969). */
+const TIMEOUT_CODE = /\b57014\b|ERROR 3024 |ERROR 1969 /;
+
 /** Runs one script as the reader role: its stdout, or null for a failure of any kind (exit code, time, a cut-off
- *  answer, a start error). Neither stream is ever shown. */
-async function runSql(dc: DataCtx, t: DataTarget, sql: string): Promise<string | null> {
+ *  answer, a start error), and whether the failure was a time limit (the call's own, or the script's statement limit, told
+ *  by the engine's fixed error code on stderr). Neither stream is ever shown. */
+export async function runSqlResult(dc: DataCtx, t: DataTarget, sql: string): Promise<{ out: string | null; timeout: boolean }> {
   const r = await dc.comp(['exec', '-T', t.svc, ...clientArgv(t)], EXEC_MS, { stdin: sql, max: { stdout: MAX_STDOUT, stderr: 64 * 1024 } });
-  if (r.error !== undefined || r.timedOut || r.code !== 0 || r.stdout.length >= MAX_STDOUT) return null;
-  return r.stdout;
+  if (r.error !== undefined || r.timedOut || r.code !== 0 || r.stdout.length >= MAX_STDOUT) return { out: null, timeout: r.timedOut || TIMEOUT_CODE.test(r.stderr) };
+  return { out: r.stdout, timeout: false };
 }
+
+const runSql = async (dc: DataCtx, t: DataTarget, sql: string): Promise<string | null> => (await runSqlResult(dc, t, sql)).out;
 
 const failed = (op: string): DataResult => ({ out: { op, ok: false, diagnostic: { code: 'data-failed', step: op } satisfies Diag }, code: 1 });
 const refused = (op: string, r: Refusal): DataResult => ({ out: { op, ok: false, diagnostic: { code: 'data-refused', step: op, field: r.field, reason: r.reason } satisfies Diag }, code: 1 });
 
 /** The tables of the schema, or the diagnostic. */
-async function catalog(dc: DataCtx, t: DataTarget): Promise<{ tables: Table[]; skipped: number; truncated: boolean } | null> {
+export async function catalog(dc: DataCtx, t: DataTarget): Promise<{ tables: Table[]; skipped: number; truncated: boolean } | null> {
   const out = await runSql(dc, t, schemaSql(dialect(t.engine)));
   return out === null ? null : parseSchema(out, t.engine);
 }
 
-const findTable = (tables: readonly Table[], name: string): Table | undefined => tables.find((x) => x.name === name);
+export const findTable = (tables: readonly Table[], name: string): Table | undefined => tables.find((x) => x.name === name);
 
 /** `sandbox-data <op> …`: one operation, answered with JSON goodboy builds. `{ok: false, diagnostic}` and exit code 1
  *  for a refusal (`data-refused`, with the field and a fixed reason) or any failure (`data-failed`, the op's name). */

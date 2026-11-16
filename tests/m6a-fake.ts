@@ -18,15 +18,23 @@
 // junit/ (copied into the build/test-results volume, `tout_build_test_results`, by the unit runner).
 // M6b: a `psql`, `mysql` or `mariadb` exec answers from db/<tag>.out, .err and .exit (see the branch below), and the
 // `meta` volume (the handle key of the reader's `meta-key` script) is the directory vol/meta.
+// M6c: the `data` volume (/goodboy-data) is the directory vol/data. The resolve step's write script (an `exec` whose script
+// names /goodboy-data/v.tmp) copies db/resolve.out into vol/data/values.tsv and prints its line and byte count (db/resolve.lines
+// replaces it, db/resolve.err and db/resolve.exit make it fail; db/resolve.hex-upper marks an engine whose HEX() prints uppercase:
+// the hex of the V lines is lowered only when the SQL holds `LOWER(HEX(`). The runner and e2e containers copy what they see of the
+// volume when they start to data-seen-runner.tsv and data-seen-e2e.tsv (removed when there was no values.tsv), and list
+// everything in it to data-ls-runner.txt and data-ls-e2e.txt (so a test sees what a start-of-run clear left).
 
 export const FAKE_DOCKER = `#!/bin/sh
 d="$FAKE_DOCKER_DIR"
 vol="$d/vol"
-mkdir -p "$vol/outroot" "$vol/live" "$vol/outdirs" "$vol/meta"
+mkdir -p "$vol/outroot" "$vol/live" "$vol/outdirs" "$vol/meta" "$vol/data"
 if [ -n "\${FAKE_FAIL:-}" ]; then case " $* " in *"$FAKE_FAIL"*) echo "\${FAKE_FAIL_TEXT:-fake failure}" >&2; exit 1 ;; esac; fi
 # volume paths of the containers, moved under the state dir (and moved back in what the reader prints)
-vmap() { printf '%s' "$1" | sed -e "s#/outroot#$vol/outroot#g" -e "s#/live#$vol/live#g" -e "s#/outdirs#$vol/outdirs#g" -e "s#/meta#$vol/meta#g"; }
-unvmap() { sed -e "s#$vol/outroot#/outroot#g" -e "s#$vol/live#/live#g" -e "s#$vol/outdirs#/outdirs#g" -e "s#$vol/meta#/meta#g"; }
+vmap() { printf '%s' "$1" | sed -e "s#/outroot#$vol/outroot#g" -e "s#/live#$vol/live#g" -e "s#/outdirs#$vol/outdirs#g" -e "s#/meta#$vol/meta#g" -e "s#/goodboy-data#$vol/data#g"; }
+unvmap() { sed -e "s#$vol/outroot#/outroot#g" -e "s#$vol/live#/live#g" -e "s#$vol/outdirs#/outdirs#g" -e "s#$vol/meta#/meta#g" -e "s#$vol/data#/goodboy-data#g"; }
+# M6c: what a test container that mounts the data volume read-only sees of it when it starts, kept for the test to read
+data_seen() { if [ -f "$vol/data/values.tsv" ]; then cp "$vol/data/values.tsv" "$d/data-seen-$1.tsv"; else rm -f "$d/data-seen-$1.tsv"; fi; ls -A "$vol/data" | sort > "$d/data-ls-$1.txt"; }
 # the run's dir of the volume a container was given with -e GOODBOY_OUT=/outroot/<ts>
 outdir() { for a in "$@"; do case "$a" in GOODBOY_OUT=*) vmap "\${a#GOODBOY_OUT=}"; return ;; esac; done; }
 # What a test running as root in a container can do in the run's dir: leave links in it that point
@@ -77,6 +85,26 @@ case " $* " in
   *" ps "*) cat "$d/ps.txt" ;;
   *" exec "*)
     case " $* " in
+      # M6c: the resolve step's write script runs the database client inside the container and keeps the answer in the
+      # \`data\` volume (vol/data/values.tsv); only the number of lines is printed. The answer is the file db/resolve.out
+      # (empty when there is none), its stderr db/resolve.err, its exit code db/resolve.exit (or FAKE_DB_EXIT), and
+      # db/resolve.lines is printed in place of the real line count. The SQL is kept in db-sql.log like the others.
+      *"/goodboy-data/v.tmp"*)
+        cat > "$d/db-sql.in"
+        { echo "=== resolve-write $*"; cat "$d/db-sql.in"; } >> "$d/db-sql.log"
+        [ -f "$d/db/resolve.err" ] && cat "$d/db/resolve.err" >&2
+        n="$(cat "$d/resolve.count" 2>/dev/null || echo 0)"; n=$((n + 1)); echo "$n" > "$d/resolve.count"
+        if [ -f "$d/db/resolve.exit.$n" ]; then exit "$(cat "$d/db/resolve.exit.$n")"; fi
+        if [ -f "$d/db/resolve.exit" ]; then exit "$(cat "$d/db/resolve.exit")"; fi
+        if [ "\${FAKE_DB_EXIT:-0}" != 0 ]; then exit "$FAKE_DB_EXIT"; fi
+        if [ -f "$d/db/resolve.out" ]; then cp "$d/db/resolve.out" "$vol/data/values.tsv"; else : > "$vol/data/values.tsv"; fi
+        # an engine whose HEX() prints uppercase (db/resolve.hex-upper): db/resolve.out is what HEX() returns, and the hex of
+        # the V lines is lowered only when the SQL says so (LOWER(HEX(...))), as the real engine would answer it
+        if [ -f "$d/db/resolve.hex-upper" ] && grep -q 'LOWER(HEX(' "$d/db-sql.in"; then
+          awk -F'\t' -v OFS='\t' '$1 == "V" { $5 = tolower($5) } { print }' "$vol/data/values.tsv" > "$vol/data/values.low" && mv "$vol/data/values.low" "$vol/data/values.tsv"
+        fi
+        if [ -f "$d/db/resolve.lines" ]; then cat "$d/db/resolve.lines"; else echo "$(wc -l < "$vol/data/values.tsv" | tr -d ' ') $(wc -c < "$vol/data/values.tsv" | tr -d ' ')"; fi
+        exit 0 ;;
       # M6b: the database client of sandbox-data. The SQL arrives on stdin and is kept (db-sql.log, one
       # "=== <arguments>" line before each); the script names itself in its first line (\`-- goodboy-data: <tag>\`),
       # and the answer is the file db/<tag>.out, its stderr db/<tag>.err, its exit code db/<tag>.exit (or FAKE_DB_EXIT).
@@ -102,6 +130,7 @@ case " $* " in
         cat "$d/probe.txt" ;;
       *" e2e "*|*" e2e")
         out="$(outdir "$@")"
+        data_seen e2e
         echo "e2e output line"
         [ -f "$d/e2e-out.txt" ] && cat "$d/e2e-out.txt"
         [ -f "$d/e2e-err.txt" ] && cat "$d/e2e-err.txt" >&2
@@ -121,6 +150,7 @@ case " $* " in
         plant "\${FAKE_PLANT_COVERAGE:-}" "$@"
         echo "coverage mode: $*"; exit "\${FAKE_COVERAGE_EXIT:-0}" ;;
       *" runner "*|*" runner")
+        data_seen runner
         plant "\${FAKE_PLANT_RUNNER:-}" "$@"
         echo "runner output line"
         [ -f "$d/runner-out.txt" ] && cat "$d/runner-out.txt"

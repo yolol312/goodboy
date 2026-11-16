@@ -4629,19 +4629,17 @@ Design:
     `attach`, `export`, `commit`, `run` with its volumes or network, DB clients pointed at it, the
     Docker socket path, and reads of the dump and registered input logs (advisory against a
     determined program; it closes the ordinary paths).
-  - M6c data helper: `sandbox-init` renders `pick(condition) -> handle`, `fillFrom(page, selector,
-    handle, column)`, `assertMatches(actual, handle, column, assertionId)` and
-    `expectedCount(condition)` for the runner and e2e containers. A failure reports the assertion
-    id, never a value. Expected sides come from the DB or a relation, not from the value itself.
-    New inputs come from per-schema generators in a sandbox namespace with transactional
-    allocation and collision checks; only generated values are stored. The tester agents and
-    skills require handles and the helper. What M6b fixed for it: the handle key is `/meta/handle.key` of the
-    `meta` volume, so the helper's container mounts `meta` read-only; it reimplements `handleOf`'s tuple
-    format (`engine|db|table|<len>:<hex>,…`, the key columns' text bytes as hex) in each stack's language;
-    and it cannot use the reader role of `sandbox-data` from the runner on `inner` (that role has no
-    password and logs in over the database container's own socket only), so the helper needs a way of its
-    own to read rows (its own role, or a call into goodboy), which M6c decides. Until M6c no helper
-    resolves a handle: a test can name one but cannot use it.
+  - M6c data helper: `sandbox-init` renders a helper for the runner and e2e containers that gives tests
+    handles to rows, never literal values: pick a row, fill a field from it, assert against it with an
+    assertion id, an expected count. A failure reports the assertion id, never a value. Expected sides
+    come from the DB or a relation, not from the value itself. New inputs come from generators in a
+    reserved sandbox space with a collision check; only generated values are stored. The tester agents
+    and skills require the helper. Design (the user's decisions, 2026-11-16): tests declare what they
+    need in a manifest; goodboy resolves it before the suites with the reader role of `sandbox-data`
+    inside the database container, into a volume only the test containers mount (no new role, no lookup
+    at run time; the M6b handles and their `meta` key stay model-facing only); JVM and Node/Playwright
+    helpers in this release, Python later; minimal generators now, per-schema transactional allocation
+    later. See "As built (M6c)".
   - M6d records: `test-write`, `review-write` and `regression` sanitize every string and key of a
     record (redacting before truncation, secrets masked too). Real-data runs record only the M6a
     result. Records must be safe even when tracked or force-added.
@@ -5341,6 +5339,67 @@ names, and "registered input logs" are paths registered with `sandbox-local --in
   `tests/m6a-fake.ts` answers a `psql`, `mysql` or `mariadb` exec from `db/<tag>.out|.err|.exit` and plays
   the `meta` volume; `tests/m6a-gaps.test.ts` now makes the rename fail in the `writeAtomic` test and puts
   the `chmod` back in `finally`.
+
+As built (M6c, the data helper, 2026-11-16):
+- The manifest `.goodboy/sandbox/data.json` (tracked; conditions, never values; `lib/sandbox-resolve.ts`):
+  `version` 1, named `picks` (table, a `where` in the `sandbox-data` grammar, `n` up to 20, default 5,
+  `columns` up to 20), `counts` (table, `where`) and `generate` (table, column, `kind` email, phone, text or
+  number); at most 50 picks, 50 counts and 20 generators, 64 KB, read without following links, names
+  `[A-Za-z][A-Za-z0-9_-]{0,63}`. The rules are `sandbox-data`'s (`checkCond`: the columns exist, comparisons on
+  numbers and times, `=` and `!=` on enum-like columns; a pick needs 10 matches). A refusal names a field path
+  and a reason (new: `unreadable`, `bad-version`, `unknown-kind`, `too-many`, `too-narrow`), never a value; a key
+  of the file that is not a manifest word is shown as its index. The manifest is read before the sandbox check.
+- The resolve step (`resolveValues`), in `sandbox-run` after each reset and before the suites. Phase 1 reads
+  counts only, once per run (a run of both suites reuses its answers after the second reset, which restores the
+  same dump): the schema, the enum checks (one statement per 25 columns), the matches of each pick, the width of a
+  `number` generator's column (bigint, or a decimal with 13 integer digits: else `too-narrow`), and for each
+  generator, in a statement of its own, the rows whose column already holds a value of the generator's reserved
+  space (text and email starting with the marker `gbx-`, a phone starting with `010-0000-`, a number at or above
+  9e12) among the table's first 100000 rows (a stated limit, as the enum check), which must be none
+  (`data-collision`). A
+  statement past the 5 s limit has its own reason (`matches-timeout`, `enum-timeout`, `collision-timeout`,
+  `precision-timeout`, `write-timeout`), told by the call's timeout or the engine's error code, which is read but
+  never shown. Phase 2 is one `exec` in the database container whose shell writes `values.tsv` into the new `data`
+  volume (`/goodboy-data`) and prints its line and byte counts, the only things goodboy reads, checked against the
+  manifest's bounds; a file over 4 MiB is removed in the container (`too-large`), and a cell over 2000 characters
+  is written as `!` (the helpers then throw "value too long" naming the pick and column; a value is never cut).
+  The file holds lines `V` (pick, a row key: md5 of the primary key, the rows chosen once in a derived table
+  because MySQL 5.7 has no window functions; helpers number rows by first appearance; column, the value's UTF-8
+  hex in lower case on every engine, `LOWER(HEX(…))` on MySQL and MariaDB, whose `HEX` gives upper case, NULL as
+  `~`), `N` (count) and `G` (generator, kind, an 8-hex run token). Failures stop the run with fixed
+  codes only (`data-refused`, `data-collision`, `data-resolve-failed`); a manifest refusal and a compose file
+  without the volume (`no-data-volume`, the stop text names `sandbox-init --force`) stop it before any reset. The
+  result carries `data: {picks, counts, generate}`, counts only. The volume is emptied at run start and right
+  after the suites (pass, fail or a stop, by a `clear-data` reader script that leaves `/live` and the output dirs
+  for coverage; a clear that fails is listed in the result's problems); the sweep empties it only when it removes
+  the last run, so after a crash or a SIGINT during the suites the values stay until the next run or that sweep.
+- Compose: the `data` volume, read-write in the database services and the reader, read-only in the runner and
+  e2e with `GOODBOY_DATA=/goodboy-data/values.tsv`; not in the app or the proxy. `hasDataVolume` accepts only that
+  named volume at that target with those modes; it refuses any other mount at or under the target (normalized),
+  the volume in any other service, any `volumes_from` (goodboy renders none), and another volume key naming it
+  or an external `data` (a hand-edited
+  compose could otherwise have the database write the file into the checkout). The data guard needed no change:
+  it matches the project name, so `<project>_data` is denied like the other volumes (`tests/m6c-guard.test.ts`).
+- Helpers, rendered by `sandbox-init` under `.goodboy/sandbox/data/` (`lib/sandbox-data-helper.ts`):
+  `goodboy-data.ts` (Playwright and TypeScript tests), `goodboy-data.cjs` (plain Node tests) and
+  `GoodboyData.java` (package `goodboy`, plain `java.nio`, Java 8 source; the tester copies it to
+  `src/test/java/goodboy/`, since Maven and Gradle compile only the project's own test sources and goodboy edits
+  no build file): `pick(name, i)`, `valueOf(handle, column)`, `fillFrom(page, selector, handle, column)` (TS),
+  `assertMatches(actual, handle, column, assertionId)` (the error names the id only), `expectedCount(name)` and
+  `generate(name, seq)` (`gbx-<token>-<seq>`, `@example.invalid` for email, `010-0000-<seq>` for phone, about
+  9e12 plus for number: a bigint or decimal column; `seq` 0 to 999). Outside the sandbox every call throws; a name
+  the file does not hold is not echoed ("an unknown pick name"), so a value passed as a name stays out. The
+  Stop gate's sandbox layout (`lib/sandbox-gate.ts`) counts the helpers as sandbox files, and a test may import
+  them without losing its exemption.
+- Texts: `agents/test-unit.md`, `test-spec.md`, `test-ui.md`, `test-security.md` and the skills `run-sandbox`,
+  `backfill-tests` and `attack-sandbox` require the manifest and the helper and forbid literal database values,
+  expected sides taken from the value itself.
+- Not verified here: the MySQL and MariaDB SQL (golden text only, `tests/m6c-golden/`); the Postgres SQL ran
+  against a throwaway local PostgreSQL 16; the file's owner and mode as written in a real database container
+  and read by the runner's user (real-docker canary step); the Java helper compiled with JDK 21 only.
+- Tests: `tests/m6c-manifest`, `m6c-sql`, `m6c-resolve`, `m6c-run` (order, clearing on pass and fail, canaries),
+  `m6c-render`, `m6c-volumes`, `m6c-helper` (TS and CJS under bun, Java with javac when present), `m6c-guard` and
+  `m6c-gate`; the fake docker (`tests/m6a-fake.ts`) plays the in-container write.
 
 ## 20. N — Fewer repeated runs, a project test inventory, task criteria (proposed, 2026-10-26)
 

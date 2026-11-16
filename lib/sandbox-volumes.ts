@@ -6,6 +6,8 @@
 //   live       /live          what the app, the proxy and the runner share (the access log, e2e coverage data)
 //   tout_<dir> /work/<dir>    one volume over each known test output dir (JUnit XML, HTML reports)
 //   meta       /meta          the handle key of `sandbox-data` (M6b), kept for the sandbox's life
+//   data       /goodboy-data  the values of `.goodboy/sandbox/data.json` (M6c), written inside the database container before
+//                             the suites and cleared after them; the test containers mount it read-only
 // The host reads or removes what it needs through the `reader` service (a pinned busybox with no
 // network) with the scripts below, in memory and under a byte budget, and never prints it.
 //
@@ -20,9 +22,15 @@ export const OUT_ROOT = '/outroot';
 export const OUTDIRS_ROOT = '/outdirs';
 export const LIVE_DIR = '/live';
 /** The `meta` volume (M6b): what goodboy keeps for the sandbox's life, the handle key. Only the `reader` mounts it
- *  (the M6c helper's container will read it); `sandbox-down --volumes` removes it. */
+ *  (M6c did not need it: the data helper reads values the database container resolved, not handles);
+ *  `sandbox-down --volumes` removes it. */
 export const META_DIR = '/meta';
 const META_KEY_FILE = 'handle.key';
+/** The `data` volume (M6c): where the database container writes the resolved values (`values.tsv`) of a run, and where the
+ *  runner and e2e containers read them (read-only). The host never reads the file, only counts its lines. */
+export const DATA_DIR = '/goodboy-data';
+export const DATA_VOLUME = 'data';
+export const DATA_FILE = 'values.tsv';
 
 /** One cap for a file read out of a volume: the access log, the Playwright report. */
 export const MAX_READ_BYTES = 64 * 1024 * 1024;
@@ -77,7 +85,7 @@ export const outDirMounts = (dirs: readonly string[] = OUTPUT_DIRS): string[] =>
 export const readerMounts = (dirs: readonly string[] = OUTPUT_DIRS): string[] => dirs.map((d) => `${outDirVolume(d)}:${OUTDIRS_ROOT}/${outDirVolume(d)}`);
 
 /** Every volume this module adds to the compose file. */
-export const volumeNames = (dirs: readonly string[] = OUTPUT_DIRS): string[] => ['runout', 'live', 'meta', ...dirs.map(outDirVolume)];
+export const volumeNames = (dirs: readonly string[] = OUTPUT_DIRS): string[] => ['runout', 'live', 'meta', DATA_VOLUME, ...dirs.map(outDirVolume)];
 
 /** The in-volume dir of a run, as the container sees it (`GOODBOY_OUT`). */
 export const runDirIn = (ts: string): string => `${OUT_ROOT}/${ts}`;
@@ -120,10 +128,19 @@ const WLOG = `wlog() {
   if mkdir -p "$d" && rm -f -- "$d/$2" && cat > "$d/$2"; then echo "@@W ok"; else echo "@@W fail"; fi
 }`;
 
+/** Empties the `data` volume (the resolved values of a run). A reader of a sandbox made before M6c has no such mount:
+ *  there is nothing to clear then. */
+const CLEAR_DATA = `clear_data() {
+  if [ -d ${DATA_DIR} ]; then find ${DATA_DIR} -mindepth 1 -maxdepth 1 -exec rm -rf {} + || return 1; fi
+  return 0
+}`;
+
 /** Clears what a run leaves outside its run dir: the e2e coverage data and the access log in /live
- *  (the log is truncated, not removed: the proxy keeps it open; a log that became a link is dropped) and
- *  everything in the output dirs. */
-const CLEAR = `clear_scratch() {
+ *  (the log is truncated, not removed: the proxy keeps it open; a log that became a link is dropped),
+ *  everything in the output dirs, and the resolved values (M6c). */
+const CLEAR = `${CLEAR_DATA}
+clear_scratch() {
+  clear_data || return 1
   rm -rf ${LIVE_DIR}/jacoco-e2e.exec ${LIVE_DIR}/v8-e2e ${LIVE_DIR}/py-e2e || return 1
   if [ -L ${LIVE_DIR}/access.log ]; then rm -f ${LIVE_DIR}/access.log || return 1
   elif [ -f ${LIVE_DIR}/access.log ]; then : > ${LIVE_DIR}/access.log || return 1; fi
@@ -183,6 +200,12 @@ for n; do
 done
 if [ "$mode" = clear ]; then clear_scratch || rc=1; fi
 if [ "$rc" = 0 ]; then ${END}; fi`;
+
+/** `clear-data`: empties the `data` volume alone (the end of the suites; the coverage step after them still needs
+ *  /live and the output dirs). `@@END` only when it worked. */
+export const CLEAR_DATA_SCRIPT = `${marker('clear-data')}
+${CLEAR_DATA}
+if clear_data; then ${END}; fi`;
 
 /** `meta-key`: the handle key of the sandbox (M6b), a file of the `meta` volume. stdin is a candidate (64 hex
  *  digits goodboy made at random); it is written only when there is no key yet (`set -C`: the first writer

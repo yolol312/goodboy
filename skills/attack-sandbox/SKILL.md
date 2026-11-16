@@ -40,4 +40,6 @@ Attack a local copy of the app and record what got through.
 
 ## Never
 - Never attack a shared, staging or remote host, even one marked `allow` (R2).
-- Never use real user data or credentials.
+- Never use real user data or credentials. Against a sandbox with a database copy, an attack test holds no literal value
+  of it: declare the data in `.goodboy/sandbox/data.json` and use the data helper (`pick`, `valueOf`, `assertMatches` with an
+  assertion id, `generate`); an expected side comes from the database or a relation, never from the value under test.

@@ -110,7 +110,7 @@ describe('the proxy and the e2e service', () => {
     expect(e2e.profiles).toEqual(['tools']);
     expect(e2e.environment).toMatchObject({ GOODBOY_BASE_URL: 'http://proxy:8080', GOODBOY_E2E_DIR: '/work/e2e' });
     // the run's dir and the test output dirs are volumes since M6a (lib/sandbox-volumes.ts)
-    expect(e2e.volumes).toEqual(['../..:/work', 'e2edeps:/work/node_modules', 'runout:/outroot', ...outDirMounts()]);
+    expect(e2e.volumes).toEqual(['../..:/work', 'e2edeps:/work/node_modules', 'runout:/outroot', 'data:/goodboy-data:ro', ...outDirMounts()]);
     expect(e2e.command).toEqual(['/work/node_modules/.bin/playwright', 'test', '--config', '/work/.goodboy/sandbox/e2e/playwright.config.ts']);
     expect(e2e.depends_on).toEqual({ proxy: { condition: 'service_started' } });
     expect(compose(p).volumes).toHaveProperty('e2edeps');

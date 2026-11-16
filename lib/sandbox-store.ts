@@ -15,6 +15,7 @@ import { noLinksUnder } from './sandbox-proof';
 import { readRegular } from './safe-read';
 import { MAX_JUNIT_BYTES, MAX_JUNIT_FILES, parseJUnit, type UnitSummary } from './sandbox-summary';
 import {
+  CLEAR_DATA_SCRIPT,
   E2E_AFTER_SCRIPT,
   E2E_READ_TOTAL,
   FINISH_SCRIPT,
@@ -78,6 +79,11 @@ export async function readFiles(ctx: StoreCtx, paths: string[], maxBytes: number
 export async function finish(ctx: StoreCtx, names: string[], clear: boolean): Promise<{ ok: boolean; call: Bounded }> {
   const call = await reader(ctx, FINISH_SCRIPT, [clear ? 'clear' : 'keep', ...names]);
   return { ok: ended(call), call };
+}
+
+/** Empties the `data` volume (the resolved values of M6c) right after the suites; true when it ran to its end. */
+export async function clearData(ctx: Pick<StoreCtx, 'comp'>): Promise<boolean> {
+  return ended(await reader(ctx, CLEAR_DATA_SCRIPT, [], { timeoutMs: 60_000 }));
 }
 
 /** The handle key of the sandbox (M6b): the one in the `meta` volume, or `candidate` (64 hex digits goodboy made) written

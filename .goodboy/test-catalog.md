@@ -3,7 +3,7 @@
 Feature → test type, generated from the test files by goodboy (`cli.ts test-catalog`).
 Regenerate it instead of editing it; the docs rule compares it with a fresh copy.
 
-Totals: unit 227 files, 4193 tests; e2e 2 files, 54 tests.
+Totals: unit 236 files, 4338 tests; e2e 2 files, 54 tests.
 
 | Feature | Type | File | Tests |
 |---|---|---|---|
@@ -113,7 +113,7 @@ Totals: unit 227 files, 4193 tests; e2e 2 files, 54 tests.
 | the proxy and the e2e service; the uiTest fixture and the Playwright config; coverage across the unit and the e2e run | unit | tests/m3-sandbox-e2e.test.ts | 17 |
 | uiCheck; uiCheck: a request counts for the one test that sent it; an empty inventory is a pass only for a project with no UI source; a log of garbage; malformed input fails closed; ui-check command | unit | tests/m3-ui-check.test.ts | 38 |
 | Spring controllers; Thymeleaf templates; JSP; Next and React; Express and FastAPI; the inventory command and limits | unit | tests/m3-ui-inventory.test.ts | 27 |
-| M4: backfill evidence with a sandbox; M4: test-write and the sandbox object; M4: the run-sandbox skill | unit | tests/m4-backfill-sandbox.test.ts | 25 |
+| M4: backfill evidence with a sandbox; M4: test-write and the sandbox object; M4: the run-sandbox skill | unit | tests/m4-backfill-sandbox.test.ts | 26 |
 | a tests-role agent removes test output; bashChangedPaths and isTestOutputPath; writeDenial with removal and expanded (in-process) | unit | tests/m5-role-removal.test.ts | 17 |
 | the sandbox dir and what a sandbox file is; sandboxGaps (in-process); sandboxGaps and sandboxGapReason say what is missing (in-process); sandboxUsers fails closed on too many changed files; Stop, end to end: a session that changed only sandbox files; only the files the sandbox commands write are exempt | unit | tests/m5-sandbox-gate.test.ts | 31 |
 | jsLoads: type-only imports do not load a module; result-guard log reason | unit | tests/m5-type-imports.test.ts | 4 |
@@ -138,6 +138,15 @@ Totals: unit 227 files, 4193 tests; e2e 2 files, 54 tests.
 | the registry file; an entry never loses a path; who writes it; the reason a sandbox command gives is the error\; the plain local.json the sandbox commands write | unit | tests/m6b-registry.test.ts | 34 |
 | the role script of each engine; when the role is applied | unit | tests/m6b-role.test.ts | 12 |
 | the SQL of each operation, per engine; values are quoted by goodboy; what the answers are read as; column classes; handles | unit | tests/m6b-sql.test.ts | 25 |
+| the layout of the sandbox dir; a test that imports the data helper | unit | tests/m6c-gate.test.ts | 9 |
+| the data volume | unit | tests/m6c-guard.test.ts | 5 |
+| values.tsv decoded by the TypeScript and the plain Node helper; outside the sandbox and with a bad file; the Java helper | unit | tests/m6c-helper.test.ts | 12 |
+| a manifest that is accepted; a manifest that is refused names the field and a fixed reason; the file; a compose config with the data volume; only the named volume `data` counts, and only the services that should hold it do | unit | tests/m6c-manifest.test.ts | 28 |
+| the compose file; the helper files | unit | tests/m6c-render.test.ts | 8 |
+| a run that resolves; phase 1 is asked once for a run; the enum checks are one statement; a manifest the schema does not fit is refused with a path and a reason; a generator whose space the dump already uses; a failure is a fixed code and no text of the database | unit | tests/m6c-resolve.test.ts | 27 |
+| the order of a run; a run that stops at the data; a canary row that was resolved never leaves the volume; the hex of a value reaches the helpers in lowercase on every engine | unit | tests/m6c-run.test.ts | 31 |
+| the SQL of the resolve step, per engine; the answers of phase 1 are read strictly; the write script run inside the database container; a statement that ran into its time limit is told by the engine's error code, and the text never comes out; the whole file is bounded in bytes, inside the container | unit | tests/m6c-sql.test.ts | 18 |
+| clear-data; finish, with the scratch volumes cleared | unit | tests/m6c-volumes.test.ts | 6 |
 | marker names and Bash writes; PreToolUse; a marker made during a model Bash call that never reported back (`exit N`, G0 M18); a marker made in another directory during a finished call (security review round 2); round 3; PostToolUse sweep | unit | tests/marker-guard.test.ts | 14 |
 | redirections; shellSegments; hostOf; curl, wget, httpie; ssh family; git push | unit | tests/outward-command.test.ts | 22 |
 | unlisted external hosts; production hosts; gate modes | unit | tests/outward-gate-hooks.test.ts | 12 |

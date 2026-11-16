@@ -20,7 +20,10 @@ You run the UI in a browser and prove what it shows, state by state.
 1. check-ui-states: the states each changed component needs.
 2. run-e2e: make each state happen and assert it; compare with the prototype.
 3. run-sandbox, when `.goodboy/sandbox/compose.yml` exists: follow it for every browser run
-   instead of a local app.
+   instead of a local app. Inputs and expected values from its database come from the data helper (`pick`,
+   `fillFrom`, `assertMatches` with an assertion id, `expectedCount`, `generate`) as declared in
+   `.goodboy/sandbox/data.json`, never as a literal; an expected side comes from the database or a relation, and a
+   value is never compared with itself.
 4. record-tests, last: suites typed `ui`, timed, with `prototype_diff`; `test_files` lists the
    specs you wrote or ran.
 

@@ -179,13 +179,12 @@ function pythonModules(rel: string): string[] {
 /** `name` inside dir `dir` ('.' is the repo top). */
 const under = (dir: string, name: string) => (dir === '.' || dir === '' ? name : `${dir}/${name}`);
 
-/** What a JS/TS test file at `testRel` loads by relative specifiers, as repo-relative keys: each
- *  target with and without its extension and as a dir's `index`. A changed file is loaded when
- *  its path or its path without the extension is a key (`.js` naming a `.ts` source too). A
- *  module named only by `import type … from` or `export type … from` is not loaded: the
- *  statement is erased at run time (`import { type A }` still loads it). */
-export function jsLoads(text: string, testRel: string): Set<string> {
-  const keys = new Set<string>();
+/** What a JS/TS test file at `testRel` loads by relative specifiers, one entry per specifier: the `target` the specifier
+ *  names (repo-relative, as written) and the `keys` it can be loaded by, each target with and without its extension and as
+ *  a dir's `index`. A module named only by `import type … from` or `export type … from` is left out: the statement is
+ *  erased at run time (`import { type A }` still loads it). */
+export function jsLoadGroups(text: string, testRel: string): { target: string; keys: string[] }[] {
+  const groups: { target: string; keys: string[] }[] = [];
   const base = posix.dirname(testRel);
   const code = withoutComments(text);
   for (const m of text.matchAll(JS_SPECIFIER)) {
@@ -194,9 +193,16 @@ export function jsLoads(text: string, testRel: string): Set<string> {
     if (typeOnlyImport(code, m)) continue;
     const target = posix.normalize(posix.join(base, spec)).replace(/\/$/, '');
     const targetNoExt = target.replace(/\.[cm]?[jt]sx?$/, '');
-    for (const k of [target, targetNoExt, under(target, 'index'), under(targetNoExt, 'index')]) keys.add(k);
+    groups.push({ target, keys: [target, targetNoExt, under(target, 'index'), under(targetNoExt, 'index')] });
   }
-  return keys;
+  return groups;
+}
+
+/** What a JS/TS test file at `testRel` loads by relative specifiers, as repo-relative keys: each
+ *  target with and without its extension and as a dir's `index`. A changed file is loaded when
+ *  its path or its path without the extension is a key (`.js` naming a `.ts` source too). */
+export function jsLoads(text: string, testRel: string): Set<string> {
+  return new Set(jsLoadGroups(text, testRel).flatMap((g) => g.keys));
 }
 
 /** The absolute modules a Python test imports, with their parents (`import a.b.c` loads `a`,

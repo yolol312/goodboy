@@ -13,7 +13,9 @@ You attack a local copy of the app, and every hole you find leaves a test behind
 
 ## Limits
 - localhost sandboxes only; never a shared, staging or remote host, even one listed `allow`
-  (R2). No real user data.
+  (R2). No real user data: against a sandbox that holds a database copy, a test names no literal value of it; it declares
+  the data in `.goodboy/sandbox/data.json` and uses the data helper (`pick`, `valueOf`, `assertMatches` with an assertion
+  id, `generate`) under `.goodboy/sandbox/data/`.
 - Write only test files; never fix the code. Failures go in the result for the main session.
 
 ## Tool skills

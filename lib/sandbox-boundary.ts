@@ -29,7 +29,9 @@ export const DIAG_CODES = [
   'artifacts-not-removed', // raw artifacts that should be gone are still there
   'coverage-failed',
   'data-failed', // a `sandbox-data` operation: the query, the container or the answer's shape (M6b); the op's name only
-  'data-refused', // a `sandbox-data` input that is not allowed: the field and a fixed reason, never the value (M6b)
+  'data-refused', // a `sandbox-data` input that is not allowed, or a refused `data.json`: the field and a fixed reason, never the value (M6b, M6c)
+  'data-resolve-failed', // the run's resolve step (M6c): the query, the container or the answer's shape; the statement's fixed reason (`schema`, `matches-timeout`, `write`, `too-large`, ...) only
+  'data-collision', // a generator's reserved space is already used by the dump (M6c): the generator's path only
   'volume-failed', // reading or writing a sandbox volume through the reader container
   'sweep-failed', // the expiry sweep of old raw artifacts
   'registry-failed', // the user-level registry of real-data sandboxes could not be read or written (M6b)
@@ -46,9 +48,9 @@ export interface Diag {
   step: string;
   exit?: number | null;
   timedOut?: boolean;
-  /** `data-refused`: the input field that was refused (`where.and[1].col`), a path goodboy builds. */
+  /** `data-refused`, `data-collision`: the input field that was refused (`where.and[1].col`, `picks.activeUser.n`), a path goodboy builds. */
   field?: string;
-  /** `data-refused`: a fixed reason code. */
+  /** `data-refused`, `data-resolve-failed`, `data-collision`: a fixed reason code. */
   reason?: string;
 }
 

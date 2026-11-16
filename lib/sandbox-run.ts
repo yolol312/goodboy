@@ -14,9 +14,10 @@ import { noLinksUnder } from './sandbox-proof';
 import { COVERAGE_REPORT, E2E_DIR } from './sandbox-e2e';
 import { planSandbox, type SandboxPlan } from './sandbox-render';
 import { dbName, INHIBIT_IPV4, RESTORE_TAG } from './sandbox-parts';
-import { type DataCtx, sandboxData } from './sandbox-data';
+import { type DataCtx, isRefusal, sandboxData } from './sandbox-data';
+import { hasDataVolume, isEmpty, manifestCounts, type Memo, newToken, NO_DATA_VOLUME, readManifest, refusedStop, type ResolveStop, resolveValues } from './sandbox-resolve';
 import { scanSandbox } from './sandbox-scan';
-import { type DockOpts, e2eAfter, finish, metaKey, readFiles, sweepRaw, unitAfter, writeState } from './sandbox-store';
+import { clearData, type DockOpts, e2eAfter, finish, metaKey, readFiles, sweepRaw, unitAfter, writeState } from './sandbox-store';
 import { type E2eSummary, playwrightSummary, type RunSummary, type UnitSummary } from './sandbox-summary';
 import type { SandboxCheck, SandboxLocal, SandboxScan } from './sandbox-types';
 import { COVERAGE_READ_BYTES, LIVE_DIR, MAX_READ_BYTES, runDirIn, volumeMarker } from './sandbox-volumes';
@@ -279,10 +280,19 @@ async function sweepIfSafe(ctx: Ctx, pre: { volumes: string[] | null | undefined
  *  check, or why the config could not be read. Empty when it is fine. */
 function composeProblems(ctx: Ctx): Promise<string[]> {
   return once(ctx, 'compose', async () => {
+    const c = await composeConfig(ctx);
+    return 'problem' in c ? [c.problem] : staticProblems(c.cfg, ctx.root, ctx.local.dump);
+  });
+}
+
+/** The compose config as docker resolves it (`config --format json`), parsed, or why it could not be read. One call per
+ *  command when `preflight` set the memo. */
+function composeConfig(ctx: Ctx): Promise<{ cfg: unknown } | { problem: string }> {
+  return once(ctx, 'compose-config', async () => {
     const cfg = await comp(ctx, ['--profile', '*', 'config', '--format', 'json'], SHORT_MS);
-    if (cfg.code !== 0) return [`docker compose config failed: ${ctx.out.why(cfg, 'docker-failed')}`];
+    if (cfg.code !== 0) return { problem: `docker compose config failed: ${ctx.out.why(cfg, 'docker-failed')}` };
     const parsed = parseJson(cfg.stdout);
-    return parsed === undefined ? ['docker compose config printed no JSON'] : staticProblems(parsed, ctx.root, ctx.local.dump);
+    return parsed === undefined ? { problem: 'docker compose config printed no JSON' } : { cfg: parsed };
   });
 }
 
@@ -872,18 +882,33 @@ async function run(ctx: Ctx, args: string[]): Promise<Result> {
     return p;
   };
   const head = { ts, suite, command, realData: ctx.out.realData };
+  const problems: string[] = [];
+  // the sandbox check, once it has run: a stop before it (a refused manifest) records none
+  let checked: SandboxCheck | undefined;
+  const stopped = async (s: Stop): Promise<Result> => {
+    const seen = checked === undefined ? {} : { check: checked };
+    const extra = { ...(s.diagnostic ? { diagnostic: s.diagnostic } : {}), ...(problems.length > 0 ? { problems } : {}) };
+    const path = write({ ...head, ...seen, exit: null, durationMs: 0, tail: '', stopped: s.stop, ...extra });
+    finishState(false);
+    return { out: { stopped: s.stop, ...seen, result: path, ...extra }, code: 1 };
+  };
+  // the data the tests ask for (M6c): a manifest that is refused stops the run before the slow sandbox check (a file read
+  // and a parse), and a sandbox with no data volume right after it, before any work
+  const manifest = readManifest(ctx.root);
+  if (isRefusal(manifest)) return stopped(refusedStop(manifest));
   const stale = outOfDate(ctx.root, ctx.plan);
   const check = await checkSandbox(ctx);
+  checked = check;
   if (!checkOk(check)) {
     const path = write({ ...head, check, exit: null, durationMs: 0, tail: '', stopped: 'the sandbox check failed' });
     finishState(false);
     return { out: { stopped: 'the sandbox check failed; the suite did not run', check, result: path }, code: 1 };
   }
-  const stopped = async (s: Stop): Promise<Result> => {
-    const path = write({ ...head, check, exit: null, durationMs: 0, tail: '', stopped: s.stop, ...(s.diagnostic ? { diagnostic: s.diagnostic } : {}) });
-    finishState(false);
-    return { out: { stopped: s.stop, check, result: path, ...(s.diagnostic ? { diagnostic: s.diagnostic } : {}) }, code: 1 };
-  };
+  if (manifest !== null && !isEmpty(manifest)) {
+    if (dataCtx(ctx).target === null) return stopped(refusedStop({ field: 'store', reason: 'no-sql-store' }));
+    const c = await composeConfig(ctx);
+    if ('problem' in c || !hasDataVolume(c.cfg, sqlServices(ctx))) return stopped(NO_DATA_VOLUME);
+  }
   // what the last run left in the shared volumes must not look like this run's
   const cleared = await finish(ctx, [], true);
   if (!cleared.ok) {
@@ -893,27 +918,48 @@ async function run(ctx: Ctx, args: string[]): Promise<Result> {
   const reset = await resetDb(ctx);
   if (reset) return stopped({ stop: reset.note, ...(reset.diagnostic ? { diagnostic: reset.diagnostic } : {}) });
   const timeoutMs = msOpt(own, DEFAULT_RUN_MS);
-  const problems: string[] = [];
   const summary: RunSummary = {};
 
-  let unit: StepResult | null = null;
-  if (wantUnit) {
-    const u = await runUnit(ctx, outDir, ts, custom, timeoutMs, problems);
-    unit = u.step;
-    summary.unit = u.summary;
-  }
-  let e2e: E2eResult | null = null;
-  if (wantE2e) {
-    // the unit tests may have written to the database: the browser suite starts from the dump again
+  const ran: { unit: StepResult | null; e2e: E2eResult | null } = { unit: null, e2e: null };
+  // the values of data.json (M6c) are resolved after each reset and live in the `data` volume only while the suites run;
+  // phase 1 of the resolve is asked once (the second reset restores the same dump), `memo` keeps its answers
+  const token = newToken();
+  const memo: Memo = {};
+  const resolve = async (): Promise<ResolveStop | null> => (manifest === null ? null : resolveValues(dataCtx(ctx), manifest, token, memo));
+  /** The suites, each after a reset and a resolve; a Stop is what ended the run before its end. */
+  const suites = async (): Promise<Stop | null> => {
+    const resolved = await resolve();
+    if (resolved !== null) return resolved;
     if (wantUnit) {
-      const again = await resetDb(ctx);
-      if (again) return stopped({ stop: again.note, ...(again.diagnostic ? { diagnostic: again.diagnostic } : {}) });
+      const u = await runUnit(ctx, outDir, ts, custom, timeoutMs, problems);
+      ran.unit = u.step;
+      summary.unit = u.summary;
     }
-    const r = await runE2e(ctx, outDir, ts, onlyE2e ? custom : [], timeoutMs, waitSeconds(own));
-    if (isStop(r)) return stopped(r);
-    e2e = r.step;
-    summary.e2e = r.summary;
+    if (wantE2e) {
+      // the unit tests may have written to the database: the browser suite starts from the dump again
+      if (wantUnit) {
+        const again = await resetDb(ctx);
+        if (again) return { stop: again.note, ...(again.diagnostic ? { diagnostic: again.diagnostic } : {}) };
+        const second = await resolve();
+        if (second !== null) return second;
+      }
+      const r = await runE2e(ctx, outDir, ts, onlyE2e ? custom : [], timeoutMs, waitSeconds(own));
+      if (isStop(r)) return r;
+      ran.e2e = r.step;
+      summary.e2e = r.summary;
+    }
+    return null;
+  };
+  let halt: Stop | null;
+  try {
+    halt = await suites();
+  } finally {
+    // the values go as soon as the suites end, pass or fail (the next run clears them too, and the sweep when no run is live)
+    if (manifest !== null && !(await clearData(ctx).catch(() => false))) problems.push('the data volume could not be cleared; the next run clears it');
   }
+  // reported after the clear, so a clear that failed is in the stopped run's result too
+  if (halt !== null) return stopped(halt);
+  const { unit, e2e } = ran;
   // the report is made in the runner container, so it needs a test command
   const coverage: CoverageResult =
     ctx.scan.build.testCommand.length > 0 ? await runCoverage(ctx, outDir, ts, e2e !== null) : { ok: false, exit: null, reports: [], note: 'the scan has no test command, so there is no runner service to make the coverage report' };
@@ -928,6 +974,7 @@ async function run(ctx: Ctx, args: string[]): Promise<Result> {
     durationMs: first.durationMs,
     timedOut,
     tail: first.tail,
+    ...(manifest !== null ? { data: manifestCounts(manifest) } : {}),
     ...(unit !== null && e2e !== null ? { unit } : {}),
     ...(e2e !== null ? { e2e } : {}),
     accessLog: e2e?.accessLog ?? null,

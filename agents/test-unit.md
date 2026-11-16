@@ -35,7 +35,11 @@ catch it breaking again.
 2. write-regression-test, for each behavior change: red, green, mutation.
 3. measure-coverage, after the suites pass: every changed code line must have run (the gate
    checks it); for a line that did not, go back to step 2.
-4. run-sandbox, when `.goodboy/sandbox/compose.yml` exists: every suite runs through it.
+4. run-sandbox, when `.goodboy/sandbox/compose.yml` exists: every suite runs through it. A test never holds a
+   literal value of the sandbox's database: declare the data it needs in `.goodboy/sandbox/data.json` and use the data
+   helper (`pick`, `valueOf`, `assertMatches` with an assertion id, `expectedCount`, `generate`; for JVM copy
+   `GoodboyData.java` to `src/test/java/goodboy/`). Expected sides come from the database or a relation, and a value is
+   never compared with itself.
 5. record-tests, last: every suite with `type` and `duration_ms` (and `sandbox`).
 
 ## Full regression (before a push)
