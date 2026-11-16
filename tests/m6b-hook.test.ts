@@ -322,6 +322,20 @@ describe('round 2: the two contexts, the raw output, wrappers, the registry file
     expect((await s.bash(`cat ${dump}`)).reason).not.toContain('the project at');
   });
 
+  test('a registered project nested inside the session\'s project dir is told no `cd` reaches it (the CLI answers for the outer dir)', async () => {
+    registerRepo();
+    const s = session(base);
+    const env = { CLAUDE_PROJECT_DIR: base };
+    for (const cwd of [base, repo]) {
+      const r = await s.bash(`cat ${dump}`, { cwd, env });
+      expect(r.denied).toBe(true);
+      expect(r.reason).toContain(`Raw rows stay in the sandbox of the project at ${JSON.stringify(repo)}, inside this session's project dir:`);
+      expect(r.reason).not.toContain('`cd` into that project');
+    }
+    // without the outer project dir, the same call from the parent is told to `cd` there
+    expect((await s.bash(`cat ${dump}`, { cwd: base })).reason).toContain('`cd` into that project');
+  });
+
   test('raw output a run left on the host is denied through the shell, and result.json is not', async () => {
     const s = session();
     const out = join(repo, '.goodboy', 'sandbox', 'out');

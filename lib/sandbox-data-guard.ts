@@ -55,6 +55,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { followedPath } from './file-tracker';
 import { plainWord, readCommand, shellReadsStdin, stripPrefix } from './outward-command';
+import { projectDir } from './project-dir';
 import { readRegular } from './safe-read';
 import { HOST_RAW_NAMES, projectName, readLocal, realDataForReading, realOrSelf, RUN_NAME, SANDBOX_DIR } from './sandbox-mode';
 import { readRegistry, RegistryError, type RegistryEntry, registryDir, registryFile } from './sandbox-registry';
@@ -62,10 +63,13 @@ import { readRegistry, RegistryError, type RegistryEntry, registryDir, registryF
 export interface DataGuardHit {
   /** What was reached, in a few words for the log and the deny text. */
   what: string;
-  /** The dirs of the guarded projects whose sandbox holds what the call reached, when that is not the project the
-   *  session's dirs are in (see `located`): `sandbox-data` answers for the dir it runs in. Absent when the hit is taken as
-   *  the session's own project's. */
+  /** The dirs of the guarded projects whose sandbox holds what the call reached, when that is not the project
+   *  `sandbox-data` answers for from the shell's dir now (see `located`): it answers for the dir it runs in, so a `cd`
+   *  into one of these reaches its sandbox. Absent when the hit is taken as the session's own project's. */
   from?: string[];
+  /** Such dirs nested inside the session's project dir: `sandbox-data` answers for the session's project anywhere below
+   *  it, so no `cd` reaches their sandbox from this session; only a session started in that dir does. */
+  nested?: string[];
 }
 
 /** A sandbox project the call may reach. */
@@ -102,18 +106,22 @@ interface Context {
   prot: Protected;
   /** The work left for matching globs against protected paths in this call (in cells of the matcher), and whether it ran out. */
   work: { left: number; over: boolean };
-  /** The words of the call, read only when a call is denied: the registered projects it names. */
-  said: readonly string[];
-  /** The shell's dir and the hook's project dir, where `sandbox-data` would answer: a project that holds neither is told
-   *  by its dir. The other dirs of the session (CLAUDE_PROJECT_DIR as `also`) are left out on purpose: the CLI answers
-   *  for the shell's dir when the shell is outside CLAUDE_PROJECT_DIR, so a shell that left its project is told the dir
-   *  to `cd` back to. */
-  session: readonly string[];
+  /** The words of the call (a Bash call's first 1600, as `sandboxDataDenial` reads them), read only when a call is denied:
+   *  the registered projects it names. */
+  words: readonly string[];
+  /** Where `sandbox-data` answers from the shell's dir now and from a `cd` (`lib/cli.ts`: the repo top of `cliProjectDir`):
+   *  `answers` is the hook's project dir (CLAUDE_PROJECT_DIR when the shell is inside it, else the shell's dir, a linked
+   *  worktree being its own), and `roots` the session's project dirs as the CLI knows them (CLAUDE_PROJECT_DIR), each
+   *  answered for anywhere below it. */
+  answers: string;
+  roots: readonly string[];
 }
 
 const MAX_WORDS = 400;
 const MAX_WORD = 2048;
 const MAX_COMMAND = 100_000;
+/** The project dirs a deny text lists before "and N more". */
+const MAX_FROM_SHOWN = 3;
 const MAX_REPOS = 4;
 const MAX_WALK = 40;
 /** The words a segment is read to in a context where the caps do not apply: a bound on the time, not a denial. */
@@ -454,7 +462,7 @@ function registryBase(): RegistryBase | RegistryError {
 
 /** The projects this call may reach, and what they protect (see the header). `note` hears of a registry that cannot be
  *  read: the rule then keeps the per-repo reading only. */
-function contextFor(dirs: readonly string[], words: readonly string[], cwd: string, session: readonly string[], note?: (n: string) => void): Context {
+function contextFor(dirs: readonly string[], words: readonly string[], cwd: string, where: { answers: string; roots: readonly string[] }, note?: (n: string) => void): Context {
   const registry = registryBase();
   if (registry instanceof RegistryError) note?.('registry-unreadable');
   const base = registry instanceof RegistryError ? null : registry;
@@ -506,7 +514,7 @@ function contextFor(dirs: readonly string[], words: readonly string[], cwd: stri
     needles: [...(base?.needles ?? []), ...needlesOf(paths)],
     dirNeedles: [...(base?.dirNeedles ?? []), ...dirNeedlesOf(paths)],
   };
-  return { local: [...local.values()], remote, prot, work: { left: WORK_CELLS, over: false }, said: words, session };
+  return { local: [...local.values()], remote, prot, work: { left: WORK_CELLS, over: false }, words, ...where };
 }
 
 /** The dir a glob lists: what is before its first glob character, up to the last `/`. */
@@ -1003,39 +1011,76 @@ function registryChange(raw: readonly string[], prog: string, dir: string): stri
 
 // ---- the rule ----
 
-/** A hit with the other projects whose sandbox answers, when they are not the session's own: `sandbox-data` answers for
- *  the dir it runs in, so a model told nothing would ask the wrong sandbox, or look for one where there is none.
- *  Told: the guarded projects the call reached by a path inside them (found by the walk) or names by project name or
- *  protected path, other than the session's. When it names none (a relative path, `~`, a glob): nothing more if the
- *  session is in a guarded project (the hit is taken as its own), else every guarded project. The words are read up to
- *  MAX_COMMAND characters: the hook must answer before its timeout, or the denied call would run. */
-function located(what: string, cx: Context): DataGuardHit {
-  const own = (g: Guarded): boolean => cx.session.some((d) => inside(realOrSelf(d), realOrSelf(g.top)));
-  let text = '';
-  for (const w of cx.said) {
-    if (text.length >= MAX_COMMAND) break;
-    text += `${w}\n`;
+/** The call's words, one per line, cut to MAX_COMMAND characters: the text `located` searches for project names. The hook
+ *  must answer before its timeout, or the denied call would run (a review measured 38 s for 3 MB of words uncut). */
+export function wordsText(words: readonly string[]): string {
+  const kept: string[] = [];
+  let size = 0;
+  for (const w of words) {
+    if (size >= MAX_COMMAND) break;
+    kept.push(w);
+    size += w.length + 1;
   }
-  text = text.slice(0, MAX_COMMAND);
-  const said = (g: Guarded): boolean => text.includes(g.project) || (g.paths ?? []).some((p) => text.includes(p));
-  const named = [...cx.local.filter((g) => !own(g)), ...cx.remote.filter(said)];
-  if (named.length > 0) return { what, from: named.map((g) => g.top) };
-  const all = [...cx.local, ...cx.remote];
-  return all.length === 0 || cx.local.some(own) ? { what } : { what, from: all.map((g) => g.top) };
+  return kept.join('\n').slice(0, MAX_COMMAND);
 }
 
-const MAX_FROM_SHOWN = 3;
+/** Whether `sandbox-data` run from `top` answers for another project: `top` is below one of the session's project dirs,
+ *  which the CLI answers for anywhere below it (`projectDir`, as `cliProjectDir` uses it; a linked worktree answers for
+ *  itself). */
+function nestedIn(top: string, roots: readonly string[]): boolean {
+  return roots.some((r) => realOrSelf(projectDir(top, { CLAUDE_PROJECT_DIR: r })) !== realOrSelf(top));
+}
+
+/** A hit with the other projects whose sandbox holds what the call reached, when they are not the one `sandbox-data`
+ *  answers for from the shell's dir now: a model told nothing would ask the wrong sandbox, or look for one where there is
+ *  none. Told: the guarded projects the call reached by a path inside them (found by the walk) or names by project name
+ *  or protected path (in its first 1600 words and MAX_COMMAND characters, `wordsText`), other than that one. When it
+ *  names none (a relative path, `~`, a glob): nothing more if that one is guarded (the hit is taken as its own), else
+ *  every guarded project. Each is told as `from` (a `cd` into it reaches its sandbox) or `nested` (inside the session's
+ *  project dir: no `cd` does). */
+function located(what: string, cx: Context): DataGuardHit {
+  const answers = realOrSelf(cx.answers);
+  const own = (g: Guarded): boolean => inside(answers, realOrSelf(g.top));
+  const text = wordsText(cx.words);
+  const mentions = (g: Guarded): boolean => text.includes(g.project) || (g.paths ?? []).some((p) => text.includes(p));
+  const named = [...cx.local.filter((g) => !own(g)), ...cx.remote.filter(mentions)];
+  const told = named.length > 0 || cx.local.some(own) ? named : [...cx.local, ...cx.remote];
+  if (told.length === 0) return { what };
+  const nested = told.filter((g) => nestedIn(g.top, cx.roots)).map((g) => g.top);
+  const from = told.filter((g) => !nested.includes(g.top)).map((g) => g.top);
+  return { what, ...(from.length > 0 ? { from } : {}), ...(nested.length > 0 ? { nested } : {}) };
+}
+
+/** The characters a reader of the deny text may not see, escaped in a shown dir: DEL and the C1 controls (U+0085 among
+ *  them), the Arabic letter mark, zero-width and direction marks, line and paragraph separators, bidi embeddings,
+ *  overrides and isolates, invisible operators, and the byte order mark. */
+const UNSEEN = /[\u{7f}-\u{9f}\u{61c}\u{200b}-\u{200f}\u{2028}-\u{202e}\u{2060}-\u{2069}\u{feff}]/gu;
+
+/** A project's dir as the deny text shows it: a JSON string (a registered dir is only checked to be absolute, so a
+ *  backtick or a newline in it stays text) with the UNSEEN characters escaped as well. */
+export function shownDir(d: string): string {
+  return JSON.stringify(d).replace(UNSEEN, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
+/** "the project at X", or "one of the projects X, Y, Z and N more". */
+function projectsAt(dirs: readonly string[]): string {
+  const shown = dirs.map(shownDir);
+  const more = shown.length > MAX_FROM_SHOWN ? ` and ${shown.length - MAX_FROM_SHOWN} more` : '';
+  return shown.length === 1 ? `the project at ${shown[0]}` : `one of the projects ${shown.slice(0, MAX_FROM_SHOWN).join(', ')}${more}`;
+}
 
 /** What a denied call is told (model-facing): what it reached, where the data is available, and the one way past. */
 export function sandboxDataMessage(hit: DataGuardHit, o: { cli: string; subagent: boolean; marker?: string }): string {
-  // each dir as a JSON string: a registered dir is only checked to be absolute, and a backtick, a newline, a line or
-  // paragraph separator or a bidi control in it stays visible text
-  const from = (hit.from ?? []).map((d) => JSON.stringify(d).replace(/[\u{2028}\u{2029}\u{200e}\u{200f}\u{202a}-\u{202e}\u{2066}-\u{2069}]/gu, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`));
-  const more = from.length > MAX_FROM_SHOWN ? ` and ${from.length - MAX_FROM_SHOWN} more` : '';
-  const where = from.length === 1 ? `the project at ${from[0]}` : `one of the projects ${from.slice(0, MAX_FROM_SHOWN).join(', ')}${more}`;
+  const where: string[] = [];
+  if ((hit.from ?? []).length > 0) {
+    where.push(`Raw rows stay in the sandbox of ${projectsAt(hit.from!)}: \`bun "${o.cli}" sandbox-data schema|shape|count|pick\` answers for the dir it runs in, so run it there (\`cd\` into that project's dir first), not from here: structure, counts and handles.`);
+  }
+  if ((hit.nested ?? []).length > 0) {
+    where.push(`Raw rows stay in the sandbox of ${projectsAt(hit.nested!)}, inside this session's project dir: \`bun "${o.cli}" sandbox-data\` answers for this session's project from any dir below it, so no \`cd\` reaches that sandbox from here; its structure, counts and handles come from a Claude Code session started in that project's dir.`);
+  }
   const use =
-    from.length > 0
-      ? `Raw rows stay in the sandbox of ${where}: \`bun "${o.cli}" sandbox-data schema|shape|count|pick\` answers for the dir it runs in, so run it there (\`cd\` into that project's dir first), not from here: structure, counts and handles.`
+    where.length > 0
+      ? where.join(' ')
       : `Raw rows stay in the sandbox: use \`bun "${o.cli}" sandbox-data schema|shape|count|pick\` for structure, counts and handles, and \`sandbox-run\` for suites.`;
   if (o.subagent) return `This would reach a sandbox that may hold real data (${hit.what}). ${use} Agents never read it directly: use those commands, or return BLOCKED.`;
   return `This would reach a sandbox that may hold real data (${hit.what}). ${use} If the user approves this one call, have them run \`! touch ${o.marker ?? '.claude/.goodboy-sandbox-data-approved-<session>.txt'}\` and run it again; the approval covers one call.`;
@@ -1083,18 +1128,21 @@ function groupAfterDir(cx: Context, command: string): boolean {
   return false;
 }
 
-/** The hit of a tool call that reaches the real data of a sandbox project, or null. `note` hears of a registry that cannot
- *  be read. */
+/** The hit of a tool call that reaches the real data of a sandbox project, or null. `projectCwd` is the hook's project dir
+ *  for `cwd` (`projectDir`); `also` holds the session's project dir as the CLI knows it (CLAUDE_PROJECT_DIR; an entry
+ *  that is not an absolute path is skipped). `note` hears of a registry that cannot be read. */
 export function sandboxDataDenial(input: { toolName: string; toolInput: Record<string, unknown>; cwd: string; projectCwd: string; also?: readonly (string | undefined)[]; note?: (n: string) => void }): DataGuardHit | null {
   const { toolName, toolInput, cwd, projectCwd } = input;
-  const session = [cwd, projectCwd, ...(input.also ?? []).filter((d): d is string => typeof d === 'string' && isAbsolute(d))];
+  const roots = (input.also ?? []).filter((d): d is string => typeof d === 'string' && isAbsolute(d));
+  const session = [cwd, projectCwd, ...roots];
+  const where = { answers: projectCwd, roots };
   if (WRITE_TOOLS.has(toolName)) {
     const why = registryWrite(toolInput, cwd);
     return why === null ? null : { what: why };
   }
   if (toolName === 'Read' || toolName === 'Grep' || toolName === 'Glob') {
     const named = ['file_path', 'path', 'pattern'].map((k) => toolInput[k]).filter((v): v is string => typeof v === 'string');
-    const tcx = contextFor(session, named, cwd, [cwd, projectCwd], input.note);
+    const tcx = contextFor(session, named, cwd, where, input.note);
     const why = toolHit(tcx, toolName, toolInput, cwd);
     return why === null ? null : located(why, tcx);
   }
@@ -1114,7 +1162,7 @@ export function sandboxDataDenial(input: { toolName: string; toolInput: Record<s
   }
   const dirs = [...session, ...segments.map((s) => s.dir).filter((d): d is string => d !== null)];
   const assigns = assignmentValues(command);
-  const cx = contextFor(dirs, [...segments.flatMap((s) => s.words), ...assigns].slice(0, MAX_WORDS * 4), cwd, [cwd, projectCwd], input.note);
+  const cx = contextFor(dirs, [...segments.flatMap((s) => s.words), ...assigns].slice(0, MAX_WORDS * 4), cwd, where, input.note);
   if (cx.local.length === 0 && cx.remote.length === 0 && cx.prot.all.length === 0) return null;
   const holds = new Map<string, boolean>();
   const dirHolds = (d: string): boolean => {

@@ -6,10 +6,10 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { globMatches, isGoodboySandboxCli, sandboxDataDenial, sandboxDataMessage } from '../lib/sandbox-data-guard';
+import { globMatches, isGoodboySandboxCli, sandboxDataDenial, sandboxDataMessage, shownDir, wordsText } from '../lib/sandbox-data-guard';
 import { projectName } from '../lib/sandbox-mode';
 import { registerRealData, registryEntryOf } from '../lib/sandbox-registry';
-import { put, sandboxIn } from './m6b-helpers';
+import { keepEnv, put, sandboxIn } from './m6b-helpers';
 
 let base = '';
 let repo = '';
@@ -18,7 +18,7 @@ let dump = '';
 let log = '';
 let inputDir = '';
 let P = '';
-const saved = { home: process.env.HOME, registry: process.env.GOODBOY_REGISTRY_DIR };
+const restoreEnv = keepEnv('HOME', 'GOODBOY_REGISTRY_DIR');
 
 beforeAll(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), 'goodboy-m6b-guard-')));
@@ -39,10 +39,7 @@ beforeAll(() => {
   process.env.GOODBOY_REGISTRY_DIR = join(base, 'registry');
 });
 afterAll(() => {
-  for (const [k, v] of [['HOME', saved.home], ['GOODBOY_REGISTRY_DIR', saved.registry]] as const) {
-    if (v === undefined) delete process.env[k];
-    else process.env[k] = v;
-  }
+  restoreEnv();
   rmSync(base, { recursive: true, force: true });
 });
 afterEach(() => {
@@ -735,6 +732,46 @@ describe('the text a denied call is told', () => {
     const hidden = sandboxDataMessage({ what: 'x', from: [`/w/a${String.fromCharCode(0x2028)}b${String.fromCharCode(0x202e)}c`] }, { cli: '/p/lib/cli.ts', subagent: false });
     expect(hidden).toContain('the project at "/w/a\\u2028b\\u202ec":');
     expect(/[\u{2028}\u{202e}]/u.test(hidden)).toBe(false);
+  });
+
+  test('a project nested inside the session\'s project dir is told that no `cd` reaches it; with another project, each its way', () => {
+    const nested = sandboxDataMessage({ what: 'x', nested: ['/w/outer/inner'] }, { cli: '/p/lib/cli.ts', subagent: false, marker: '.claude/m.txt' });
+    expect(nested).toContain('Raw rows stay in the sandbox of the project at "/w/outer/inner", inside this session\'s project dir: `bun "/p/lib/cli.ts" sandbox-data` answers for this session\'s project from any dir below it, so no `cd` reaches that sandbox from here;');
+    expect(nested).toContain('a Claude Code session started in that project\'s dir');
+    expect(nested).not.toContain('`cd` into that project');
+    expect(nested).toContain('! touch .claude/m.txt');
+    const both = sandboxDataMessage({ what: 'x', from: ['/w/shop'], nested: ['/w/outer/a', '/w/outer/b'] }, { cli: '/p/lib/cli.ts', subagent: true });
+    expect(both).toContain('of the project at "/w/shop": ');
+    expect(both).toContain('of one of the projects "/w/outer/a", "/w/outer/b", inside this session\'s project dir');
+    expect(both.indexOf('/w/shop')).toBeLessThan(both.indexOf('/w/outer/a'));
+    expect(both).toContain('return BLOCKED');
+  });
+
+  test('a shown dir escapes every character a reader may not see: C1 (U+0085), the Arabic letter mark, zero-width, BOM', () => {
+    const at = (c: number): string => `/w/a${String.fromCodePoint(c)}b`;
+    for (const c of [0x7f, 0x85, 0x9f, 0x61c, 0x200b, 0x200d, 0x200e, 0x200f, 0x2028, 0x2029, 0x202a, 0x202c, 0x202e, 0x2060, 0x2061, 0x2066, 0x2067, 0x2069, 0xfeff]) {
+      expect([c, shownDir(at(c))]).toEqual([c, `"/w/a\\u${c.toString(16).padStart(4, '0')}b"`]);
+    }
+    // printable text stays as it is, Korean and other scripts included; JSON's own escapes stay
+    for (const d of ['/w/가나다', '/w/ü é', '/w/a\u{a0}b', '/w/a\u{202f}b', '/w/a\u{2070}b']) expect(shownDir(d)).toBe(JSON.stringify(d));
+    expect(shownDir('/w/a\tb')).toBe('"/w/a\\tb"');
+  });
+
+  test('the names are searched in the first 100000 characters of the words, read no further than that', () => {
+    expect(wordsText(['a', 'b c', 'd'])).toBe('a\nb c\nd');
+    expect(wordsText([])).toBe('');
+    // one word longer than the cap is cut too
+    expect(wordsText(['y'.repeat(150_000), 'z'])).toBe('y'.repeat(100_000));
+    const words = Array.from({ length: 50_000 }, () => 'x'.repeat(10));
+    let read = 0;
+    const counted = new Proxy(words, {
+      get(t, k, r) {
+        if (typeof k === 'string' && /^\d+$/.test(k)) read++;
+        return Reflect.get(t, k, r);
+      },
+    });
+    expect(wordsText(counted)).toHaveLength(100_000);
+    expect(read).toBeLessThanOrEqual(10_001);
   });
 
   test('a denial names what was reached, never the dump\'s path or a value', () => {

@@ -9,14 +9,14 @@ import { realDataOf } from '../lib/sandbox-boundary';
 import { addInputs, clearRealData, inputProblem, writeLocal } from '../lib/sandbox-files';
 import { LOCAL_FILE, MAX_INPUTS, readLocal } from '../lib/sandbox-mode';
 import { cleanupFakeProjects, fakeProject } from './m6a-project';
+import { keepEnv } from './m6b-helpers';
 
 setDefaultTimeout(120_000);
 const scratch: string[] = [];
-const savedHome = process.env.HOME;
+const restoreHome = keepEnv('HOME');
 afterEach(() => {
   // a dump has to be under the home directory (dumpProblem); two tests move it
-  if (savedHome === undefined) delete process.env.HOME;
-  else process.env.HOME = savedHome;
+  restoreHome();
   cleanupFakeProjects();
   while (scratch.length) rmSync(scratch.pop()!, { recursive: true, force: true });
 });

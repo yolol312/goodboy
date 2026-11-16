@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { sandboxDataDenial } from '../lib/sandbox-data-guard';
 import { projectName } from '../lib/sandbox-mode';
 import { registerRealData, registryEntryOf, registryFile } from '../lib/sandbox-registry';
-import { put, sandboxIn } from './m6b-helpers';
+import { keepEnv, put, sandboxIn } from './m6b-helpers';
 
 let base = '';
 let repo = '';
@@ -19,7 +19,7 @@ let dump = '';
 let log = '';
 let inputDir = '';
 let registryDir = '';
-const saved = { home: process.env.HOME, registry: process.env.GOODBOY_REGISTRY_DIR };
+const restoreEnv = keepEnv('HOME', 'GOODBOY_REGISTRY_DIR');
 
 beforeAll(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), 'goodboy-m6b-forms-')));
@@ -36,20 +36,19 @@ beforeAll(() => {
   process.env.GOODBOY_REGISTRY_DIR = registryDir;
 });
 afterAll(() => {
-  for (const [k, v] of [['HOME', saved.home], ['GOODBOY_REGISTRY_DIR', saved.registry]] as const) {
-    if (v === undefined) delete process.env[k];
-    else process.env[k] = v;
-  }
+  restoreEnv();
   rmSync(base, { recursive: true, force: true });
 });
 afterEach(() => {
-  for (const d of ['plain', 'registry', 'korean', 'other', 'away']) rmSync(join(base, d), { recursive: true, force: true });
+  for (const d of ['plain', 'registry', 'korean', 'other', 'away', 'outer']) rmSync(join(base, d), { recursive: true, force: true });
   rmSync(join(repo, '.goodboy', 'sandbox', 'out'), { recursive: true, force: true });
   rmSync(join(base, 'repo2'), { recursive: true, force: true });
 });
 
 const bash = (command: string, cwd = repo): string | null => sandboxDataDenial({ toolName: 'Bash', toolInput: { command }, cwd, projectCwd: cwd })?.what ?? null;
 const tool = (toolName: string, toolInput: Record<string, unknown>, cwd = repo): string | null => sandboxDataDenial({ toolName, toolInput, cwd, projectCwd: cwd })?.what ?? null;
+/** The dirs a denial from `cwd` tells to `cd` into (`DataGuardHit.from`). */
+const fromOf = (toolName: string, toolInput: Record<string, unknown>, cwd: string): string[] | undefined => sandboxDataDenial({ toolName, toolInput, cwd, projectCwd: cwd })?.from;
 const OUT = (): string => join(repo, '.goodboy', 'sandbox', 'out');
 const RUN = '20261101T000000Z';
 
@@ -110,13 +109,12 @@ describe('a plain project, with other projects in the registry, is not slowed or
 
   test('a hit from outside the registered project names that project: `sandbox-data` answers there, not here (live verify)', () => {
     const { plain, other } = plainWithRegistry();
-    const from = (toolName: string, toolInput: Record<string, unknown>, cwd: string) => sandboxDataDenial({ toolName, toolInput, cwd, projectCwd: cwd })?.from;
-    expect(from('Bash', { command: `cat ${dump}` }, plain)).toEqual([other]);
-    expect(from('Bash', { command: `docker exec ${projectName(other)}-db-1 sh` }, plain)).toEqual([other]);
-    expect(from('Read', { file_path: dump }, plain)).toEqual([other]);
+    expect(fromOf('Bash', { command: `cat ${dump}` }, plain)).toEqual([other]);
+    expect(fromOf('Bash', { command: `docker exec ${projectName(other)}-db-1 sh` }, plain)).toEqual([other]);
+    expect(fromOf('Read', { file_path: dump }, plain)).toEqual([other]);
     // a call inside a guarded project that reaches only its own data: sandbox-data answers from where it is
     expect(sandboxDataDenial({ toolName: 'Bash', toolInput: { command: `cat ${inputDir}/a.log` }, cwd: repo, projectCwd: repo })).toEqual({ what: 'a path of the dump or an input log' });
-    expect(sandboxDataDenial({ toolName: 'Read', toolInput: { file_path: dump }, cwd: other, projectCwd: other })?.from).toBeUndefined();
+    expect(fromOf('Read', { file_path: dump }, other)).toBeUndefined();
   });
 
   test('with two registered projects, the one the call names by path or project name is told; a call naming none lists both', () => {
@@ -125,14 +123,14 @@ describe('a plain project, with other projects in the registry, is not slowed or
     const dump2 = put(join(second, 'data', 'b.sql'), 'COPY b FROM stdin;');
     sandboxIn(second, { dump: dump2, dumpFormat: 'sql', realData: true });
     expect(registerRealData(registryEntryOf(second, { dump: dump2, dumpFormat: 'sql', realData: true }))).toBeNull();
-    const from = (toolName: string, toolInput: Record<string, unknown>) => sandboxDataDenial({ toolName, toolInput, cwd: plain, projectCwd: plain })?.from;
+    const from = (toolName: string, toolInput: Record<string, unknown>) => fromOf(toolName, toolInput, plain);
     expect(from('Bash', { command: `cat ${dump2}` })).toEqual([second]);
     expect(from('Read', { file_path: dump })).toEqual([other]);
     expect(from('Bash', { command: `docker logs ${projectName(second)}-app-1` })).toEqual([second]);
     // `~/dumps/dump.sql` names neither by its text: both are listed
     expect(from('Bash', { command: 'cat ~/dumps/dump.sql' })?.sort()).toEqual([other, second].sort());
     // a session in another real-data project is told the project it reached, not its own
-    const inRepo = (command: string) => sandboxDataDenial({ toolName: 'Bash', toolInput: { command }, cwd: repo, projectCwd: repo })?.from;
+    const inRepo = (command: string) => fromOf('Bash', { command }, repo);
     expect(inRepo(`cat ${dump2}`)).toEqual([second]);
     expect(inRepo(`docker exec ${projectName(second)}-db-1 sh`)).toEqual([second]);
     expect(inRepo(`docker exec ${projectName(repo)}-db-1 sh`)).toBeUndefined();
@@ -144,6 +142,35 @@ describe('a plain project, with other projects in the registry, is not slowed or
     // following the text: goodboy's own command run from that project's dir passes
     const cli = join(import.meta.dir, '..', 'lib', 'cli.ts');
     expect(sandboxDataDenial({ toolName: 'Bash', toolInput: { command: `cd "${second}" && bun "${cli}" sandbox-data schema` }, cwd: plain, projectCwd: plain })).toBeNull();
+  });
+
+  test('a project nested inside the session\'s project dir is told as nested: `sandbox-data` there answers for the outer dir', () => {
+    const { plain, other } = plainWithRegistry();
+    const outer = join(base, 'outer');
+    const inner = join(outer, 'inner');
+    const innerDump = put(join(inner, 'data', 'c.sql'), 'COPY c FROM stdin;');
+    sandboxIn(inner, { dump: innerDump, dumpFormat: 'sql', realData: true });
+    expect(registerRealData(registryEntryOf(inner, { dump: innerDump, dumpFormat: 'sql', realData: true }))).toBeNull();
+    // the hook's project dir is the outer one while the shell is anywhere inside it, also after a `cd` into the nested one
+    const hit = (command: string, cwd: string, root: string | null = outer) =>
+      sandboxDataDenial({ toolName: 'Bash', toolInput: { command }, cwd, projectCwd: root !== null && (cwd === root || cwd.startsWith(`${root}/`)) ? root : cwd, also: root === null ? [] : [root] });
+    expect(hit(`cat ${innerDump}`, outer)).toEqual({ what: 'a path of the dump or an input log', nested: [inner] });
+    expect(hit(`cat ${innerDump}`, inner)).toEqual({ what: 'a path of the dump or an input log', nested: [inner] });
+    expect(hit(`docker exec ${projectName(inner)}-db-1 sh`, outer)?.nested).toEqual([inner]);
+    // from outside the outer dir a `cd` into the nested one lands inside it too: still nested
+    expect(hit(`cat ${innerDump}`, plain)?.nested).toEqual([inner]);
+    // with another registered project outside it, each is told its own way
+    expect(hit(`cat ${innerDump} ${dump}`, outer)).toEqual({ what: 'a path of the dump or an input log', from: [other], nested: [inner] });
+    // with no outer project dir (no CLAUDE_PROJECT_DIR), a `cd` reaches it
+    expect(hit(`cat ${innerDump}`, outer, null)?.from).toEqual([inner]);
+    expect(hit(`cat ${innerDump}`, inner, null)).toEqual({ what: 'a path of the dump or an input log' });
+    // the outer project's own data is its own: nothing more
+    const outerDump = put(join(outer, 'o.sql'), 'COPY o FROM stdin;');
+    sandboxIn(outer, { dump: outerDump, dumpFormat: 'sql', realData: true });
+    expect(hit(`cat ${outerDump}`, outer)).toEqual({ what: 'a path of the dump or an input log' });
+    // a shell inside the nested project counts as reaching it: told as nested, never sent to the outer sandbox for it
+    expect(hit(`cat ${outerDump}`, inner)).toEqual({ what: 'a path of the dump or an input log', nested: [inner] });
+    expect(hit('cat data/c.sql', inner)).toEqual({ what: 'a path of the dump or an input log', nested: [inner] });
   });
 
   test('a call from a dir that holds a protected path is read to the caps: a word that long could be a path to it', () => {

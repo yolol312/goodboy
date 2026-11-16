@@ -15,7 +15,7 @@ import { handleOf } from '../lib/sandbox-data';
 import { writeLocal } from '../lib/sandbox-files';
 import { registerRealData, registryEntryOf } from '../lib/sandbox-registry';
 import { cleanupFakeProjects, fakeProject, type FakeProject, plainScan } from './m6a-project';
-import { put, sandboxIn } from './m6b-helpers';
+import { keepEnv, put, sandboxIn } from './m6b-helpers';
 
 setDefaultTimeout(120_000);
 afterEach(cleanupFakeProjects);
@@ -88,7 +88,7 @@ describe('writeLocal', () => {
   test('a sandbox dir that is a file is an Error naming it, not a throw, and no local file is written', () => {
     const base = realpathSync(mkdtempSync(join(tmpdir(), 'goodboy-m6b-wl-')));
     dirs.push(base);
-    const saved = { home: process.env.HOME, registry: process.env.GOODBOY_REGISTRY_DIR };
+    const restoreEnv = keepEnv('HOME', 'GOODBOY_REGISTRY_DIR');
     // the dump must sit in the home dir for the docker VM to see it (dumpProblem), so HOME is the temp dir
     process.env.HOME = base;
     process.env.GOODBOY_REGISTRY_DIR = join(base, 'registry');
@@ -102,10 +102,7 @@ describe('writeLocal', () => {
       expect((w as Error).message).toContain(`${join(root, '.goodboy')} is a link or not a directory`);
       expect(existsSync(join(root, '.goodboy', 'sandbox', 'local.json'))).toBe(false);
     } finally {
-      for (const [k, v] of [['HOME', saved.home], ['GOODBOY_REGISTRY_DIR', saved.registry]] as const) {
-        if (v === undefined) delete process.env[k];
-        else process.env[k] = v;
-      }
+      restoreEnv();
     }
   });
 });
@@ -135,7 +132,7 @@ describe('glob reader of the data guard', () => {
 describe('bounds of one call', () => {
   let base = '';
   let home = '';
-  const saved = { home: process.env.HOME, registry: process.env.GOODBOY_REGISTRY_DIR };
+  const restoreEnv = keepEnv('HOME', 'GOODBOY_REGISTRY_DIR');
   beforeAll(() => {
     base = realpathSync(mkdtempSync(join(tmpdir(), 'goodboy-m6b-cov-')));
     home = join(base, 'home');
@@ -144,10 +141,7 @@ describe('bounds of one call', () => {
     process.env.GOODBOY_REGISTRY_DIR = join(base, 'registry');
   });
   afterAll(() => {
-    for (const [k, v] of [['HOME', saved.home], ['GOODBOY_REGISTRY_DIR', saved.registry]] as const) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
+    restoreEnv();
     rmSync(base, { recursive: true, force: true });
   });
 

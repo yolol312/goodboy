@@ -9,16 +9,13 @@ import { addInputs, writeLocal } from '../lib/sandbox-files';
 import { LOCAL_FILE, projectName, SANDBOX_DIR } from '../lib/sandbox-mode';
 import { readRegistry, REGISTRY_MAX, REGISTRY_MAX_PATHS, type RegistryEntry, RegistryError, registerRealData, registryDir, registryEntryOf, registryFile } from '../lib/sandbox-registry';
 import { cleanupFakeProjects, fakeProject } from './m6a-project';
-import { put } from './m6b-helpers';
+import { keepEnv, put } from './m6b-helpers';
 
 setDefaultTimeout(120_000);
 const dirs: string[] = [];
-const saved = { home: process.env.HOME, registry: process.env.GOODBOY_REGISTRY_DIR };
+const restoreEnv = keepEnv('HOME', 'GOODBOY_REGISTRY_DIR');
 afterEach(() => {
-  for (const [k, v] of [['HOME', saved.home], ['GOODBOY_REGISTRY_DIR', saved.registry]] as const) {
-    if (v === undefined) delete process.env[k];
-    else process.env[k] = v;
-  }
+  restoreEnv();
   cleanupFakeProjects();
   while (dirs.length) rmSync(dirs.pop()!, { recursive: true, force: true });
 });

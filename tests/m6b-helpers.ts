@@ -1,5 +1,6 @@
 // Shared by tests/m6b-*.test.ts (track M, M6b; plan §19): files in a temp project, a sandbox dir with a local file,
-// and the column and table fixtures of the `sandbox-data` grammar tests.
+// environment variables put back after a file's tests, and the column and table fixtures of the `sandbox-data` grammar
+// tests.
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -10,6 +11,17 @@ export function put(p: string, text = 'x'): string {
   mkdirSync(join(p, '..'), { recursive: true });
   writeFileSync(p, text);
   return p;
+}
+
+/** A function that puts the variables `keys` back as they are now (unset when they are unset now). */
+export function keepEnv(...keys: string[]): () => void {
+  const was = keys.map((k) => [k, process.env[k]] as const);
+  return () => {
+    for (const [k, v] of was) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  };
 }
 
 /** `root/.goodboy/sandbox/` with a compose file and, unless `local` is null, a `local.json` (a string is written as it is). */

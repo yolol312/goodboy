@@ -14,10 +14,11 @@ import { commitIssueDenial } from '../lib/commit-issue';
 import { cdTarget, readCommand } from '../lib/outward-command';
 import { handoffsOf } from '../lib/push-test';
 import { bashChangedPaths } from '../lib/role-limits';
+import { keepEnv } from './m6b-helpers';
 
 const HOOK = resolve(import.meta.dir, '..', 'hooks', 'pre-tool-use.ts');
 const RULES = { allow: [], production: [] };
-const savedHome = process.env.HOME;
+const restoreHome = keepEnv('HOME');
 
 let base = '';
 let home = '';
@@ -52,8 +53,7 @@ beforeAll(() => {
   process.env.HOME = home;
 });
 afterAll(() => {
-  if (savedHome === undefined) delete process.env.HOME;
-  else process.env.HOME = savedHome;
+  restoreHome();
   rmSync(base, { recursive: true, force: true });
 });
 afterEach(() => {

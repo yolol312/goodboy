@@ -5207,10 +5207,20 @@ names, and "registered input logs" are paths registered with `sandbox-local --in
   hold real data", names what was reached, the `sandbox-data` and `sandbox-run` commands and the marker path,
   never the dump's path. `sandbox-data` answers for the dir it runs in (the shell's, when it is outside the session's
   project), so a call that reached another guarded project is also told that project's dir, to `cd` into first (a
-  JSON string, line separators and bidi controls escaped): the projects the call reached by a path inside them or
-  names by project name or protected path (read up to 100000 characters of its words: the hook must answer before
-  its timeout, or the denied call runs), other than the shell's or the hook's project; when it names none, nothing
-  more if the session is in a guarded project, else every guarded project (three, then "and N more"). The live
+  JSON string with these invisible characters escaped too: DEL and the C1 controls, U+061C, zero-width and direction
+  marks, line and paragraph separators, bidi embeddings, overrides and isolates, invisible operators and the BOM,
+  `shownDir`; others pass raw, such as the tag characters U+E0000-U+E007F, the soft hyphen and the Hangul fillers,
+  a limit under the threat model): the projects the call reached by a path inside them or names by project name or protected path
+  (read in its first 1600 words and 100000 characters, `wordsText`: the hook must answer before its timeout, or the
+  denied call runs), other than the one the CLI answers for from the shell's dir now (the hook's project dir); when it
+  names none, nothing more if that project is guarded, else every guarded project (three, then "and N more"). A
+  guarded project nested inside the session's project dir (CLAUDE_PROJECT_DIR) is told apart (M6c start): the CLI
+  answers for the session's project anywhere below that dir (`cliProjectDir`, a linked worktree answering for itself),
+  so no `cd` reaches its sandbox, and the text says its structure and counts come from a session started in its dir;
+  the guard asks the same `projectDir` the CLI does (the CLI's `repoTop` after it is not repeated: a registered dir is
+  a repo top already). A shell inside the nested project counts as reaching it, so a call there that reaches the outer
+  project's data is told only the nested project, and the text then reads as if the outer data could not be asked
+  either (an over-tell, chosen over sending the model to the outer sandbox for the nested one's data). The live
   verify found a model in another project, told nothing, planning a `sandbox-scan` there; a review measured the
   uncapped name search at 38 s for 3 MB of words built from the registry's paths of 77 characters (capped, 0.43 s
   for 3.2 MB built from paths of 150 characters, a different fixture).
@@ -5289,11 +5299,7 @@ names, and "registered input logs" are paths registered with `sandbox-local --in
   registered projects' dirs to a session that did not reach them (a call that names none, from a plain project)
   or the wrong project after the walk's cap on dirs (paths of the user's own projects, never a dump path or a
   row), a session in one guarded project that reaches another's data by `~`, a relative path or a glob and is told
-  no dir (the hit is taken as its own project's), a registered project nested inside the session's project dir
-  that is told to `cd` into it although `sandbox-data` answers for the session's project anywhere below it (the
-  model gets the outer sandbox's schema and counts; the text is fixed at the start of M6c, with U+061C and U+0085
-  added to the escaped characters and the name search's first 1600 words named beside its 100000 characters),
-  and a shape timeout on columns of about 16000 characters, and
+  no dir (the hit is taken as its own project's), and a shape timeout on columns of about 16000 characters, and
   the 15 ms of a project with no `local.json` and 200 run dirs (left as limits); a project that is in no registry
   and that no dir or path of the session leads to is not attributed (a project becomes registered with its next
   `sandbox-local` or `sandbox-*` command in real-data mode, so a sandbox that has not run a command since M6b is
@@ -5326,7 +5332,8 @@ names, and "registered input logs" are paths registered with `sandbox-local --in
   `m6b-home-cd.test.ts` (the `cd "$HOME/…"` reading in its other users: the push rule, the commit issue rule
   and the role limits; `${HOME:-/x}`, `$HOMEX` and `$HOME/$X` stay unknown), `m6b-coverage.test.ts` (the rare
   paths in-process: `sandbox-data` through `sandboxCommand`, a `local.json` write error, the glob bounds),
-  `m6b-helpers.ts` (shared fixtures); `tests/setup.ts` points `GOODBOY_REGISTRY_DIR` at a temp dir for the
+  `m6b-helpers.ts` (shared fixtures, and `keepEnv`, which puts the variables a file sets back, as the m6b files
+  share it since the M6c start); `tests/setup.ts` points `GOODBOY_REGISTRY_DIR` at a temp dir for the
   whole run (`bun test` fires no `exit` event, so a run's dir stays; the next run removes those older than a
   day), empties that registry after each test (a project one test registered denied `grep -r foo /` in a
   later hook test), and clears `DOCKER_HOST` and `DOCKER_CONTEXT` unless the real-docker test is on, and

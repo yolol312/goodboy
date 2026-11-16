@@ -10,7 +10,7 @@ import { cdTarget } from '../lib/outward-command';
 import { sandboxDataDenial } from '../lib/sandbox-data-guard';
 import { projectName } from '../lib/sandbox-mode';
 import { registerRealData, registryEntryOf, registryFile } from '../lib/sandbox-registry';
-import { put, sandboxIn } from './m6b-helpers';
+import { keepEnv, put, sandboxIn } from './m6b-helpers';
 
 let base = '';
 let repo = '';
@@ -18,7 +18,7 @@ let home = '';
 let dump = '';
 let log = '';
 let registryDir = '';
-const saved = { home: process.env.HOME, registry: process.env.GOODBOY_REGISTRY_DIR };
+const restoreEnv = keepEnv('HOME', 'GOODBOY_REGISTRY_DIR');
 
 beforeAll(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), 'goodboy-m6b-scope-')));
@@ -33,10 +33,7 @@ beforeAll(() => {
   process.env.GOODBOY_REGISTRY_DIR = registryDir;
 });
 afterAll(() => {
-  for (const [k, v] of [['HOME', saved.home], ['GOODBOY_REGISTRY_DIR', saved.registry]] as const) {
-    if (v === undefined) delete process.env[k];
-    else process.env[k] = v;
-  }
+  restoreEnv();
   rmSync(base, { recursive: true, force: true });
 });
 afterEach(() => {

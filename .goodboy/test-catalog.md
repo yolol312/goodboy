@@ -3,7 +3,7 @@
 Feature → test type, generated from the test files by goodboy (`cli.ts test-catalog`).
 Regenerate it instead of editing it; the docs rule compares it with a fresh copy.
 
-Totals: unit 227 files, 4187 tests; e2e 2 files, 54 tests.
+Totals: unit 227 files, 4193 tests; e2e 2 files, 54 tests.
 
 | Feature | Type | File | Tests |
 |---|---|---|---|
@@ -129,11 +129,11 @@ Totals: unit 227 files, 4187 tests; e2e 2 files, 54 tests.
 | the small module a hook can load (lib/sandbox-mode.ts); old runs with no local.json (rawMayRemain); a docker that does not answer; ui-check on a project that is real data only because of old files | unit | tests/m6b-gaps.test.ts | 13 |
 | the glob matcher agrees with bash on the forms of `**` | unit | tests/m6b-glob.test.ts | 4 |
 | the operations; the condition; the condition against the table | unit | tests/m6b-grammar.test.ts | 16 |
-| a plain project, with other projects in the registry, is not slowed or stopped; raw output a run left on the host, through the shell; a path held in a variable, and a reader that is fed names; find -exec, globs with braces, `**`, classes and extended forms; programs that run their arguments or their input; a Korean path in either Unicode form | unit | tests/m6b-guard-forms.test.ts | 24 |
+| a plain project, with other projects in the registry, is not slowed or stopped; raw output a run left on the host, through the shell; a path held in a variable, and a reader that is fed names; find -exec, globs with braces, `**`, classes and extended forms; programs that run their arguments or their input; a Korean path in either Unicode form | unit | tests/m6b-guard-forms.test.ts | 25 |
 | cd into a dir spelled from $HOME; compose set by the environment; raw host output while some is left, below a parent dir; the $HOME needles on Linux; a protected path is held as text at a path boundary; the work of a call is bounded | unit | tests/m6b-guard-scope.test.ts | 17 |
-| docker, podman and compose; the docker socket and the database clients; the dump and the input logs; Read, Grep and Glob; any tool whose input is a shell command; projects the rule leaves alone, and those it holds | unit | tests/m6b-guard.test.ts | 36 |
+| docker, podman and compose; the docker socket and the database clients; the dump and the input logs; Read, Grep and Glob; any tool whose input is a shell command; projects the rule leaves alone, and those it holds | unit | tests/m6b-guard.test.ts | 39 |
 | the outward push rule judges the push in the dir a $HOME cd names; the commit issue rule judges the commit in the repo a $HOME cd (or -C) names; the role limits judge a change in the dir a $HOME cd names; the reader itself: the dir a `cd` with HOME leaves | unit | tests/m6b-home-cd.test.ts | 14 |
-| Bash; Read, Grep and Glob; projects the rule leaves alone; round 2: the two contexts, the raw output, wrappers, the registry file, through the spawned hook | unit | tests/m6b-hook.test.ts | 25 |
+| Bash; Read, Grep and Glob; projects the rule leaves alone; round 2: the two contexts, the raw output, wrappers, the registry file, through the spawned hook | unit | tests/m6b-hook.test.ts | 27 |
 | sandbox-local --input; inputs in the local file and in the mode | unit | tests/m6b-local.test.ts | 11 |
 | the registry file; an entry never loses a path; who writes it; the reason a sandbox command gives is the error\; the plain local.json the sandbox commands write | unit | tests/m6b-registry.test.ts | 34 |
 | the role script of each engine; when the role is applied | unit | tests/m6b-role.test.ts | 12 |
