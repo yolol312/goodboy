@@ -284,7 +284,7 @@ export function shellWords(cmd: string): string[] | null {
  *  `sandbox-run`, flags), with no shell syntax around it (shellWords): not a comment, an echo or the
  *  second half of a chain. A host command, even the same one, is not. `--suite` must be the run's.
  *  For an e2e-only run `--` is refused: its words would replace the e2e service's command. */
-function lineKind(command: string, proof: RunProof): 'command' | 'whole' | null {
+export function lineKind(command: string, proof: RunProof): 'command' | 'whole' | null {
   const w = shellWords(command);
   if (w === null) return null;
   let i = 0;
@@ -302,6 +302,32 @@ function lineKind(command: string, proof: RunProof): 'command' | 'whole' | null 
   if (proof.suite === 'e2e' || proof.command.length === 0) return null;
   const tail = rest.slice(dd + 1);
   return tail.length === proof.command.length && tail.every((x, k) => x === proof.command[k]) ? 'command' : null;
+}
+
+/** Whether a `sandbox-run` line holds nothing but the invocation and its own flags before `--`: no runtime flag
+ *  with a value, and only `--suite unit|e2e|all` and `--timeout-ms <digits>` after `sandbox-run`. A real-data run's
+ *  test record keeps such a line (M6d); any other word there could carry text the caller chose (a name has no
+ *  shape the detectors know), so a line with one is withheld. The words after `--` are the run's own command,
+ *  which `lineKind` matches word for word. */
+export function sandboxRunFlagsOnly(command: string): boolean {
+  const w = shellWords(command);
+  if (w === null) return false;
+  let i = 0;
+  if (/^(?:bun|bunx|node|nodejs|tsx)$/.test((w[0] ?? '').split('/').pop()!)) {
+    i = 1;
+    while (i < w.length && /^--?[a-z][a-z-]*$/.test(w[i]!)) i++;
+  }
+  if (!/(^|\/)cli\.ts$/.test(w[i] ?? '') || w[i + 1] !== 'sandbox-run') return false;
+  const rest = w.slice(i + 2);
+  const dd = rest.indexOf('--');
+  const flags = dd < 0 ? rest : rest.slice(0, dd);
+  for (let k = 0; k < flags.length; k += 2) {
+    const [f, v] = [flags[k], flags[k + 1] ?? ''];
+    if (f === '--suite' && /^(?:unit|e2e|all)$/.test(v)) continue;
+    if (f === '--timeout-ms' && /^\d{1,9}$/.test(v)) continue;
+    return false;
+  }
+  return true;
 }
 
 /** The one line a counted suite must be, for the run of a record (named in the refusal). */

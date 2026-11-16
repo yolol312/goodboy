@@ -4650,8 +4650,9 @@ Design:
     "detection incomplete" and never relaxes the boundary.
   - M6f commit and push scan: on `git commit`, the complete new and modified blobs of the exact
     proposed tree, the message and the paths; on push, every outgoing ref and newly reachable
-    object. Detectors: PII shapes with checksums (resident and business numbers, Luhn cards,
-    phones, emails outside reserved domains) and the M6e fingerprints (a fingerprint hit overrides
+    object. Detectors: the PII shapes of M6d (`lib/pii-patterns.ts`: resident numbers by date and
+    gender digit, business numbers by checksum, cards by issuer prefix and Luhn, phones, emails
+    outside reserved domains) and the M6e fingerprints (a fingerprint hit overrides
     any exception). Binary and unknown formats are "unscanned", not clean; an exhausted budget
     denies. A hit names file, line and kind, never the value; exceptions are user-approved and
     bound to the exact content. `cli.ts git-hooks install` (run by the user) adds pre-commit and
@@ -5400,6 +5401,60 @@ As built (M6c, the data helper, 2026-11-16):
 - Tests: `tests/m6c-manifest`, `m6c-sql`, `m6c-resolve`, `m6c-run` (order, clearing on pass and fail, canaries),
   `m6c-render`, `m6c-volumes`, `m6c-helper` (TS and CJS under bun, Java with javac when present), `m6c-guard` and
   `m6c-gate`; the fake docker (`tests/m6a-fake.ts`) plays the in-container write.
+
+As built (M6d, records, 2026-11-16):
+- Detectors, `lib/pii-patterns.ts` (for M6f too): `findSensitive(text)` gives spans `{kind, start, end}` and
+  `redactText(text)` writes `[redacted:<kind>]`. Kinds: `resident-number` (a valid date and a gender digit 1-8,
+  joined by a hyphen, a space, a dot, a padded hyphen or nothing; no checksum), `business-number` (the Korean
+  checksum), `card` (13 to 19 digits, in groups led by four with one kind of separator, an issuer prefix and Luhn),
+  `phone` (Korean mobile and area numbers with or without padded separators, `(02) 123-4567`, `+82` and
+  `+82 (0)` forms), `email` (Hangul and IDN parts too; a domain that is not reserved: `example.com|net|org`,
+  `*.example`, `*.invalid`, `*.test`, `*.localhost`; not `git@host:path`, a common file extension such as
+  `logo@2x.png`, or a decorator call) and `secret` (each of `SECRET_PATTERNS` of `lib/secret-patterns.ts` run on
+  its own, compiled once; a PEM private key, either case, through its `-----END` line, the END searched once
+  forward). Full-width and Arabic-Indic digits, dash look-alikes and no-break or thin spaces are folded (same
+  length) before matching. Linear: 35 to 280 ms a megabyte, a megabyte of unclosed PEM lines included; the
+  tracked files of this repo (7.1 MB) scan in 1.7 s.
+- The sanitizer, `lib/record-sanitize.ts`: `sanitizeRecord(record, schema, {withhold})` copies a record with every
+  string value and key redacted, except the computed fields (tree, commit, timestamp, hashes, numbers, booleans),
+  the ids (`category`, `dimensions_checked`, acceptance ids, enums) and the paths (the file lists,
+  `findings[].file`, acceptance test paths, `mutation.file`, the known keys and paths of `coverage.changed` and
+  `coverage.subprocess`, `worktree`, `repo`). Those are not redacted but checked when written (`checkRecordFields`):
+  an id must match `[A-Za-z0-9_.:-]{1,64}` or its enum, and an id or a path holding a sensitive span (a phone, a card
+  and a resident number fit an id's characters) refuses the write with an error naming the field and the kind,
+  never the value. Commands are redacted by span. The schemas are typed by
+  the record types (`FieldPath<T>`), and `tests/m6d-schema.test.ts` walks a fully populated record of each type and
+  fails when a string field is in no list. A value it cannot walk (a cycle, a class instance, a throwing getter,
+  depth over 40) is withheld; `__proto__` and `constructor` keys become plain own properties.
+- Where: `writeTestRecord` (the record and the sibling copy of #42), `cmdReviewWrite`, and `writeRegressionRecord`.
+  Redaction comes before every cut: `notes` before its 4000 characters, and a regression output is captured with a
+  16 KB margin, redacted and cut to its tail in the raw text's coordinates, past any span the cut falls in, so no
+  part of a value is left at the tail's head; `outputSummary` redacts too, so the stderr summary and the Stop
+  message are safe even for an old raw record. What the three commands print to stderr from the caller's input
+  (validation echoes, the mutation-suite warning, the regression's changed files) is redacted, and withheld for a
+  real-data run.
+- Real-data runs: `readRunResult` gives `realData` (a run from before M6a counts as real data). A test record whose
+  `sandbox.run` was real data keeps its exact fields and has every display string replaced by
+  `[withheld: real-data run]`, which still meets the validators' rules (non-empty, a blocked reason of 15
+  characters); a command is withheld too unless it is that run's own `sandbox-run` line (`lineKind`) with plain
+  runtime flags and only `--suite` and `--timeout-ms` after `sandbox-run` (`sandboxRunFlagsOnly`: a name in any other
+  flag has no shape the detectors know), kept redacted by span. A record with no sandbox run is redacted only: a test outside the sandbox cannot reach the restored
+  data (the M6b guard).
+- Limits: names and addresses have no shape (M6e fingerprints, later); about 3% of bare 13-digit epoch
+  milliseconds read as a resident number (a review sampled 2001 to 2023: 564 of 18919), and a bare 10-digit number
+  can pass the business-number check (both redacted: the safe side); the rule that numbers issued from October 2020
+  carry no checksum is the reason none is required (not checked against a citable source here: requiring none only
+  widens the redaction); a secret with no keyword and no length bound, or a span over 16 KB across the start of the
+  regression's capture window, is seen in part; a file genuinely named like a phone or resident number cannot be
+  recorded (the write is refused); cards with two-space or underscore separators, Diners Club and Maestro prefixes,
+  and an email ending in a file extension that is no real top-level domain (`name@corp.js`) are not found; records
+  already on disk are not rewritten; M6f will need an early exit (`hasSensitive`) for whole blobs, not added yet.
+- Tests: `tests/m6d-detectors.test.ts` (positives and negatives per kind, epoch milliseconds, hashes, UUIDs,
+  versions, paths, `PT-`/`UIUX-` ids, Korean text, 1 MB inputs of each shape), `m6d-sanitize.test.ts`,
+  `m6d-schema.test.ts` (every string field of each record type is in one list) and `m6d-records.test.ts`
+  (canaries in every display field of the three records, on disk and in the sibling copies; exact fields
+  byte-identical; redaction before the notes and tail cuts; a real-data record withheld and still passing the Stop
+  gate's validators).
 
 ## 20. N — Fewer repeated runs, a project test inventory, task criteria (proposed, 2026-10-26)
 

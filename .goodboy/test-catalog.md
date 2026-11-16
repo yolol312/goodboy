@@ -3,7 +3,7 @@
 Feature → test type, generated from the test files by goodboy (`cli.ts test-catalog`).
 Regenerate it instead of editing it; the docs rule compares it with a fresh copy.
 
-Totals: unit 236 files, 4338 tests; e2e 2 files, 54 tests.
+Totals: unit 241 files, 4434 tests; e2e 2 files, 54 tests.
 
 | Feature | Type | File | Tests |
 |---|---|---|---|
@@ -147,6 +147,11 @@ Totals: unit 236 files, 4338 tests; e2e 2 files, 54 tests.
 | the order of a run; a run that stops at the data; a canary row that was resolved never leaves the volume; the hex of a value reaches the helpers in lowercase on every engine | unit | tests/m6c-run.test.ts | 31 |
 | the SQL of the resolve step, per engine; the answers of phase 1 are read strictly; the write script run inside the database container; a statement that ran into its time limit is told by the engine's error code, and the text never comes out; the whole file is bounded in bytes, inside the container | unit | tests/m6c-sql.test.ts | 18 |
 | clear-data; finish, with the scratch volumes cleared | unit | tests/m6c-volumes.test.ts | 6 |
+| M6d detectors: positives; M6d detectors: negatives; M6d detectors: spans and context; M6d detectors: cost; M6d detectors compile nothing per call; M6d lib/secret-patterns.ts keeps its own behaviour for its other users | unit | tests/m6d-detectors.test.ts | 25 |
+| M6d test-write; M6d review-write; M6d regression; M6d real-data runs record only the M6a result; M6d an id or a path that holds personal data stops test-write and review-write; M6d stderr shows no caller text | unit | tests/m6d-records.test.ts | 41 |
+| M6d runCommands | unit | tests/m6d-run-commands.test.ts | 3 |
+| M6d sanitizeRecord; M6d sanitizeRecord: keys that redact to one text; M6d sandboxRunFlagsOnly: the run line a real-data record may keep; M6d checkRecordFields | unit | tests/m6d-sanitize.test.ts | 17 |
+| M6d field lists are tied to the record types; M6d each field list does what it says, on every string field of each record | unit | tests/m6d-schema.test.ts | 10 |
 | marker names and Bash writes; PreToolUse; a marker made during a model Bash call that never reported back (`exit N`, G0 M18); a marker made in another directory during a finished call (security review round 2); round 3; PostToolUse sweep | unit | tests/marker-guard.test.ts | 14 |
 | redirections; shellSegments; hostOf; curl, wget, httpie; ssh family; git push | unit | tests/outward-command.test.ts | 22 |
 | unlisted external hosts; production hosts; gate modes | unit | tests/outward-gate-hooks.test.ts | 12 |

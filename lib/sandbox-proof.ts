@@ -46,6 +46,9 @@ export interface RunProof {
    *  the project has no e2e tests). The requested `suite` alone does not say the step ran. */
   e2e: { exit: number | null; timedOut: boolean; report: boolean } | null;
   check: { inner_only: boolean; egress_blocked: boolean; hosts_to_dummies: boolean };
+  /** Whether the run held real data (M6a writes `realData`); a result with no such field is from before M6a and
+   *  counts as real data (fail closed). Records of such a run keep no display text (M6d). */
+  realData: boolean;
 }
 
 /** The result of a sandbox run (`out/<run>/result.json`), read from the repo top without
@@ -79,7 +82,7 @@ export function readRunResult(root: string, run: string): RunProof | Error {
     ) {
       const e = j.e2e;
       const e2e = typeof e === 'object' && e !== null ? { exit: typeof (e as { exit?: unknown }).exit === 'number' ? ((e as { exit: number }).exit) : null, timedOut: (e as { timedOut?: unknown }).timedOut === true, report: typeof j.playwrightReport === 'string' } : null;
-      return { run, sha256: sha(r.text), exit: exit as number | null, command: j.command as string[], suite: typeof j.suite === 'string' ? j.suite : null, e2e, check: { inner_only: c.inner_only, egress_blocked: c.egress_blocked, hosts_to_dummies: c.hosts_to_dummies } };
+      return { run, sha256: sha(r.text), exit: exit as number | null, command: j.command as string[], suite: typeof j.suite === 'string' ? j.suite : null, e2e, realData: j.realData !== false, check: { inner_only: c.inner_only, egress_blocked: c.egress_blocked, hosts_to_dummies: c.hosts_to_dummies } };
     }
   } catch {
     // below

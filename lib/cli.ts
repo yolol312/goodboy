@@ -25,6 +25,8 @@ import { outsideRepoTop, regressionTop, repoTrees, topOf, treeDiff, treesOf, wor
 import { cleanWorktreeFor, type CleanWorktree, worktreeArg } from './clean-worktree';
 import { cliProjectDir, knownProjectDir } from './project-dir';
 import { getEditHistory, openedPath } from './file-tracker';
+import { redactText } from './pii-patterns';
+import { checkRecordFields, type FieldProblem, REVIEW_SCHEMA, type SanitizeOptions, sanitizeRecord, TEST_SCHEMA } from './record-sanitize';
 import { DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, outputSummary, type RegressionRecord, regressionCommands, runCommands, writeRegressionRecord } from './regression';
 import { diffCoverageOf } from './diff-coverage';
 import { criteriaNow } from './session-criteria';
@@ -68,7 +70,7 @@ import { allIdentifiers, buildInventory, fitInventory, inventoryLists, inventory
 import { fitProbes, probeEstimate, probesSummary, runProbes } from './probes';
 import { GOODBOY_CASES, readUserCases, runSmoke, smokeSummary } from './smoke';
 import { surveyProject } from './test-survey';
-import { BACKFILL_FILE, backfillSummary, DEFAULT_BATCH, markTarget, MAX_TARGETS, mergeSurvey, nextBatch, readBackfill, repoRel, type TargetStatus, withBackfillLock, writeBackfill } from './test-backfill';
+import { BACKFILL_FILE, backfillSummary, DEFAULT_BATCH, lineKind, markTarget, MAX_TARGETS, mergeSurvey, nextBatch, readBackfill, repoRel, sandboxRunFlagsOnly, type TargetStatus, withBackfillLock, writeBackfill } from './test-backfill';
 import { extraBlobsFor, repoTop } from './changed-coverage';
 import { changedEntries, MAX_CHANGED_ENTRIES, scopeCoverageTops } from './coverage-entries';
 import { repoOfFile, type RepoWalkMemo } from './nested-repos';
@@ -77,7 +79,7 @@ import { readTopStart, topIdentity } from './start-pins';
 import { cmdCoverageCheck } from './coverage-check';
 import { cmdUiCheck } from './ui-check';
 import { cmdUiInventory } from './ui-inventory';
-import { readRunResult } from './sandbox-proof';
+import { readRunResult, type RunProof } from './sandbox-proof';
 import { sandboxCommand } from './sandbox-run';
 
 // ---- 유틸 ----
@@ -85,6 +87,24 @@ import { sandboxCommand } from './sandbox-run';
 function fail(msg: string): never {
   process.stderr.write(msg + '\n');
   process.exit(1);
+}
+
+/** (M6d) A caller's value as an error message or a warning shows it: redacted, cut, and with `withhold` (the run
+ *  the record stands on held real data) not shown at all. */
+function shown(v: unknown, withhold = false): string {
+  return withhold ? '[withheld]' : redactText(String(v)).slice(0, 80);
+}
+
+/** (M6d) Stops with the fields the record may not carry, named by path and reason, never by value. */
+function failOnFields(cmd: string, problems: readonly FieldProblem[]): void {
+  if (problems.length === 0) return;
+  fail(
+    `${cmd}: the record is not written. ` +
+      problems.map((p) => `${p.path} ${p.why}`).slice(0, 10).join('; ') +
+      `${problems.length > 10 ? `; and ${problems.length - 10} more` : ''}. ` +
+      'A path, a category, an id or a dimension that holds personal data (or, for an identifier, anything but letters, digits and _ . : -) is not recorded: ' +
+      'give the file a name without it, or name the check by an id.',
+  );
 }
 
 function ensureDir(path: string): void {
@@ -152,7 +172,7 @@ export function validateReviewResultInput(parsed: unknown): {
       }
       if (!VALID_SEVERITIES.includes(finding.severity as Severity)) {
         errors.push(
-          `findings[${i}].severity는 ${VALID_SEVERITIES.join('|')} 중 하나여야 합니다 (입력: ${String(finding.severity)}).`,
+          `findings[${i}].severity는 ${VALID_SEVERITIES.join('|')} 중 하나여야 합니다 (입력: ${shown(finding.severity)}).`,
         );
       }
       if (finding.line !== undefined && typeof finding.line !== 'number') {
@@ -169,7 +189,7 @@ export function validateReviewResultInput(parsed: unknown): {
       if (finding.severity === 'high' || finding.severity === 'medium') {
         if (typeof finding.probe !== 'string' || finding.probe.trim() === '') {
           errors.push(
-            `findings[${i}](severity=${String(finding.severity)})에 probe 증거가 없습니다. ` +
+            `findings[${i}](severity=${shown(finding.severity)})에 probe 증거가 없습니다. ` +
               `high/medium finding은 실제 실행한 명령과 관찰된 출력을 probe 필드에 기록해야 합니다 (예: "echo '[{\\"text\\":\\"x\\"}]' > db.json; bun -e '...' → nextId=NaN").`,
           );
         }
@@ -179,7 +199,7 @@ export function validateReviewResultInput(parsed: unknown): {
 
   // verdict
   if (!VALID_VERDICTS.includes(p.verdict as Verdict)) {
-    errors.push(`verdict는 ${VALID_VERDICTS.join('|')} 중 하나여야 합니다 (입력: ${String(p.verdict)}).`);
+    errors.push(`verdict는 ${VALID_VERDICTS.join('|')} 중 하나여야 합니다 (입력: ${shown(p.verdict)}).`);
   }
 
   // unknown_assumptions_checked: optional array, default []
@@ -298,7 +318,7 @@ export function recordOutsideRepo(cwd: string, files: readonly unknown[]): strin
 
 function failOutsideRepo(cmd: string, file: string): never {
   fail(
-    `${cmd}: ${file} is outside goodboy's own directory, where this command runs. ` +
+    `${cmd}: ${redactText(file)} is outside goodboy's own directory, where this command runs. ` +
       `Run \`bun "<goodboy>/lib/cli.ts" ${cmd}\` from the project's directory (cd there first); the gates read results there.`,
   );
 }
@@ -367,6 +387,8 @@ export async function cmdReviewWrite(cwd: string, args: string[]): Promise<void>
   const repos = repoTrees(result.reviewed_files, cwd);
   if (Object.keys(repos.trees).length > 0) result.trees = repos.trees;
   setExtraBlobs(cwd, result, result.tree, result.reviewed_files, repos.trees);
+  // (M6d) The ids and paths the gates compare are kept as they are, so one that holds personal data stops the write.
+  failOnFields('review-write', checkRecordFields(result, REVIEW_SCHEMA));
   const reviewsDir = join(cwd, '.claude', 'reviews');
   ensureDir(reviewsDir);
   const outPath = uniqueJsonPath(reviewsDir, timestampToFilename(result.timestamp));
@@ -377,7 +399,8 @@ export async function cmdReviewWrite(cwd: string, args: string[]): Promise<void>
   if (resolvedOut !== resolvedReviews && !resolvedOut.startsWith(resolvedReviews + sep)) {
     fail(`출력 경로가 reviews 디렉터리를 벗어납니다: ${resolvedOut}`);
   }
-  writeJson(outPath, result);
+  // (M6d) Every string and key redacted on the way to disk; the paths, ids and enums the gates compare stay as they are.
+  writeJson(outPath, sanitizeRecord(result, REVIEW_SCHEMA));
 
   process.stdout.write(
     JSON.stringify({ ok: true, path: outPath, timestamp: result.timestamp }) + '\n',
@@ -419,12 +442,19 @@ export function validateTestResultInput(parsed: unknown, bases: readonly string[
   ok: boolean;
   errors: string[];
   value?: TestResult;
+  /** (M6d) The sandbox run the record stands on: when it held real data (or its result does not say), the writer keeps no
+   *  display text and no command but the run's own `sandbox-run` line. Also on failure: the errors then show no input. */
+  proof?: RunProof;
 } {
   const errors: string[] = [];
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     return { ok: false, errors: ['최상위 값이 JSON 객체가 아닙니다.'] };
   }
   const p = parsed as Record<string, unknown>;
+  // (M6d) The sandbox run first (its errors are listed last): a run on real data shows none of the input in an error.
+  const sandboxErrors: string[] = [];
+  const sandboxRun = p.sandbox === undefined ? undefined : sandboxFromRun(p.sandbox, root, sandboxErrors);
+  const show = (v: unknown): string => shown(v, sandboxRun?.proof.realData === true);
 
   if (!Array.isArray(p.tested_files) || p.tested_files.length === 0) {
     errors.push('tested_files는 비어 있지 않은 배열이어야 합니다(이번 테스트가 커버하는 변경 파일).');
@@ -475,7 +505,7 @@ export function validateTestResultInput(parsed: unknown, bases: readonly string[
       }
       // (#32) Relative to the project dir or the shell's dir: either is where the agent can mean it.
       if (!bases.some((b) => existsSync(resolve(b, f)))) {
-        errors.push(`test_files[${i}] 파일이 존재하지 않습니다: ${f}`);
+        errors.push(`test_files[${i}] 파일이 존재하지 않습니다: ${show(f)}`);
       }
     });
   }
@@ -487,7 +517,7 @@ export function validateTestResultInput(parsed: unknown, bases: readonly string[
     const env = p.environment as Record<string, unknown>;
     if (!VALID_ENV_MODES.includes(env.mode as TestEnvMode)) {
       errors.push(
-        `environment.mode는 ${VALID_ENV_MODES.join('|')} 중 하나여야 합니다 (입력: ${String(env.mode)}).`,
+        `environment.mode는 ${VALID_ENV_MODES.join('|')} 중 하나여야 합니다 (입력: ${show(env.mode)}).`,
       );
     }
   }
@@ -509,7 +539,7 @@ export function validateTestResultInput(parsed: unknown, bases: readonly string[
       if (typeof suite.output !== 'string') errors.push(`suites[${i}].output은 문자열이어야 합니다.`);
       // Per test type, the count and the time (track G §10.8): measured, not gated.
       if (!TEST_TYPES.includes(suite.type as TestType)) {
-        errors.push(`suites[${i}].type must be one of ${TEST_TYPES.join('|')} (got ${String(suite.type)}).`);
+        errors.push(`suites[${i}].type must be one of ${TEST_TYPES.join('|')} (got ${show(suite.type)}).`);
       }
       if (typeof suite.duration_ms !== 'number' || !Number.isFinite(suite.duration_ms) || suite.duration_ms < 0) {
         errors.push(`suites[${i}].duration_ms must be the suite's wall time in milliseconds (a number ≥ 0).`);
@@ -588,7 +618,7 @@ export function validateTestResultInput(parsed: unknown, bases: readonly string[
   }
 
   if (!VALID_TEST_VERDICTS.includes(p.verdict as TestVerdict)) {
-    errors.push(`verdict는 ${VALID_TEST_VERDICTS.join('|')} 중 하나여야 합니다 (입력: ${String(p.verdict)}).`);
+    errors.push(`verdict는 ${VALID_TEST_VERDICTS.join('|')} 중 하나여야 합니다 (입력: ${show(p.verdict)}).`);
   }
 
   if (p.prototype_diff !== undefined) {
@@ -601,14 +631,21 @@ export function validateTestResultInput(parsed: unknown, bases: readonly string[
       }
       if (!Array.isArray(pd.mismatches)) {
         errors.push('prototype_diff.mismatches는 배열이어야 합니다.');
+      } else {
+        // (M6d) `severity` is kept as it is, so it is one of the three, never free text.
+        pd.mismatches.forEach((m, i) => {
+          const sev = (m as Record<string, unknown> | null)?.severity;
+          if (!VALID_SEVERITIES.includes(sev as Severity)) errors.push(`prototype_diff.mismatches[${i}].severity는 ${VALID_SEVERITIES.join('|')} 중 하나여야 합니다.`);
+        });
       }
     }
   }
 
   if (p.notes !== undefined && typeof p.notes !== 'string') errors.push('notes, when given, must be a string.');
-  const sandbox = p.sandbox === undefined ? undefined : sandboxFromRun(p.sandbox, root, errors);
+  errors.push(...sandboxErrors);
+  const sandbox = sandboxRun?.value;
 
-  if (errors.length > 0) return { ok: false, errors };
+  if (errors.length > 0) return { ok: false, errors, ...(sandboxRun !== undefined ? { proof: sandboxRun.proof } : {}) };
 
   // review-write와 같은 이유로 timestamp는 호출자 입력을 무시하고 서버 시각을 쓴다
   //   (미래 시각을 넣으면 이후 편집까지 "테스트됨"이 되는 게이트 우회가 성립).
@@ -628,10 +665,11 @@ export function validateTestResultInput(parsed: unknown, bases: readonly string[
   if (isBlocked) value.blocked = p.blocked as TestResult['blocked'];
   if (p.coverage !== undefined) value.coverage = p.coverage as TestResult['coverage'];
   // Kept, cut at 4000 characters (they were dropped without a word); no gate reads them.
-  if (typeof p.notes === 'string' && p.notes.trim() !== '') value.notes = p.notes.slice(0, MAX_NOTES);
+  //   (M6d) Redacted before the cut, so a number that crosses the cut is never left half visible.
+  if (typeof p.notes === 'string' && p.notes.trim() !== '') value.notes = redactText(p.notes).slice(0, MAX_NOTES);
   if (sandbox !== undefined) value.sandbox = sandbox;
   if (value.suites.length > 0) value.by_type = byTestType(value.suites);
-  return { ok: true, errors: [], value };
+  return { ok: true, errors: [], value, ...(sandboxRun !== undefined ? { proof: sandboxRun.proof } : {}) };
 }
 
 const TEST_TYPES: TestType[] = ['unit', 'integration', 'ui', 'e2e'];
@@ -695,7 +733,7 @@ function validateChangedEntry(raw: unknown, label: string, errors: string[]): bo
  *  flags and the hash of the run's result.json are taken here from `.goodboy/sandbox/out/<ts>/`
  *  under the repo top (lib/sandbox-proof.ts readRunResult), so a record can not claim a check no
  *  sandbox-run made. Flags the caller adds must match the result's. Undefined on errors. */
-function sandboxFromRun(raw: unknown, root: string | undefined, errors: string[]): NonNullable<TestResult['sandbox']> | undefined {
+function sandboxFromRun(raw: unknown, root: string | undefined, errors: string[]): { value: NonNullable<TestResult['sandbox']>; proof: RunProof } | undefined {
   const s = raw as Record<string, unknown> | null;
   if (typeof s !== 'object' || s === null || Array.isArray(s) || typeof s.run !== 'string') {
     errors.push('sandbox must be {run: "<ts>"}: the directory name of the sandbox-run under .goodboy/sandbox/out/ (the check flags are copied from its result.json).');
@@ -712,10 +750,10 @@ function sandboxFromRun(raw: unknown, root: string | undefined, errors: string[]
   }
   for (const k of ['inner_only', 'egress_blocked', 'hosts_to_dummies'] as const) {
     if (s[k] !== undefined && s[k] !== proof.check[k]) {
-      errors.push(`sandbox.${k} is ${String(s[k])} but the run's result.json says ${proof.check[k]}: pass only {run}, the flags are copied from it.`);
+      errors.push(`sandbox.${k} is ${typeof s[k] === 'boolean' ? String(s[k]) : shown(s[k], proof.realData)} but the run's result.json says ${proof.check[k]}: pass only {run}, the flags are copied from it.`);
     }
   }
-  return { ...proof.check, run: proof.run, result_sha256: proof.sha256 };
+  return { value: { ...proof.check, run: proof.run, result_sha256: proof.sha256 }, proof };
 }
 
 function validateCoverageInput(raw: unknown, errors: string[]): void {
@@ -793,13 +831,13 @@ function idleTestedFiles(result: TestResult, spelledTested: readonly string[], c
 /** (#25 part 3) Failing suites that look like a mutation run (`mutant` or `mutation` in the name or command):
  *  the mutants fail by design, and the Stop counts every failing suite as a failing test. A warning, never a
  *  skip: a real failure would hide behind the name. */
-export function mutationSuiteWarnings(suites: readonly TestResult['suites'][number][] | undefined): string[] {
+export function mutationSuiteWarnings(suites: readonly TestResult['suites'][number][] | undefined, label: (name: string) => string = (n) => n): string[] {
   const out: string[] = [];
   for (const s of suites ?? []) {
     if (typeof s?.failed !== 'number' || s.failed <= 0) continue;
     if (!/mutant|mutation/i.test(`${s.name ?? ''} ${s.command ?? ''}`)) continue;
     out.push(
-      `warning: suite "${s.name}" has ${s.failed} failure(s) and looks like a mutation run. \`suites\` are runs of the real tree; ` +
+      `warning: suite "${label(String(s.name))}" has ${s.failed} failure(s) and looks like a mutation run. \`suites\` are runs of the real tree; ` +
         "the Stop counts these failures as failing tests. Put a mutation run in its criterion's `mutation` ({command, output, detected: true, file}) instead.",
     );
   }
@@ -817,8 +855,10 @@ function recordCopy(write: () => string): string | undefined {
   }
 }
 
-/** A test record written under `dir`'s `.claude/tests`, under a new name; its path. */
-function writeTestRecord(dir: string, result: TestResult): string {
+/** A test record written under `dir`'s `.claude/tests`, under a new name; its path. (M6d) Every string and key is
+ *  redacted on the way to disk (the fields the gates compare stay as they are); `withhold`, for the record of a run
+ *  on real data, replaces the display text, and every command but the run's own `sandbox-run` line, by a fixed one. Both the record and its sibling copy come here. */
+function writeTestRecord(dir: string, result: TestResult, opts: SanitizeOptions = {}): string {
   const testsDir = join(dir, '.claude', 'tests');
   ensureDir(testsDir);
   const outPath = uniqueJsonPath(testsDir, timestampToFilename(result.timestamp));
@@ -826,7 +866,7 @@ function writeTestRecord(dir: string, result: TestResult): string {
   const resolvedOut = resolve(outPath);
   // A guard only: timestampToFilename keeps the name inside (one line, so the moved check is measured as run).
   if (resolvedOut !== resolvedTests && !resolvedOut.startsWith(resolvedTests + sep)) fail(`출력 경로가 tests 디렉터리를 벗어납니다: ${resolvedOut}`);
-  writeJson(outPath, result);
+  writeJson(outPath, sanitizeRecord(result, TEST_SCHEMA, opts));
   return outPath;
 }
 
@@ -920,12 +960,19 @@ export async function cmdTestWrite(cwd: string, args: string[], shell: string = 
   const repos = wt !== null ? { trees: {}, dropped: [] as string[] } : repoTrees(result.tested_files, cwd);
   if (Object.keys(repos.trees).length > 0) result.trees = repos.trees;
   setExtraBlobs(base, result, state.tree, result.tested_files, repos.trees);
-  const outPath = writeTestRecord(cwd, result);
   // (#42) A run in a repo outside the session's project dir: a copy marked with that repo is stored in the project
   //   dir too. The hooks read the project dir when the shell went back there after a `cd` outside it, and the
   //   shell's dir when it stays there (a directory added to the session); the record serves both.
   const away = outsideRepo(shell);
-  const copy = away !== null ? recordCopy(() => writeTestRecord(away.project, { ...result, repo: away.repo })) : undefined;
+  // (M6d) The ids and paths the gates compare are kept as they are, so one that holds personal data stops the write
+  //   (before the record or its copy is written). A run on real data records no display text and no command but its own.
+  failOnFields('test-write', checkRecordFields(result, TEST_SCHEMA));
+  if (away !== null) failOnFields('test-write', checkRecordFields({ ...result, repo: away.repo }, TEST_SCHEMA));
+  const proof = validated.proof;
+  const withhold = proof?.realData === true;
+  const opts: SanitizeOptions = { withhold, ...(proof !== undefined ? { keepCommand: (c: string) => lineKind(c, proof) !== null && sandboxRunFlagsOnly(c) } : {}) };
+  const outPath = writeTestRecord(cwd, result, opts);
+  const copy = away !== null ? recordCopy(() => writeTestRecord(away.project, { ...result, repo: away.repo }, opts)) : undefined;
   // The project's test profile, for the tier advice (track H §14.7).
   recordTestProfile(knowledgeRoot(cwd).root, result.by_type, result.timestamp);
 
@@ -938,7 +985,7 @@ export async function cmdTestWrite(cwd: string, args: string[], shell: string = 
   if (idle.length > 0) {
     process.stderr.write(`warning: no changed line of these tested files ran in the tests: ${idle.join(', ')}\n`);
   }
-  for (const w of mutationSuiteWarnings(result.suites)) process.stderr.write(w + '\n');
+  for (const w of mutationSuiteWarnings(result.suites, (n) => shown(n, withhold))) process.stderr.write(w + '\n');
   if (repos.dropped.length > 0) {
     process.stderr.write(`warning: tested files span more repos than goodboy hashes; no tree recorded for ${repos.dropped.join(', ')} (a push from them needs a test run of their own).\n`);
   }
@@ -1008,7 +1055,7 @@ export async function cmdRegression(cwd: string, args: string[]): Promise<void> 
   if (bad) process.stderr.write(`regression failed: \`${bad.command}\` exited ${bad.exit_code}\n${outputSummary(bad.output_tail, 1500, 500)}\n`);
   if (changed) {
     process.stderr.write(
-      `regression failed: the run changed the working tree (${(rec.changed_files ?? []).slice(0, 10).join(', ') || 'unknown files'}), ` +
+      `regression failed: the run changed the working tree (${redactText((rec.changed_files ?? []).slice(0, 10).join(', ')) || 'unknown files'}), ` +
         'so it proves neither tree. Ignore what the tests generate (e.g. coverage/) or commit it, then run again.\n',
     );
   }

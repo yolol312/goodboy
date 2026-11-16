@@ -1,6 +1,10 @@
 // Secrets in text, for the places goodboy keeps text it did not write: a field report's public
-// summary (lib/field-report.ts, track J) and what an update checkup keeps (track K: hook
-// commands in the inventory).
+// summary (lib/field-report.ts, track J), what an update checkup keeps (track K: hook commands in
+// the inventory), and the records `test-write`, `review-write` and `regression` write (track M, M6d:
+// lib/pii-patterns.ts, which runs each pattern on its own and covers a PEM key to its END line).
+
+/** The BEGIN line of a PEM private key; lib/pii-patterns.ts extends a match of it to the END line. */
+export const PEM_PRIVATE_KEY_BEGIN = '-----BEGIN [A-Z ]*PRIVATE KEY';
 
 /** Tokens, keys and passwords as they appear in output and config. */
 export const SECRET_PATTERNS: readonly string[] = [
@@ -12,7 +16,7 @@ export const SECRET_PATTERNS: readonly string[] = [
   '\\bAIza[\\w-]{30,}',
   '\\bnpm_[A-Za-z0-9]{30,}',
   '\\bxox[abprs]-[A-Za-z0-9-]{10,}',
-  '-----BEGIN [A-Z ]*PRIVATE KEY',
+  PEM_PRIVATE_KEY_BEGIN,
   '\\beyJ[\\w-]{10,}\\.[\\w-]{10,}',
   '\\bBearer\\s+[\\w.~+/-]{16,}',
   // A user and password in a URL (`redis://:pw@host`), or for curl (`-u user:pw`; a password

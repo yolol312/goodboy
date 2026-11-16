@@ -9,7 +9,9 @@
 import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { runBounded } from './bounded';
+import { findSensitive, redactText } from './pii-patterns';
 import { OBJECT_ID } from './push-test';
+import { type RecordSchema, sanitizeRecord } from './record-sanitize';
 import { readRegular } from './safe-read';
 import { GRADLE_FILES } from './test-validator';
 
@@ -22,6 +24,11 @@ const MAX_MANIFEST_BYTES = 1_000_000;
  *  so stderr noise does not push the failing lines out). */
 export const STDOUT_TAIL = 6_000;
 export const STDERR_TAIL = 2_000;
+/** Read past each tail by this much, so a number or a token that straddles the start of the tail is seen whole
+ *  before the tail is cut (M6d). A span longer than this that straddles the start of the window can still be
+ *  seen only in part: the detectors' unbounded patterns (a PEM key to its END line, a `Bearer` or `password`
+ *  value) can run that long, and `redactedTail` then cuts after the part it sees. */
+const CAPTURE_MARGIN = 16_384;
 /** Past this, a full regression is too long to ask before every push (plan §15.1, H6 tiers). */
 export const ONE_HOUR_MS = 60 * 60_000;
 /** A run is stopped after this long (`--timeout-min`, at most a day: a longer timer overflows
@@ -68,6 +75,16 @@ export interface RegressionRecord {
   duration_ms: number;
   verdict: 'pass' | 'fail';
 }
+
+/** `regression` (lib/record-sanitize.ts): goodboy's own measurement, no caller text; only the commands' output
+ *  and the names of the files a run changed are text. Never refused: nothing here is the caller's. */
+export const REGRESSION_SCHEMA: RecordSchema<RegressionRecord> = {
+  computed: ['timestamp', 'commit', 'tree', 'tree_after', 'source'],
+  ids: ['verdict'],
+  paths: ['worktree', 'repo', 'runs.[].program'],
+  commands: ['runs.[].command'],
+  display: ['changed_files.[]', 'runs.[].output_tail'],
+};
 
 // npm's default `test` script, which runs nothing.
 const NPM_PLACEHOLDER = /^echo\s+["']?Error: no test specified["']?\s*&&\s*exit\s+1$/;
@@ -161,6 +178,25 @@ export function regressionCommands(top: string): { commands: string[]; source: s
   return commands.length > 0 ? { commands, source: sources.join(' + ') } : null;
 }
 
+/** The last `n` characters of `raw`, redacted (M6d). The cut is made in `raw`, never in the redacted text, and moved
+ *  past any span it falls in: a cut first would leave the end of a value no pattern matches, and redacting first and
+ *  keeping the last `n` of the result would keep the head of the window (which can start inside a value) whenever
+ *  the redaction shrank it below `n`. `raw` is the captured window, longer than `n` by CAPTURE_MARGIN when the
+ *  output was longer than that, so the part before the cut holds any span that straddles it. */
+export function redactedTail(raw: string, n: number): string {
+  if (raw.length <= n) return redactText(raw).slice(-n);
+  let cut = raw.length - n;
+  for (const s of findSensitive(raw)) {
+    if (s.start >= cut) break;
+    if (s.end > cut) {
+      cut = s.end;
+      break;
+    }
+  }
+  // a placeholder is longer than a short value it replaced: the result is cut to `n` again (only redacted text is cut here)
+  return redactText(raw.slice(cut)).slice(-n);
+}
+
 /** Runs the commands one after another from `top` (all of them, so one failure does not hide
  *  another), each through `sh -c`, keeping the last characters of their output. A command
  *  still running at `timeoutMs` is killed and fails (exit 124). Known limit: killing `sh` may
@@ -170,10 +206,12 @@ export async function runCommands(top: string, commands: readonly string[], time
   for (const command of commands) {
     const word = command.split(/\s+/)[0] ?? '';
     const program = Bun.which(word, { PATH: process.env.PATH ?? '', cwd: top }) ?? null;
-    const r = await runBounded(['sh', '-c', command], { cwd: top, timeoutMs, max: { stdout: STDOUT_TAIL, stderr: STDERR_TAIL }, keep: 'tail', killSignal: 'SIGKILL' });
+    const r = await runBounded(['sh', '-c', command], { cwd: top, timeoutMs, max: { stdout: STDOUT_TAIL + CAPTURE_MARGIN, stderr: STDERR_TAIL + CAPTURE_MARGIN }, keep: 'tail', killSignal: 'SIGKILL' });
+    const stdout = redactedTail(r.stdout, STDOUT_TAIL);
+    const stderr = redactedTail(r.stderr, STDERR_TAIL);
     const note = r.timedOut ? `\n[goodboy] stopped after ${Math.round(timeoutMs / 60_000)} min` : r.error ? `\n[goodboy] could not start: ${r.error}` : '';
     const exit_code = r.timedOut ? 124 : (r.code ?? 127);
-    out.push({ command, program, exit_code, duration_ms: r.ms, output_tail: r.stdout + (r.stderr ? `\n[stderr]\n${r.stderr}` : '') + note });
+    out.push({ command, program, exit_code, duration_ms: r.ms, output_tail: stdout + (stderr ? `\n[stderr]\n${stderr}` : '') + note });
   }
   return out;
 }
@@ -186,7 +224,8 @@ export function writeRegressionRecord(dir: string, rec: RegressionRecord): strin
   const base = rec.timestamp.replace(/[:.]/g, '-');
   let path = join(at, `${base}.json`);
   for (let i = 1; existsSync(path); i++) path = join(at, `${base}-${i}.json`);
-  writeFileSync(path, JSON.stringify(rec, null, 2) + '\n', 'utf8');
+  // (M6d) Every string and key redacted on the way to disk (the output tails were redacted before their cut).
+  writeFileSync(path, JSON.stringify(sanitizeRecord(rec, REGRESSION_SCHEMA), null, 2) + '\n', 'utf8');
   try {
     const names = readdirSync(at).filter((n) => n.endsWith('.json')).sort().reverse();
     for (const n of names.slice(KEEP)) unlinkSync(join(at, n));
@@ -261,7 +300,8 @@ export function checkRegression(rev: string, tree: string, records: readonly Reg
 /** A run's output for a message: the end of its stdout, then the end of its stderr, so stderr
  *  noise does not hide the failing lines (round-2 review). */
 export function outputSummary(tail: string, out = 600, err = 200): string {
-  const [so = '', se = ''] = tail.split('\n[stderr]\n');
+  // (M6d) A record from before the redaction may hold raw text: redacted here too, before the cut.
+  const [so = '', se = ''] = redactText(tail).split('\n[stderr]\n');
   return so.slice(-out) + (se ? ` [stderr] ${se.slice(-err)}` : '');
 }
 
