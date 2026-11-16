@@ -9,7 +9,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { initSandbox, readScan, writeLocal, writeScan } from '../lib/sandbox-files';
-import { planSandbox, SANDBOX_DIR } from '../lib/sandbox-render';
+import { SANDBOX_DIR } from '../lib/sandbox-mode';
+import { planSandbox } from '../lib/sandbox-render';
 import { checkSandbox, loadCtx, sandboxCommand } from '../lib/sandbox-run';
 import type { SandboxOutbound, SandboxScan, SandboxStore } from '../lib/sandbox-types';
 

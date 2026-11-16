@@ -28,8 +28,11 @@ export const DIAG_CODES = [
   'live-failed', // cleaning or truncating the shared /live volume
   'artifacts-not-removed', // raw artifacts that should be gone are still there
   'coverage-failed',
+  'data-failed', // a `sandbox-data` operation: the query, the container or the answer's shape (M6b); the op's name only
+  'data-refused', // a `sandbox-data` input that is not allowed: the field and a fixed reason, never the value (M6b)
   'volume-failed', // reading or writing a sandbox volume through the reader container
   'sweep-failed', // the expiry sweep of old raw artifacts
+  'registry-failed', // the user-level registry of real-data sandboxes could not be read or written (M6b)
   'docker-failed', // any other docker call that failed
   'check-failed', // a finding of sandbox-check that names a container or a network
   'internal', // an exception inside goodboy
@@ -43,12 +46,17 @@ export interface Diag {
   step: string;
   exit?: number | null;
   timedOut?: boolean;
+  /** `data-refused`: the input field that was refused (`where.and[1].col`), a path goodboy builds. */
+  field?: string;
+  /** `data-refused`: a fixed reason code. */
+  reason?: string;
 }
 
 /** Whether the project holds real data: a dump is set now, or was set once (`realData` is kept
  *  when the dump is removed and cleared only by `sandbox-down --volumes`, which drops the DB
- *  volumes). A local file that says nothing and has a dump counts: the check fails closed. */
-export const realDataOf = (local: SandboxLocal): boolean => local.realData === true || local.dump !== null;
+ *  volumes), or an input log is registered (M6b). A local file that says nothing and has a dump
+ *  counts: the check fails closed. */
+export const realDataOf = (local: SandboxLocal): boolean => local.realData === true || local.dump !== null || (local.inputs?.length ?? 0) > 0;
 
 export interface Boundary {
   /** The mode, for the result file and for the one place that builds the boundary; nothing else branches on it. */

@@ -31,8 +31,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { readRegular } from './safe-read';
-import { realDataForReading } from './sandbox-files';
-import { SANDBOX_DIR } from './sandbox-render';
+import { RUN_NAME, realDataForReading, realDataOfRoot, SANDBOX_DIR } from './sandbox-mode';
 import { MAX_READ_BYTES } from './sandbox-volumes';
 import { uiInventory } from './ui-inventory';
 import {
@@ -444,7 +443,7 @@ function latestRun(root: string): string | null {
   } catch {
     return null;
   }
-  const runs = names.filter((n) => /^\d{8}T\d{6}Z$/.test(n) && ((existsSync(join(out, n, ACCESS_LOG_FILE)) && existsSync(join(out, n, PLAYWRIGHT_REPORT_FILE))) || existsSync(join(out, n, STORED_FILE))));
+  const runs = names.filter((n) => RUN_NAME.test(n) && ((existsSync(join(out, n, ACCESS_LOG_FILE)) && existsSync(join(out, n, PLAYWRIGHT_REPORT_FILE))) || existsSync(join(out, n, STORED_FILE))));
   runs.sort();
   return runs.length > 0 ? runs[runs.length - 1]! : null;
 }
@@ -491,14 +490,19 @@ export function cmdUiCheck(root: string, args: string[]): { out: unknown; code: 
   // no local.json (it goes with `git clean -xfd`), real data too while raw host files of a run that may have
   // held it remain: this command cannot ask docker for the database volume as the sandbox commands do
   const real = realDataForReading(root);
-  if (real && (logOpts as string[]).length + (reportOpts as string[]).length + inv0.length > 0) return { error: 'ui-check: --log, --report and --inventory are not read in a sandbox that holds real data; use --run <ts>, which prints the verdict stored by sandbox-run' };
+  // real only because local.json is gone and old raw files remain (not because it says so): the way out is the user's
+  const leftoversOnly = real && !realDataOfRoot(root);
+  const wayOut = leftoversOnly
+    ? ' This project counts as real data only because .goodboy/sandbox/local.json is missing and runs from before M6a left raw files in .goodboy/sandbox/out/. If it never held real data, the user can end this by removing those old run dirs (and out/live), or by creating .goodboy/sandbox/local.json with {"dump": null, "dumpFormat": null, "realData": false}.'
+    : '';
+  if (real && (logOpts as string[]).length + (reportOpts as string[]).length + inv0.length > 0) return { error: `ui-check: --log, --report and --inventory are not read in a sandbox that holds real data; use --run <ts>, which prints the verdict stored by sandbox-run.${wayOut}` };
   let run: string | null = null;
   let logs = logOpts as string[];
   let reports = reportOpts as string[];
   if (logs.length === 0 && reports.length === 0) {
     const name = (runs as string[])[0] ?? latestRun(root);
     if (name === null) return { error: 'ui-check: no run with an access log and a Playwright report under .goodboy/sandbox/out/; run sandbox-run --suite e2e, or pass --log and --report' };
-    if (!/^\d{8}T\d{6}Z$/.test(name)) return { error: 'ui-check: --run is a run name like 20261022T101500Z' };
+    if (!RUN_NAME.test(name)) return { error: 'ui-check: --run is a run name like 20261022T101500Z' };
     const dir = join(root, SANDBOX_DIR, 'out', name);
     try {
       if (!statSync(dir).isDirectory()) throw new Error('not a dir');
@@ -510,7 +514,7 @@ export function cmdUiCheck(root: string, args: string[]): { out: unknown; code: 
     if (!raw) {
       // the raw files are in the sandbox's volume: the verdict `sandbox-run` stored at the end of its e2e step
       const r = readRegular(join(dir, STORED_FILE), 1024 * 1024, true);
-      if (typeof r !== 'object') return { error: real || r === 'refused' ? `ui-check: run ${name} has no stored verdict (its e2e step did not finish, or it ran no e2e suite)` : `ui-check: the access log ${join(dir, ACCESS_LOG_FILE)} does not exist` };
+      if (typeof r !== 'object') return { error: real || r === 'refused' ? `ui-check: run ${name} has no stored verdict (its e2e step did not finish, or it ran no e2e suite).${wayOut}` : `ui-check: the access log ${join(dir, ACCESS_LOG_FILE)} does not exist` };
       const stored = parseStoredUiCheck(r.text);
       if (stored === null) return { error: `ui-check: ${join(dir, STORED_FILE)} is not a verdict goodboy wrote` };
       return { out: { ...stored, run, stored: true }, code: stored.ok ? 0 : 1 };

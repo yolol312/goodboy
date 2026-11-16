@@ -6,10 +6,11 @@ import { afterAll, afterEach, beforeEach, describe, expect, setDefaultTimeout, t
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { checkSandbox, type Ctx, loadCtx, parseNslookup, probeScript, projectName, sandboxCommand, staticProblems } from '../lib/sandbox-run';
+import { checkSandbox, type Ctx, loadCtx, parseNslookup, probeScript, sandboxCommand, staticProblems } from '../lib/sandbox-run';
 import { RESTORE_TAG } from '../lib/sandbox-parts';
-import { configKeyAt, IMAGES, planSandbox, renderSandbox, SANDBOX_DIR, SCAN_FILE } from '../lib/sandbox-render';
-import { initSandbox, outOfDate, readLocal, readScan, writeLocal, writeScan } from '../lib/sandbox-files';
+import { configKeyAt, IMAGES, planSandbox, renderSandbox, SCAN_FILE } from '../lib/sandbox-render';
+import { initSandbox, outOfDate, readScan, writeLocal, writeScan } from '../lib/sandbox-files';
+import { projectName, readLocal, SANDBOX_DIR } from '../lib/sandbox-mode';
 import { FAKE_DOCKER } from './m6a-fake';
 import type { SandboxLocal, SandboxOutbound, SandboxScan, SandboxStore } from '../lib/sandbox-types';
 
@@ -1736,6 +1737,7 @@ describe('sandbox-prepare, sandbox-up and sandbox-down (in this process)', () =>
       { step: 'up stores and dummies', ok: true },
       { step: 'restore db', ok: true, note: 'template shop_template' },
       { step: 'reset', ok: true },
+      { step: 'data role', ok: true },
       { step: 'app health', ok: true, note: f.ctx.plan.healthUrl },
       { step: 'proxy health', ok: true, note: f.ctx.plan.proxyHealthUrl },
     ]);

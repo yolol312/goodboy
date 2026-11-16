@@ -360,6 +360,67 @@ rm -f /tmp/goodboy-snapshot.sql
   return { restore, reset };
 }
 
+/** The read-only roles `sandbox-data` connects as (M6b), one per engine family. They hold no password and are
+ *  made for the container's own socket (`'gb_reader'@'localhost'`, a Postgres role that scram refuses over
+ *  the network), so a container on `inner` cannot log in as them. */
+export const PG_READER = 'goodboy_reader';
+export const MY_READER = 'gb_reader';
+
+/** `db/<svc>/data-role.sh` (M6b): the least-privilege role of `sandbox-data`, made idempotently as the
+ *  database superuser and run by `sandbox-up` and again after every reset (the app database is made again from
+ *  its template, and its grants go with it). It does not look at the template marker: a template restored
+ *  before M6b gets its role too. Postgres: LOGIN with no superuser, database, role or replication rights and
+ *  no inherited membership, SELECT on the tables of every user schema of the app database, role settings that
+ *  make a session read-only with a statement, lock and idle-transaction timeout. MySQL and MariaDB: SELECT on
+ *  the app database only and at most two connections. */
+export function dataRoleScript(s: Sql): string {
+  if (s.store.kind === 'postgres') {
+    return `#!/bin/sh
+# The read-only role goodboy sandbox-data reads as (goodboy sandbox-init). Idempotent; run after every reset, because
+# the app database is made again from its template and the grants of the old one are gone.
+set -eu
+export PGPASSWORD=${DUMMY_PASSWORD}
+psql -q -h 127.0.0.1 -U sandbox -v ON_ERROR_STOP=1 -d postgres <<'SQL'
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${PG_READER}') THEN
+    CREATE ROLE ${PG_READER} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+  END IF;
+END
+$$;
+ALTER ROLE ${PG_READER} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+ALTER ROLE ${PG_READER} SET default_transaction_read_only = on;
+ALTER ROLE ${PG_READER} SET statement_timeout = '5s';
+ALTER ROLE ${PG_READER} SET lock_timeout = '1s';
+ALTER ROLE ${PG_READER} SET idle_in_transaction_session_timeout = '10s';
+GRANT CONNECT ON DATABASE "${s.name}" TO ${PG_READER};
+SQL
+psql -q -h 127.0.0.1 -U sandbox -v ON_ERROR_STOP=1 -d "${s.name}" <<'SQL'
+DO $$
+DECLARE s text;
+BEGIN
+  FOR s IN SELECT nspname FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname <> 'information_schema' LOOP
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO ${PG_READER}', s);
+    EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA %I TO ${PG_READER}', s);
+  END LOOP;
+END
+$$;
+SQL
+`;
+  }
+  const cli = s.store.kind === 'mariadb' ? 'mariadb' : 'mysql';
+  return `#!/bin/sh
+# The read-only user goodboy sandbox-data reads as (goodboy sandbox-init). Idempotent; run after every reset.
+set -eu
+MY="${cli} -h 127.0.0.1 -uroot -p${DUMMY_PASSWORD}"
+$MY <<'SQL'
+CREATE USER IF NOT EXISTS '${MY_READER}'@'localhost';
+ALTER USER '${MY_READER}'@'localhost' WITH MAX_USER_CONNECTIONS 2;
+GRANT SELECT ON \`${s.name}\`.* TO '${MY_READER}'@'localhost';
+SQL
+`;
+}
+
 // ---- the plan ----
 
 export const GITIGNORE = 'local.json\nout/\nca/*.key\n*.p12\n';

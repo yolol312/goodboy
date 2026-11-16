@@ -7,8 +7,8 @@ import { afterEach, describe, expect, setDefaultTimeout, setSystemTime, test } f
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { clearRealData, readLocal, writeAtomic } from '../lib/sandbox-files';
-import { SANDBOX_DIR } from '../lib/sandbox-render';
+import { clearRealData, writeAtomic } from '../lib/sandbox-files';
+import { readLocal, SANDBOX_DIR } from '../lib/sandbox-mode';
 import { type StoreCtx, SWEEP_FAILED, sweepRaw } from '../lib/sandbox-store';
 import { cleanupFakeProjects, fakeProject } from './m6a-project';
 
@@ -20,10 +20,20 @@ const scratch: string[] = [];
 const toRestore: string[] = [];
 
 afterEach(() => {
-  setSystemTime();
-  for (const p of toRestore.splice(0)) chmodSync(p, 0o755);
-  cleanupFakeProjects();
-  while (scratch.length) rmSync(scratch.pop()!, { recursive: true, force: true });
+  // a mode that cannot be put back (the dir is gone) must not skip the removal of everything else
+  try {
+    setSystemTime();
+    for (const p of toRestore.splice(0)) {
+      try {
+        chmodSync(p, 0o755);
+      } catch {
+        // gone
+      }
+    }
+  } finally {
+    cleanupFakeProjects();
+    while (scratch.length) rmSync(scratch.pop()!, { recursive: true, force: true });
+  }
 });
 
 describe('writeAtomic', () => {
@@ -36,6 +46,17 @@ describe('writeAtomic', () => {
     writeAtomic(join(dir, 'x.json'), 'text');
     expect(readdirSync(dir)).toEqual(['x.json']);
   });
+
+  test('a rename that fails, after the temp file was written, removes the temp file and throws', () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'goodboy-m6a-gap-')));
+    scratch.push(dir);
+    // a non-empty directory where the file goes: writing the temp name works, the rename onto it does not
+    mkdirSync(join(dir, 'x.json', 'keep'), { recursive: true });
+    expect(() => writeAtomic(join(dir, 'x.json'), 'text')).toThrow();
+    expect(readdirSync(dir).filter((n) => n.endsWith('.tmp'))).toEqual([]);
+    expect(readdirSync(dir)).toEqual(['x.json']);
+    expect(existsSync(join(dir, 'x.json', 'keep'))).toBe(true);
+  });
 });
 
 describe('clearRealData', () => {
@@ -44,9 +65,13 @@ describe('clearRealData', () => {
     const dir = join(f.root, SANDBOX_DIR);
     chmodSync(dir, 0o555);
     toRestore.push(dir);
-    const r = clearRealData(f.root);
+    let r: Error | null;
+    try {
+      r = clearRealData(f.root);
+    } finally {
+      chmodSync(dir, 0o755);
+    }
     expect(r).toBeInstanceOf(Error);
-    chmodSync(dir, 0o755);
     const local = readLocal(f.root);
     expect(local instanceof Error ? null : local.realData).toBe(true);
   });

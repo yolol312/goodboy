@@ -30,6 +30,7 @@ export * from './spawn-guard';
 export * from './outward-command';
 export * from './role-limits';
 export * from './result-dir';
+export { type DataGuardHit, sandboxDataDenial, sandboxDataMessage } from './sandbox-data-guard';
 export * from './skill-rule';
 export * from './effort-advice';
 export * from './push-test';

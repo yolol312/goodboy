@@ -2,7 +2,8 @@
 // host (`out/<ts>/state.json`), the time to live, and which runs the sweep removes. Pure decisions;
 // lib/sandbox-store.ts does the reading and removing.
 
-import { RUN_NAME, runStart } from './sandbox-proof';
+import { RUN_NAME } from './sandbox-mode';
+import { runStart } from './sandbox-proof';
 
 export const MAX_TTL_HOURS = 24;
 /** A run name or a start time that many ms ahead of the clock is no honest start (a clock moved

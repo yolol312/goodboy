@@ -19,6 +19,7 @@ import { extname, relative, resolve } from 'node:path';
 import { jsLoads } from './existing-tests';
 import { realish } from './review-scope';
 import { MAX_DOC_BYTES, readRegular } from './safe-read';
+import { RUN_NAME } from './sandbox-mode';
 import { e2ePassed, runStartsAfter, sandboxProof } from './sandbox-proof';
 import { JS_SPECIFIER, recordStandsAlone, withoutComments } from './test-types';
 import { isTestFile } from './test-validator';
@@ -35,7 +36,7 @@ export const SANDBOX_PREFIX = '.goodboy/sandbox/';
 const SANDBOX_LAYOUT: readonly RegExp[] = [
   /^(?:compose\.yml|\.gitignore|scan\.json|local\.json|\.written\.json)$/,
   /^runtime\/(?:entrypoint\.sh|prep\.sh|coverage\.sh|flush\.cjs|lcov-merge\.cjs|coveragerc|e2e-prep\.sh)$/,
-  /^db\/[\w.-]+\/(?:restore|reset)\.sh$/,
+  /^db\/[\w.-]+\/(?:restore|reset|data-role)\.sh$/,
   /^overrides\/(?:application-sandbox\.yml|sandbox\.env)$/,
   /^dummies\/stubs\/mappings\/[\w.-]+\.json$/,
   /^dummies\/ldap\/[\w.-]+\.ldif$/,
@@ -45,7 +46,7 @@ const SANDBOX_LAYOUT: readonly RegExp[] = [
 ];
 /** `sandbox-run`'s own output, `out/<run>/…` (git-ignored): no test applies, and no run starts
  *  after it. */
-const RUN_OUTPUT = /^out\/\d{8}T\d{6}Z\//;
+const RUN_OUTPUT = new RegExp(`^out/${RUN_NAME.source.slice(1, -1)}/`);
 /** Files only the e2e path uses: a run that did not run the e2e step does not exercise them. */
 const E2E_ONLY = /^(?:e2e\/|proxy\/|runtime\/e2e-prep\.sh$)/;
 /** The one layout file a test may import. */

@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, s
 import { join } from 'node:path';
 import { RESTORE_TAG } from '../lib/sandbox-parts';
 import { e2ePassed, readRunResult } from '../lib/sandbox-proof';
-import { SANDBOX_DIR } from '../lib/sandbox-render';
+import { SANDBOX_DIR } from '../lib/sandbox-mode';
 import { type Ctx, loadCtx } from '../lib/sandbox-run';
 import { cleanupFakeProjects, type FakeProject, fakeProject, filesUnder } from './m6a-project';
 
@@ -676,7 +676,8 @@ describe('the real-data flag over the life of a sandbox', () => {
     // no local.json at all: nothing to clear and no error
     const none = fakeProject(null);
     expect((await none.inproc('sandbox-down', ['--volumes'])).out.realData).toBe('cleared');
-    expect(existsSync(join(none.root, SANDBOX_DIR, 'local.json'))).toBe(false);
+    // nothing to clear; the command's preflight found no real data and wrote the plain local file (M6b)
+    expect(JSON.parse(readFileSync(join(none.root, SANDBOX_DIR, 'local.json'), 'utf8'))).toEqual({ dump: null, dumpFormat: null, realData: false });
   });
 
   test('a failed docker down does not clear the flag', async () => {

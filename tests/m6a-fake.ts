@@ -16,15 +16,17 @@
 // app-logs.txt, playwright-report.json, access.log (what the proxy wrote: copied into the `live`
 // volume while the e2e container runs), runner-out.txt, runner-err.txt, e2e-out.txt, e2e-err.txt,
 // junit/ (copied into the build/test-results volume, `tout_build_test_results`, by the unit runner).
+// M6b: a `psql`, `mysql` or `mariadb` exec answers from db/<tag>.out, .err and .exit (see the branch below), and the
+// `meta` volume (the handle key of the reader's `meta-key` script) is the directory vol/meta.
 
 export const FAKE_DOCKER = `#!/bin/sh
 d="$FAKE_DOCKER_DIR"
 vol="$d/vol"
-mkdir -p "$vol/outroot" "$vol/live" "$vol/outdirs"
+mkdir -p "$vol/outroot" "$vol/live" "$vol/outdirs" "$vol/meta"
 if [ -n "\${FAKE_FAIL:-}" ]; then case " $* " in *"$FAKE_FAIL"*) echo "\${FAKE_FAIL_TEXT:-fake failure}" >&2; exit 1 ;; esac; fi
 # volume paths of the containers, moved under the state dir (and moved back in what the reader prints)
-vmap() { printf '%s' "$1" | sed -e "s#/outroot#$vol/outroot#g" -e "s#/live#$vol/live#g" -e "s#/outdirs#$vol/outdirs#g"; }
-unvmap() { sed -e "s#$vol/outroot#/outroot#g" -e "s#$vol/live#/live#g" -e "s#$vol/outdirs#/outdirs#g"; }
+vmap() { printf '%s' "$1" | sed -e "s#/outroot#$vol/outroot#g" -e "s#/live#$vol/live#g" -e "s#/outdirs#$vol/outdirs#g" -e "s#/meta#$vol/meta#g"; }
+unvmap() { sed -e "s#$vol/outroot#/outroot#g" -e "s#$vol/live#/live#g" -e "s#$vol/outdirs#/outdirs#g" -e "s#$vol/meta#/meta#g"; }
 # the run's dir of the volume a container was given with -e GOODBOY_OUT=/outroot/<ts>
 outdir() { for a in "$@"; do case "$a" in GOODBOY_OUT=*) vmap "\${a#GOODBOY_OUT=}"; return ;; esac; done; }
 # What a test running as root in a container can do in the run's dir: leave links in it that point
@@ -75,6 +77,17 @@ case " $* " in
   *" ps "*) cat "$d/ps.txt" ;;
   *" exec "*)
     case " $* " in
+      # M6b: the database client of sandbox-data. The SQL arrives on stdin and is kept (db-sql.log, one
+      # "=== <arguments>" line before each); the script names itself in its first line (\`-- goodboy-data: <tag>\`),
+      # and the answer is the file db/<tag>.out, its stderr db/<tag>.err, its exit code db/<tag>.exit (or FAKE_DB_EXIT).
+      *" psql "*|*" mysql "*|*" mariadb "*)
+        cat > "$d/db-sql.in"
+        { echo "=== $*"; cat "$d/db-sql.in"; } >> "$d/db-sql.log"
+        tag="$(sed -n 's/^-- goodboy-data: //p' "$d/db-sql.in" | head -n 1)"
+        [ -f "$d/db/$tag.err" ] && cat "$d/db/$tag.err" >&2
+        [ -f "$d/db/$tag.out" ] && cat "$d/db/$tag.out"
+        if [ -f "$d/db/$tag.exit" ]; then exit "$(cat "$d/db/$tag.exit")"; fi
+        exit "\${FAKE_DB_EXIT:-0}" ;;
       *restore.sh*)
         [ -f "$d/restore-out.txt" ] && cat "$d/restore-out.txt"
         [ -f "$d/restore-err.txt" ] && cat "$d/restore-err.txt" >&2

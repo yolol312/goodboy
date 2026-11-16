@@ -11,6 +11,7 @@
 //   /build    the build volume the preparation step filled (the app runs from it)
 
 import type { SandboxStack } from './sandbox-types';
+import { E2E_ARTIFACTS_DIR } from './sandbox-mode';
 import { NONCE_ANNOTATION, NONCE_HEADER } from './ui-types';
 
 export const E2E_DIR = 'e2e';
@@ -118,7 +119,7 @@ const OUT = process.env.GOODBOY_OUT ?? '/tmp/goodboy-out';
 
 export default defineConfig({
   testDir: process.env.GOODBOY_E2E_DIR ?? '/work/${E2E_DIR}',
-  outputDir: \`\${OUT}/e2e-artifacts\`,
+  outputDir: \`\${OUT}/${E2E_ARTIFACTS_DIR}\`,
   preserveOutput: 'failures-only',
   retries: 0,
   workers: 1,

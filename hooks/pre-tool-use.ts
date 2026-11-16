@@ -110,6 +110,8 @@ import {
   isRequiredKnowledgeFile,
   markerWriteDenial,
   policyReadDenial,
+  sandboxDataDenial,
+  sandboxDataMessage,
 } from '../lib';
 
 interface PreToolInput {
@@ -444,6 +446,8 @@ function main(): void {
       let pendingOutwardApproval: { markerPath: string; what: string } | null = null;
       // (A0.87) The user's push-test approval this hand-off may use, consumed at the end.
       let pendingPushTestApproval: { markerPath: string; what: string } | null = null;
+      // (A0.89) The user's approval for one call past the real-data sandbox rule, consumed at the end.
+      let pendingSandboxDataApproval: { markerPath: string; what: string } | null = null;
 
       // (A00) Policy read gate (track H §14.3): until the main session has read the project's
       //   knowledge files in full, its other tools wait (lib/project-knowledge.ts). First of
@@ -794,6 +798,40 @@ function main(): void {
         logGate(sessionId, 'state-guard', 'deny', toolInput.command.slice(0, 120));
         emit(deny("This command changes goodboy's own session state (goodboy-session-*). The gates decide from it; leave it alone and satisfy the gate instead."));
         return;
+      }
+
+      // (A0.89) Real-data sandbox rule (track M, M6b, lib/sandbox-data-guard.ts): in a project that may hold real data,
+      //   no docker exec/cp/logs/…, database client, docker socket, or read of the dump and the input logs; the data
+      //   comes through `sandbox-data` and `sandbox-run`. Any tool is asked: the rule reads Read/Grep/Glob and every
+      //   tool whose input has a shell `command` (Bash, Monitor, PowerShell), and passes the rest at once. The main
+      //   session's way past is the user's one-use marker (consumed at the end); a subagent has none.
+      //   env GOODBOY_SANDBOX_DATA_GATE=on|off (default on). A check that fails is denied in a subagent and passes in
+      //   the main session, like the outward rule.
+      if (envStr('GOODBOY_SANDBOX_DATA_GATE', 'on') !== 'off') {
+        const inSubagent = !!input.agent_type;
+        try {
+          const hit = sandboxDataDenial({ toolName, toolInput, cwd, projectCwd, also: [process.env.CLAUDE_PROJECT_DIR], note: (n) => logGate(sessionId, 'sandbox-data', 'warn', n) });
+          if (hit !== null) {
+            const marker = approvalMarkerPath(projectCwd, 'sandbox-data', sessionId);
+            if (!inSubagent && userMarkerPresent(sessionId, marker, input.tool_use_id)) {
+              pendingSandboxDataApproval = { markerPath: marker, what: hit.what };
+            } else {
+              logGate(sessionId, 'sandbox-data', 'deny', `${hit.what} ${input.agent_type ?? 'main'}`);
+              if (!inSubagent) ensureApprovalDir(projectCwd);
+              emit({
+                ...deny(sandboxDataMessage(hit, { cli: CLI_PATH, subagent: inSubagent, marker: approvalMarkerShown(projectCwd, 'sandbox-data', sessionId, cwd) })),
+                ...(inSubagent ? {} : { systemMessage: `[goodboy] 실제 데이터가 든 샌드박스에 닿는 호출을 막았어요: ${hit.what}` }),
+              });
+              return;
+            }
+          }
+        } catch (err) {
+          logGate(sessionId, 'sandbox-data', 'fail-open', String(err));
+          if (inSubagent) {
+            emit(deny('The real-data sandbox rule could not check this call, so it is denied inside a subagent. Return BLOCKED.'));
+            return;
+          }
+        }
       }
 
 
@@ -1725,6 +1763,7 @@ function main(): void {
       const approvals = [
         ['push-test', pendingPushTestApproval, (w: string) => `This hands off ${w} without a passing test result, and its one-use approval was already used. Ask the user to approve it again.`],
         ['outward', pendingOutwardApproval, (w: string) => `This command changes ${w}, listed as production in .goodboy/hosts (stop rule R2), and its one-use approval was already used. Ask the user to approve it again.`],
+        ['sandbox-data', pendingSandboxDataApproval, (w: string) => `This call reaches the real data of the sandbox (${w}), and its one-use approval was already used. Ask the user to approve it again.`],
       ] as const;
       const taken: Array<{ markerPath: string; consumed: string }> = [];
       for (const [gate, pending, lost] of approvals) {

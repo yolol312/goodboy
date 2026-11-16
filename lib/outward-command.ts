@@ -399,10 +399,17 @@ export interface ReadSegment {
   unsure?: boolean;
 }
 
+/** The home dir `~` and `$HOME` name: HOME as the process has it now, else the account's. */
+const homeOf = (): string => process.env.HOME?.trim() || homedir();
+
 /** `dir` resolved from `from`, or null when it is computed (`$`, a glob) or `from` is unknown. */
 function literalDir(dir: string | null, from: string | null): string | null {
-  if (dir === null || dir === '-' || /[$`*?]/.test(dir) || from === null) return null;
-  if (dir === '~' || dir.startsWith('~/')) return resolvePath(homedir(), dir.slice(2));
+  if (dir === null || dir === '-' || from === null) return null;
+  // `$HOME` and `${HOME}` at the start are the home dir, as `~` is (any other variable is computed)
+  const home = /^(?:\$HOME|\$\{HOME\})(?:\/(.*))?$/.exec(dir);
+  if (home) return /[$`*?]/.test(home[1] ?? '') ? null : resolvePath(homeOf(), home[1] ?? '');
+  if (/[$`*?]/.test(dir)) return null;
+  if (dir === '~' || dir.startsWith('~/')) return resolvePath(homeOf(), dir.slice(2));
   return resolvePath(from, dir);
 }
 
@@ -411,7 +418,7 @@ function literalDir(dir: string | null, from: string | null): string | null {
  *  which is all a repo-wide check needs. */
 export function cdTarget(words: string[], from: string | null): string | null {
   const dir = words.slice(1).find((w) => !w.startsWith('-') || w === '-');
-  if (dir === undefined) return homedir();
+  if (dir === undefined) return homeOf();
   if (/^(?:\$\(|`)\s*git rev-parse --show-toplevel\s*(?:\)|`)$/.test(dir)) return from;
   return literalDir(dir, from);
 }

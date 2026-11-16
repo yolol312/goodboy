@@ -3,18 +3,20 @@
 // here calls the network except `sandbox-prepare` (image pulls and the preparation step, the
 // only places the compose file gives network access to).
 
-import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
-import { basename, join, relative, resolve, sep } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import { type Bounded, onInterrupt, runBounded } from './bounded';
 import { type Boundary, boundary, type Diag, type DiagCode, OPEN, realDataOf } from './sandbox-boundary';
-import { clearRealData, ensureRealDir, initSandbox, outOfDate, readLocal, readScan, realOrSelf, repoTops, writeAtomic, writeLocal, writeScan } from './sandbox-files';
+import { addInputs, clearRealData, ensureRealDir, initSandbox, outOfDate, readScan, repoTops, writeAtomic, writeLocal, writePlainLocal, writeScan } from './sandbox-files';
+import { E2E_OUTPUT_LOG_FILE, LOCAL_FILE, OUTPUT_LOG_FILE, projectName, readLocal, realOrSelf, SANDBOX_DIR } from './sandbox-mode';
+import { registerRealData, registryEntryOf } from './sandbox-registry';
 import { noLinksUnder } from './sandbox-proof';
 import { COVERAGE_REPORT, E2E_DIR } from './sandbox-e2e';
-import { planSandbox, SANDBOX_DIR, type SandboxPlan } from './sandbox-render';
-import { INHIBIT_IPV4, RESTORE_TAG } from './sandbox-parts';
+import { planSandbox, type SandboxPlan } from './sandbox-render';
+import { dbName, INHIBIT_IPV4, RESTORE_TAG } from './sandbox-parts';
+import { type DataCtx, sandboxData } from './sandbox-data';
 import { scanSandbox } from './sandbox-scan';
-import { type DockOpts, e2eAfter, finish, readFiles, sweepRaw, unitAfter, writeState } from './sandbox-store';
+import { type DockOpts, e2eAfter, finish, metaKey, readFiles, sweepRaw, unitAfter, writeState } from './sandbox-store';
 import { type E2eSummary, playwrightSummary, type RunSummary, type UnitSummary } from './sandbox-summary';
 import type { SandboxCheck, SandboxLocal, SandboxScan } from './sandbox-types';
 import { COVERAGE_READ_BYTES, LIVE_DIR, MAX_READ_BYTES, runDirIn, volumeMarker } from './sandbox-volumes';
@@ -28,14 +30,6 @@ const MAX_RUN_MS = 7_200_000;
 const TAIL_CHARS = 2000;
 
 export const dockerBin = (): string => process.env.GOODBOY_DOCKER_BIN?.trim() || 'docker';
-
-/** The compose project of a repo: its dir name and a short hash of its real path, so two
- *  checkouts of one name never share networks or volumes. */
-export function projectName(root: string): string {
-  const real = realOrSelf(root);
-  const slug = basename(real).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30) || 'project';
-  return `gb-${slug}-${createHash('sha256').update(real).digest('hex').slice(0, 6)}`;
-}
 
 export interface Ctx {
   root: string;
@@ -52,6 +46,13 @@ export interface Ctx {
   comp(args: string[], timeoutMs: number, o?: DockOpts): Promise<Bounded>;
   /** Answers of one command's docker questions that every step of it shares (set by `preflight`). */
   memo?: Map<string, Promise<unknown>>;
+  /** `preflight` made the mode strict only because docker did not answer (see StoreCtx.keepHostRaw). */
+  keepHostRaw?: boolean;
+  /** The SQL services whose read-only role could not be applied by the last `resetDb`. */
+  roleFailed?: string[];
+  /** The user-level registry of real-data sandboxes could not be read or written (lib/sandbox-registry.ts): the command
+   *  says so next to its output; the PreToolUse rule then keeps to the per-repo reading. */
+  registryProblem?: Diag;
 }
 
 /** The scan, the local answers and the plan; `needFiles` also wants the compose file written. */
@@ -242,10 +243,28 @@ const isDataVolume = (ctx: Ctx, name: string): boolean => new RegExp(`^${ctx.pro
  *  and nothing was asked of it). */
 async function preflight(ctx: Ctx): Promise<{ volumes: string[] | null | undefined }> {
   ctx.memo = new Map();
+  // a project that says real data is in the user-level registry (a sandbox of M6a gets there with its next command)
+  if (ctx.out.realData) register(ctx);
   if ((await endpointProblem(ctx)) !== null) return { volumes: undefined };
   const volumes = await once(ctx, 'volumes', () => projectVolumes(ctx));
-  if ((volumes === null || volumes.some((v) => isDataVolume(ctx, v))) && !ctx.out.realData) ctx.out = boundary(true);
+  if ((volumes === null || volumes.some((v) => isDataVolume(ctx, v))) && !ctx.out.realData) {
+    // A docker that did not answer makes the output strict, which is all it can justify: the sweep must not
+    // take it for proof that the host's old raw files are a real-data run's (a plain project's output.log
+    // would be deleted by an outage). A database volume is proof, and the registry hears of it.
+    if (volumes === null) ctx.keepHostRaw = true;
+    else register(ctx);
+    ctx.out = boundary(true);
+  }
+  // docker answered, no database volume, no local file: the project is plain, and says so from now on
+  if (volumes !== null && !ctx.out.realData && !existsSync(join(ctx.root, LOCAL_FILE))) writePlainLocal(ctx.root);
   return { volumes };
+}
+
+/** Puts the project in the user-level registry of real-data sandboxes; a failure goes next to the command's output. */
+function register(ctx: Ctx): void {
+  const err = registerRealData(registryEntryOf(ctx.root, ctx.local));
+  if (err === null) return;
+  ctx.registryProblem = { code: 'registry-failed', step: 'registry', reason: err.code };
 }
 
 /** The expiry sweep of every command but scan and init: raw files the host kept from before are removed
@@ -526,16 +545,25 @@ async function prepare(ctx: Ctx, args: string[]): Promise<Result> {
 
 const sqlServices = (ctx: Ctx): string[] => ctx.plan.upServices.filter((s) => /^db\d*$/.test(s));
 
+/** Resets each SQL service's app database from its template, and after each reset applies the read-only role of
+ *  `sandbox-data` (M6b, `db/<svc>/data-role.sh`): the database is made again, and its grants went with the old
+ *  one. The role step does not look at the template marker (a template restored before M6b gets its role too)
+ *  and stops nothing when it fails: the services are in `ctx.roleFailed`, and only `sandbox-data` needs the role. */
 async function resetDb(ctx: Ctx): Promise<{ note: string; diagnostic?: Diag } | null> {
+  ctx.roleFailed = [];
   for (const svc of sqlServices(ctx)) {
     const r = await comp(ctx, ['exec', '-T', svc, 'sh', '/goodboy-db/reset.sh'], 5 * SHORT_MS);
     if (r.code !== 0) {
       const f = ctx.out.fail(r, 'reset-failed', `reset ${svc}`);
       return { ...f, note: `resetting ${svc} from its template failed: ${f.note}` };
     }
+    const role = await comp(ctx, ['exec', '-T', svc, 'sh', '/goodboy-db/data-role.sh'], 2 * SHORT_MS);
+    if (role.code !== 0) ctx.roleFailed.push(svc);
   }
   return null;
 }
+
+const ROLE_NOTE = 'the read-only role of sandbox-data could not be made (run sandbox-init --force if the sandbox was set up before M6b); suites are not affected, sandbox-data fails until it works';
 
 const APP_LOGS_REFUSED = "sandbox-up: --app-logs is not available in a sandbox that holds real data: the app's log can hold rows of the database";
 const APP_LOG_HIDDEN = "the app's log is not shown; pass --app-logs to sandbox-up to include its last lines";
@@ -565,6 +593,9 @@ async function up(ctx: Ctx, args: string[]): Promise<Result> {
   const err = await resetDb(ctx);
   if (err) return { out: { steps: [...steps, { step: 'reset', ok: false, ...err }], stale }, code: 1 };
   if (sqlServices(ctx).length > 0) steps.push({ step: 'reset', ok: true });
+  // the read-only role of sandbox-data: goodboy's own fixed words, in both modes, and no stop
+  for (const svc of ctx.roleFailed ?? []) steps.push({ step: `data role ${svc}`, ok: false, note: ROLE_NOTE, diagnostic: { code: 'data-failed', step: `data role ${svc}` } });
+  if (sqlServices(ctx).length > 0 && (ctx.roleFailed ?? []).length === 0) steps.push({ step: 'data role', ok: true });
   if (!ctx.plan.hasApp) return { out: { steps, stale, notes: ['no app service: nothing to start'] }, code: 0 };
   const a = await comp(ctx, ['up', '-d', 'app'], 5 * SHORT_MS);
   if (a.code !== 0) return bad('start app', a, 'app-failed');
@@ -678,7 +709,7 @@ async function runUnit(ctx: Ctx, outDir: string, ts: string, custom: string[], t
   const log = logText(r);
   const after = await unitAfter(ctx, ts, log, ctx.scan.stack === 'jvm');
   if (!after.wrote) problems.push('output.log could not be written to the run volume');
-  if (ctx.out.hostCopies) writeAtomic(join(outDir, 'output.log'), log);
+  if (ctx.out.hostCopies) writeAtomic(join(outDir, OUTPUT_LOG_FILE), log);
   const step = stepOf(ctx, r);
   return { step, summary: { exit: step.exit, durationMs: step.durationMs, timedOut: step.timedOut, ...after.counts } };
 }
@@ -734,7 +765,7 @@ async function runE2e(ctx: Ctx, outDir: string, ts: string, custom: string[], ti
     problems.push('the Playwright report and the access log could not be read from the sandbox volumes');
     problems.push('e2e-output.log could not be written to the run volume');
   } else if (!after.wrote) problems.push('e2e-output.log could not be written to the run volume');
-  if (ctx.out.hostCopies) writeAtomic(join(outDir, 'e2e-output.log'), log);
+  if (ctx.out.hostCopies) writeAtomic(join(outDir, E2E_OUTPUT_LOG_FILE), log);
   if (after?.partial) problems.push('the Playwright report and the access log are larger than the read budget: some were not read');
   const rep = after?.files.get(reportPath);
   const acc = after?.files.get(logPath);
@@ -886,6 +917,7 @@ async function run(ctx: Ctx, args: string[]): Promise<Result> {
   // the report is made in the runner container, so it needs a test command
   const coverage: CoverageResult =
     ctx.scan.build.testCommand.length > 0 ? await runCoverage(ctx, outDir, ts, e2e !== null) : { ok: false, exit: null, reports: [], note: 'the scan has no test command, so there is no runner service to make the coverage report' };
+  if ((ctx.roleFailed ?? []).length > 0) problems.push(ROLE_NOTE);
   const first = unit ?? e2e!;
   const exit = unit !== null && unit.exit !== 0 ? unit.exit : e2e !== null && e2e.exit !== 0 ? e2e.exit : first.exit;
   const timedOut = unit?.timedOut === true || e2e?.timedOut === true;
@@ -937,15 +969,29 @@ async function down(ctx: Ctx, args: string[]): Promise<Result> {
   let flag: 'cleared' | 'kept' | undefined;
   if (volumes && r.code === 0) {
     flag = 'kept';
-    if (!(await dataVolumesLeft(ctx)) && clearRealData(ctx.root) === null && ctx.local.dump === null) flag = 'cleared';
+    if (!(await dataVolumesLeft(ctx)) && clearRealData(ctx.root) === null && ctx.local.dump === null && (ctx.local.inputs?.length ?? 0) === 0) flag = 'cleared';
   }
   return { out: { exit: r.code, tail: ctx.out.tail(r, TAIL_CHARS), volumes: volumes ? 'removed' : 'kept', ...(flag === undefined ? {} : { realData: flag }) }, code: r.code === 0 ? 0 : 1 };
 }
 
-/** Adds the sweep's diagnostic to a command's output (an object), when it failed. */
-function withSweep(r: Result, sweep: Diag | null): Result {
-  if (sweep === null || 'error' in r || typeof r.out !== 'object' || r.out === null || Array.isArray(r.out)) return r;
-  return { ...r, out: { ...r.out, sweep } };
+/** What `sandbox-data` needs of the project (M6b): the first SQL store's service, engine and app database, a compose
+ *  call, a check that the daemon and the compose file are safe (asked after the input is parsed, before any query),
+ *  and the handle key out of the `meta` volume. */
+function dataCtx(ctx: Ctx): DataCtx {
+  const store = ctx.scan.stores.find((s) => s.kind === 'postgres' || s.kind === 'mysql' || s.kind === 'mariadb');
+  return {
+    target: store === undefined || ctx.plan.dbService === null ? null : { engine: store.kind as 'postgres' | 'mysql' | 'mariadb', svc: ctx.plan.dbService, db: dbName(store) },
+    comp: ctx.comp,
+    ready: async () => (await guard(ctx)) === null,
+    key: (candidate) => metaKey(ctx, candidate),
+  };
+}
+
+/** Adds the sweep's diagnostic, and the registry's (lib/sandbox-registry.ts), to a command's output (an object), when
+ *  one failed. */
+function withSweep(r: Result, sweep: Diag | null, ctx: Ctx): Result {
+  if ((sweep === null && ctx.registryProblem === undefined) || 'error' in r || typeof r.out !== 'object' || r.out === null || Array.isArray(r.out)) return r;
+  return { ...r, out: { ...r.out, ...(sweep !== null ? { sweep } : {}), ...(ctx.registryProblem !== undefined ? { registry: ctx.registryProblem } : {}) } };
 }
 
 /** The `sandbox-init|local|check|prepare|up|run|down` commands. `error` is a message for the
@@ -961,18 +1007,31 @@ export async function sandboxCommand(command: string, root: string, args: string
     return { out: { path, ...scan }, code: scan.problems.length > 0 ? 1 : 0 };
   }
   if (command === 'sandbox-local') {
+    const USAGE = 'sandbox-local: pass --dump <absolute path> [--format sql|custom] and/or --input <absolute path> (once per input log)';
     const di = args.indexOf('--dump');
     const dump = di >= 0 ? args[di + 1] : undefined;
-    if (dump === undefined || dump.startsWith('--')) return { error: 'sandbox-local: pass --dump <absolute path> [--format sql|custom]' };
+    if (di >= 0 && (dump === undefined || dump.startsWith('--'))) return { error: USAGE };
+    const inputs: string[] = [];
+    for (let i = args.indexOf('--input'); i >= 0 && i < args.length; i = args.indexOf('--input', i + 1)) {
+      const v = args[i + 1];
+      if (v === undefined || v.startsWith('--')) return { error: USAGE };
+      inputs.push(v);
+    }
+    if (dump === undefined && inputs.length === 0) return { error: USAGE };
     const fi = args.indexOf('--format');
     const f = fi >= 0 ? args[fi + 1] : undefined;
     if (f !== undefined && f !== 'sql' && f !== 'custom') return { error: 'sandbox-local: --format is sql or custom' };
-    const w = writeLocal(root, dump, (f as 'sql' | 'custom' | undefined) ?? null);
+    let w: { path: string; local: SandboxLocal } | Error | null = null;
+    if (dump !== undefined) w = writeLocal(root, dump, (f as 'sql' | 'custom' | undefined) ?? null);
+    if (!(w instanceof Error) && inputs.length > 0) w = addInputs(root, inputs);
     if (w instanceof Error) return { error: `sandbox-local: ${w.message}` };
+    // the registered input logs are shown as a count only
+    const { inputs: registered, ...shown } = w!.local;
+    const out = { path: w!.path, ...shown, ...((registered?.length ?? 0) > 0 ? { inputs: registered!.length } : {}) };
     // a sandbox that exists already has its sweep (a project with no compose file has nothing to sweep)
     const known = loadCtx(root, true);
-    if (known instanceof Error) return { out: { path: w.path, ...w.local }, code: 0 };
-    return withSweep({ out: { path: w.path, ...w.local }, code: 0 }, await sweepIfSafe(known, await preflight(known)));
+    if (known instanceof Error) return { out, code: 0 };
+    return withSweep({ out, code: 0 }, await sweepIfSafe(known, await preflight(known)), known);
   }
   if (command === 'sandbox-init') {
     const scan = readScan(root);
@@ -991,16 +1050,18 @@ export async function sandboxCommand(command: string, root: string, args: string
     switch (command) {
       case 'sandbox-check': {
         const c = await checkSandbox(ctx);
-        return withSweep({ out: c, code: checkOk(c) ? 0 : 1 }, sweep);
+        return withSweep({ out: c, code: checkOk(c) ? 0 : 1 }, sweep, ctx);
       }
       case 'sandbox-prepare':
-        return withSweep(await prepare(ctx, args), sweep);
+        return withSweep(await prepare(ctx, args), sweep, ctx);
       case 'sandbox-up':
-        return withSweep(await up(ctx, args), sweep);
+        return withSweep(await up(ctx, args), sweep, ctx);
       case 'sandbox-run':
-        return withSweep(await run(ctx, args), sweep);
+        return withSweep(await run(ctx, args), sweep, ctx);
       case 'sandbox-down':
-        return withSweep(await down(ctx, args), sweep);
+        return withSweep(await down(ctx, args), sweep, ctx);
+      case 'sandbox-data':
+        return withSweep(await sandboxData(dataCtx(ctx), args), sweep, ctx);
       default:
         return { error: `unknown sandbox command ${command}` };
     }

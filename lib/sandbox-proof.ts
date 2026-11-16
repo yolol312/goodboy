@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { MAX_DOC_BYTES, readRegular } from './safe-read';
+import { RUN_NAME } from './sandbox-mode';
 import type { TestResult } from './types';
 
 export const sha = (text: string | Buffer) => createHash('sha256').update(text).digest('hex');
@@ -29,9 +30,6 @@ export function noLinksUnder(base: string, parts: readonly string[], last: 'file
     return false;
   }
 }
-
-/** The name of a `sandbox-run` directory under `.goodboy/sandbox/out/` (its timestamp). */
-export const RUN_NAME = /^\d{8}T\d{6}Z$/;
 
 /** What a record needs from the result of one `sandbox-run`. */
 export interface RunProof {

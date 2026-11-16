@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pinCoverageStart } from '../lib/changed-coverage';
 import { recordEdit } from '../lib/file-tracker';
-import { SANDBOX_DIR as RENDER_DIR } from '../lib/sandbox-render';
+import { SANDBOX_DIR as RENDER_DIR } from '../lib/sandbox-mode';
 import { isSandboxLayout, SANDBOX_PREFIX, sandboxExemptRel, sandboxGapReason, sandboxGaps, sandboxRel, sandboxTestEdits, sandboxTestRel, sandboxUsed, sandboxUsers } from '../lib/sandbox-gate';
 import { planSandbox } from '../lib/sandbox-render';
 import type { SandboxLocal, SandboxScan } from '../lib/sandbox-types';

@@ -5,6 +5,7 @@
 //   runout     /outroot       one dir per run, `/outroot/<ts>/` (the container's `/out` is a link to it)
 //   live       /live          what the app, the proxy and the runner share (the access log, e2e coverage data)
 //   tout_<dir> /work/<dir>    one volume over each known test output dir (JUnit XML, HTML reports)
+//   meta       /meta          the handle key of `sandbox-data` (M6b), kept for the sandbox's life
 // The host reads or removes what it needs through the `reader` service (a pinned busybox with no
 // network) with the scripts below, in memory and under a byte budget, and never prints it.
 //
@@ -12,10 +13,16 @@
 // lib/sandbox-store.ts, the expiry rules in lib/sandbox-expiry.ts.
 
 import { createHash } from 'node:crypto';
+import { E2E_ARTIFACTS_DIR, E2E_OUTPUT_LOG_FILE, OUTPUT_LOG_FILE } from './sandbox-mode';
+import { ACCESS_LOG_FILE, PLAYWRIGHT_REPORT_FILE } from './ui-types';
 
 export const OUT_ROOT = '/outroot';
 export const OUTDIRS_ROOT = '/outdirs';
 export const LIVE_DIR = '/live';
+/** The `meta` volume (M6b): what goodboy keeps for the sandbox's life, the handle key. Only the `reader` mounts it
+ *  (the M6c helper's container will read it); `sandbox-down --volumes` removes it. */
+export const META_DIR = '/meta';
+const META_KEY_FILE = 'handle.key';
 
 /** One cap for a file read out of a volume: the access log, the Playwright report. */
 export const MAX_READ_BYTES = 64 * 1024 * 1024;
@@ -70,7 +77,7 @@ export const outDirMounts = (dirs: readonly string[] = OUTPUT_DIRS): string[] =>
 export const readerMounts = (dirs: readonly string[] = OUTPUT_DIRS): string[] => dirs.map((d) => `${outDirVolume(d)}:${OUTDIRS_ROOT}/${outDirVolume(d)}`);
 
 /** Every volume this module adds to the compose file. */
-export const volumeNames = (dirs: readonly string[] = OUTPUT_DIRS): string[] => ['runout', 'live', ...dirs.map(outDirVolume)];
+export const volumeNames = (dirs: readonly string[] = OUTPUT_DIRS): string[] => ['runout', 'live', 'meta', ...dirs.map(outDirVolume)];
 
 /** The in-volume dir of a run, as the container sees it (`GOODBOY_OUT`). */
 export const runDirIn = (ts: string): string => `${OUT_ROOT}/${ts}`;
@@ -139,7 +146,7 @@ export const UNIT_AFTER_SCRIPT = `${marker('unit-after')}
 ts="$1"; max="$2"; total="$3"; cap="$4"; used=0
 ${EMIT}
 ${WLOG}
-wlog "$ts" output.log
+wlog "$ts" ${OUTPUT_LOG_FILE}
 find ${OUTDIRS_ROOT} -type f -name 'TEST-*.xml' | sort | head -n "$cap" | while IFS= read -r f; do emit "$f" || break; done
 ${END}`;
 
@@ -150,10 +157,10 @@ export const E2E_AFTER_SCRIPT = `${marker('e2e-after')}
 ts="$1"; max="$2"; total="$3"; action="$4"; used=0
 ${EMIT}
 ${WLOG}
-wlog "$ts" e2e-output.log
-emit "${OUT_ROOT}/$ts/playwright-report.json" || true
-emit "${LIVE_DIR}/access.log" || true
-a="${OUT_ROOT}/$ts/e2e-artifacts"
+wlog "$ts" ${E2E_OUTPUT_LOG_FILE}
+emit "${OUT_ROOT}/$ts/${PLAYWRIGHT_REPORT_FILE}" || true
+emit "${LIVE_DIR}/${ACCESS_LOG_FILE}" || true
+a="${OUT_ROOT}/$ts/${E2E_ARTIFACTS_DIR}"
 if [ -e "$a" ] || [ -L "$a" ]; then
   echo "@@P present"
   if [ "$action" = rm ]; then
@@ -176,6 +183,30 @@ for n; do
 done
 if [ "$mode" = clear ]; then clear_scratch || rc=1; fi
 if [ "$rc" = 0 ]; then ${END}; fi`;
+
+/** `meta-key`: the handle key of the sandbox (M6b), a file of the `meta` volume. stdin is a candidate (64 hex
+ *  digits goodboy made at random); it is written only when there is no key yet (`set -C`: the first writer
+ *  wins, two calls at once agree), mode 0600, never through a link. The key that stands is printed as one file
+ *  frame, which the host keeps in memory only. */
+export const META_KEY_SCRIPT = `${marker('meta-key')}
+max=4096; total=4096; used=0
+${EMIT}
+f="${META_DIR}/${META_KEY_FILE}"
+IFS= read -r cand || cand=''
+case "$cand" in *[!0-9a-f]*) cand='' ;; esac
+if [ "\${#cand}" -eq 64 ] && [ ! -e "$f" ] && [ ! -L "$f" ]; then
+  ( umask 077; set -C; printf '%s\\n' "$cand" > "$f" ) 2>/dev/null || true
+fi
+emit "$f" || true
+${END}`;
+
+/** The key out of a `meta-key` call's frames: 64 hex digits, or null (no key, a refused file, a bad shape). */
+export function parseMetaKey(stdout: string): string | null {
+  const f = parseFrames(stdout)?.files.get(`${META_DIR}/${META_KEY_FILE}`);
+  if (f?.kind !== 'text') return null;
+  const key = f.text.trim();
+  return /^[0-9a-f]{64}$/.test(key) ? key : null;
+}
 
 /** The entries of the runs volume, one `@@E name` per line (hidden ones too). */
 export const LIST_SCRIPT = `${marker('list')}

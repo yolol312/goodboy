@@ -1332,9 +1332,9 @@ function cmdBackfill(command: string, cwd: string, args: string[]): void {
 }
 
 /** The sandbox commands (track M, M1b): `sandbox-init [--force]`, `sandbox-local --dump <abs> [--format
- *  sql|custom]`, `sandbox-check`, `sandbox-prepare`, `sandbox-up`, `sandbox-run [--suite unit|all] [--
- *  cmd...]`, `sandbox-down [--volumes]`. They read `.goodboy/sandbox/scan.json`; the exit code of
- *  `sandbox-run` is the suite's. */
+ *  sql|custom] [--input <abs>]...`, `sandbox-check`, `sandbox-prepare`, `sandbox-up`, `sandbox-run [--suite unit|all] [--
+ *  cmd...]`, `sandbox-down [--volumes]`, and `sandbox-data schema|shape|count|pick` (M6b: the only way to look at
+ *  the restored database). They read `.goodboy/sandbox/scan.json`; the exit code of `sandbox-run` is the suite's. */
 async function cmdSandbox(command: string, cwd: string, args: string[]): Promise<void> {
   const r = await sandboxCommand(command, repoTop(cwd), args);
   if ('error' in r) fail(r.error);
@@ -1546,7 +1546,7 @@ async function cmdCheckup(command: string, args: string[]): Promise<void> {
 
 const USAGE =
   '사용법: bun lib/cli.ts <command> [args...]\n' +
-  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | test-survey [--all | --dir <dir>] [--max N] | backfill-plan | backfill-next [--size N] [--pick a,b] | backfill-mark <file> --status done|skipped|suspect [--tests a,b] [--note text] | backfill-status | sandbox-scan | sandbox-init [--force] | sandbox-local --dump <abs path> [--format sql|custom] | sandbox-check | sandbox-prepare [--timeout-ms N] | sandbox-up [--wait-seconds N] [--app-logs] | sandbox-run [--suite unit|e2e|all] [--timeout-ms N] [-- cmd...] | sandbox-down [--volumes] | coverage-check <report...> [--root-map from=to] | ui-inventory [--summary] | ui-check [--run <ts>] [--log f]... [--report f]... [--inventory f] | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text> | checkup-state | checkup-begin [--cli <v>] [--replace] | checkup-changelog [--from <v>|none] [--to <v>] [--ids a,b] [--changelog <path>] [--max-matched N] [--max-unmapped N] [--run <id>] | checkup-write --run <id> --name <file> | checkup-complete --run <id> | checkup-abort --run <id> | checkup-projects [--add <dir>|--remove <dir>] [--suggest] | checkup-inventory [--run <id>] (checkup-changelog --inventory adds its identifiers) | checkup-health [--run <id>] [--timeout-ms N] | checkup-smoke [--run <id>] | checkup-compare --run <id> | checkup-probe --run <id> (--estimate | --estimate-id <id>)';
+  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | test-survey [--all | --dir <dir>] [--max N] | backfill-plan | backfill-next [--size N] [--pick a,b] | backfill-mark <file> --status done|skipped|suspect [--tests a,b] [--note text] | backfill-status | sandbox-scan | sandbox-init [--force] | sandbox-local --dump <abs path> [--format sql|custom] [--input <abs path>]... | sandbox-check | sandbox-prepare [--timeout-ms N] | sandbox-up [--wait-seconds N] [--app-logs] | sandbox-run [--suite unit|e2e|all] [--timeout-ms N] [-- cmd...] | sandbox-down [--volumes] | sandbox-data schema | sandbox-data shape <table>.<col> | sandbox-data count <table> [--where <json>] | sandbox-data pick <table> --where <json> [--n N] | coverage-check <report...> [--root-map from=to] | ui-inventory [--summary] | ui-check [--run <ts>] [--log f]... [--report f]... [--inventory f] | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text> | checkup-state | checkup-begin [--cli <v>] [--replace] | checkup-changelog [--from <v>|none] [--to <v>] [--ids a,b] [--changelog <path>] [--max-matched N] [--max-unmapped N] [--run <id>] | checkup-write --run <id> --name <file> | checkup-complete --run <id> | checkup-abort --run <id> | checkup-projects [--add <dir>|--remove <dir>] [--suggest] | checkup-inventory [--run <id>] (checkup-changelog --inventory adds its identifiers) | checkup-health [--run <id>] [--timeout-ms N] | checkup-smoke [--run <id>] | checkup-compare --run <id> | checkup-probe --run <id> (--estimate | --estimate-id <id>)';
 
 async function main(): Promise<void> {
   // The session's project dir, not the shell's dir after a `cd`: the records written here are
@@ -1628,6 +1628,7 @@ async function main(): Promise<void> {
       case 'sandbox-up':
       case 'sandbox-run':
       case 'sandbox-down':
+      case 'sandbox-data':
         await cmdSandbox(command, cwd, args);
         break;
       case 'report-evidence':

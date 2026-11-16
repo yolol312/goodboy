@@ -3,7 +3,7 @@
 Feature → test type, generated from the test files by goodboy (`cli.ts test-catalog`).
 Regenerate it instead of editing it; the docs rule compares it with a fresh copy.
 
-Totals: unit 213 files, 3910 tests; e2e 2 files, 54 tests.
+Totals: unit 227 files, 4187 tests; e2e 2 files, 54 tests.
 
 | Feature | Type | File | Tests |
 |---|---|---|---|
@@ -121,9 +121,23 @@ Totals: unit 213 files, 3910 tests; e2e 2 files, 54 tests.
 | planSandbox hosts and stores; the scan, the local file and the ledger of a project that is not what goodboy wrote; sandboxCommand in this process; checkSandbox | unit | tests/m6-sandbox-line-coverage.test.ts | 11 |
 | config readers: YAML corners, .env and JSON that do not parse; IPv6 URLs and string literals in code; Node: the port, Prisma stores; JVM: a WAR with no Spring Boot, a module with settings.gradle above it; Python layouts; caps and the time budget | unit | tests/m6-sandbox-scan-coverage.test.ts | 14 |
 | jsxActions; jsCalls and addCalls; scanTemplate; springRoutes on Kotlin and odd annotations; parseReport shapes; cmdUiCheck | unit | tests/m6-ui-line-coverage.test.ts | 7 |
-| writeAtomic; clearRealData; the sweep of host raw files and of a broken context; a ui-check verdict that cannot be stored | unit | tests/m6a-gaps.test.ts | 4 |
+| writeAtomic; clearRealData; the sweep of host raw files and of a broken context; a ui-check verdict that cannot be stored | unit | tests/m6a-gaps.test.ts | 5 |
 | the text policy (lib/sandbox-boundary.ts); the counts of a run (lib/sandbox-summary.ts); the volume scripts and what they print (lib/sandbox-volumes.ts); expiry (lib/sandbox-expiry.ts); the ui-check verdict without titles (lib/ui-check.ts); the real-data flag in local.json | unit | tests/m6a-parts.test.ts | 47 |
 | real data: a full run prints and records no canary; real data: every failure prints a code, never the words of what failed; without real data the old output stays; raw artifacts expire; raw files of runs before M6a and of non-real-data runs; real data found in the volumes when local.json is gone | unit | tests/m6a-run.test.ts | 30 |
+| sandbox-data through sandboxCommand; writeLocal; glob reader of the data guard; bounds of one call | unit | tests/m6b-coverage.test.ts | 10 |
+| schema; shape; count; pick; what a failure says; the client | unit | tests/m6b-data.test.ts | 35 |
+| the small module a hook can load (lib/sandbox-mode.ts); old runs with no local.json (rawMayRemain); a docker that does not answer; ui-check on a project that is real data only because of old files | unit | tests/m6b-gaps.test.ts | 13 |
+| the glob matcher agrees with bash on the forms of `**` | unit | tests/m6b-glob.test.ts | 4 |
+| the operations; the condition; the condition against the table | unit | tests/m6b-grammar.test.ts | 16 |
+| a plain project, with other projects in the registry, is not slowed or stopped; raw output a run left on the host, through the shell; a path held in a variable, and a reader that is fed names; find -exec, globs with braces, `**`, classes and extended forms; programs that run their arguments or their input; a Korean path in either Unicode form | unit | tests/m6b-guard-forms.test.ts | 24 |
+| cd into a dir spelled from $HOME; compose set by the environment; raw host output while some is left, below a parent dir; the $HOME needles on Linux; a protected path is held as text at a path boundary; the work of a call is bounded | unit | tests/m6b-guard-scope.test.ts | 17 |
+| docker, podman and compose; the docker socket and the database clients; the dump and the input logs; Read, Grep and Glob; any tool whose input is a shell command; projects the rule leaves alone, and those it holds | unit | tests/m6b-guard.test.ts | 36 |
+| the outward push rule judges the push in the dir a $HOME cd names; the commit issue rule judges the commit in the repo a $HOME cd (or -C) names; the role limits judge a change in the dir a $HOME cd names; the reader itself: the dir a `cd` with HOME leaves | unit | tests/m6b-home-cd.test.ts | 14 |
+| Bash; Read, Grep and Glob; projects the rule leaves alone; round 2: the two contexts, the raw output, wrappers, the registry file, through the spawned hook | unit | tests/m6b-hook.test.ts | 25 |
+| sandbox-local --input; inputs in the local file and in the mode | unit | tests/m6b-local.test.ts | 11 |
+| the registry file; an entry never loses a path; who writes it; the reason a sandbox command gives is the error\; the plain local.json the sandbox commands write | unit | tests/m6b-registry.test.ts | 34 |
+| the role script of each engine; when the role is applied | unit | tests/m6b-role.test.ts | 12 |
+| the SQL of each operation, per engine; values are quoted by goodboy; what the answers are read as; column classes; handles | unit | tests/m6b-sql.test.ts | 25 |
 | marker names and Bash writes; PreToolUse; a marker made during a model Bash call that never reported back (`exit N`, G0 M18); a marker made in another directory during a finished call (security review round 2); round 3; PostToolUse sweep | unit | tests/marker-guard.test.ts | 14 |
 | redirections; shellSegments; hostOf; curl, wget, httpie; ssh family; git push | unit | tests/outward-command.test.ts | 22 |
 | unlisted external hosts; production hosts; gate modes | unit | tests/outward-gate-hooks.test.ts | 12 |

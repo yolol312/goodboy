@@ -4622,7 +4622,7 @@ Design:
     outputs never echo raw input when validation or masking fails.
   - M6b restricted data access: no model-facing SQL. `cli.ts sandbox-data` offers fixed
     operations (schema, shape categories per column, aggregate counts with a minimum group size,
-    opaque per-run handles for records matching a condition built from those operations) through a
+    opaque handles, stable for the sandbox's life, for records matching a condition built from those operations) through a
     least-privilege DB role with statement, output and time limits, and never returns DB error
     text. Raw primary keys are values too: tests use handles. A PreToolUse rule denies, for the
     sandbox's real-data containers and volumes, docker or compose `exec`, `cp`, `logs`, `inspect`,
@@ -4635,7 +4635,13 @@ Design:
     id, never a value. Expected sides come from the DB or a relation, not from the value itself.
     New inputs come from per-schema generators in a sandbox namespace with transactional
     allocation and collision checks; only generated values are stored. The tester agents and
-    skills require handles and the helper.
+    skills require handles and the helper. What M6b fixed for it: the handle key is `/meta/handle.key` of the
+    `meta` volume, so the helper's container mounts `meta` read-only; it reimplements `handleOf`'s tuple
+    format (`engine|db|table|<len>:<hex>,…`, the key columns' text bytes as hex) in each stack's language;
+    and it cannot use the reader role of `sandbox-data` from the runner on `inner` (that role has no
+    password and logs in over the database container's own socket only), so the helper needs a way of its
+    own to read rows (its own role, or a call into goodboy), which M6c decides. Until M6c no helper
+    resolves a handle: a test can name one but cannot use it.
   - M6d records: `test-write`, `review-write` and `regression` sanitize every string and key of a
     record (redacting before truncation, secrets masked too). Real-data runs record only the M6a
     result. Records must be safe even when tracked or force-added.
@@ -4985,6 +4991,349 @@ goodboy sandbox command, crash leftovers too.
   not say `realData: false` exists (the sandbox commands look for the database volume instead). A
   suite that wraps others and has `<testcase>` elements of its own is counted for those cases, once.
   `network_mode: none` passes the static check for a service named `reader` only.
+
+M6b restricted data access, as built (2026-11-13, #19). The user's decisions (design of the same day):
+minimum group size k = 10; `=` only on enum-like columns; handles stable for the sandbox's life (an HMAC
+with a key in a sandbox volume); a one-use user marker and an env switch as the only way past the hook rule.
+Settled by the plan and fail-closed: the three SQL engines (Postgres, MySQL, MariaDB; the dump goes to the
+first SQL store only, Redis and Mongo hold no dump and are out of scope), the four operations the plan
+names, and "registered input logs" are paths registered with `sandbox-local --input <path>`.
+- `cli.ts sandbox-data <op>` (`lib/sandbox-data.ts`, wired in `sandboxCommand` after `preflight` and the
+  sweep, so it follows the same daemon and compose checks; one code path for real-data and plain sandboxes).
+  The grammar, as built:
+  - `schema`: tables (a table outside `public` is `schema.table`), columns with type, `nullable`, `pk`, `fk`,
+    and the row-count bucket of each table (`0`, `<10`, `10-99`, `100-999`, `1k-10k`, `>10k`, counted up to
+    10001). Only plain identifiers (`[A-Za-z_][A-Za-z0-9_$]{0,62}`) are listed, the query itself leaves the
+    others out and `skippedNames` counts those columns. Caps: 500 tables, 20000 catalog rows (`truncated`).
+  - `shape <table>.<col>`: counts per category (`null`, `empty`, `integer`, `decimal`, `datetime`, `uuid`,
+    `email-like`, `phone-like`, `url`, `other`, the first that matches wins, regular expressions without a
+    backslash so both engines read them the same), counts per length bucket (`0`, `1-8`, `9-32`, `33-128`,
+    `129-1024`, `>1024`), `distinct` as a bucket (`0`, `1`, `2-9`, `10-50`, `>50`) and `enumLike` (at most 50
+    distinct values). Every count follows the group-size rule: 10 or more as it is, else `"<10"`. The
+    answer is made from the first 100000 rows of the table (`sampled: true` when the table has more: a
+    separate `T` count up to 100001 says so). The distinct count runs over the md5 of the text, so a wide
+    column is not sorted whole (a 3.8 KB text column of 100000 rows took 4.1 s against the 5 s limit; it
+    timed out at 8.7 s before, on 1M rows, with the text itself).
+  - `count <table> [--where <json>]`: the exact count when it is 10 or more, else `"<10"` (0 included).
+  - `pick <table> --where <json> [--n N]`: `N` from 1 to 20, 5 when not given; handles of random matching
+    rows, only when the condition matches at least 10 rows (`data-refused`, `too-few-rows` otherwise), and
+    only for a table with a primary key (`no-primary-key`).
+  - The condition (`--where`, JSON, at most 4 KiB, depth 4, 20 nodes, 10 children): `{"and":[…]}`,
+    `{"or":[…]}`, or `{"col","op","value"?}` with op `is-null`, `not-null` (no value), `shape` (a category
+    above), `<` `>` `<=` `>=` (a number up to 1e15 on a numeric column, or an ISO date or date-time on a
+    date column; a date that is not on the calendar, `2024-02-30`, is refused as `bad-value`, where the
+    database would have answered with an error), `=` `!=` (a number, a boolean or a string of at most 64
+    characters on a column of that kind, and only when the column is enum-like: a check of the md5 of the
+    first 100000 rows' values asks for at most 50 distinct values first). A string value may not hold a backslash or a control character; a quote is doubled. A
+    column or table that the catalog does not list is refused before any query of the data. Extra keys,
+    unknown ops and options are refused.
+  - Errors: `{op, ok: false, diagnostic}` and exit 1. `data-refused` has `field` (a path goodboy builds:
+    `where.and[1].col`, `table`, `--n`) and a fixed `reason` (20 of them: `unknown-table`, `bad-type`,
+    `not-enum-like`, `too-few-rows`, …); an unknown first word is a usage error. `data-failed` has the op's
+    name only. The input is never echoed: not a value, a column, a table or an option name. Two new
+    diagnostic codes in the M6a list (`data-failed`, `data-refused`).
+  - SQL is built here from names the catalog listed and values it validated (numbers, dates, short strings it
+    quotes itself), and runs inside the database service: `docker compose exec -T <svc> psql|mysql|mariadb`
+    with the SQL on stdin as the reader role, in a read-only transaction (`BEGIN READ ONLY`, `START
+    TRANSACTION READ ONLY`) with a time limit (`statement_timeout` 5 s; `max_execution_time` 5000 ms on
+    MySQL, `max_statement_time` 5 s on MariaDB), `ON_ERROR_STOP` and `VERBOSITY=sqlstate` (Postgres), a cap of
+    4 MiB on the answer and 60 s on the call. Each script's first line names it (`-- goodboy-data: schema`,
+    `rowcounts`, `enum`, `count`, `shape`, `pick`). The answer is read strictly: every line is `<tag>` and tab
+    separated fields of an exact shape, each tag at most as many times as it can be, a closing newline; an
+    answer that reaches the cap is taken as cut off. Anything else, a non-zero exit, a timeout or a start
+    error is `data-failed`. Neither stream is read into output.
+  - Calls per op: `schema` 1 catalog query + one per 50 tables; `shape`, `count` and `pick` 2 (3 with an enum
+    check, and `pick` one more call of the `reader` for the key); a refused input makes no `exec`, no SQL
+    and no key call (the daemon check runs after the input is parsed; the preflight and the sweep ask docker
+    before any op, as for every `sandbox-*` command). `data-failed` can also mean that the read-only role is
+    missing (a sandbox made before M6b, or a role step that failed): run `sandbox-init --force` and
+    `sandbox-up` again.
+- Handles: `h_` and the base32 (lower case, 32 characters) of the first 20 bytes of HMAC-SHA-256(key,
+  `engine|db|table|<len>:<hex>,<len>:<hex>…`), the key columns' values as the hex of their text bytes in key
+  order, length-prefixed (so `("ab","c")` and `("a","bc")` differ). The same row gives the same handle after a
+  reset or a rebuilt database; another sandbox has another key. The key is 32 random bytes, made once and kept
+  in the `meta` volume (`/meta/handle.key`, mode 0600, created by the `reader` service's `meta-key` script
+  with `set -C`, so two first calls agree, never through a link, a candidate that is not 64 lower-case hex
+  digits is not written). The `meta` volume is a new compose volume mounted in the `reader` only
+  (`sandbox-down --volumes` removes it); the M6c helper's container will mount it to resolve handles.
+  Where the HMAC runs: in goodboy's process. The key comes back through the reader into memory for the length
+  of one `pick` and the primary keys come out of the database as hex into the same memory; neither is written
+  to a file or printed (the tests check the project dir, the outputs, the docker call log and the SQL log).
+  "Never on the host" therefore means never on the host's disk and never in output.
+- The role (`db/<svc>/data-role.sh`, a new rendered layout file, drift-checked and `stale`-listed like the
+  others, and in the layout list of `lib/sandbox-gate.ts`): Postgres `goodboy_reader` (`LOGIN NOSUPERUSER
+  NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS`, no password: the image's `scram` line refuses
+  it over the network and `sandbox-data` connects over the container's own socket; `CONNECT` on the app
+  database, `USAGE` and `SELECT` on the tables of every user schema; role settings `default_transaction_read_only =
+  on`, `statement_timeout = 5s`, `lock_timeout = 1s`, `idle_in_transaction_session_timeout = 10s`) and MySQL or
+  MariaDB `gb_reader`@`localhost` (no password, `SELECT` on the app database only, `MAX_USER_CONNECTIONS 2`). It
+  is idempotent, never reads the template marker, and runs after every `reset.sh` (`resetDb`, so `sandbox-up`
+  after the restore and `sandbox-run` before each suite): the app database is made again from its template and
+  its grants go with the old one. A role that cannot be made stops nothing: `sandbox-up` shows a step
+  `data role <svc>` with `ok: false`, `sandbox-run` a problem, in goodboy's own fixed words in both modes, and
+  `sandbox-data` fails with `data-failed` until it works. Not a barrier against a program in the container:
+  a session can switch its own read-only setting off (measured on PostgreSQL 16: `SET
+  default_transaction_read_only = off` succeeds as `goodboy_reader`); what refuses a write is the role's
+  privileges (`INSERT` and `CREATE` fail with SQLSTATE 42501 or 25006), and `PUBLIC` may hold `CREATE` on
+  `public` before Postgres 15. It keeps a goodboy bug from writing.
+- `sandbox-local --input <path>` (repeatable, alone or with `--dump`): adds the path to `inputs` of
+  `local.json`, validated like the dump (absolute, there, a file or a directory, outside the repo and not a
+  directory that holds it; the docker-mount rule does not apply, inputs are never mounted), deduplicated by
+  real path, at most 50, and sets `realData: true`. The output shows `inputs: <count>`. `realDataOf` counts a
+  registered input, so `sandbox-down --volumes` does not end the mode while one is registered, and `--dump`
+  later keeps the inputs. A local file that cannot be read is replaced by `--dump` or `--input` (its error
+  message says to run it again).
+- The user-level registry of real-data sandboxes (`lib/sandbox-registry.ts`, review round 1 of M6b):
+  `<HOME>/.claude/goodboy/sandbox/real-data.json` (HOME as the inbox of `lib/field-report.ts` reads it;
+  `GOODBOY_REGISTRY_DIR` for tests), mode 0600 in a 0700 dir, entries `{top (real path), project, dump | null,
+  inputs[], paths[], dirs[]}` (round 2: `paths` is every dump and input path ever registered, each as typed and as
+  resolved, NFC-normalized at write time so the hook resolves nothing per call; `dirs` are those that were
+  directories). The per-repo rule below finds a project by walking up from the session's dirs and reads its own
+  `local.json`; a project the session does not stand in (a nested repo under a non-repo project dir), a deleted
+  `.goodboy/sandbox`, and a deleted or corrupt `local.json` had no protection of their dump, inputs and
+  containers. The registry keeps, outside the project, who holds real data. Written by: `writeLocal` and
+  `addInputs` (before `local.json`, so a registry that refuses leaves the local file as it was), every
+  command that runs `preflight` (`sandbox-local`, `-check`, `-prepare`, `-up`, `-run`, `-down`, `-data`; not `sandbox-scan` or
+  `sandbox-init`) whose project is real data by its local file (a sandbox of M6a gets in with its next
+  command), and `preflight` when it finds a database volume. The registry never loses a path (round 2): a write
+  merges into the entry of the same `top` (the union of inputs, `paths` and `dirs`; the last dump, the old one
+  when the write names none) and never replaces it, under a lock file (`real-data.lock`, O_EXCL with a token of its own, 60 tries 25 ms apart = 1.5 s, a lock older than
+  10 s moved aside by a rename and taken over, removed only while it still holds the holder's token), so two commands
+  cannot drop each other's entry; the file is
+  rewritten only when something changed. An entry is never dropped: it would go only when a project returns to
+  plain with no dump and no input, and there is no command for that yet, so entries stay (a user removes the file
+  or an entry by hand). At most 100 entries and 200 paths for a project: past either, a write is refused with an
+  error that says so and drops nothing (an entry already in still updates with paths it already holds). Errors
+  carry a `code` (`unreadable`, `full`, `too-many-paths`, `busy`, `write-failed`); the sandbox commands print the
+  code and never read the message. A
+  registry that cannot be read (a link, a non-regular file, text that is not what goodboy wrote) is "unknown":
+  the rule then keeps the per-repo reading only (it does not deny everything), `sandbox-local` fails with
+  the problem, and every other sandbox command prints `registry: {code: "registry-failed", step: "registry",
+  reason: "unreadable"|"full"|"too-many-paths"|"busy"|"write-failed"}` next to its output and runs on. A
+  `sandbox-*` command also writes a plain `local.json` (`{dump: null, dumpFormat: null, realData: false}`) when
+  there is none, docker answered, the daemon is local and no database volume exists, so a project that never
+  held real data does not stay under the fail-closed reading of old run dirs (`rawMayRemain`, which read up to 200
+  `result.json` on every hook call and treated a project with more than 200 run dirs as real data for good). It
+  does not write it (round 2) when the registry has an entry for the project or cannot be read, or while raw host
+  files that may have held real data remain (`rawMayRemain`): a plain file would lift the fail-closed reading that
+  protects them. The registry file and its dir are protected from changes only (below, round 3): reading them is no
+  harm, they hold paths and no data.
+- PreToolUse rule (`lib/sandbox-data-guard.ts`, called from `hooks/pre-tool-use.ts` after the state guard; the
+  small module `lib/sandbox-mode.ts` holds `readLocal`, `realDataForReading`, `projectName`, `SANDBOX_DIR`,
+  `LOCAL_FILE`, the run-dir name and the list of raw host files, so the hook loads no renderer). It applies to
+  Read, Grep and Glob and to any tool whose input has a shell `command` (Bash, Monitor, PowerShell; the
+  PreToolUse matcher is every tool) and passes the rest at once. Round 2 splits it into two contexts. The LOCAL
+  context is a project found from the shell's dir, the project dir, `CLAUDE_PROJECT_DIR`, each segment's dir and
+  each path a word names (at most four) that is real data by `realDataForReading`, or that the registry holds
+  (a deleted `local.json` does not release it): everything below applies. The REGISTRY-ONLY context is a project
+  of the registry that the call's dirs do not belong to, wherever the shell is: only (a) a docker deny verb with a
+  word that names that project's exact name (`gb-<slug>-<hash>`, whole or as the start of `<name>-<svc>-<n>` and
+  `<name>_<vol>`) and (b) the protected paths of the registry (dump and inputs). It has no generic
+  `gb-` rule, no unknown-container rule, no wrapper rule, no socket rule, no database host rule, and the size caps
+  only when a cwd or a segment's dir holds a protected path, so a plain project beside a non-empty registry
+  behaves as with an empty one (`docker exec web`, `psql -h db`, `git add` of 450 files, a 3000-character commit
+  message and a 2.6 KB header all pass). Round 1 had applied everything to every registry entry. The
+  old clause "a compose file and no `local.json` holds the project" is gone: `sandbox-init` never writes
+  `local.json`, so it held every plain sandbox. What it denies, for the main session and subagents alike:
+  - docker, podman, nerdctl and `docker-compose` (also `docker compose`, `container …`, global options
+    skipped) with the verbs `exec cp logs inspect attach export commit run create start top diff save`, and
+    a `compose up` without `-d`, `--detach` or `--wait` (attached, it streams the logs), when the target is
+    the sandbox of a guarded project: any word of the whole command (every segment, and the value of every
+    env assignment and `export`: `COMPOSE_FILE=.goodboy/sandbox/compose.yml`, `COMPOSE_PROJECT_NAME=<project>`)
+    that names the project, a `gb-` name (after `=` or `:` or at the start of a word) or `.goodboy/sandbox`;
+    the segment's own `-f`, `--file`, `--project-directory` or `--env-file` that resolves into the sandbox dir
+    from where the segment runs (`cd .goodboy && docker compose -f sandbox/compose.yml …`); a cwd inside the
+    sandbox dir (also after `cd`); `--volumes-from`; `container:`. For the verbs that take a container: an
+    operand that is a variable, a substitution, a placeholder `{}` or a hex id (4 to 64 digits), or none (an
+    `xargs` supplies it: `docker ps -aq | xargs docker logs`). `ps images build pull network ls volume ls
+    compose ps|config`, a detached `up`, and `exec` into a container with a literal other name pass. Reading
+    the whole command makes a sandbox word in another segment of the same command target it
+    (`cd .goodboy/sandbox; cd ..; docker compose exec web sh` is denied): the rule fails closed;
+  - a program that runs its arguments or stdin as a command and that the shell reader does not open
+    (`watch`, `colima ssh`, `limactl shell`, `ssh`, `script`, `unbuffer`, `tmux`, `screen`, `at`, `batch`,
+    `parallel`, `su -c`, a shell that reads stdin: a heredoc into `bash`), when the command text holds a docker-family program followed by a deny verb on one line:
+    "a docker call the rule cannot read". Text that only mentions docker (`echo`, `grep`, `git commit -m`)
+    passes. Wrappers `readCommand` already opens (`sudo env time nohup timeout`, `xargs`, `sh -c`, and `rtk` /
+    `rtk proxy` followed by any of them, read as the outward rule's `stripPrefix` reads a prefix) are read
+    as the program they run;
+  - a program that opens a unix socket from a path it is given on the docker socket (round 2, narrowed):
+    `curl --unix-socket` (any path), `socat` and `nc -U` with a `docker.sock` word, checked on the segment's words
+    before `rtk` is stripped. `DOCKER_HOST` in the environment of another program, an assignment or `export`, and
+    text in `grep`, `echo`, `git commit -m` or `ls` are no use of it (the old rule denied a `DOCKER_HOST=` word
+    anywhere, which stopped Colima users' ordinary commands); a docker program is read by its verb and target;
+  - `psql mysql mariadb mongosh pg_dump mysqldump` with a host `db`, `db2` or `gb-*` (`-h`, `--host`, a URL's
+    host, `host=`, `PGHOST=` and the like);
+  - any word that resolves to the dump or a registered input (links followed, `~` and `$HOME` expanded, a
+    redirect's target, `--opt=path`, a glob matched against the real paths by a linear matcher, a path inside
+    a registered directory, and a word with a variable that still holds the protected path as text),
+    unless the segment is goodboy's own `bun|node …/lib/cli.ts sandbox-*`: the `cli.ts` is the plugin's by its real
+    path (this guard's own `lib/cli.ts`, `$CLAUDE_PLUGIN_ROOT/lib/cli.ts`, or those spelled from `$GB` or
+    `$CLAUDE_PLUGIN_ROOT`), not by its name, so a `./lib/cli.ts` planted in a repo gets no exemption. Round 2 adds:
+    braces (`{a,b}`, nested, at most 64 alternatives), `**` (crosses `/`, and `**/` also matches zero dirs),
+    POSIX classes (`[[:alpha:]]`) and an extended glob (`@(` `!(` `+(` `*(` `?(`) or a glob the matcher cannot read
+    are matched, the last two by the dir they list; a dir followed by a group (`dumps/(a|b).sql`, `dumps/@(a|b)`);
+    a variable that holds the path as text in an assignment (`DUMP=/path; head $DUMP`, also `~/` and `$HOME/`
+    spellings, in the text of the whole command); NFC-normalized comparison (a Korean name typed decomposed is the
+    same file on APFS). `ls stat wc du file test [` on them pass (they tell about the file and read none of it);
+  - a recursive reader over a dir that holds the dump or an input, like the Grep tool: `grep -r|-R|-d recurse`
+    (a search with no path means the cwd), `rg`, `ag`, `ack`, `tar`, `zip`, `cp -r|-R|-a`, `rsync`, `scp`, and
+    `find … -exec|-execdir|-ok|-okdir`; a reader with no file operand, or a name a substitution or a variable builds,
+    in such a dir (`cd dumps && ls | xargs cat`, `cat $(ls)`), and a reader fed by `xargs` after a `find`, `ls` or
+    `echo` that names such a dir (`find ~/dumps | xargs cat`, `xargs -I{} cat {}`);
+  - a command the rule cannot read in time, which is denied instead of skipped ("a command too long to check
+    (split it)"): a word over 2048 characters, a segment of more than 400 words, a command over 100 KB. The caps
+    apply in the LOCAL context, and in the registry-only context only when a cwd or a segment's dir holds a
+    protected path (a relative spelling could reach it). Without a guarded project nothing is read;
+  - raw output a sandbox left on the host, through the shell as well as the tools (round 2): any word that resolves
+    to `out/live/…` or to a raw name of a run dir (`out/<ts>/` + `HOST_RAW_NAMES`), a glob that lists such a dir,
+    and a recursive reader over `out/`, while some raw output is left; `result.json`, `ls` and `stat` pass;
+  - Read, Grep and Glob (`file_path`, `path`, an absolute Glob `pattern`) on the dump, an input, or the
+    raw files an older run left on the host (`out/live/`, `out/<ts>/` + the five names of
+    `HOST_RAW_NAMES`, the list the sweep removes); a Grep over a dir that holds the dump or an input (a Glob
+    lists names only and passes).
+  The registry file and its dir are protected from changes, in every context (round 3: round 2 had protected them like
+  the dump, which denied `rg` and the Grep tool in `~`, `~/.claude` and `~/.claude/goodboy`, and `grep -r` over them):
+  Write, Edit, MultiEdit and NotebookEdit on any path inside the registry dir (denied whether or not the dir exists
+  yet), and a shell segment whose program is no reader (`cat head tail less grep rg ag ack ls stat wc du file test jq
+  diff cmp echo printf find tree fd` are readers; `find -delete` is not) with a word naming a path inside the dir, a
+  redirect (`>`, `>>`, `1>`, `&>`) into it, a glob that lists it, or running inside the dir, and `rm`, `rmdir`, `mv`,
+  `unlink`, `shred` of a dir above it. Reading them, and recursive readers over `~` or `~/.claude`, pass. A registry
+  that cannot be read adds a `warn` line to the gate log (`sandbox-data`, `registry-unreadable`) and denies nothing
+  more.
+  The main session's way past is the user's one-use marker (`.claude/.goodboy-sandbox-data-approved-<tag>.txt`,
+  the new approval kind `sandbox-data`, used for the one call at the end of the hook like the R2 and push
+  markers; a subagent has none and is told to return BLOCKED), or `GOODBOY_SANDBOX_DATA_GATE=off`. A check that
+  throws is denied in a subagent and passes in the main session (as R2). The deny text says the sandbox "may
+  hold real data", names what was reached, the `sandbox-data` and `sandbox-run` commands and the marker path,
+  never the dump's path. `sandbox-data` answers for the dir it runs in (the shell's, when it is outside the session's
+  project), so a call that reached another guarded project is also told that project's dir, to `cd` into first (a
+  JSON string, line separators and bidi controls escaped): the projects the call reached by a path inside them or
+  names by project name or protected path (read up to 100000 characters of its words: the hook must answer before
+  its timeout, or the denied call runs), other than the shell's or the hook's project; when it names none, nothing
+  more if the session is in a guarded project, else every guarded project (three, then "and N more"). The live
+  verify found a model in another project, told nothing, planning a `sandbox-scan` there; a review measured the
+  uncapped name search at 38 s for 3 MB of words built from the registry's paths of 77 characters (capped, 0.43 s
+  for 3.2 MB built from paths of 150 characters, a different fixture).
+  Linear glob matching: the first version turned each `*` into a regular expression, which
+  backtracked exponentially on a run of stars (16 stars took 23 s, past the 60 s hook timeout, so the call ran
+  unchecked); the matcher now collapses runs of stars and walks the text with two pointers (40 stars: a few
+  milliseconds).
+- Round 3 of the M6b review (2026-11-16): (1) the glob matcher went back to its last star only, but `**` crosses `/`
+  and `*` does not, so `**/*.sql` under-matched a dump two dirs below the prefix; it now simulates the match with the set
+  of token positions (one pass over the text, no backtracking) and is checked against a table of bash 5.3 globstar
+  results (`tests/m6b-glob.test.ts`); where zsh reads `**` as `*` the matcher still crosses `/` (fails closed). (2) `cd "$HOME/dumps"`
+  and `cd ${HOME}/…` set the segment's dir (`literalDir` of `lib/outward-command.ts` expands them like `~`, from HOME as the
+  process has it; any other variable stays unknown). (3) `COMPOSE_FILE` and `COMPOSE_PROJECT_NAME`, inline, by `export` or by
+  `env`: the assignments' values go to the walk that finds the projects and to the registry-only docker rule, so the
+  exact registered name or a path into a registered sandbox with a deny verb is denied from anywhere. (4) raw host
+  output below a parent dir: while some is left, recursive readers over a dir that holds `out/` (the project root,
+  `.goodboy`, `.goodboy/sandbox`; `grep -r`, `ack`, `tar`, `cp -r`, `rsync`, `zip`, `find -exec`), names a substitution
+  builds (`cat $(ls …/out/*/output.log)`), and `xargs` fed by a lister of such a dir are denied; `rg` and `ag` pass
+  unless given `-u`/`-uu`/`--unrestricted`/`--no-ignore*`/`-U`/`--skip-vcs-ignores`, and so does the Grep tool, only when
+  `out/` is ignored: a `.git` at or above the project and `out/` in the sandbox's `.gitignore` (ripgrep reads
+  `.gitignore` only inside a git repository, checked: outside one it read `out/`; the Grep tool is taken to be ripgrep with
+  its default ignore handling, which could not be observed from here); otherwise they are denied like `grep -r`. The deny
+  text says the files are leftovers and that any sandbox command removes them in real-data mode, or that `out/live` and the
+  old run dirs can be removed. (5) the `$HOME` needles are compared the way the text is (`norm` on both sides), so
+  `DUMP=$HOME/…; head $DUMP` is denied on Linux too (a test forces the platform). Lows: a protected path held as text must
+  end at a path boundary (`~/Downloads` does not hold `~/Downloads2`); the registry file is protected from changes
+  only (above); the group check after a protected dir is a linear scan (256 characters after each occurrence, the first
+  100 KB) and glob matching has a work budget of 3 million cells per call, with a literal-prefix pre-check against the
+  protected paths: past it, LOCAL denies as too long and the registry-only context keeps the text check only; a call
+  dir inside a registered top is LOCAL even with `.goodboy/sandbox` gone; the registry's paths, needles and dir
+  needles are built once per registry file (its mtime, size and inode); a stale lock is moved aside by a rename and put back
+  when it turns out fresh, and removed only by the token that made it (the window between reading the age and the rename
+  remains: a limit). Not done, with the reason: the `bun ./lib/cli.ts sandbox-local --dump <registered dump>` of another
+  checkout of goodboy's own repo is denied when the plugin runs from its cache (the exemption is by this hook's own path;
+  a deliberate limit, `$GB` and the cache path work); `assignmentValues` and `dbClientHit` keep their own text readers
+  (`readCommand` gives only the assignments that precede a program, not `export X=…` or a bare one, and the host forms of a
+  client differ from the outward rule's).
+- M6a follow-ups fixed here: (1) the scan for raw host files of old runs without `local.json` reads the
+  newest 200 run dirs and counts more than 200 as raw (it read 200 in directory order); (2) a docker that did
+  not answer makes the output strict but no longer proves real data: the sweep leaves the host's raw files
+  alone (`keepHostRaw`), while the flag, a dump, an input or a database volume still do; (4) the `ui-check`
+  message of a project that is real data only because of old files says so and gives the user's two ways out
+  (remove the old run dirs and `out/live`, or write a `local.json` with `realData: false`; the design said
+  "`sandbox-local` with no dump", which has no such form: `sandbox-local` always sets the flag; the sandbox
+  commands now write that plain `local.json` themselves, see the registry above); (5) the doc of
+  `parseJUnit` says that a wrapping suite with cases of its own is counted once. Review round 1 of M6b also
+  made one run-dir name (`RUN_NAME`) and one list of raw host files (`HOST_RAW_NAMES`), both in
+  `lib/sandbox-mode.ts`, serve `sandbox-proof`, the sweep (`removeHostRaw`), `ui-check` and the guard, so the
+  sweep list and the rule cannot drift.
+- Stated limits (M6b): the check-then-remove of host raw files (`removeHostRaw`: the link check of the path
+  and the removal are two steps) is not atomic, so a process that swaps a directory for a link in between can
+  send a removal elsewhere, as the rest of the host-side cleanup; counts of one condition can be subtracted
+  (`count A` and `count A and B` give the size of a group below 10 when both are 10 or more: the group-size
+  rule is per answer, as decided); `pick` handles are stable, so two picks with different conditions can be
+  intersected to build per-row attribute vectors, and `count` with `<`/`>` on a number can narrow a group of
+  one (`id<=1000` against `id<1000`) when both counts are 10 or more; the enum check reads the first 100000
+  rows only; a path built at run time or in code, a program that talks to docker's socket by another name,
+  a wrapper the rule does not know that hides its docker text from a one-line search, a model that writes its
+  own client, and a command that names no word of the rule are not caught (the threat model is accidental
+  leaks, plan §19 M6). Deliberate forms, listed instead of chased (round 2): a path built from a directory
+  variable and a suffix (`D=/data/dumps; cat $D/dump.sql`: only a variable that holds a protected path whole is
+  seen), a name built by the shell's own expansion or a function, an extended glob with a quoted or computed
+  prefix, a zsh glob qualifier, a program that reads docker's socket under another name (`python3`, `ruby`, a
+  compiled client), a wrapper the rule does not know, `DOCKER_HOST` pointed at a daemon that holds the project, a
+  second tool call that assembles a command from pieces left on disk, a single glob word over 2048 characters in
+  a project the call is not in (registry-only: the substring check does not read a pattern), `HOME` reassigned
+  earlier in the same command before a `cd $HOME/…` (the reader expands `$HOME` from the hook's own environment,
+  also inside single quotes: an over-match), commands of many path-like words with a full registry that run the
+  hook past its 60 s timeout, so the call runs (the cost follows the words, not the bytes: about 1.4 ms a word with
+  100 projects of 200 paths, past the timeout near 44000 words; measured from a plain project: 3000 segments of 20
+  such words took 75.8 s, 600 of 20 (about 75 KB) 17 s, and an allowed call of 5000 segments of 3 words 20.9 s;
+  with one project, 1 MB took 0.04 to 1.1 s; a fresh hook process per call also makes the registry's needle cache
+  help only within one process), a registered dump named by a segment's word past the
+  2000th from a plain project (the registry-only context reads a segment to that cap; inside the project the call
+  is denied), a deny text that names other
+  registered projects' dirs to a session that did not reach them (a call that names none, from a plain project)
+  or the wrong project after the walk's cap on dirs (paths of the user's own projects, never a dump path or a
+  row), a session in one guarded project that reaches another's data by `~`, a relative path or a glob and is told
+  no dir (the hit is taken as its own project's), a registered project nested inside the session's project dir
+  that is told to `cd` into it although `sandbox-data` answers for the session's project anywhere below it (the
+  model gets the outer sandbox's schema and counts; the text is fixed at the start of M6c, with U+061C and U+0085
+  added to the escaped characters and the name search's first 1600 words named beside its 100000 characters),
+  and a shape timeout on columns of about 16000 characters, and
+  the 15 ms of a project with no `local.json` and 200 run dirs (left as limits); a project that is in no registry
+  and that no dir or path of the session leads to is not attributed (a project becomes registered with its next
+  `sandbox-local` or `sandbox-*` command in real-data mode, so a sandbox that has not run a command since M6b is
+  the exception); entries of the registry are never removed by a command (the file may name a project that is
+  gone: its project name and paths are still denied, which costs nothing); a `readLocal` error drops the per-repo
+  protection of that project, the registry's entry stands in for it; `pick` that matches fewer than 10 rows scans
+  the table twice before it refuses (left as it is); a sandbox set up before M6b needs `sandbox-init --force` (new
+  `meta` volume in the compose file, new `data-role.sh`, and the `reader` mounts it) and `sandbox-down` before the
+  next `sandbox-up`.
+- Not verified against a live engine here (no real docker was allowed): the Postgres SQL, the role script
+  and the answers were run against a throwaway local PostgreSQL 16 on a unix socket (schema, row counts, enum,
+  shape, count and pick as `goodboy_reader`, with the role's privileges refusing a write: INSERT and CREATE
+  fail in a read-only transaction, and after the session switched the read-only setting off a DELETE failed on
+  privileges); the MySQL and MariaDB scripts and the SQL for them are golden-tested text only
+  (`tests/m6b-golden/`), unrun. The unix-socket-only login of the MySQL role and an empty password are the
+  points to check on a real image first.
+- Tests: `tests/m6b-grammar.test.ts` (every op, refusals, no echo), `m6b-sql.test.ts` (golden SQL per engine,
+  quoting, strict parsing, handles with known answers), `m6b-data.test.ts` (a stub database: counts, refusals,
+  canaries in rows, errors and exit codes; the `meta-key` script run under `sh`; the CLI against the fake docker:
+  key, handles across resets and sandboxes, the key never on the host), `m6b-role.test.ts` (role text per
+  engine, `sh -n`, applied after each reset, non-fatal), `m6b-guard.test.ts` (the rule as a function, about
+  a hundred forms) and `m6b-guard-forms.test.ts` (round 2: plain projects beside a registry, raw output through the shell,
+  variable-held paths, xargs, `find -exec`, braces and classes, wrappers, Korean paths, the registry file),
+  `m6b-guard-scope.test.ts` (round 3: `cd "$HOME/…"`, compose by the environment, raw output below a parent
+  dir, `$HOME` needles on Linux, path boundaries, the work bound, a registered project whose sandbox dir is gone, the
+  registry cache), `m6b-glob.test.ts` (the matcher against a table of bash 5.3 globstar results),
+  and `m6b-hook.test.ts` (the spawned hook: denied forms, passes, marker, subagent, env switch,
+  Read/Grep/Glob, Monitor, the registry, plain projects, the round-3 forms), `m6b-local.test.ts` (`--input`), `m6b-registry.test.ts`
+  (the registry file, who writes it, the plain `local.json`), `m6b-gaps.test.ts` (the M6a follow-ups),
+  `m6b-home-cd.test.ts` (the `cd "$HOME/…"` reading in its other users: the push rule, the commit issue rule
+  and the role limits; `${HOME:-/x}`, `$HOMEX` and `$HOME/$X` stay unknown), `m6b-coverage.test.ts` (the rare
+  paths in-process: `sandbox-data` through `sandboxCommand`, a `local.json` write error, the glob bounds),
+  `m6b-helpers.ts` (shared fixtures); `tests/setup.ts` points `GOODBOY_REGISTRY_DIR` at a temp dir for the
+  whole run (`bun test` fires no `exit` event, so a run's dir stays; the next run removes those older than a
+  day), empties that registry after each test (a project one test registered denied `grep -r foo /` in a
+  later hook test), and clears `DOCKER_HOST` and `DOCKER_CONTEXT` unless the real-docker test is on, and
+  `fakeProject` gives each project one of its own (restored by the cleanup);
+  `tests/m6a-fake.ts` answers a `psql`, `mysql` or `mariadb` exec from `db/<tag>.out|.err|.exit` and plays
+  the `meta` volume; `tests/m6a-gaps.test.ts` now makes the rename fail in the `writeAtomic` test and puts
+  the `chmod` back in `finally`.
 
 ## 20. N — Fewer repeated runs, a project test inventory, task criteria (proposed, 2026-10-26)
 

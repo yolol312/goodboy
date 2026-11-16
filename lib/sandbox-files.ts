@@ -4,17 +4,18 @@
 // directory that is a real directory (a linked `.goodboy` would send the write outside the repo).
 
 import { randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, mkdtempSync, realpathSync, renameSync, rmSync, type Stats, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, renameSync, rmSync, type Stats, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { runBounded } from './bounded';
-import { realDataOf } from './sandbox-boundary';
-import { KEYSTORE_PASSWORD, planSandbox, SANDBOX_DIR, SCAN_FILE, type SandboxPlan } from './sandbox-render';
+import { KEYSTORE_PASSWORD, planSandbox, SCAN_FILE, type SandboxPlan } from './sandbox-render';
 import { MAX_DOC_BYTES, readRegular } from './safe-read';
 import { isStrings, sha } from './sandbox-proof';
+import { realDataOf } from './sandbox-boundary';
+import { LOCAL_FILE, MAX_INPUTS, rawMayRemain, readLocal, realOrSelf, SANDBOX_DIR } from './sandbox-mode';
+import { readRegistry, RegistryError, registerRealData, registryEntryOf } from './sandbox-registry';
 import type { SandboxLocal, SandboxScan, SandboxStack } from './sandbox-types';
 
-export const LOCAL_FILE = `${SANDBOX_DIR}/local.json`;
 export const LEDGER_FILE = `${SANDBOX_DIR}/.written.json`;
 const STACKS: readonly SandboxStack[] = ['jvm', 'node', 'python'];
 
@@ -60,78 +61,8 @@ export function readScan(root: string): SandboxScan | Error {
   return new Error(`${p} is not a scan goodboy wrote; run sandbox-scan again`);
 }
 
-/** `realpath(p)`, or `p` itself when it does not exist (yet). */
-export function realOrSelf(p: string): string {
-  try {
-    return realpathSync(p);
-  } catch {
-    return p;
-  }
-}
-
 /** A repo root as the paths under it may spell it: lexical and real, once each. */
 export const repoTops = (root: string): string[] => [...new Set([root, realOrSelf(root)])];
-
-/** The local answers; empty ones when there is no local.json, an Error when it is unreadable. */
-export function readLocal(root: string): SandboxLocal | Error {
-  const p = join(root, LOCAL_FILE);
-  const r = readRegular(p, 64 * 1024, true);
-  if (r === 'absent') return { dump: null, dumpFormat: null };
-  if (r === 'refused') return new Error(`${p} is not a regular file; move it away`);
-  try {
-    const l = JSON.parse(r.text) as SandboxLocal;
-    const okDump = l.dump === null || (typeof l.dump === 'string' && isAbsolute(l.dump));
-    const okFormat = l.dumpFormat === null || l.dumpFormat === 'sql' || l.dumpFormat === 'custom';
-    // `realData` is true, false or absent; anything else is a file goodboy did not write (fail closed)
-    const okReal = l.realData === undefined || typeof l.realData === 'boolean';
-    if (okDump && okFormat && okReal) return { dump: l.dump, dumpFormat: l.dumpFormat, realData: l.realData === true };
-  } catch {
-    // below
-  }
-  return new Error(`${p} is not a local file goodboy wrote; run sandbox-local --dump <path> again`);
-}
-
-/** Whether a project holds real data by its local file alone: the flag or a dump, and a file that cannot
- *  be read counts as real (fail closed). The one rule `loadCtx` and `ui-check` share; the commands that
- *  talk to docker may also find a database volume (`preflight` in lib/sandbox-run.ts). */
-export function realDataOfRoot(root: string): boolean {
-  const local = readLocal(root);
-  return local instanceof Error || realDataOf(local);
-}
-
-/** Whether raw host files of a run that may have held real data can still be there, for a command that
- *  cannot ask docker (`ui-check`): the old `out/live/` dir, or a run dir whose `result.json` does not say
- *  `realData: false` (a run before M6a has no such field, a real-data run says true). A dir with no
- *  result (a run that stopped at once) says nothing. Bounded: 200 dirs, 64 KiB each. */
-function rawMayRemain(root: string): boolean {
-  const out = join(root, SANDBOX_DIR, 'out');
-  let names: string[];
-  try {
-    names = readdirSync(out);
-  } catch {
-    return false;
-  }
-  if (names.includes('live')) return true;
-  for (const n of names.filter((x) => /^\d{8}T\d{6}Z$/.test(x)).slice(0, 200)) {
-    const r = readRegular(join(out, n, 'result.json'), 64 * 1024, true);
-    if (typeof r !== 'object') continue;
-    try {
-      if ((JSON.parse(r.text) as { realData?: unknown } | null)?.realData !== false) return true;
-    } catch {
-      return true; // a result goodboy cannot read may be any run's
-    }
-  }
-  return false;
-}
-
-/** The mode for reading what a run left behind, without docker: the rule of `realDataOfRoot`, and, when
- *  `local.json` is gone (the file is untracked and goes with `git clean -xfd`), real data as well while raw
- *  host files that may have held it can remain (`rawMayRemain`): the mode is then decided fail-closed
- *  the way the sandbox commands do with the project's database volume. */
-export function realDataForReading(root: string): boolean {
-  if (realDataOfRoot(root)) return true;
-  return !existsSync(join(root, LOCAL_FILE)) && rawMayRemain(root);
-}
 
 /** `root/rel` made a real directory, each part of it: an Error when one is a link or a file
  *  (a write would land outside the repo). */
@@ -243,13 +174,78 @@ export function writeLocal(root: string, dump: string, format: 'sql' | 'custom' 
   const problem = dumpProblem(root, dump);
   if (problem !== null) return new Error(problem);
   const fmt: 'sql' | 'custom' = format ?? (/\.(dump|custom|backup|pgdump)$/i.test(dump) ? 'custom' : 'sql');
-  const local: SandboxLocal = { dump: resolve(dump), dumpFormat: fmt, realData: true };
-  ensureRealDir(root, SANDBOX_DIR);
-  const ignore = join(root, SANDBOX_DIR, '.gitignore');
-  if (!existsSync(ignore)) writeAtomic(ignore, 'local.json\nout/\nca/*.key\n*.p12\n');
-  const path = join(root, LOCAL_FILE);
-  writeAtomic(path, JSON.stringify(local, null, 2) + '\n', 0o600);
-  return { path, local };
+  // the registered inputs stay; a local file that cannot be read is replaced (its error message says to run this again)
+  const before = readLocal(root);
+  const inputs = before instanceof Error ? undefined : before.inputs;
+  return saveLocal(root, { dump: resolve(dump), dumpFormat: fmt, realData: true, ...(inputs !== undefined ? { inputs } : {}) });
+}
+
+/** local.json written (mode 0600), with the sandbox dir and its `.gitignore` made first. A project in real-data mode is
+ *  put in the user-level registry first (lib/sandbox-registry.ts): a registry that refuses leaves local.json as it was. */
+function saveLocal(root: string, local: SandboxLocal): { path: string; local: SandboxLocal } | Error {
+  try {
+    if (realDataOf(local)) {
+      const refused = registerRealData(registryEntryOf(root, local));
+      if (refused !== null) return refused;
+    }
+    ensureRealDir(root, SANDBOX_DIR);
+    const ignore = join(root, SANDBOX_DIR, '.gitignore');
+    if (!existsSync(ignore)) writeAtomic(ignore, 'local.json\nout/\nca/*.key\n*.p12\n');
+    const path = join(root, LOCAL_FILE);
+    writeAtomic(path, JSON.stringify(local, null, 2) + '\n', 0o600);
+    return { path, local };
+  } catch (err) {
+    return err instanceof Error ? err : new Error(String(err));
+  }
+}
+
+/** A plain `local.json` (`realData: false`, no dump, no input) where there is none: the sandbox commands write it
+ *  once they know the project holds no real data, so a missing file stays the rare case that is read fail-closed
+ *  (`realDataForReading` looks at every old run dir while it is missing). An Error when it cannot be written. */
+export function writePlainLocal(root: string): Error | null {
+  if (existsSync(join(root, LOCAL_FILE))) return null;
+  // not for a project the registry knows (it held real data once) or whose old runs may have left raw files:
+  // the plain file would lift the fail-closed reading that protects them
+  const registry = readRegistry();
+  if (registry instanceof RegistryError || registry.some((e) => e.top === realOrSelf(root)) || rawMayRemain(root)) return null;
+  const w = saveLocal(root, { dump: null, dumpFormat: null, realData: false });
+  return w instanceof Error ? w : null;
+}
+
+/** Why a path cannot be registered as an input log (M6b), or null. Like the dump: absolute, there, and outside
+ *  the repo (inside it, one `git add` commits it). It is not mounted into a container, so the docker
+ *  mount rule of `dumpProblem` does not apply. A file or a directory of logs. */
+export function inputProblem(root: string, input: string): string | null {
+  if (!isAbsolute(input)) return '--input needs an absolute path';
+  let st: Stats;
+  try {
+    st = statSync(input);
+  } catch {
+    return `${input} does not exist`;
+  }
+  if (!st.isFile() && !st.isDirectory()) return `${input} is not a file or a directory`;
+  const top = realOrSelf(root);
+  const real = realOrSelf(input);
+  if (within(real, top)) return `${input} is inside the repository (${top}); keep input logs outside it, so they can not be committed`;
+  // a directory that holds the repo would register the whole project as an input
+  if (within(top, real)) return `${input} holds the repository (${top}); register the log files, not a directory above the project`;
+  return null;
+}
+
+/** Registers input logs (M6b) in local.json: kept next to the dump, deduplicated by real path, at most
+ *  MAX_INPUTS. Registering one puts the project in real-data mode (`realData: true`). */
+export function addInputs(root: string, inputs: readonly string[]): { path: string; local: SandboxLocal } | Error {
+  const read = readLocal(root);
+  const before: SandboxLocal = read instanceof Error ? { dump: null, dumpFormat: null } : read;
+  const all = [...(before.inputs ?? [])];
+  for (const raw of inputs) {
+    const problem = inputProblem(root, raw);
+    if (problem !== null) return new Error(problem);
+    const p = resolve(raw);
+    if (!all.some((x) => realOrSelf(x) === realOrSelf(p))) all.push(p);
+  }
+  if (all.length > MAX_INPUTS) return new Error(`at most ${MAX_INPUTS} input paths can be registered`);
+  return saveLocal(root, { dump: before.dump, dumpFormat: before.dumpFormat, realData: true, inputs: all });
 }
 
 /** `sandbox-down --volumes` dropped the database volumes: nothing of the real data is left in
@@ -260,7 +256,7 @@ export function clearRealData(root: string): Error | null {
   if (local instanceof Error) return local;
   if (!existsSync(join(root, LOCAL_FILE)) || local.realData !== true) return null;
   try {
-    writeAtomic(join(root, LOCAL_FILE), JSON.stringify({ dump: local.dump, dumpFormat: local.dumpFormat, realData: false }, null, 2) + '\n', 0o600);
+    writeAtomic(join(root, LOCAL_FILE), JSON.stringify({ dump: local.dump, dumpFormat: local.dumpFormat, realData: false, ...(local.inputs !== undefined ? { inputs: local.inputs } : {}) }, null, 2) + '\n', 0o600);
     return null;
   } catch (err) {
     return err instanceof Error ? err : new Error(String(err));

@@ -10,7 +10,8 @@ import type { Bounded } from './bounded';
 import type { Boundary, Diag } from './sandbox-boundary';
 import { isLiveRun, parseState, type RunState, rawTtlMs, sweepVictims } from './sandbox-expiry';
 import { writeAtomic } from './sandbox-files';
-import { noLinksUnder, RUN_NAME } from './sandbox-proof';
+import { HOST_RAW_NAMES, RUN_NAME } from './sandbox-mode';
+import { noLinksUnder } from './sandbox-proof';
 import { readRegular } from './safe-read';
 import { MAX_JUNIT_BYTES, MAX_JUNIT_FILES, parseJUnit, type UnitSummary } from './sandbox-summary';
 import {
@@ -22,7 +23,9 @@ import {
   JUNIT_READ_TOTAL,
   LIST_SCRIPT,
   MAX_READ_BYTES,
+  META_KEY_SCRIPT,
   parseFrames,
+  parseMetaKey,
   parseNames,
   READ_SCRIPT,
   readerArgv,
@@ -41,6 +44,9 @@ export interface DockOpts {
 export interface StoreCtx {
   dir: string;
   out: Boundary;
+  /** The strict mode comes from a docker that did not answer, not from the local file, a dump or a database
+   *  volume: the sweep then leaves the host's raw files alone (they may be a plain project's output). */
+  keepHostRaw?: boolean;
   comp(args: string[], timeoutMs: number, o?: DockOpts): Promise<Bounded>;
 }
 
@@ -52,7 +58,7 @@ export const SWEEP_FAILED: Diag = { code: 'sweep-failed', step: 'sweep' };
 
 /** One call of the `reader` service: a script of lib/sandbox-volumes.ts, its arguments, an optional
  *  stdin; `totalBytes` is the budget the script keeps, which caps what the host captures. */
-export function reader(ctx: StoreCtx, script: string, args: string[], o: { stdin?: string; totalBytes?: number; timeoutMs?: number } = {}): Promise<Bounded> {
+export function reader(ctx: Pick<StoreCtx, 'comp'>, script: string, args: string[], o: { stdin?: string; totalBytes?: number; timeoutMs?: number } = {}): Promise<Bounded> {
   return ctx.comp(['run', '--rm', '-T', '--no-deps', ...readerArgv(script, args)], o.timeoutMs ?? CALL_MS, {
     max: { stdout: o.totalBytes === undefined ? 1024 * 1024 : frameBudget(o.totalBytes), stderr: 64 * 1024 },
     ...(o.stdin !== undefined ? { stdin: o.stdin } : {}),
@@ -72,6 +78,13 @@ export async function readFiles(ctx: StoreCtx, paths: string[], maxBytes: number
 export async function finish(ctx: StoreCtx, names: string[], clear: boolean): Promise<{ ok: boolean; call: Bounded }> {
   const call = await reader(ctx, FINISH_SCRIPT, [clear ? 'clear' : 'keep', ...names]);
   return { ok: ended(call), call };
+}
+
+/** The handle key of the sandbox (M6b): the one in the `meta` volume, or `candidate` (64 hex digits goodboy made) written
+ *  there first when there is none. The key is returned for the length of one call and never written to the host. */
+export async function metaKey(ctx: Pick<StoreCtx, 'comp'>, candidate: string): Promise<string | null> {
+  const r = await reader(ctx, META_KEY_SCRIPT, [], { stdin: `${candidate}\n`, totalBytes: 4096, timeoutMs: 60_000 });
+  return r.code === 0 ? parseMetaKey(r.stdout) : null;
 }
 
 /** The entries of the runs volume, or null when the call failed. */
@@ -146,7 +159,9 @@ export const writeState = (outDir: string, st: RunState): void => writeAtomic(jo
  *  every part of the path from the project top (`dir` is `<top>/.goodboy/sandbox`) down to `out/` is a real
  *  directory; links inside are removed, not followed. Each entry goes on its own: one that cannot be removed
  *  (a root-owned leftover, a read-only dir, a race with another command) is counted, and the others still go.
- *  Returns how many entries could not be removed. */
+ *  Returns how many entries could not be removed. Known limit (plan §19 M6b): the link check of the path and the
+ *  removal are two steps, so a process that swaps a directory of the path for a link in between can send a removal
+ *  elsewhere. */
 function removeHostRaw(dir: string): number {
   const top = join(dir, '..', '..');
   if (!noLinksUnder(top, ['.goodboy', 'sandbox', 'out'], 'dir')) return 0;
@@ -177,7 +192,7 @@ function removeHostRaw(dir: string): number {
       failed++;
       continue;
     }
-    for (const f of ['output.log', 'e2e-output.log', 'access.log', 'playwright-report.json', 'e2e-artifacts']) rm(join(p, f));
+    for (const f of HOST_RAW_NAMES) rm(join(p, f));
   }
   return failed;
 }
@@ -201,7 +216,7 @@ function anyLiveRun(dir: string, now: number, ttlMs: number): boolean {
 export async function sweepRaw(ctx: StoreCtx, volume: boolean): Promise<Diag | null> {
   try {
     // a host file that cannot be removed is a failed sweep in the end, but never stops the sweep of the volume
-    const hostFailed = ctx.out.hostCopies ? 0 : removeHostRaw(ctx.dir);
+    const hostFailed = ctx.out.hostCopies || ctx.keepHostRaw === true ? 0 : removeHostRaw(ctx.dir);
     if (!volume) return hostFailed > 0 ? SWEEP_FAILED : null;
     const names = await listRuns(ctx);
     if (names === null) return SWEEP_FAILED;

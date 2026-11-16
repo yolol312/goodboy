@@ -96,6 +96,9 @@ export interface SandboxLocal {
   /** The sandbox holds real data (M6a): set by `sandbox-local --dump`, kept when the dump is
    *  removed, cleared by `sandbox-down --volumes`. Absent means false. */
   realData?: boolean;
+  /** Absolute paths of registered input logs (M6b, `sandbox-local --input`): files or dirs of production
+   *  data the model must not read. Registering one puts the project in real-data mode. Absent means none. */
+  inputs?: string[];
 }
 
 /** What `sandbox-run` checks before a suite runs; a test record carries it. */

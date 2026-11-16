@@ -6,8 +6,9 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { SANDBOX_DIR, SCAN_FILE } from '../lib/sandbox-render';
-import { type Ctx, loadCtx, projectName, sandboxCommand } from '../lib/sandbox-run';
+import { projectName, SANDBOX_DIR } from '../lib/sandbox-mode';
+import { SCAN_FILE } from '../lib/sandbox-render';
+import { type Ctx, loadCtx, sandboxCommand } from '../lib/sandbox-run';
 import type { SandboxLocal, SandboxScan } from '../lib/sandbox-types';
 import { FAKE_DOCKER } from './m6a-fake';
 
@@ -41,6 +42,8 @@ export interface FakeProject {
   root: string;
   state: string;
   bin: string;
+  /** The dir of this project's user-level registry of real-data sandboxes (GOODBOY_REGISTRY_DIR of its commands). */
+  registry: string;
   ctx: Ctx;
   /** The docker calls so far, one per line (a reader call by its kind). */
   calls: () => string[];
@@ -53,8 +56,15 @@ export interface FakeProject {
 }
 
 const made: string[] = [];
+/** The registry dir the process had before the first fake project pointed it at its own (restored by the cleanup). */
+let registryBefore: { value: string | undefined } | null = null;
 export function cleanupFakeProjects(): void {
   while (made.length) rmSync(made.pop()!, { recursive: true, force: true });
+  if (registryBefore !== null) {
+    if (registryBefore.value === undefined) delete process.env.GOODBOY_REGISTRY_DIR;
+    else process.env.GOODBOY_REGISTRY_DIR = registryBefore.value;
+    registryBefore = null;
+  }
 }
 
 const tmp = (prefix: string): string => {
@@ -92,7 +102,12 @@ export function fakeProject(local: SandboxLocal | null, scan: SandboxScan = plai
   w('probe.txt', 'CTL_DNS=ok\nCTL_NC=ok\nCTL_WGET=ok\nCTL_PING=ok\nDNS=blocked\nTCP=blocked\nHTTP=blocked\nGW_PING=blocked\nGW_TCP=blocked\n@@END\n');
   w('playwright-report.json', JSON.stringify(passingReport()));
   w('access.log', '{"request":{"method":"GET","uri":"/","headers":{}},"status":200}\n');
-  const env = (extra: Record<string, string> = {}): Record<string, string> => ({ GOODBOY_DOCKER_BIN: bin, FAKE_DOCKER_DIR: state, CLAUDE_PROJECT_DIR: root, ...extra });
+  // each project has a registry of its own (lib/sandbox-registry.ts): a test never writes the developer's, and never
+  // fills the one of the whole run
+  const registry = tmp('goodboy-m6a-registry-');
+  registryBefore ??= { value: process.env.GOODBOY_REGISTRY_DIR };
+  process.env.GOODBOY_REGISTRY_DIR = registry;
+  const env = (extra: Record<string, string> = {}): Record<string, string> => ({ GOODBOY_DOCKER_BIN: bin, FAKE_DOCKER_DIR: state, CLAUDE_PROJECT_DIR: root, GOODBOY_REGISTRY_DIR: registry, ...extra });
   const hostFiles = (): string[] => {
     const out: string[] = [];
     const walk = (rel: string): void => {
@@ -108,6 +123,7 @@ export function fakeProject(local: SandboxLocal | null, scan: SandboxScan = plai
     root,
     state,
     bin,
+    registry,
     ctx,
     calls: () => (existsSync(join(state, 'calls.log')) ? readFileSync(join(state, 'calls.log'), 'utf8').trim().split('\n') : []),
     cli: (args, extra = {}) => {

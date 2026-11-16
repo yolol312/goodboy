@@ -127,8 +127,10 @@ interface Open {
   inCase: boolean;
 }
 
-/** The leaf suites of the JUnit XML texts, one entry per `<testsuite>` that holds no other one
- *  (a wrapping suite repeats the counts of the suites inside it): their counts and, when the name is a
+/** The suites of the JUnit XML texts, one entry per `<testsuite>` that holds no other one (a wrapping suite
+ *  repeats the counts of the suites inside it, so it is not counted), and one more for a wrapping suite that
+ *  has `<testcase>` elements of its own: those cases are counted once, as a suite of that name, from the
+ *  cases themselves (its own attributes are not used). Each entry has its counts and, when the name is a
  *  class name, the name (else `suite-<n>`). One forward scanner per text, each marker (comment,
  *  CDATA, processing instruction, tag) is looked for once from where the scan is, so the time is linear
  *  in the text however it is garbled. `unreadable` for a text with no suite, a comment, CDATA, tag or

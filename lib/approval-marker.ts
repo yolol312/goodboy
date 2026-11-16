@@ -17,18 +17,19 @@ import { hostsFilesFrom, parseHostRules, segmentChanging } from './outward-comma
 /** `outward`: one use of a command aimed at a host listed as production (track G, R2).
  *  `stop`: one Stop past a gate the work cannot satisfy (track G: the user's override, which
  *  replaced the count-based escapes). `push-test`: one push or hand-off without a passing test
- *  result for the commit (track G push test check). */
-export type ApprovalKind = 'risk' | 'bash-write' | 'outward' | 'stop' | 'push-test';
+ *  result for the commit (track G push test check). `sandbox-data`: one command past the real-data
+ *  sandbox rule (track M, M6b, lib/sandbox-data-guard.ts). */
+export type ApprovalKind = 'risk' | 'bash-write' | 'outward' | 'stop' | 'push-test' | 'sandbox-data';
 
 /** True for a path named like any goodboy approval marker, in any letter case (the default
  *  macOS volume ignores case, so `.Goodboy-Stop-Approved-…` is the same file). Only the user
  *  may create one (`! touch` runs outside the tool hooks); PreToolUse denies the model's
  *  writes to them. */
 export function isApprovalMarkerPath(p: string): boolean {
-  return /^\.goodboy-(?:risk|bash-write|outward|stop|push-test)-approved-[^/\\]*$/i.test(basename(p));
+  return /^\.goodboy-(?:risk|bash-write|outward|stop|push-test|sandbox-data)-approved-[^/\\]*$/i.test(basename(p));
 }
 
-const MARKER_NAME = /\.goodboy-(?:risk|bash-write|outward|stop|push-test)-approved-/i;
+const MARKER_NAME = /\.goodboy-(?:risk|bash-write|outward|stop|push-test|sandbox-data)-approved-/i;
 
 /** This session's marker names in `<dir>/.claude`, lower-cased. */
 function ownMarkerNames(sessionId: string, dir: string): string[] {

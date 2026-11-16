@@ -6,13 +6,25 @@
 // review). It runs before the first test file, not before each: a test that sets one of
 // these variables in process.env restores it itself.
 
-import { delimiter, dirname, isAbsolute } from 'node:path';
+import { afterEach } from 'bun:test';
+import { mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { delimiter, dirname, isAbsolute, join } from 'node:path';
 import { resolveGitBinary } from '../lib/git-binary';
 
 // GOODBOY_DOCKER_IT is an opt-in switch for the real-docker test of track M
 // (tests/m1-sandbox.test.ts), not a gate setting: it stays.
 for (const key of Object.keys(process.env)) {
   if (key.startsWith('GOODBOY_') && key !== 'GOODBOY_DOCKER_IT') delete process.env[key];
+}
+
+// The sandbox commands read DOCKER_HOST to tell a local daemon from a remote one (lib/sandbox-run.ts), and DOCKER_CONTEXT picks
+// the daemon of the docker binary itself; the tests answer through a fake docker that says which daemon it is. A developer's
+// colima or remote setting would make every sandbox test see a daemon that is not the fake's. The real-docker test keeps both
+// (it talks to the developer's daemon).
+if (process.env.GOODBOY_DOCKER_IT === undefined) {
+  delete process.env.DOCKER_HOST;
+  delete process.env.DOCKER_CONTEXT;
 }
 
 // The field-report notice asks gh for unanswered issues on goodboy's repo (#20 triage); a test
@@ -55,6 +67,30 @@ process.env.GOODBOY_FRICTION_NOTICE = 'off';
 // The update checkup (track K1c) runs `claude`: no test may run the real one. A path that
 // does not exist makes a missed fake fail loudly; tests/k1c-health-smoke.test.ts sets a fake.
 process.env.GOODBOY_CLAUDE_BIN = '/nonexistent/goodboy-tests/claude';
+
+// The sandbox commands register a real-data project in a user-level file (lib/sandbox-registry.ts, track M
+// M6b); a test never writes the developer's own: the registry dir is a temp dir of this run. `bun test` fires no
+// `exit` event in the preload (bun 1.3.11, round-4 review), so the dir of this run stays; the dirs earlier runs left
+// are removed here once they are a day old (a run still going is younger than that).
+const DAY_MS = 24 * 60 * 60 * 1000;
+for (const name of readdirSync(tmpdir())) {
+  if (!name.startsWith('goodboy-test-registry-')) continue;
+  const p = join(tmpdir(), name);
+  try {
+    if (Date.now() - statSync(p).mtimeMs > DAY_MS) rmSync(p, { recursive: true, force: true });
+  } catch {
+    // gone already, or not ours to remove
+  }
+}
+const testRegistry = mkdtempSync(join(tmpdir(), 'goodboy-test-registry-'));
+process.env.GOODBOY_REGISTRY_DIR = testRegistry;
+// The data guard protects the dump and input paths of every registered project wherever the shell is, so a project one test
+// registered here would deny `grep -r foo /` in a hook test that runs later (full run: tests/outward-gate-hooks.test.ts). Each
+// test starts with the shared registry empty. A test that needs a registry sets its own dir (tests/m6a-project.ts,
+// tests/m6b-*.test.ts) and is not touched by this.
+afterEach(() => {
+  rmSync(join(testRegistry, 'real-data.json'), { force: true });
+});
 
 // The hooks read the project dir from CLAUDE_PROJECT_DIR (I10). A suite run inside a Claude Code
 // session inherits that session's; tests set it themselves (tests/i10-project-dir.test.ts).
