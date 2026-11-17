@@ -96,8 +96,9 @@ describe('the order of a run', () => {
     expect([reset1, write1, runner, reset2, write2, e2e, cleared, coverage].every((i) => i >= 0)).toBe(true);
     expect([reset1, write1, runner, reset2, write2, e2e, cleared, coverage]).toEqual([...[reset1, write1, runner, reset2, write2, e2e, cleared, coverage]].sort((a, b) => a - b));
     // the run starts by clearing the shared volumes (the data volume with them), before the first reset
-    expect(idx(calls, 'reader:finish clear')).toBeGreaterThanOrEqual(0);
-    expect(idx(calls, 'reader:finish clear')).toBeLessThan(reset1);
+    const startClear = idx(calls, 'reader:finish clear');
+    expect(calls[startClear]).toContain('reader:finish clear');
+    expect(startClear).toBeLessThan(reset1);
     // the phase-1 questions come between the reset and the write, as the reader role
     const schema = idx(calls, "-U goodboy_reader");
     expect(schema).toBeGreaterThan(reset1);
