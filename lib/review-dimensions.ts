@@ -24,14 +24,17 @@ export type ReviewDimension =
   | 'security-secrets'
   | 'security-injection'
   | 'security-authz'
-  | 'dependency-risk';
+  | 'dependency-risk'
+  // Track M, M6g: the privacy review of a real-data sandbox's setup and of the source files that use the data helper.
+  // Required only through the caller's `privacy` predicate (lib/privacy-files.ts), never by a path rule alone.
+  | 'data-privacy';
 
 /**
  * 리뷰 축 — 병렬 서브에이전트 1개가 담당하는 묶음.
  * 축마다 별도 에이전트가 자기 dimensions_checked를 채워 **부분 리뷰 JSON**을 쓰고,
  * Stop hook이 합집합으로 커버리지를 판정한다(validateReviewCoverage.effective).
  */
-export type ReviewAxis = 'refactoring' | 'security' | 'performance' | 'ui' | 'hallucination';
+export type ReviewAxis = 'refactoring' | 'security' | 'performance' | 'ui' | 'hallucination' | 'data-privacy';
 
 /** 축이 담당하는 차원. hallucination 축은 차원이 아니라 환각/추론 4분류 검증을 맡아 비어 있다. */
 export const AXIS_DIMENSIONS: Record<ReviewAxis, ReviewDimension[]> = {
@@ -48,17 +51,24 @@ export const AXIS_DIMENSIONS: Record<ReviewAxis, ReviewDimension[]> = {
   performance: ['performance'],
   ui: ['ui-ux-accessibility', 'plan-completeness'],
   hallucination: [],
+  'data-privacy': ['data-privacy'],
 };
+
+/** (M6g) What a caller knows that the file names do not: which files are privacy files of a real-data project
+ *  (lib/privacy-files.ts). The functions of this module stay pure: the caller computes the predicate. */
+export interface DimensionOptions {
+  privacy?: (file: string) => boolean;
+}
 
 /**
  * 이번 변경에서 실제로 띄워야 하는 리뷰 축.
  * hallucination 축은 변경 내용과 무관하게 **항상** 포함된다 — 환각/추론 검증은
  * 무엇을 고쳤든 매번 확인해야 하기 때문.
  */
-export function axesFor(changedFiles: string[]): ReviewAxis[] {
-  const dims = new Set<ReviewDimension>(requiredDimensionsFor(changedFiles));
+export function axesFor(changedFiles: string[], opts?: DimensionOptions): ReviewAxis[] {
+  const dims = new Set<ReviewDimension>(requiredDimensionsFor(changedFiles, opts));
   const axes: ReviewAxis[] = ['hallucination'];
-  for (const axis of ['refactoring', 'security', 'performance', 'ui'] as ReviewAxis[]) {
+  for (const axis of ['refactoring', 'security', 'performance', 'ui', 'data-privacy'] as ReviewAxis[]) {
     if (AXIS_DIMENSIONS[axis].some((d) => dims.has(d))) axes.push(axis);
   }
   return axes;
@@ -224,16 +234,20 @@ function isConfigLikeFile(lower: string): boolean {
  *  - 의존성 매니페스트/락파일 → dependency-risk
  *
  * best-effort: 파일명/확장자만으로 판정. 서버/프론트엔드/파서 신호는 넓게 잡는다(미탐 < 오탐).
+ * (M6g) `opts.privacy` is the caller's answer to "is this a privacy file of a real-data project": a file it
+ *  accepts also needs `data-privacy`, whatever else its name says (a document or a preview too).
  * @param changedFiles 변경된 파일 경로 배열(절대/상대 무관)
  * @returns 필수 차원 배열(중복 제거, 정렬)
  */
-export function requiredDimensionsFor(changedFiles: string[]): ReviewDimension[] {
+export function requiredDimensionsFor(changedFiles: string[], opts?: DimensionOptions): ReviewDimension[] {
   const required = new Set<ReviewDimension>();
   if (!Array.isArray(changedFiles)) return [];
 
   for (const raw of changedFiles) {
     if (typeof raw !== 'string' || raw.trim() === '') continue;
     const lower = raw.toLowerCase();
+
+    if (opts?.privacy?.(raw) === true) required.add('data-privacy');
 
     // (I3a, plan §15.6) Documents and static previews by the one classifier: requirements
     //   Markdown needs the plan checked, a preview its presentation (and, for HTML, the
@@ -319,13 +333,14 @@ export interface FileMissingDimensions {
 export function missingDimensionsByFile(
   changedFiles: readonly string[],
   reviewsOf: (file: string) => readonly Pick<ReviewResult, 'dimensions_checked'>[] | undefined,
+  opts?: DimensionOptions,
 ): FileMissingDimensions[] {
   const out: FileMissingDimensions[] = [];
   const seen = new Set<string>();
   for (const file of changedFiles) {
     if (typeof file !== 'string' || file.trim() === '' || seen.has(file)) continue;
     seen.add(file);
-    const required = requiredDimensionsFor([file]);
+    const required = requiredDimensionsFor([file], opts);
     if (required.length === 0) continue;
     const checked = new Set<string>();
     for (const r of reviewsOf(file) ?? []) {

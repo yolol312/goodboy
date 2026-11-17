@@ -31,8 +31,10 @@ Record one review result the Stop gate can read.
    review-axes <files>` lists the required ones per axis), never empty: an empty list reads as
    a hallucination review and could clear its findings. Markers: `hallucination` for the
    evidence check (and in a one-pass all-axes run), `infra-config` for an infra review,
-   `spec-coverage` for a spec review, `codex` for a Codex-only record. Listing a dimension you
-   did not assess is a false record.
+   `spec-coverage` for a spec review, `codex` for a Codex-only record. `data-privacy` is a
+   dimension of its own: list it only after check-data-privacy, with every sandbox file and
+   data-helper file you were asked about in `reviewed_files` (a real-data `sandbox-run` needs
+   a passing review that lists them). Listing a dimension you did not assess is a false record.
 4. `unknown_assumptions_checked`: one entry per guess or assumption the main session declared,
    `{assumption, reasonable, note}`; `[]` when it declared none.
 5. `verdict`: `pass` (no high, nothing critical), `needs-changes` (any high, or several

@@ -43,6 +43,9 @@ import { detectTestInfrastructure, type TestInfraSignal } from './test-validator
 import { isGeneratedLcov } from './lcov-report';
 import { MAX_MANIFEST_BYTES, needsTests } from './verification-scope';
 import { sandboxExemptRel, sandboxUsed, sandboxUsers, type SandboxUsers } from './sandbox-gate';
+import { privacyFilesOf } from './privacy-files';
+import { realDataForReading } from './sandbox-mode';
+import type { DimensionOptions } from './review-dimensions';
 import type { ChangedFileEdit } from './review-validator';
 import type { TestResult } from './types';
 
@@ -324,6 +327,21 @@ export function sandboxUsersOf(sessionId: string, cwd: string): SandboxUsers {
 export function sandboxOwnFile(sessionId: string, cwd: string, file: string, top: string): boolean {
   const rel = sandboxExemptRel(file, top);
   return rel !== null && !sandboxUsed(sandboxUsersOf(sessionId, cwd), rel);
+}
+
+/** (Track M, M6g) The privacy predicate of the review gate for `files`: per group, when its repo holds real data
+ *  (`realDataForReading`, fail closed: an unreadable state counts as real data), the files that are privacy files
+ *  (lib/privacy-files.ts) need the `data-privacy` dimension. Other projects are asked nothing. A throw is the caller's:
+ *  both review paths fail closed on one. The groups share `deadline` (the Stop's group budget, and never the hook's
+ *  clock): what is not read before it runs out counts as a privacy file, so the review is asked for it. */
+export function privacyOptionsFor(sessionId: string, cwd: string, files: readonly string[], deadline: Deadline = newDeadline()): DimensionOptions {
+  const privacy = new Set<string>();
+  for (const g of groupsOf(sessionId, cwd, files)) {
+    if (g.edits.length === 0 || !realDataForReading(g.top)) continue;
+    // one deadline for all groups (never past the hook's clock): a file not read in time counts as a privacy file
+    for (const f of privacyFilesOf(g.top, g.edits, cwd, { until: deadline.left })) privacy.add(f);
+  }
+  return { privacy: (f) => privacy.has(f) };
 }
 
 const testEditsMemo = new Map<string, { g: Group; files: string[] }[]>();

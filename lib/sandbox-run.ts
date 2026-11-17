@@ -15,6 +15,7 @@ import { COVERAGE_REPORT, E2E_DIR } from './sandbox-e2e';
 import { planSandbox, type SandboxPlan } from './sandbox-render';
 import { dbName, INHIBIT_IPV4, RESTORE_TAG } from './sandbox-parts';
 import { type DataCtx, isRefusal, sandboxData } from './sandbox-data';
+import { privacyGate } from './sandbox-privacy-gate';
 import { hasDataVolume, isEmpty, manifestCounts, type Memo, newToken, NO_DATA_VOLUME, readManifest, refusedStop, type ResolveStop, resolveValues } from './sandbox-resolve';
 import { scanSandbox } from './sandbox-scan';
 import { clearData, type DockOpts, e2eAfter, finish, metaKey, readFiles, sweepRaw, unitAfter, writeState } from './sandbox-store';
@@ -852,7 +853,7 @@ async function runCoverage(ctx: Ctx, outDir: string, ts: string, withE2e: boolea
   return { ok, exit: r.code, reports: ok ? [path] : [], note: ok ? ctx.out.text(lines(r.stdout).slice(-1)[0] ?? '', 'withheld') : 'the coverage report could not be read from the run volume' };
 }
 
-async function run(ctx: Ctx, args: string[]): Promise<Result> {
+async function run(ctx: Ctx, args: string[], projectDir?: string): Promise<Result> {
   const dd = args.indexOf('--');
   const own = dd >= 0 ? args.slice(0, dd) : args;
   const custom = dd >= 0 ? args.slice(dd + 1) : [];
@@ -868,6 +869,12 @@ async function run(ctx: Ctx, args: string[]): Promise<Result> {
   const wantUnit = !onlyE2e && unitCommand.length > 0;
   const wantE2e = onlyE2e || (suite === 'all' && e2eReady);
   if (!wantUnit && !wantE2e) return { error: 'sandbox-run: the scan has no test command; pass one after --' };
+  // (M6g) A real-data run starts only with a passing data-privacy review of the setup and the source files that use the data helper.
+  //   Before the out dir and result.json exist: a refusal leaves nothing behind.
+  if (ctx.out.realData) {
+    const gate = privacyGate(ctx.root, process.env, {}, projectDir);
+    if (!gate.ok) return { out: { stopped: gate.code, reason: gate.reason, files: gate.files, diagnostic: ctx.out.diag(gate.code, 'privacy-gate') }, code: 1 };
+  }
   const command = wantUnit ? unitCommand : ctx.plan.hasE2e ? ['playwright', 'test'] : [];
   const ts = stamp();
   ensureRealDir(ctx.root, `${SANDBOX_DIR}/out`);
@@ -1044,8 +1051,9 @@ function withSweep(r: Result, sweep: Diag | null, ctx: Ctx): Result {
 /** The `sandbox-init|local|check|prepare|up|run|down` commands. `error` is a message for the
  *  user; `code` is the exit code (for `sandbox-run`, the suite's). Every command but `sandbox-scan`
  *  and `sandbox-init` starts with `preflight` (is the daemon local, does the project hold real data) and
- *  the expiry sweep of old raw artifacts. */
-export async function sandboxCommand(command: string, root: string, args: string[]): Promise<Result> {
+ *  the expiry sweep of old raw artifacts. `projectDir` is the session's project dir as the CLI knows it (the privacy gate
+ *  reads its reviews too, as well as the repository top's). */
+export async function sandboxCommand(command: string, root: string, args: string[], projectDir?: string): Promise<Result> {
   if (command === 'sandbox-scan') {
     // Read-only on the project; the one write is the scan itself.
     const scan = scanSandbox(root);
@@ -1104,7 +1112,7 @@ export async function sandboxCommand(command: string, root: string, args: string
       case 'sandbox-up':
         return withSweep(await up(ctx, args), sweep, ctx);
       case 'sandbox-run':
-        return withSweep(await run(ctx, args), sweep, ctx);
+        return withSweep(await run(ctx, args, projectDir), sweep, ctx);
       case 'sandbox-down':
         return withSweep(await down(ctx, args), sweep, ctx);
       case 'sandbox-data':

@@ -1,6 +1,6 @@
 ---
 name: review-all
-description: Reviews changed files in one pass across all axes (evidence, quality, security, performance, UI), or one axis when the prompt says `axis: <name>` (or `축: <name>`), and records a review JSON. Use for the review the goodboy Stop gate asks for. Was review-changes.
+description: Reviews changed files in one pass across all axes (evidence, quality, security, performance, UI, data privacy in a real-data project), or one axis when the prompt says `axis: <name>` (or `축: <name>`), and records a review JSON. Use for the review the goodboy Stop gate asks for. Was review-changes.
 model: sonnet
 effort: high
 tools: Read, Grep, Glob, Bash, Skill
@@ -49,7 +49,10 @@ When the prompt carries the Stop gate's `Document change (class: document; …)`
      changed on purpose);
    - `refactoring` and `performance`: check-code-quality;
    - `security`: check-security;
-   - `ui`: check-ui-states and follow-design-tokens.
+   - `ui`: check-ui-states and follow-design-tokens;
+   - `data-privacy` (only listed in a project that holds real data, for the sandbox's files,
+     `data.json` and source files that use the data helper, test or not): check-data-privacy; record the
+     dimension `data-privacy` and list each of those files in `reviewed_files`.
 3. run-codex-review, once per round, only when GOODBOY_CODEX=on.
 4. record-review, last; a one-pass run also lists `hallucination` in `dimensions_checked`.
 

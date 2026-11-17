@@ -22,7 +22,7 @@ The Stop gate requires the axes and dimensions that `bun "$GB/lib/cli.ts" review
 <files>` prints; every required axis gets one member:
 - `hallucination` (always): review-evidence.
 - `refactoring` and `performance`: review-quality. `security`: review-security.
-- `ui`: review-ui.
+- `ui`: review-ui. `data-privacy`: a review-all member with `axis: data-privacy`.
 - Also, when they apply: config, CI or containers → review-infra; dev-cycle documents or
   stated requirements → review-spec.
 - A small change needs one review-all instead of a team.

@@ -38,6 +38,8 @@ import { recordTestProfile } from './test-profile';
 import { changedLineCount, realish, reviewPlan, reviewPlanNote } from './review-scope';
 import { agentName, ROUTE } from './routing-policy';
 import { findDevCycleArtifacts, prototypeContractWarnings, readAcceptance, VERIFY_STAGE } from './acceptance';
+import { privacyFilesOf } from './privacy-files';
+import { realDataForReading } from './sandbox-mode';
 import { AXIS_DIMENSIONS, axesFor, requiredDimensionsFor } from './review-dimensions';
 import { MAX_DOC_BYTES, readRegular } from './safe-read';
 import { appendSkillGapLog, recordSkillEvidence, validateSkillGapNote } from './skill-rule';
@@ -1146,12 +1148,41 @@ function cmdAcceptanceList(cwd: string): void {
 
 // ---- 명령: review-axes ----
 
+/** The files of `files` that are privacy files of a real-data repository, decided per repository as the Stop's groups are
+ *  (lib/stop-groups.ts groupsOf): one repo for a project dir that is (inside) a repo; for one that is no repo, the nested
+ *  repo each file belongs to, and the project dir itself for a file in none. A repo the CLI cannot name counts as the
+ *  project dir's own. */
+function privacyFilesByRepo(cwd: string, files: readonly string[]): Set<string> {
+  const top0 = repoTop(cwd);
+  let noRepo = false;
+  try {
+    noRepo = topIdentity(top0).id === 'nogit';
+  } catch {
+    // the Stop's isNoRepoProject answers false then, too
+  }
+  const byTop = new Map<string, string[]>();
+  for (const f of files) {
+    const top = noRepo ? (repoOfFile(f, cwd)?.top ?? top0) : top0;
+    byTop.set(top, [...(byTop.get(top) ?? []), f]);
+  }
+  const own = new Set<string>();
+  for (const [top, group] of byTop) {
+    if (!realDataForReading(top)) continue;
+    for (const f of privacyFilesOf(top, group, cwd)) own.add(f);
+  }
+  return own;
+}
+
 /** 변경 파일 목록으로부터 띄워야 할 리뷰 축과 각 축이 채워야 할 차원을 출력한다.
  *  스킬이 "어떤 축을 병렬로 띄울지"를 눈대중이 아니라 결정적으로 정하게 한다. */
 function cmdReviewAxes(cwd: string, args: string[]): void {
   const files = args.filter((a) => typeof a === 'string' && a.trim() !== '');
-  const dims = requiredDimensionsFor(files);
-  const axes = axesFor(files);
+  // (M6g) In a project that may hold real data, the sandbox's files, data.json and the source files that use the data
+  //   helper also need `data-privacy`: the same answer the Stop gives (stop-groups privacyOptionsFor), group by group.
+  const own = privacyFilesByRepo(cwd, files);
+  const opts = { privacy: (f: string) => own.has(f) };
+  const dims = requiredDimensionsFor(files, opts);
+  const axes = axesFor(files, opts);
   // (H7) How many review runs: one for every axis when the diff is small.
   const changedLines = changedLineCount(cwd, files);
   const plan = reviewPlan(changedLines, axes.length);
@@ -1383,7 +1414,7 @@ function cmdBackfill(command: string, cwd: string, args: string[]): void {
  *  cmd...]`, `sandbox-down [--volumes]`, and `sandbox-data schema|shape|count|pick` (M6b: the only way to look at
  *  the restored database). They read `.goodboy/sandbox/scan.json`; the exit code of `sandbox-run` is the suite's. */
 async function cmdSandbox(command: string, cwd: string, args: string[]): Promise<void> {
-  const r = await sandboxCommand(command, repoTop(cwd), args);
+  const r = await sandboxCommand(command, repoTop(cwd), args, cwd);
   if ('error' in r) fail(r.error);
   process.stdout.write(JSON.stringify(r.out, null, 2) + '\n');
   if (r.code !== 0) process.exitCode = r.code;

@@ -4659,7 +4659,10 @@ Design:
     pre-push hooks for commits outside Claude Code; `--no-verify` still bypasses them (stated).
   - M6g privacy review: a `data-privacy` review of the sandbox setup and the tests (data access,
     output channels, artifact mounts, helper assertions, exports), judged on capabilities and
-    evidence.
+    evidence. The user decided (2026-11-17): a review axis and a run gate. In a real-data project the
+    Stop review gate asks for the `data-privacy` dimension on changed sandbox files, `data.json` and the
+    tests that use the data helper, and a real-data `sandbox-run` runs only with a passing
+    `data-privacy` review that covers the current sandbox setup and tests.
   - Order, all before M5 session 3: M6a, M6b, M6c, M6d, M6g, M6f (with the git hooks when IDE
     commits are in scope), then synthetic canary tests pass. Templates restored earlier must not
     skip the new initialization checks because their completion marker exists.
@@ -5455,6 +5458,51 @@ As built (M6d, records, 2026-11-16):
   (canaries in every display field of the three records, on disk and in the sibling copies; exact fields
   byte-identical; redaction before the notes and tail cuts; a real-data record withheld and still passing the Stop
   gate's validators).
+
+As built (M6g, the privacy review, 2026-11-17):
+- A review dimension and axis `data-privacy` (`lib/review-dimensions.ts`). `requiredDimensionsFor`,
+  `missingDimensionsByFile` and `axesFor` stay path-only and take an optional `privacy(file)` predicate; the callers
+  compute it: the Stop review gate per repo group (`privacyOptionsFor`, `lib/stop-groups.ts`: the group's top is real
+  data by `realDataForReading`, and the file is a privacy file; within a 16 MB read cap and the Stop's clock, past
+  which the remaining files count as privacy files) and `review-axes` (per nested repo, as the Stop's groups).
+- Privacy files (`lib/privacy-files.ts`, sharing the import and file rules of `lib/sandbox-gate.ts`): the sandbox
+  layout files and `data.json` (not the state files that change with every `sandbox-local` or `sandbox-init`:
+  `scan.json`, `local.json`, `.written.json`, `.gitignore`, `ca/*`, keys and run output), and any source file, in any
+  language (code extensions, `.json`, `.yml`, build and script files), that uses the data helper: a relative import
+  that reduces to the sandbox's `data/goodboy-data`, or the text `.goodboy/sandbox/data/`, `GOODBOY_DATA` or
+  `GoodboyData`, and copies of the helpers anywhere (a superset, on purpose). `privacySetupOf(top)` lists the current
+  setup for the run gate: the layout files on disk and the source files among `git ls-files --cached --others
+  --exclude-standard` (20000 candidates, 256 MB); over a cap, a test over 512 KB, unreadable, or no repository →
+  `privacy-setup-unreadable`. Not found: git-ignored files (not listed), a helper reached through a barrel, an alias
+  or a computed path.
+- The check skill `skills/check-data-privacy` (judged on capabilities and evidence: data access, output channels,
+  artifact mounts, helper assertions, exports); `review-all` takes `axis: data-privacy`, `review-lead` runs that axis
+  with a `review-all` member, and `record-review` names the dimension.
+- The run gate (`lib/sandbox-privacy-gate.ts`), in `sandbox-run` of a real-data project before the run dir is made:
+  for every file of the current setup, the newest review record that lists it, has `data-privacy` among its
+  dimensions and whose `tree` or `extra_blobs` prove the file's current content must have the verdict `pass` and no
+  high or medium finding (a record is bound to the content it saw, so a fix is a new review; a record with no tree
+  never counts). The records of the last 30 days are read from `.claude/reviews` of the repo top and of the CLI's
+  project dir; the Stop prunes records older than its retention, 3 days by default, so an older review is asked for
+  again. Else the run stops with `privacy-review-missing`, the relative paths that lack one, and how to get it
+  (`review-all` with `axis: data-privacy` on them); the text says the user can turn the check off in their settings,
+  without naming the switch.
+- The switch `GOODBOY_SANDBOX_PRIVACY_GATE=off` is read by the CLI process, so a command could set it for itself;
+  the review found that bypass (high). The PreToolUse data guard now denies, in every project and for the main
+  session and subagents alike, a shell command that assigns it (inline, `export`, `env` and `env -S`, `declare -x`,
+  `typeset -x`, `readonly`, `local`, `set -a` with a bare assignment, `+=`, `sudo env`, wrappers, nested shells,
+  `eval`, `xargs`, `find -exec`, a spelled assignment fed to a shell or an interpreter, PowerShell's `$env:` and
+  `set`), with a fixed text that offers no way past (no approval marker). The user's settings reach the CLI without a
+  command. Bun loads `.env` files from the process's dir and the files of a `--env-file` flag on its own, and a file a
+  tool wrote is no command the guard reads (the delta review's medium), so the CLI does not take the switch when a
+  `.env`, `.env.local` or `.env.<development|production|test>[.local]` of its dir sets it (or is no regular file), or
+  when it runs with `--env-file` (`switchFromFile`). Limits: a script written to disk and then run, `printf -v`, a name built at run time, or an interpreter
+  setting the environment without spelling the assignment are not read (advisory, as the rest of the guard).
+  The test suite sets the switch in `tests/setup.ts`, as for the other gates; `tests/m6g-run-gate.test.ts` turns
+  the gate on.
+- Tests: `tests/m6g-files.test.ts`, `m6g-review-gate.test.ts`, `m6g-run-gate.test.ts`, `m6g-texts.test.ts`,
+  `m6g-gate-switch.test.ts` (the forms of the switch's assignment) and `m6g-shared.test.ts` (the rules shared with the
+  sandbox gate).
 
 ## 20. N — Fewer repeated runs, a project test inventory, task criteria (proposed, 2026-10-26)
 

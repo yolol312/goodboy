@@ -3,7 +3,7 @@
 Feature → test type, generated from the test files by goodboy (`cli.ts test-catalog`).
 Regenerate it instead of editing it; the docs rule compares it with a fresh copy.
 
-Totals: unit 241 files, 4434 tests; e2e 2 files, 54 tests.
+Totals: unit 247 files, 4551 tests; e2e 2 files, 54 tests.
 
 | Feature | Type | File | Tests |
 |---|---|---|---|
@@ -35,7 +35,7 @@ Totals: unit 241 files, 4434 tests; e2e 2 files, 54 tests.
 | GAP-D2: a deploy is compared where it runs, not where the command ends; GAP-F: a `function name { … }` body is read by every classifier; GAP-RS: the result guard and role limits follow cd scopes (`( … )`, `sh -c`, `cd -`, pushd); GAP-NS: sibling nested shells and evals each get their own scope; GAP-OD: writers whose target is not the result dir word itself; LOW-FP: "inside a result dir" holds only while the shell is there | unit | tests/g1-reader-scopes.test.ts | 23 |
 | program names as the system finds them; shells that read their script from stdin; alias values split as git splits them; hook git settings; state guard restore; commit rule caps | unit | tests/g1-round4-fixes.test.ts | 13 |
 | D1: a hook git that reads a missing object starts a promisor fetch (remote.<r>.uploadpack); D2: git spelled with quotes, another letter case or its dashed program; D3: alias values are split on spaces, not as git splits them (quotes, backslashes); D4: `git send-pack` pushes without being a push to the push gate or R2; D5: the post hook's write sweep runs a clean filter (git status hashes a touched file); D6: a guarded file replaced by a directory stops the state guard from restoring the rest | unit | tests/g1-round4-l1-gaps.test.ts | 10 |
-| the 24 agents; the 28 tool skills (23 from G2, keep-project-knowledge from H2, report-goodboy from J1, cli-update-check from K1d, setup-test-infra from L, run-sandbox from M); the renames are complete | unit | tests/g2-agents-skills.test.ts | 4 |
+| the 24 agents; the 29 tool skills (23 from G2, keep-project-knowledge from H2, report-goodboy from J1, cli-update-check from K1d, setup-test-infra from L, run-sandbox and check-data-privacy from M); the renames are complete | unit | tests/g2-agents-skills.test.ts | 4 |
 | PostToolUse: skill effort notice; legacy result writer, hook level; changed-line coverage from a real report, into test-write; role limits of the test agents, through the PreToolUse hook | unit | tests/g2-e2e-hooks.test.ts | 6 |
 | test results: suites per type; test results: coverage, recorded not gated; review results: Codex; changed-line coverage; skill effort notice; agent outcomes | unit | tests/g2-results.test.ts | 16 |
 | workflow skills | unit | tests/g3-workflow-skills.test.ts | 4 |
@@ -152,6 +152,12 @@ Totals: unit 241 files, 4434 tests; e2e 2 files, 54 tests.
 | M6d runCommands | unit | tests/m6d-run-commands.test.ts | 3 |
 | M6d sanitizeRecord; M6d sanitizeRecord: keys that redact to one text; M6d sandboxRunFlagsOnly: the run line a real-data record may keep; M6d checkRecordFields | unit | tests/m6d-sanitize.test.ts | 17 |
 | M6d field lists are tied to the record types; M6d each field list does what it says, on every string field of each record | unit | tests/m6d-schema.test.ts | 10 |
+| isPrivacyPath: the sandbox files and the manifest, by path; usesDataHelper: the tests that use the helper; privacyFilesOf: the files of a change; privacySetupOf: the current setup of a project | unit | tests/m6g-files.test.ts | 33 |
+| every way a command sets the switch is denied; what is not a command that sets it passes; the denial is one fixed text, with no way around it offered; through the PreToolUse hook | unit | tests/m6g-gate-switch.test.ts | 14 |
+| the dimension and the axis; review-axes in a project; privacyOptionsFor: the Stop’s predicate is bounded by the shared deadline and the hook’s clock; the Stop in a project that holds real data | unit | tests/m6g-review-gate.test.ts | 25 |
+| a real-data run without a covering review is refused; a covering review lets it run; what does not count as a covering review; what the gate leaves alone, and what it cannot read; the newest review of a file decides, and an open high or medium finding is no pass; the reviews of the repository top and of the project dir both count | unit | tests/m6g-run-gate.test.ts | 33 |
+| one definition of the helper facts; the surface | unit | tests/m6g-shared.test.ts | 5 |
+| the reviewers and the skill; the README | unit | tests/m6g-texts.test.ts | 7 |
 | marker names and Bash writes; PreToolUse; a marker made during a model Bash call that never reported back (`exit N`, G0 M18); a marker made in another directory during a finished call (security review round 2); round 3; PostToolUse sweep | unit | tests/marker-guard.test.ts | 14 |
 | redirections; shellSegments; hostOf; curl, wget, httpie; ssh family; git push | unit | tests/outward-command.test.ts | 22 |
 | unlisted external hosts; production hosts; gate modes | unit | tests/outward-gate-hooks.test.ts | 12 |

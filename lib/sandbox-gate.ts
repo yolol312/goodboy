@@ -50,16 +50,23 @@ const SANDBOX_LAYOUT: readonly RegExp[] = [
 const RUN_OUTPUT = new RegExp(`^out/${RUN_NAME.source.slice(1, -1)}/`);
 /** Files only the e2e path uses: a run that did not run the e2e step does not exercise them. */
 const E2E_ONLY = /^(?:e2e\/|proxy\/|runtime\/e2e-prep\.sh$)/;
+/** The data helper's module below the sandbox dir, as `bareModule` reduces an import of it (M6c; the privacy review of
+ *  lib/privacy-files.ts finds the files that use it by the same reduction). */
+export const DATA_HELPER = 'data/goodboy-data';
+/** A copy of the data helper wherever it lies (the sandbox's own `data/` entry of SANDBOX_LAYOUT is one place; a project
+ *  may keep another next to its tests, or compiled). tests/m6g-files.test.ts keeps every layout file of `data/` matching it. */
+export const HELPER_COPY = /(?:^|\/)(?:GoodboyData\.java|goodboy-data\.(?:ts|cjs|js|mjs))$/;
 /** The layout files a test may import: the e2e fixture and the data helper (M6c; a JVM test uses a copy of
  *  `GoodboyData.java` in its own test sources, which no import path names). */
-const IMPORTABLE: ReadonlySet<string> = new Set(['e2e/goodboy-ui', 'data/goodboy-data']);
+const IMPORTABLE: ReadonlySet<string> = new Set(['e2e/goodboy-ui', DATA_HELPER]);
 
 /** Whether a path below the sandbox dir is one the sandbox commands write. */
 export function isSandboxLayout(rel: string): boolean {
   return SANDBOX_LAYOUT.some((r) => r.test(rel));
 }
 
-const toPosix = (p: string) => p.split('\\').join('/');
+/** A path with `/` separators. */
+export const toPosix = (p: string): string => p.split('\\').join('/');
 
 /** The path of a file below `<top>/.goodboy/sandbox/` when it is below it both as spelled and as
  *  resolved (a link from outside into the dir is not a sandbox file: `src/x.ts -> …/sandbox/y.ts`
@@ -102,14 +109,21 @@ export interface SandboxUsers {
   all: boolean;
 }
 
-const CODE_EXT = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.mts', '.cts', '.py', '.rb', '.go', '.java', '.kt', '.php', '.cs', '.rs', '.sh']);
-const JS_EXT = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.mts', '.cts']);
+/** The extensions of the code and script files a project holds (also what the privacy review of lib/privacy-files.ts reads). */
+export const CODE_EXT: ReadonlySet<string> = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.mts', '.cts', '.py', '.rb', '.go', '.java', '.kt', '.php', '.cs', '.rs', '.sh']);
+/** The JS/TS extensions: the files whose imports `jsLoadGroups` reads. */
+export const JS_EXT: ReadonlySet<string> = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.mts', '.cts']);
 const MAX_USERS_READ = 400;
-const MAX_USER_BYTES = 512 * 1024;
-const noExt = (rel: string) => rel.replace(/\.[cm]?[jt]sx?$/, '');
+/** The most bytes of one source file read to see what it imports or names. */
+export const MAX_USER_BYTES = 512 * 1024;
+/** A path without its JS/TS extension (once). */
+export const noExt = (rel: string): string => rel.replace(/\.[cm]?[jt]sx?$/, '');
 /** The module a specifier names, as Node resolves it: the extension taken off once, then one `/index` (a file `m.ts`, a
  *  directory `m/index.ts`). A directory that merely looks like the fixture (`goodboy-ui.js/index`) is another module. */
-const bareModule = (rel: string): string => noExt(rel).replace(/\/index$/, '');
+export const bareModule = (rel: string): string => noExt(rel).replace(/\/index$/, '');
+
+/** A test file, or a file below an `e2e/` dir: what may import the e2e fixture and the data helper. */
+export const isTestOrE2e = (rel: string): boolean => isTestFile(rel) || /(?:^|\/)e2e\//.test(rel);
 
 /** The sandbox layout files that the changed files (absolute paths) of the project import: a
  *  relative specifier (as lib/existing-tests.ts reads them, comments ignored) that resolves into
@@ -139,7 +153,7 @@ export function sandboxUsers(top: string, changed: readonly string[]): SandboxUs
     }
     if (text === 'absent') continue; // deleted: it uses nothing
     read++;
-    const test = isTestFile(rel) || /(?:^|\/)e2e\//.test(rel);
+    const test = isTestOrE2e(rel);
     if (JS_EXT.has(ext)) {
       for (const g of jsLoadGroups(text.text, rel)) {
         // a specifier is exempt as a whole, by the module it names (its keys also hold the dir-index forms of other modules)

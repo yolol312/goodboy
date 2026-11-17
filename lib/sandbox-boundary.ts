@@ -33,6 +33,8 @@ export const DIAG_CODES = [
   'data-resolve-failed', // the run's resolve step (M6c): the query, the container or the answer's shape; the statement's fixed reason (`schema`, `matches-timeout`, `write`, `too-large`, ...) only
   'data-collision', // a generator's reserved space is already used by the dump (M6c): the generator's path only
   'volume-failed', // reading or writing a sandbox volume through the reader container
+  'privacy-review-missing', // a real-data run without a passing data-privacy review of the setup and the source files that use the data helper (M6g): the files, as relative paths
+  'privacy-setup-unreadable', // the privacy setup could not be listed in full: git, a cap or an unreadable file (M6g)
   'sweep-failed', // the expiry sweep of old raw artifacts
   'registry-failed', // the user-level registry of real-data sandboxes could not be read or written (M6b)
   'docker-failed', // any other docker call that failed

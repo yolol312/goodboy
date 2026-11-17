@@ -104,7 +104,7 @@ describe('the text policy (lib/sandbox-boundary.ts)', () => {
   test('the codes are one fixed list, and the preparation step keeps its tails', () => {
     expect(DIAG_CODES).toEqual([
       'step-failed', 'timed-out', 'restore-failed', 'reset-failed', 'proxy-failed', 'app-failed', 'app-down', 'live-failed',
-      'artifacts-not-removed', 'coverage-failed', 'data-failed', 'data-refused', 'data-resolve-failed', 'data-collision', 'volume-failed', 'sweep-failed', 'registry-failed', 'docker-failed', 'check-failed', 'internal', 'withheld',
+      'artifacts-not-removed', 'coverage-failed', 'data-failed', 'data-refused', 'data-resolve-failed', 'data-collision', 'volume-failed', 'privacy-review-missing', 'privacy-setup-unreadable', 'sweep-failed', 'registry-failed', 'docker-failed', 'check-failed', 'internal', 'withheld',
     ]);
     expect(OPEN.realData).toBe(false);
     expect(OPEN.tail(bounded(), 100)).toContain('out');

@@ -340,7 +340,7 @@ describe('V18-AC-8 a failure while working the dimensions out blocks the Stop', 
   // A preload that makes `requiredDimensionsFor` throw when V18_FAULT is set, for this spawned Stop only
   // (the module's source is rewritten as it loads; nothing in the repo changes).
   function faultPreload(base: string): string {
-    const needle = 'export function requiredDimensionsFor(changedFiles: string[]): ReviewDimension[] {';
+    const needle = 'export function requiredDimensionsFor(changedFiles: string[], opts?: DimensionOptions): ReviewDimension[] {';
     const src = readFileSync(join(ROOT, 'lib', 'review-dimensions.ts'), 'utf8');
     expect(src).toContain(needle); // the injection point must exist, or this test proves nothing
     const p = join(base, 'fault-preload.ts');

@@ -400,7 +400,7 @@ Agent 도구와 모든 서브에이전트의 `claude -p` 차단), 훅이 검사�
 없이 정해진 human 항목을 찾는다(프로젝트 항목은 high, 기본 항목은 medium). 사용자가 내린 결정은 정책 항목으로
 기록되어(`keep-project-knowledge` 갱신 모드) 다음부터 ai 항목이 된다.
 
-#### 에이전트 24개와 도구 스킬 28개
+#### 에이전트 24개와 도구 스킬 29개
 
 에이전트 이름은 `<팀>-<역할>`이고 리드는 `-lead`로 끝난다(전체 표: 계획서 §10.3). 리뷰 게이트는
 `goodboy:review-all`(구 review-changes), 테스트 게이트와 push 확인은 `goodboy:test-unit`(구 test-changes)을
@@ -424,7 +424,8 @@ measure-coverage, follow-agent-rules, keep-project-knowledge(`/` 메뉴에도 �
 report-goodboy(`/report-goodboy`, 트랙 J: goodboy 자체의 문제를 현장 리포트로 남김),
 cli-update-check(`/cli-update-check`, 트랙 K: CLI 업데이트 뒤 사용자 설정 점검),
 setup-test-infra(트랙 L: `/backfill-tests`가 쓰는 테스트 도구 구성),
-run-sandbox(트랙 M: 격리 샌드박스가 있는 프로젝트에서 테스트 에이전트가 스위트를 돌리는 절차).
+run-sandbox(트랙 M: 격리 샌드박스가 있는 프로젝트에서 테스트 에이전트가 스위트를 돌리는 절차),
+check-data-privacy(트랙 M, M6g: 실제 데이터 샌드박스의 설정과 데이터 헬퍼를 쓰는 테스트가 데이터를 꺼낼 수 있는지 보는 개인정보 점검).
 
 ## 결정 근거 기록 (4분류)
 
@@ -651,7 +652,7 @@ goodboy/                                # 플러그인 루트
 │   ├── request-review/SKILL.md
 │   ├── backfill-tests/SKILL.md         # 기존 코드 테스트 보강 (트랙 L)
 │   ├── setup-statusline/SKILL.md       # 상태바 설치/연동
-│   └── <도구 스킬 28개>/SKILL.md        # 에이전트가 쓰는 절차 (check-*, record-*, run-*, write-* …, keep-project-knowledge, report-goodboy, cli-update-check, setup-test-infra, run-sandbox)
+│   └── <도구 스킬 29개>/SKILL.md        # 에이전트가 쓰는 절차 (check-*, record-*, run-*, write-* …, keep-project-knowledge, report-goodboy, cli-update-check, setup-test-infra, run-sandbox, check-data-privacy)
 ├── agents/                             # 에이전트 24개 (research-*, build-*, review-*, test-*)
 │   ├── test-unit.md                    # 층1 — 테스트 작성/실행·red-green·커버리지 (구 test-changes)
 │   └── review-all.md                   # 층2 — 전 축 또는 축 하나 리뷰 (구 review-changes)
@@ -962,6 +963,7 @@ bun ${CLAUDE_PLUGIN_ROOT}/lib/cli.ts review-axes <변경 파일...>   # 축, 변
 | `security` | `security-secrets`, `security-injection`, `security-authz`, `dependency-risk`, `web-hardening`, `error-path`, `proto-pollution` |
 | `performance` | `performance` |
 | `ui` | `ui-ux-accessibility`, `plan-completeness` |
+| `data-privacy` | `data-privacy` (실제 데이터 프로젝트에서 샌드박스 파일·`data.json`·데이터 헬퍼를 쓰는 테스트가 바뀔 때만 요구되고, 담당은 `review-all`의 `axis: data-privacy`) |
 
 호출은 **한 메시지에서 여러 Agent 호출을 동시에** 보내야 실제로 병렬이 된다.
 
@@ -1384,6 +1386,7 @@ v0.8.0까지의 환경변수는 `VCF_` 접두였고, v0.9.0부터 `GOODBOY_`로 
 - M6b 제한된 데이터 접근(트랙 M, #19): 모델에게는 SQL도 DB 클라이언트도 없다. `cli.ts sandbox-data`의 고정된 네 가지만 쓴다: `schema`(테이블·컬럼·타입·PK/FK·행 수 구간), `shape <테이블>.<컬럼>`(null·빈 값·정수·소수·날짜·uuid·이메일꼴·전화꼴·url·기타별 건수, 길이 구간, 서로 다른 값의 수 구간과 `enumLike`), `count <테이블> [--where <json>]`(10 이상이면 정확한 수, 아니면 `"<10"`), `pick <테이블> --where <json> [--n N≤20]`(조건에 맞는 행이 10개 이상일 때만, 행의 기본키로 만든 불투명한 핸들 `h_…`). 조건은 고정된 문법의 JSON(`and`·`or`, `is-null`·`not-null`·`shape`·`<`·`>`·`<=`·`>=`, 그리고 서로 다른 값이 50개 이하인 컬럼에만 `=`·`!=`)이고, 테이블·컬럼은 DB의 카탈로그로 먼저 확인한 뒤 goodboy가 SQL을 만든다. DB의 글자는 출력에 닿지 않는다(실패는 `data-failed`와 op 이름뿐이고, 거부는 `data-refused`와 필드·고정 사유뿐이며 입력을 되풀이하지 않는다). SQL은 컨테이너 안에서 읽기 전용 역할(Postgres `goodboy_reader`, MySQL·MariaDB `gb_reader`: SELECT만, 제한 시간)로 읽기 전용 트랜잭션에서 돌고, 그 역할은 `sandbox-up`과 매 리셋 뒤에 `db/<서비스>/data-role.sh`로 다시 만든다. 핸들은 샌드박스의 `meta` 볼륨에 둔 키의 HMAC이라 같은 행은 리셋 뒤에도 같은 핸들이고 샌드박스마다 다르다(키는 디스크와 출력에 나오지 않는다. `pick`을 하는 동안 goodboy 프로세스의 메모리에만 있고, `sandbox-down --volumes`로 볼륨과 함께 지워진다). 실제 데이터가 들었을 수 있는 프로젝트에서는 PreToolUse 규칙이 샌드박스 컨테이너·볼륨·네트워크에 대한 `docker exec`·`cp`·`logs`·`inspect`·`attach`·`export`·`commit`·`run`(과 `create`·`start`·`top`·`diff`·`save`, 로그를 흘리는 `compose up`(`-d` 없이)), docker 소켓을 직접 여는 프로그램(`curl --unix-socket`, `socat`, `nc -U`; 다른 프로그램 앞의 `DOCKER_HOST=`는 막지 않는다), 샌드박스 호스트(`db`, `db2`, `gb-*`)를 가리킨 DB 클라이언트, 덤프와 등록한 입력 로그(`sandbox-local --input <경로>`, 여러 번 가능, 출력에는 개수만)를 읽는 명령(그 파일이 든 폴더를 통째로 읽는 `grep -r`·`rg`·`tar`·`cp -r`·`find -exec`, `ls | xargs cat` 같은 이름 전달 읽기, 중괄호·`**`·`[[:alpha:]]` 글롭, 경로가 든 변수 포함)과 호스트에 남은 원본 출력(`out/live`, 실행 폴더의 원본 파일; `result.json`은 통과. 프로젝트 루트·`.goodboy`를 통째로 읽는 `grep -r`·`tar` 등도 남은 원본이 있는 동안 막고, 거부 메시지가 지우는 방법을 알려 준다. `rg`와 Grep 도구는 git 저장소에서 `out/`이 `.gitignore`에 있으면 통과한다), Read·Grep·Glob(서브에이전트 포함)을 막는다. 셸 명령을 받는 도구(Bash·Monitor·PowerShell)는 모두 같은 규칙으로 읽고, `watch`·`colima ssh`·`tmux`·`parallel`·`su -c`·heredoc을 `bash`에 넣는 식으로 docker 명령을 감싸면 "읽을 수 없는 docker 호출"로 막는다. 규칙은 사용자 폴더의 등록부(`~/.claude/goodboy/sandbox/real-data.json`, 프로젝트 100개·프로젝트당 경로 200개까지, 명령이 합치기만 하고 경로를 잃지도 지우지도 않는다. 이 파일은 도구 호출로 고치거나 지울 수 없다. 읽기는 된다)에 오른 프로젝트를 셸이 어디에 있든 지킨다. 셸이 그 프로젝트 밖에 있으면 그 프로젝트의 컨테이너 이름과 덤프·입력 경로만 지키므로 일반 프로젝트의 docker·DB 클라이언트·긴 명령은 그대로 통과한다. 등록부를 읽을 수 없으면 프로젝트 폴더 기준으로만 지킨다(게이트 로그에 남는다). `sandbox-*` 명령은 실제 데이터가 아니라고 확인한 프로젝트에 `local.json`(`realData: false`)을 만들어 둔다(등록부에 오른 프로젝트나 원본이 남았을 수 있는 프로젝트에는 만들지 않는다). 일반 docker 사용(`ps`, `images`, `build`, 샌드박스가 아닌 이름의 컨테이너에 `exec` 등)과 goodboy의 `sandbox-*` 명령, `ls`·`stat`·`wc` 같은 파일 정보 조회는 통과한다. 한 번만 넘기려면 사용자가 `! touch .claude/.goodboy-sandbox-data-approved-<세션>.txt`(거부 메시지가 경로를 알려 준다, 서브에이전트에는 적용되지 않는다)를 하거나 `GOODBOY_SANDBOX_DATA_GATE=off`로 끈다. 한계: 같은 조건의 건수 차이로 10건 미만 집단을 짐작하는 것(차분 공격), 모델이 일부러 우회 프로그램을 짜는 것, 폴더 변수에 이름을 이어 붙이는 식으로 조립한 경로는 막지 못하고, MySQL·MariaDB 쿼리는 아직 실제 엔진으로 확인하지 못했다(Postgres는 로컬 Postgres 16으로 확인했다). 기존 샌드박스는 `sandbox-init --force`(새 `meta` 볼륨과 `data-role.sh`)와 `sandbox-down` 뒤 다시 올려야 한다. 거부 메시지는 호출이 경로나 이름으로 지목한 다른 프로젝트의 폴더를 알려 주고(그 폴더로 `cd`해서 `sandbox-data`를 쓰라고), 세션 프로젝트 폴더 안에 중첩된 프로젝트는 그 폴더에서 시작한 세션에서만 물을 수 있다고 알려 준다. 상대 경로·`~`·글롭으로만 닿은 경우는 폴더를 알려 주지 못할 수 있다
 - M6c 데이터 헬퍼(트랙 M, #19): 실제 데이터 행이 필요한 테스트는 `.goodboy/sandbox/data.json`에 조건만 적는다(`picks`: 테이블·`sandbox-data`와 같은 문법의 조건·행 수·컬럼, `counts`, `generate`). 값은 적지 않는다. `sandbox-run`이 리셋 뒤마다 스위트 직전에 DB 컨테이너 안에서 읽기 전용 역할로 값을 풀어 새 `data` 볼륨의 `values.tsv`에 쓰고, goodboy는 줄 수와 바이트 수만 읽는다(값은 호스트를 거치지 않는다. 칸 하나 2000자, 파일 4 MiB 상한). 볼륨은 DB 서비스와 정리용 `reader`가 쓰고, 테스트 쪽에서는 runner와 e2e 컨테이너에만 읽기 전용으로 붙으며(앱·프록시에는 붙지 않는다), 실행 시작과 스위트 직후에 비운다. 테스트는 `sandbox-init`이 만드는 헬퍼(`.goodboy/sandbox/data/`의 `goodboy-data.ts`(Playwright·TypeScript), `goodboy-data.cjs`(Node), `GoodboyData.java`(`src/test/java/goodboy/`에 복사))로 `pick`·`valueOf`·`fillFrom`(TS만)·`assertMatches`(실패 시 assertion id만, 값 없음)·`expectedCount`·`generate`(예약 영역 `gbx-…`, `@example.invalid`, `010-0000-…`, 넣기 전 충돌 검사)를 쓴다. 테스트 에이전트와 샌드박스 스킬이 이 헬퍼를 요구하고 DB 값을 테스트에 직접 적지 못하게 한다. Python 헬퍼와 스키마별 할당은 이후 버전. 기존 샌드박스는 `sandbox-init --force`가 필요하다
 - M6d 기록 정화(트랙 M, #19): `test-write`·`review-write`·`regression`이 쓰는 기록(형제 저장소 사본 포함)은 자르기 전에 모든 문자열과 키에서 주민번호(날짜·성별 자리)·사업자번호(검증 숫자)·카드번호(카드사 범위와 Luhn)·전화번호·예약 도메인이 아닌 이메일·비밀값을 `[redacted:<종류>]`로 가린다. 게이트가 비교하는 경로·id는 가리지 않고 검사하며, `test-write`와 `review-write`는 그 안에 개인정보 모양이 있으면 기록을 쓰지 않는다(오류에는 필드와 종류만). 실제 데이터로 돈 `sandbox-run`을 가리키는 테스트 기록은 설명 글과 명령을 모두 `[withheld: real-data run]`으로 바꾸고, 그 실행의 `sandbox-run` 줄만 남긴다(`sandbox-run` 뒤 플래그가 `--suite`·`--timeout-ms`뿐일 때). 한계: 이름·주소는 모양이 없어 가리지 못하고(이후 지문 검사), 이미 디스크에 있는 기록은 다시 쓰지 않는다
+- M6g 개인정보 리뷰(트랙 M, #19): 실제 데이터가 든 프로젝트(`local.json`·덤프·DB 볼륨으로 판단하고, 읽을 수 없으면 실제 데이터로 본다)에서는 `data-privacy` 차원이 새로 생긴다. 샌드박스가 만드는 파일(compose·런타임·DB 스크립트·오버라이드·더미·프록시·e2e·데이터 헬퍼. 스캔·로컬 답·장부·CA·`.gitignore`는 동작이 없어 제외)과 `data.json`, 데이터 헬퍼를 쓰는 소스 파일(테스트가 아니어도 되고, 코드·스크립트·`.json`·`.yml` 파일이 대상이다. JS/TS는 헬퍼 모듈을 가리키는 상대 import, 어떤 언어든 `GOODBOY_DATA`·`.goodboy/sandbox/data/`·`GoodboyData`를 이름으로 쓰는 파일, 헬퍼 사본)이 바뀌면 리뷰 게이트가 이 차원을 요구한다. 한계: 헬퍼를 감싼 파일(barrel)을 거쳐 쓰거나, 별칭(tsconfig paths 등)·실행 중에 만든 경로로 가리키는 파일은 이름이 없어 찾지 못한다(감싼 파일 자신은 찾는다). `review-axes`도 같은 파일에 `data-privacy` 축을 알려 주고, 담당은 `review-all`(`axis: data-privacy`)이며 새 도구 스킬 `check-data-privacy`(29번째)가 데이터 접근·출력 경로·아티팩트 마운트·헬퍼 단언·내보내기를 이름이 아니라 할 수 있는 일과 증거로 판단한다. 실행 게이트: 실제 데이터로 도는 `sandbox-run`은 인자 확인 직후, `out/`·`result.json`을 만들기 전에 현재 설정(위 파일들과 git이 알려 주는 소스 파일 중 헬퍼를 쓰는 파일. git이 무시하는 파일은 이 목록에 없다)이 `data-privacy`를 확인한 통과 리뷰로 덮여 있는지 본다. 리뷰는 `tree`(또는 `extra_blobs`)가 파일의 현재 내용을 증명해야 하고, `tree`가 없는 기록은 인정되지 않으며, 마지막 리뷰 뒤에 바뀐 파일은 다시 리뷰를 요구한다. 파일마다 그 내용을 덮는 리뷰 중 가장 새것이 판단하며, 통과여야 하고 high·medium 발견이 없어야 한다(더 새 `needs-changes`는 오래된 통과를 되돌린다). 저장소 최상위와 세션 프로젝트 디렉터리의 `.claude/reviews`를 둘 다 읽고(30일 안의 기록을 읽지만 정리 설정(기본 3일)이 먼저 지우면 다시 리뷰해야 한다). 거절은 고정 코드(`privacy-review-missing`: 파일의 상대 경로만 나열, `privacy-setup-unreadable`: git이 목록을 못 주거나 후보 파일 20000개·파일당 512 KB·합계 256 MB 상한을 넘거나 읽을 수 없는 테스트 파일이 있을 때. 테스트가 아닌 큰 파일은 읽지 않고 건너뛴다)와 방법만 알려 주고 내용은 담지 않는다. 거절 문구는 끄는 방법의 이름을 알려 주지 않고 사용자가 설정에서 끌 수 있다고만 한다. 사용자는 설정의 환경변수 `GOODBOY_SANDBOX_PRIVACY_GATE=off`로 끌 수 있고, 명령에 이 변수를 붙이는 호출(`VAR=… cmd`·`export`·`env`·`declare -x` 등)은 PreToolUse 데이터 가드가 메인 세션과 서브에이전트 모두에게 언제나 막는다(승인 마커도 통하지 않는다). Bun은 `.env` 파일을 스스로 읽으므로, CLI가 도는 폴더의 `.env`·`.env.local`·`.env.<development|production|test>[.local]`가 이 변수를 정하거나 `--env-file`로 실행되면 끄기는 무시된다(설정의 환경변수에 넣어야 한다). 실제 데이터가 아닌 프로젝트는 아무것도 바뀌지 않는다
 
 </details>
 

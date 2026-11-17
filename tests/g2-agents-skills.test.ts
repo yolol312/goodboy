@@ -73,6 +73,8 @@ const TOOL_SKILLS: Record<string, string | null> = {
   'setup-test-infra': 'medium',
   // Track M (§19, M4): how a tester runs suites in the isolated sandbox.
   'run-sandbox': 'medium',
+  // Track M (§19, M6g): the privacy review of a real-data sandbox's setup and of the tests that use the data helper.
+  'check-data-privacy': 'high',
 };
 const USER_INVOCABLE_TOOL_SKILLS = new Set(['keep-project-knowledge', 'report-goodboy', 'cli-update-check']);
 
@@ -121,7 +123,7 @@ describe('the 24 agents', () => {
   }
 });
 
-describe('the 28 tool skills (23 from G2, keep-project-knowledge from H2, report-goodboy from J1, cli-update-check from K1d, setup-test-infra from L, run-sandbox from M)', () => {
+describe('the 29 tool skills (23 from G2, keep-project-knowledge from H2, report-goodboy from J1, cli-update-check from K1d, setup-test-infra from L, run-sandbox and check-data-privacy from M)', () => {
   for (const [name, effort] of Object.entries(TOOL_SKILLS)) {
     test(`${name}: format`, () => {
       const path = join(ROOT, 'skills', name, 'SKILL.md');

@@ -46,7 +46,9 @@
 // goodboy's own commands (`bun …/lib/cli.ts sandbox-*`, the path being this guard's own lib/cli.ts or one spelled from
 // `$GB` or `$CLAUDE_PLUGIN_ROOT`) pass: they hold the boundary. The rule is advisory against a program written to get
 // around it (plan §19 M6): it closes the ordinary paths; the deliberate forms are listed in the plan. The user's
-// one-use marker (`sandbox-data`) and GOODBOY_SANDBOX_DATA_GATE=off are the ways past it.
+// one-use marker (`sandbox-data`) and GOODBOY_SANDBOX_DATA_GATE=off are the ways past it. One hit is no reach of data and
+// has no way past: a command that sets the switch of the privacy run gate (M6g, `setsGateSwitch`), denied in every
+// context with a fixed text (`DataGuardHit.fixed`), because the CLI reads that switch from its process environment.
 //
 // Pure: the hook calls `sandboxDataDenial` and decides what to do with the answer.
 
@@ -54,7 +56,7 @@ import { existsSync, lstatSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { followedPath } from './file-tracker';
-import { plainWord, readCommand, shellReadsStdin, stripPrefix } from './outward-command';
+import { plainWord, readCommand, readPrefix, shellReadsStdin, stripPrefix } from './outward-command';
 import { projectDir } from './project-dir';
 import { readRegular } from './safe-read';
 import { HOST_RAW_NAMES, projectName, readLocal, realDataForReading, realOrSelf, RUN_NAME, SANDBOX_DIR } from './sandbox-mode';
@@ -70,6 +72,9 @@ export interface DataGuardHit {
   /** Such dirs nested inside the session's project dir: `sandbox-data` answers for the session's project anywhere below
    *  it, so no `cd` reaches their sandbox from this session; only a session started in that dir does. */
   nested?: string[];
+  /** A hit that is no reach of data and has a fixed text of its own (the deny text is this, whatever the context; no
+   *  approval marker applies): a command that sets a goodboy gate switch. */
+  fixed?: string;
 }
 
 /** A sandbox project the call may reach. */
@@ -702,6 +707,53 @@ const HEX_ID = /^[0-9a-f]{4,64}$/;
 /** A container operand that cannot be read: a variable, a substitution, an `xargs` placeholder, a hex id. */
 const unreadable = (x: string): boolean => /[$`]|\{\}/.test(x) || HEX_ID.test(x);
 
+// ---- the gate switch (M6g) ----
+
+/** The user's switch of the privacy run gate (lib/sandbox-privacy-gate.ts `privacyGateOff`), read from the CLI's process
+ *  environment: a command that set it for the CLI would be a way past the gate, so no command may. The user sets it in
+ *  their settings (`env`), which reaches the CLI without a command. */
+const GATE_SWITCH = 'GOODBOY_SANDBOX_PRIVACY_GATE';
+const GATE_SWITCH_CHANGE = 'a command that sets a goodboy gate switch';
+const GATE_SWITCH_TEXT = "This command sets one of goodboy's own gate switches. Those switches are the user's settings, outside any command: a command never sets them. Run the command without the assignment.";
+/** An assignment of the switch in a word, quotes out: `NAME=…`, `NAME+=…`. Any letter case: the reader lower-cases a
+ *  segment's program word (`programWords`, for case-insensitive file systems), and a leading `NAME+=x` is one. */
+const GATE_ASSIGN = new RegExp(`^${GATE_SWITCH}\\+?=`, 'i');
+/** The same anywhere in a text, quotes out, with blanks allowed around the `=` (PowerShell `$env:NAME = 'x'`, cmd `set NAME=x`). */
+const GATE_SPELLED = new RegExp(`(?:^|[^A-Za-z0-9_])${GATE_SWITCH}\\s*\\+?=`);
+/** Programs whose next word is an assignment, not a command. */
+const ASSIGNING = new Set(['export', 'declare', 'typeset', 'readonly', 'local']);
+/** Programs that run text they are given (a script, a string, stdin) the reader of the command has not followed: a
+ *  command that spells the assignment and runs one of them is denied (`echo 'NAME=x cmd' | sh`, `eval "$(…)"`,
+ *  `python -c`, a heredoc fed to a shell). `git commit -m` and a `grep` that only name it are no such program. */
+const RUNS_TEXT = new Set(['eval', 'xargs', 'source', '.', 'env', 'sh', 'bash', 'zsh', 'dash', 'ksh', 'csh', 'tcsh', 'fish', 'python', 'python3', 'node', 'bun', 'deno', 'perl', 'ruby', 'awk', 'make']);
+
+/** Whether a command sets the privacy gate switch: an assignment before a program (`NAME=x cmd`, `env NAME=x cmd`,
+ *  `env -S 'NAME=x cmd'`, a bare `NAME=x` after `set -a`), `export`/`declare -x`/`typeset -x`/`readonly`/`local` of it, the same in
+ *  a nested `sh -c`, `eval`, `xargs` or `find -exec` (the reader follows them), or its spelling in a command that runs
+ *  text (RUNS_TEXT). `env -u NAME` and reads of the variable set nothing. A PowerShell call is denied on the spelling alone. */
+function setsGateSwitch(toolName: string, command: string, segments: readonly { words: readonly string[]; env: readonly string[] }[], truncated: boolean): boolean {
+  const plain = command.replace(/["'\\]/g, '');
+  if (!plain.includes(GATE_SWITCH)) return false;
+  if (truncated) return true; // too large to read whole: not read to the end
+  const spelled = GATE_SPELLED.test(plain);
+  if (toolName === 'PowerShell' && spelled) return true;
+  let runsText = false;
+  for (const seg of segments) {
+    if (seg.env.includes(GATE_SWITCH)) return true;
+    // the reader has taken the quotes out of the words (`env "NAME=x" cmd` and `export "NAME"=x` assign too)
+    const words = [...seg.words];
+    const w = words[0] === 'rtk' ? words.slice(words[1] === 'proxy' ? 2 : 1) : words;
+    const { rest } = readPrefix(w);
+    // the words before the program (`rtk proxy env NAME=x cmd`, `env "NAME=x" cmd`) and the program word itself (an append,
+    //   `NAME+=x cmd`: not a name `readPrefix` takes)
+    if (w.slice(0, w.length - rest.length + 1).some((x) => GATE_ASSIGN.test(x))) return true;
+    const prog = basename(rest[0] ?? '');
+    if (ASSIGNING.has(prog) && rest.slice(1).some((x) => GATE_ASSIGN.test(x))) return true;
+    if (RUNS_TEXT.has(prog)) runsText = true;
+  }
+  return spelled && runsText;
+}
+
 /** The values of the assignments in a command text (`FOO=x cmd`, `export FOO=x`, a bare `FOO=x`), quotes out. */
 function assignmentValues(command: string): string[] {
   const out: string[] = [];
@@ -1071,6 +1123,7 @@ function projectsAt(dirs: readonly string[]): string {
 
 /** What a denied call is told (model-facing): what it reached, where the data is available, and the one way past. */
 export function sandboxDataMessage(hit: DataGuardHit, o: { cli: string; subagent: boolean; marker?: string }): string {
+  if (hit.fixed !== undefined) return hit.fixed;
   const where: string[] = [];
   if ((hit.from ?? []).length > 0) {
     where.push(`Raw rows stay in the sandbox of ${projectsAt(hit.from!)}: \`bun "${o.cli}" sandbox-data schema|shape|count|pick\` answers for the dir it runs in, so run it there (\`cd\` into that project's dir first), not from here: structure, counts and handles.`);
@@ -1149,7 +1202,9 @@ export function sandboxDataDenial(input: { toolName: string; toolInput: Record<s
   // any tool whose input is a shell command: Bash, Monitor, PowerShell
   if (typeof toolInput.command !== 'string') return null;
   const command = toolInput.command;
-  const { segments } = readCommand(command, cwd, { keepRedirects: true });
+  const { segments, truncated } = readCommand(command, cwd, { keepRedirects: true });
+  // a goodboy gate switch is set by no command, whatever project or context the call is in (own CLI commands included)
+  if (setsGateSwitch(toolName, command, segments, truncated)) return { what: GATE_SWITCH_CHANGE, fixed: GATE_SWITCH_TEXT };
   const parsed = segments.map((seg) => {
     const words = pastRtk(seg.words);
     const dir = seg.dir ?? cwd;

@@ -59,6 +59,11 @@ process.env.GOODBOY_PUSH_REGRESSION = 'off';
 // tests/i5-existing-tests.test.ts turns them on.
 process.env.GOODBOY_EXISTING_TESTS = 'off';
 
+// The privacy run gate (track M, M6g) refuses a real-data `sandbox-run` without a data-privacy review of the setup,
+// which the older run fixtures (fake projects that are no git repositories) do not have. Off for the suite;
+// tests/m6g-run-gate.test.ts turns it on.
+process.env.GOODBOY_SANDBOX_PRIVACY_GATE = 'off';
+
 // The friction notice (track J3) adds a line to a Stop's systemMessage once per session, which
 // older Stop tests that switch gates or block three times would see. Off for the suite;
 // tests/j3-friction.test.ts turns it on.

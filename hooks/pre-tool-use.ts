@@ -813,14 +813,22 @@ function main(): void {
           const hit = sandboxDataDenial({ toolName, toolInput, cwd, projectCwd, also: [process.env.CLAUDE_PROJECT_DIR], note: (n) => logGate(sessionId, 'sandbox-data', 'warn', n) });
           if (hit !== null) {
             const marker = approvalMarkerPath(projectCwd, 'sandbox-data', sessionId);
-            if (!inSubagent && userMarkerPresent(sessionId, marker, input.tool_use_id)) {
+            // A command that sets a goodboy gate switch (`hit.fixed`) has no marker: the user sets switches in their settings.
+            if (hit.fixed === undefined && !inSubagent && userMarkerPresent(sessionId, marker, input.tool_use_id)) {
               pendingSandboxDataApproval = { markerPath: marker, what: hit.what };
             } else {
               logGate(sessionId, 'sandbox-data', 'deny', `${hit.what} ${input.agent_type ?? 'main'}`);
-              if (!inSubagent) ensureApprovalDir(projectCwd);
+              if (!inSubagent && hit.fixed === undefined) ensureApprovalDir(projectCwd);
               emit({
                 ...deny(sandboxDataMessage(hit, { cli: CLI_PATH, subagent: inSubagent, marker: approvalMarkerShown(projectCwd, 'sandbox-data', sessionId, cwd) })),
-                ...(inSubagent ? {} : { systemMessage: `[goodboy] 실제 데이터가 든 샌드박스에 닿는 호출을 막았어요: ${hit.what}` }),
+                ...(inSubagent
+                  ? {}
+                  : {
+                      systemMessage:
+                        hit.fixed === undefined
+                          ? `[goodboy] 실제 데이터가 든 샌드박스에 닿는 호출을 막았어요: ${hit.what}`
+                          : '[goodboy] goodboy의 게이트 스위치를 명령으로 바꾸려는 호출을 막았어요. 스위치는 사용자가 설정(settings)에서 정합니다.',
+                    }),
               });
               return;
             }

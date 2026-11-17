@@ -63,6 +63,7 @@ import {
   projectTop,
   ranOutOfTime,
   repoOfFileFor,
+  privacyOptionsFor,
   reviewEditsSince,
   sandboxUsersOf,
   scopeFor,
@@ -1693,7 +1694,7 @@ function tryAcceptPendingReview(
     if (declaredUnknowns > 0 && checkedAssumptions === 0) return null;
     // (F2 상당) 필수 차원 누락이면 수락 보류.
     //   (#27) Per file; a throw leaves the review unaccepted (the outer catch), as a gap does.
-    if (missingDimensionsByFile(recentEdits, (f) => v.byFile?.get(f)).length > 0) return null;
+    if (missingDimensionsByFile(recentEdits, (f) => v.byFile?.get(f), privacyOptionsFor(sessionId, cwd, recentEdits)).length > 0) return null;
     // (I5) A weakened existing test needs a finding first (warn mode: the user is told).
     const weakMode = existingTestsMode();
     const weak = weakMode === 'off' ? [] : unjudgedWeakenedNow(sessionId, cwd, reviews);
@@ -2500,7 +2501,7 @@ function main(): void {
       //   throws, the gate fails closed.
       const dimCheck = (() => {
         try {
-          return { missing: missingDimensionsByFile(recentEdits, (f) => v.byFile?.get(f)), error: null };
+          return { missing: missingDimensionsByFile(recentEdits, (f) => v.byFile?.get(f), privacyOptionsFor(sessionId, cwd, recentEdits)), error: null };
         } catch (err) {
           hookError(sessionId, 'stop', 'review dimensions per file', err);
           return { missing: [], error: String(err) };
