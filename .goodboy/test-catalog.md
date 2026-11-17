@@ -3,7 +3,7 @@
 Feature → test type, generated from the test files by goodboy (`cli.ts test-catalog`).
 Regenerate it instead of editing it; the docs rule compares it with a fresh copy.
 
-Totals: unit 247 files, 4551 tests; e2e 2 files, 54 tests.
+Totals: unit 247 files, 4552 tests; e2e 2 files, 54 tests.
 
 | Feature | Type | File | Tests |
 |---|---|---|---|
@@ -152,7 +152,7 @@ Totals: unit 247 files, 4551 tests; e2e 2 files, 54 tests.
 | M6d runCommands | unit | tests/m6d-run-commands.test.ts | 3 |
 | M6d sanitizeRecord; M6d sanitizeRecord: keys that redact to one text; M6d sandboxRunFlagsOnly: the run line a real-data record may keep; M6d checkRecordFields | unit | tests/m6d-sanitize.test.ts | 17 |
 | M6d field lists are tied to the record types; M6d each field list does what it says, on every string field of each record | unit | tests/m6d-schema.test.ts | 10 |
-| isPrivacyPath: the sandbox files and the manifest, by path; usesDataHelper: the tests that use the helper; privacyFilesOf: the files of a change; privacySetupOf: the current setup of a project | unit | tests/m6g-files.test.ts | 33 |
+| isPrivacyPath: the sandbox files and the manifest, by path; usesDataHelper: the tests that use the helper; privacyFilesOf: the files of a change; privacySetupOf: the current setup of a project | unit | tests/m6g-files.test.ts | 34 |
 | every way a command sets the switch is denied; what is not a command that sets it passes; the denial is one fixed text, with no way around it offered; through the PreToolUse hook | unit | tests/m6g-gate-switch.test.ts | 14 |
 | the dimension and the axis; review-axes in a project; privacyOptionsFor: the Stop’s predicate is bounded by the shared deadline and the hook’s clock; the Stop in a project that holds real data | unit | tests/m6g-review-gate.test.ts | 25 |
 | a real-data run without a covering review is refused; a covering review lets it run; what does not count as a covering review; what the gate leaves alone, and what it cannot read; the newest review of a file decides, and an open high or medium finding is no pass; the reviews of the repository top and of the project dir both count | unit | tests/m6g-run-gate.test.ts | 33 |
