@@ -3,7 +3,7 @@
 Feature → test type, generated from the test files by goodboy (`cli.ts test-catalog`).
 Regenerate it instead of editing it; the docs rule compares it with a fresh copy.
 
-Totals: unit 253 files, 4765 tests; e2e 2 files, 54 tests.
+Totals: unit 255 files, 4790 tests; e2e 2 files, 54 tests.
 
 | Feature | Type | File | Tests |
 |---|---|---|---|
@@ -152,6 +152,8 @@ Totals: unit 253 files, 4765 tests; e2e 2 files, 54 tests.
 | M6d runCommands | unit | tests/m6d-run-commands.test.ts | 3 |
 | M6d sanitizeRecord; M6d sanitizeRecord: keys that redact to one text; M6d sandboxRunFlagsOnly: the run line a real-data record may keep; M6d checkRecordFields | unit | tests/m6d-sanitize.test.ts | 17 |
 | M6d field lists are tied to the record types; M6d each field list does what it says, on every string field of each record | unit | tests/m6d-schema.test.ts | 10 |
+| the secret kind reads a type annotation after a keyword as no secret; the precision rule stays linear | unit | tests/m6d-secret-precision.test.ts | 5 |
+| the render the exemption compares with is one that would hit; an unchanged render is not scanned; everything else below the sandbox dir is scanned as before; a project below the repository top; a push | unit | tests/m6f-canary-fixes.test.ts | 20 |
 | install and uninstall; a commit through the hooks; a push through the hooks; by hand | unit | tests/m6f-git-hooks.test.ts | 27 |
 | the denial; the user\; the hook\; a check that fails; where the scan applies | unit | tests/m6f-hook.test.ts | 18 |
 | git-hooks install and uninstall, in process; commit-scan, in process; push-scan, in process; the command reader, in process | unit | tests/m6f-in-process.test.ts | 18 |

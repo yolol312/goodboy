@@ -23,7 +23,12 @@
 //     address either: a domain under the reserved example.com, example.net, example.org or the TLDs
 //     .example, .invalid, .test, .localhost (or `localhost`), and the `git@host:path` of an ssh remote.
 //   - secret: SECRET_PATTERNS; a PEM private key is covered to its END line, found once for the BEGIN
-//     lines of one stretch.
+//     lines of one stretch. A keyword match (`token: x`) is no secret when it is a TYPE annotation: a `:` (never
+//     `=`) and an unquoted value that starts with a known type name (`token: string`, `password: String`,
+//     `apiKey: number | null`, `token: Map<string, string>`: generics, `[]`, `?`, unions, then the end of a
+//     declaration; a default value (`= "…"`), a dotted path (`password: Tr0ub4dor.string`) or a quoted value keeps
+//     the hit). Any other value, a regex-looking one included (`password = "Hunter[2]xx?"`), `PGPASSWORD=sandbox`
+//     included, still is a secret.
 // Stated limits: about 3% of the 13-digit epoch-millisecond numbers of 2001-2024 (measured by sampling)
 // read as an unhyphenated resident number, and a bare 10-digit number can pass the business-number
 // check; both are redacted (the safe side). Digits are read after folding full-width and Arabic-Indic
@@ -31,7 +36,7 @@
 // spellings do not slip past. Not found: a card with other separators (two spaces, an underscore), and
 // an email whose top level is a file extension that is no delegated domain (`name@corp.js`).
 
-import { PEM_PRIVATE_KEY_BEGIN, SECRET_PATTERNS } from './secret-patterns';
+import { KEYWORD_SECRET, PEM_PRIVATE_KEY_BEGIN, SECRET_PATTERNS } from './secret-patterns';
 
 export type SensitiveKind = 'resident-number' | 'business-number' | 'card' | 'phone' | 'email' | 'secret';
 
@@ -197,17 +202,106 @@ function emailSpans(text: string, out: Span[]): void {
 
 // One compiled matcher per pattern, made once (a joined alternation of all of them cost about six times as
 // much on plain text).
-const SECRET_MATCHERS = SECRET_PATTERNS.map((p) => ({ re: new RegExp(p, 'gi'), pem: p === PEM_PRIVATE_KEY_BEGIN }));
+const SECRET_MATCHERS = SECRET_PATTERNS.map((p) => ({ re: new RegExp(p, 'gi'), pem: p === PEM_PRIVATE_KEY_BEGIN, keyword: p === KEYWORD_SECRET }));
 const PEM_END = /-----END [A-Z ]*PRIVATE KEY-----/gi;
+
+// What a keyword match (`token: string`) is not a secret for (M6f, after the M6 canary step S3): a TYPE annotation of source
+// code, only after a `:` and only when the value starts with a known type name. Judged from the text after the separator, in a
+// window of WINDOW characters, one linear pass with no backtracking.
+const WINDOW = 240;
+const KEYWORD_HEAD = /^[A-Za-z_-]+["']?\s*([:=])\s*(["']?)/;
+// Type names, lower case (compared case-blind, whole identifier: no dotted name): scalar types of TypeScript, Java,
+// Kotlin, Python, Go, Rust, C#; containers and their generics (`Map<string, string>`, `Optional<String>`, `List<String>`).
+const TYPE_NAMES: ReadonlySet<string> = new Set(
+  ('string str number int integer long short float double decimal bigint bool boolean any unknown void never object bytes byte char character text uuid date datetime instant duration symbol ' +
+    'null undefined nil secretstr charsequence bytearray uint8array buffer optional option map set list array record promise dict tuple vec hashmap hashset sequence collection iterable').split(' '),
+);
+const isSpace = (c: string | undefined): boolean => c === ' ' || c === '\t';
+
+/** The end of the type atom at `s[i]` (`string`, `Map<string, string[]>`, `(a | b)[]`, a `?` or `[]` suffix), or -1. */
+function typeAtomEnd(s: string, i: number, depth: number): number {
+  if (depth > 8) return -1;
+  let j = i;
+  if (s[j] === '(') {
+    const e = typeExprEnd(s, j + 1, depth + 1);
+    if (e < 0 || s[e] !== ')') return -1;
+    j = e + 1;
+  } else {
+    const m = /^[A-Za-z_$][\w$]*/.exec(s.slice(j, j + 80));
+    if (m === null) return -1;
+    if (!TYPE_NAMES.has(m[0].toLowerCase())) return -1;
+    j += m[0].length;
+    if (s[j] === '<') {
+      j++;
+      for (;;) {
+        while (isSpace(s[j])) j++;
+        const e = typeExprEnd(s, j, depth + 1);
+        if (e < 0) return -1;
+        j = e;
+        while (isSpace(s[j])) j++;
+        if (s[j] === ',') j++;
+        else if (s[j] === '>') {
+          j++;
+          break;
+        } else return -1;
+      }
+    }
+  }
+  while (s[j] === '[' && s[j + 1] === ']') j += 2;
+  if (s[j] === '?' || s[j] === '!') j++;
+  return j;
+}
+
+/** The end of a type expression (atoms joined by `|` or `&`) at `s[i]`, or -1. A `|` that is not followed by a type ends it before the `|`. */
+function typeExprEnd(s: string, i: number, depth: number): number {
+  const j = typeAtomEnd(s, i, depth);
+  return j < 0 ? -1 : unionEnd(s, j, depth);
+}
+
+/** After a type atom that ends at `j`: the end of the `|` or `&` members that follow it, or `j`. One call per member, and
+ *  the members fit in the judgment's window, so the depth is bounded. */
+function unionEnd(s: string, j: number, depth: number): number {
+  let k = j;
+  while (isSpace(s[k])) k++;
+  if ((s[k] !== '|' && s[k] !== '&') || s[k + 1] === s[k]) return j;
+  k++;
+  while (isSpace(s[k])) k++;
+  const e = typeAtomEnd(s, k, depth);
+  return e < 0 ? j : unionEnd(s, e, depth);
+}
+
+/** Whether `s` starts with a type expression that nothing but the end of a declaration follows: the end of the line or window,
+ *  `;` `,` `}` `)` `]` `>`, or a comment. A default value (`= "…"`), another word or a `|` that is no type is not that end, so
+ *  `token: string = "abc123def456"` stays a hit. */
+function isTypeValue(s: string): boolean {
+  const e = typeExprEnd(s, 0, 0);
+  if (e < 0) return false;
+  let k = e;
+  while (isSpace(s[k])) k++;
+  const c = s[k];
+  return c === undefined || c === '\n' || c === '\r' || c === ';' || c === ',' || c === '}' || c === ')' || c === ']' || c === '>' || (c === '/' && (s[k + 1] === '/' || s[k + 1] === '*')) || (c === '#' && k > e);
+}
+
+/** Whether the keyword match at `at` (`token: string`) is a type annotation, not a secret: the separator is a `:` (never `=`,
+ *  so `token = string` or an assignment is a value), the value is unquoted and STARTS with a known type name (no dotted path:
+ *  `password: Tr0ub4dor.string` is a value), and `isTypeValue` holds. A regex pattern after a keyword is NOT exempt here (a
+ *  password may hold a class and a quantifier): goodboy's own regex constant is covered by the commit scan's render exemption. */
+function keywordIsNoSecret(text: string, at: number): boolean {
+  const s = text.slice(at, at + WINDOW);
+  const head = KEYWORD_HEAD.exec(s);
+  if (head === null || head[1] !== ':' || head[2] !== '') return false;
+  return isTypeValue(s.slice(head[0].length));
+}
 
 /** A PEM private key reaches its END line (the secret pattern matches only the BEGIN line); without one,
  *  the rest of the text. The search for the END line runs once per stretch: the scan resumes after it (or ends
  *  with the text), so many BEGIN lines cost no more than one. */
 function secretSpans(text: string, out: Span[]): void {
-  for (const { re, pem } of SECRET_MATCHERS) {
+  for (const { re, pem, keyword } of SECRET_MATCHERS) {
     re.lastIndex = 0;
     for (let m = re.exec(text); m !== null; m = re.exec(text)) {
       const start = m.index;
+      if (keyword && keywordIsNoSecret(text, start)) continue;
       let end = start + m[0].length;
       if (pem) {
         PEM_END.lastIndex = end;

@@ -43,12 +43,12 @@ import { realish } from './review-scope';
 import type { DiagCode } from './sandbox-boundary';
 import { findRecentReviewFiles, validateReviewCoverage } from './review-validator';
 import { SANDBOX_PREFIX } from './sandbox-gate';
-import { readLocal, SANDBOX_DIR } from './sandbox-mode';
-import { planSandbox } from './sandbox-render';
-import { SCAN_BUDGET_MS, scanSandbox } from './sandbox-scan';
-import type { SandboxLocal, SandboxScan } from './sandbox-types';
+import { SANDBOX_DIR } from './sandbox-mode';
+import { type RenderFailure, RENDER_SCAN_BUDGET_MS, renderSandboxFiles } from './sandbox-render-files';
+import { scanSandbox } from './sandbox-scan';
 import type { ReviewResult } from './types';
 
+export { RENDER_SCAN_BUDGET_MS, type RenderFailure };
 export const PRIVACY_DIMENSION = 'data-privacy';
 const PRIVACY_CODES = ['privacy-review-missing', 'privacy-setup-unreadable'] as const satisfies readonly DiagCode[];
 export type PrivacyCode = (typeof PRIVACY_CODES)[number];
@@ -98,12 +98,6 @@ export interface GateReaders {
   rendered?: typeof renderedUnchanged;
 }
 
-/** The wall time the fresh scan of `renderedUnchanged` may take, in ms: the scanner's own budget (`SCAN_BUDGET_MS`, 60 s),
- *  so a scan that `sandbox-scan` accepted is one the gate accepts. The scan is synchronous and stops itself at its budget
- *  (leaving the rest out); a scan that took that long is not trusted. The scan of a typical project takes 10 to 400 ms,
- *  and it runs only when an uncovered file lies below the sandbox dir. */
-export const RENDER_SCAN_BUDGET_MS = SCAN_BUDGET_MS;
-
 /** Why the files could not be re-rendered, as the fixed words a refusal uses. */
 const RENDER_FAILURE = {
   'scan-threw': 'the project scan failed',
@@ -111,8 +105,7 @@ const RENDER_FAILURE = {
   'scan-slow': 'the project scan did not finish within its time budget',
   'local-unreadable': 'the local answers file of the sandbox cannot be read',
   'render-failed': 'the render failed',
-} as const;
-export type RenderFailure = keyof typeof RENDER_FAILURE;
+} as const satisfies Record<RenderFailure, string>;
 
 /** The sandbox files (paths below the repo top) whose current bytes equal what goodboy renders for this project now: the
  *  layout `sandbox-init` would write, made by `planSandbox` from a fresh scan of the project (`scanSandbox`, read-only,
@@ -123,31 +116,13 @@ export type RenderFailure = keyof typeof RENDER_FAILURE;
  *  a test seam. */
 export function renderedUnchanged(root: string, scanner: typeof scanSandbox = scanSandbox): { files: Set<string>; failure: RenderFailure | null } {
   const none = (failure: RenderFailure) => ({ files: new Set<string>(), failure });
-  const local = ((): SandboxLocal | Error => {
-    try {
-      return readLocal(root);
-    } catch (err) {
-      return err instanceof Error ? err : new Error(String(err));
-    }
-  })();
-  if (local instanceof Error) return none('local-unreadable');
-  let scan: SandboxScan;
-  const t0 = Date.now();
-  try {
-    scan = scanner(root, { budgetMs: RENDER_SCAN_BUDGET_MS });
-  } catch {
-    return none('scan-threw');
-  }
-  if (Date.now() - t0 >= RENDER_SCAN_BUDGET_MS) return none('scan-slow');
-  if (scan.problems.length > 0) return none('scan-problems');
+  const render = renderSandboxFiles(root, scanner);
+  if (render.files === null) return none(render.failure ?? 'render-failed');
   const files = new Set<string>();
-  try {
-    for (const [rel, text] of planSandbox(scan, local, { root }).files) {
-      const cur = readRegular(join(root, SANDBOX_DIR, rel), MAX_DOC_BYTES, true);
-      if (typeof cur === 'object' && cur.text === text && cur.st.size === Buffer.byteLength(text, 'utf8')) files.add(`${SANDBOX_PREFIX}${rel}`);
-    }
-  } catch {
-    return none('render-failed');
+  // readRegular answers 'absent' or 'refused' instead of throwing, so this loop needs no catch of its own.
+  for (const [rel, text] of render.files) {
+    const cur = readRegular(join(root, SANDBOX_DIR, rel), MAX_DOC_BYTES, true);
+    if (typeof cur === 'object' && cur.text === text && cur.st.size === Buffer.byteLength(text, 'utf8')) files.add(`${SANDBOX_PREFIX}${rel}`);
   }
   return { files, failure: null };
 }

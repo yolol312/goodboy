@@ -21,6 +21,13 @@
 //     author's own address is no hit) and the paths.
 // Clean filters run by no goodboy git (lib/git-run.ts): a repo that rewrites content on `add` is scanned as the
 // work tree has it.
+// Goodboy's own render is not scanned (user decision 2026-11-18, after the M6 canary step S3, as for the privacy run
+// gate): a file below the real-data project's `.goodboy/sandbox/` whose proposed content (the blob a commit or push
+// holds, or the work-tree bytes) is byte-equal to what goodboy renders for the project NOW (`OwnRender`,
+// lib/sandbox-render-files.ts: a fresh scan and `local.json`, never `scan.json` or the ledger) has no entry in the
+// report, so the digest binds it out. Any other byte, `data.json`, a record, any other file is scanned as before. A render
+// that cannot be made (scan failed, a problem, past the call's time) exempts nothing. A push compares with the CURRENT
+// render only: an older render in the pushed history is scanned.
 //
 // Budgets: 4 MB per blob, 64 MB and 20000 blobs per call, a time limit that stops at the hook's clock; what is left
 // when one runs out is one entry "not scanned". Every entry of the report is bound to its content: the digest is
@@ -28,13 +35,14 @@
 
 import { createHash } from 'node:crypto';
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, readlinkSync } from 'node:fs';
-import { dirname, extname, join, resolve } from 'node:path';
+import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { spawnGit } from './git-run';
 import { hookLeft } from './hook-clock';
 import { findSensitive, redactText, type SensitiveKind } from './pii-patterns';
 import { readRegular } from './safe-read';
 import { realDataForReading, realOrSelf, SANDBOX_DIR } from './sandbox-mode';
 import { readRegistry, RegistryError } from './sandbox-registry';
+import { RENDER_SCAN_BUDGET_MS, renderSandboxFiles } from './sandbox-render-files';
 
 const MAX_BLOB = 4 * 1024 * 1024;
 const MAX_SCAN_BYTES = 64 * 1024 * 1024;
@@ -102,6 +110,9 @@ export class Acc {
   blobs = 0;
   /** Why the scan stopped taking objects (a budget), or null. */
   stopped: string | null = null;
+  /** The renders made by this call, by project root (sandbox-relative path to exact bytes): at most one render per root and call
+   *  (null: it failed or was out of time). */
+  readonly renders = new Map<string, Map<string, Buffer> | null>();
   private readonly deadline: number;
   /** `salt`: text every `unclear` reason of this call is bound to (the PreToolUse scan binds them to the command; the git
    *  hooks leave it empty). */
@@ -358,7 +369,7 @@ interface BlobItem {
 }
 
 /** Scans blobs by id: each is read once, with a size, a type and budget check before it is read. */
-function scanBlobs(repo: Repo, items: BlobItem[], acc: Acc): void {
+function scanBlobs(repo: Repo, items: BlobItem[], acc: Acc, own: OwnRender): void {
   const known = new Map<string, { type: string; size: number }>();
   const need = items.filter((i) => i.size === undefined).map((i) => i.id);
   if (need.length > 0) {
@@ -411,7 +422,7 @@ function scanBlobs(repo: Repo, items: BlobItem[], acc: Acc): void {
       const body = read[k];
       // a header that is not the one asked for loses the place in the output: this object and the rest are not read
       if (body === null) acc.unscanned(b.path, b.id, 'git could not read the object');
-      else acc.bytesOf(b.path, b.id, body);
+      else if (!own.covers(b.path, body)) acc.bytesOf(b.path, b.id, body);
     });
   }
 }
@@ -476,7 +487,7 @@ function readWork(abs: string, limits: ScanLimits): { buf: Buffer } | { big: str
 }
 
 /** Scans work-tree files of the entries (their content is the file as it is now). */
-function scanWorkFiles(repo: Repo, paths: string[], acc: Acc): void {
+function scanWorkFiles(repo: Repo, paths: string[], acc: Acc, own: OwnRender): void {
   for (const p of paths) {
     acc.pathName(p, 'path');
     const abs = join(repo.top, p);
@@ -494,7 +505,72 @@ function scanWorkFiles(repo: Repo, paths: string[], acc: Acc): void {
       acc.unscanned(p, id, 'binary file type');
       continue;
     }
-    if (acc.take(id, r.buf.length)) acc.bytesOf(p, id, r.buf);
+    if (acc.take(id, r.buf.length) && !own.covers(p, r.buf)) acc.bytesOf(p, id, r.buf);
+  }
+}
+
+// ---- goodboy's own render ----
+
+/** A path with a `.goodboy/sandbox/` segment: the cheap check before anything is resolved or rendered. */
+const SANDBOX_SEGMENT = `/${SANDBOX_DIR}/`;
+const hasSandboxSegment = (path: string): boolean => `/${path}`.includes(SANDBOX_SEGMENT);
+
+/** The exemption of one scan call (one repo): whether a path's proposed content is goodboy's own render of the real-data
+ *  project the repo holds. Nothing is resolved or rendered until a candidate path (one below `.goodboy/sandbox/`) has its
+ *  bytes in hand; the project root is `realDataRootOf` of the repo's dir, the render runs once per root and call (cached
+ *  in the Acc) within the call's own time and the hook's clock. Paths are repo-relative: a project root below the repo's top
+ *  has its prefix. A project root outside the repo, no real-data root, a render that cannot be made, or a time that ran
+ *  out exempts nothing (the file is scanned). */
+class OwnRender {
+  private prefix: string | null | undefined;
+  private root = '';
+  constructor(
+    private readonly repo: Repo,
+    private readonly acc: Acc,
+  ) {}
+
+  covers(path: string, buf: Buffer): boolean {
+    if (!hasSandboxSegment(path)) return false;
+    if (this.prefix === undefined) this.prefix = this.locate();
+    if (this.prefix === null || !path.startsWith(this.prefix)) return false;
+    // the cache holds paths relative to the sandbox dir, so it is right for every repo that maps this root
+    const want = this.render()?.get(path.slice(this.prefix.length));
+    return want !== undefined && want.equals(buf);
+  }
+
+  /** The repo-relative prefix of the project's sandbox dir, or null: no real-data project, or one outside the repo. */
+  private locate(): string | null {
+    try {
+      const root = realDataRootOf(this.repo.dir);
+      if (root === null) return null;
+      const rel = relative(realOrSelf(this.repo.top), realOrSelf(root)).split('\\').join('/');
+      if (rel === '..' || rel.startsWith('../') || isAbsolute(rel)) return null;
+      this.root = root;
+      return rel === '' ? `${SANDBOX_DIR}/` : `${rel}/${SANDBOX_DIR}/`;
+    } catch {
+      return null;
+    }
+  }
+
+  private render(): Map<string, Buffer> | null {
+    const key = this.root;
+    if (this.acc.renders.has(key)) return this.acc.renders.get(key) ?? null;
+    let out: Map<string, Buffer> | null = null;
+    // the render shares the scan's own time: nothing is rendered once it is out or the hook's clock is near its end
+    const budget = Math.min(RENDER_SCAN_BUDGET_MS, this.acc.left(), hookLeft() - 1500);
+    if (!this.acc.expired() && budget >= 1) {
+      try {
+        const r = renderSandboxFiles(this.root, undefined, budget);
+        if (r.files !== null) {
+          out = new Map();
+          for (const [rel, text] of r.files) out.set(rel, Buffer.from(text, 'utf8'));
+        }
+      } catch {
+        out = null;
+      }
+    }
+    this.acc.renders.set(key, out);
+    return out;
   }
 }
 
@@ -562,7 +638,7 @@ export function scanCommit(input: CommitInput, acc: Acc): void {
   for (const why of input.unclear) unclear(acc, '<commit>', why);
   const base = baseTree(repo, input.amend, acc);
   if (base === null) unclear(acc, '<commit>', 'git could not tell what this commit is compared with');
-  else scanTree(repo, input, base, acc);
+  else scanTree(repo, input, base, acc, new OwnRender(repo, acc));
   const messages = [...input.messages];
   for (const f of input.files) {
     const buf = readMessageFile(f);
@@ -580,7 +656,7 @@ export function scanCommit(input: CommitInput, acc: Acc): void {
   for (const t of input.identity) acc.text('<author>', sha(t), t);
 }
 
-function scanTree(repo: Repo, input: CommitInput, base: string, acc: Acc): void {
+function scanTree(repo: Repo, input: CommitInput, base: string, acc: Acc, own: OwnRender): void {
   let staged: Entry[] | undefined = [];
   let work: Entry[] | undefined = [];
   if (input.mode === 'index' || input.mode === 'include') staged = diffIndex(repo, ['--cached', base], [], acc);
@@ -605,8 +681,8 @@ function scanTree(repo: Repo, input: CommitInput, base: string, acc: Acc): void 
     if (e.id !== null) blobs.push({ id: e.id, path: e.path });
     else files.push(e.path);
   }
-  scanBlobs(repo, blobs, acc);
-  scanWorkFiles(repo, files, acc);
+  scanBlobs(repo, blobs, acc, own);
+  scanWorkFiles(repo, files, acc, own);
 }
 
 /** The git hook side of a commit: the index as it is (git points GIT_INDEX_FILE at the exact tree for `-a` and
@@ -721,7 +797,7 @@ export function scanPush(input: PushInput, acc: Acc): void {
     else if (meta.type === 'commit' || meta.type === 'tag') messages.push(id);
   }
   for (const id of paths.keys()) if (!types.has(id)) unclear(acc, '<outgoing objects>', 'an outgoing object is missing');
-  scanBlobs(repo, blobs, acc);
+  scanBlobs(repo, blobs, acc, new OwnRender(repo, acc));
   scanMessages(repo, messages, types, acc);
 }
 

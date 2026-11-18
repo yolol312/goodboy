@@ -6,6 +6,10 @@
 /** The BEGIN line of a PEM private key; lib/pii-patterns.ts extends a match of it to the END line. */
 export const PEM_PRIVATE_KEY_BEGIN = '-----BEGIN [A-Z ]*PRIVATE KEY';
 
+/** `password = x`, `"token": "x"`: a keyword, a `:` or `=`, and a value with a letter in it (a token count is no secret).
+ *  lib/pii-patterns.ts judges each match of it once more (a `:` type annotation such as `token: string` is no secret). */
+export const KEYWORD_SECRET = '(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)["\']?\\s*[:=]\\s*["\']?(?=[^\\s"\']*[A-Za-z])[^\\s"\',;]{6,}';
+
 /** Tokens, keys and passwords as they appear in output and config. */
 export const SECRET_PATTERNS: readonly string[] = [
   '\\bAKIA[0-9A-Z]{16}',
@@ -29,7 +33,7 @@ export const SECRET_PATTERNS: readonly string[] = [
   '\\bhooks\\.slack\\.com/services/[\\w/]{10,}',
   // `password = x`, `"token": "x"`: a value with a letter in it (a token count is no secret);
   //   `--password x` as a flag.
-  '(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)["\']?\\s*[:=]\\s*["\']?(?=[^\\s"\']*[A-Za-z])[^\\s"\',;]{6,}',
+  KEYWORD_SECRET,
   '--(?:password|passwd|token|secret|api-key)[=\\s]+\\S{4,}',
 ];
 
