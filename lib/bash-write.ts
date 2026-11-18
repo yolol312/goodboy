@@ -282,6 +282,8 @@ export function stripHeredocs(command: string, opts: { expansions?: boolean; bod
 export interface HeredocOwner {
   words: string;
   substitution: boolean;
+  /** Where the operator was, as an index into the text `stripHeredocs` returns (the operator itself is gone from it). */
+  at: number;
 }
 
 /** Read back from the text before the operator, at most 256 characters (a long line of
@@ -290,7 +292,7 @@ function heredocOwner(out: string): HeredocOwner {
   const stop = Math.max(0, out.length - 256);
   let k = out.length;
   while (k > stop && !/[\n;&|()]/.test(out[k - 1]!)) k--;
-  return { words: out.slice(k).trim(), substitution: out[k - 1] === '(' && out[k - 2] === '$' };
+  return { words: out.slice(k).trim(), substitution: out[k - 1] === '(' && out[k - 2] === '$', at: out.length };
 }
 
 /** The index after an arithmetic expression starting at `i` (`$((`, `((` or `$[`). */

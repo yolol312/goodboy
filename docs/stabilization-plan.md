@@ -4657,6 +4657,10 @@ Design:
     denies. A hit names file, line and kind, never the value; exceptions are user-approved and
     bound to the exact content. `cli.ts git-hooks install` (run by the user) adds pre-commit and
     pre-push hooks for commits outside Claude Code; `--no-verify` still bypasses them (stated).
+    The user decided (2026-11-17): both the PreToolUse check of Claude Code's own commits and pushes and the
+    git hooks the user installs for commits outside it; an unscannable file (binary, unknown format) blocks the
+    commit only in a real-data project, where the user's one-use approval bound to that content lets it pass, and
+    elsewhere it is reported as unscanned.
   - M6g privacy review: a `data-privacy` review of the sandbox setup and the tests (data access,
     output channels, artifact mounts, helper assertions, exports), judged on capabilities and
     evidence. The user decided (2026-11-17): a review axis and a run gate. In a real-data project the
@@ -5503,6 +5507,179 @@ As built (M6g, the privacy review, 2026-11-17):
 - Tests: `tests/m6g-files.test.ts`, `m6g-review-gate.test.ts`, `m6g-run-gate.test.ts`, `m6g-texts.test.ts`,
   `m6g-gate-switch.test.ts` (the forms of the switch's assignment) and `m6g-shared.test.ts` (the rules shared with the
   sandbox gate).
+
+As built (M6f, the commit and push scan, 2026-11-17):
+- Scope: only a real-data project is scanned (the main session's judgment on top of the user's decision: M6 guards
+  the sandbox's data, and elsewhere fixtures like `t@e.com` would block ordinary work). Real data is a dir whose
+  sandbox says so (`realDataForReading`) or a project the user-level registry holds (`realDataRootOf`,
+  `lib/commit-scan.ts`, no git call). A project without real data costs a file check or two and no git call; the
+  hand-run `commit-scan` and `push-scan` there only report (exit 0).
+- The scanner (`lib/commit-scan.ts`), with the M6d detectors only (`findSensitive`; no M6e fingerprints yet, so the
+  plan's "a fingerprint hit overrides any exception" waits for M6e):
+  - A commit is the exact tree it would store, read without writing: the index against HEAD's tree (`diff-index
+    --cached`); `-a` the work tree of every tracked file; paths (`--only`, the default) the work tree of those paths;
+    `-i` the index and those paths; `--amend` compares against HEAD's parent, so the replaced commit counts. Changed
+    and new blobs are read whole (`cat-file --batch`; a work-tree file from disk, a symlink as its target), plus the
+    message (`-m`, `--message`, `--trailer`, `-F`, a `cat` heredoc) and every path (line 0).
+  - A push is every outgoing ref (refspecs, `tag <name>`, `--all`/`--mirror`, `--branches`, `--tags`,
+    `--follow-tags`, the current branch by default, every branch when config sends more as in the push test check)
+    and every object of `rev-list --objects <refs> --not --remotes=<name>`: blobs, paths, and commit and tag messages
+    after their headers (the author's own address is no hit). The exclusion is the push's own remote only: a configured
+    remote name excludes `--remotes=<name>`; a URL excludes the configured remote (or remotes) whose `remote.<n>.url`
+    or `remote.<n>.pushurl` is exactly that string; a URL or a name no remote has excludes nothing but the hook's own
+    old ids, so content that only another remote holds is scanned (review H1; before, `--remotes` for all remotes).
+    The hook gets the remote name, or the URL when git had none, and reads it the same way. `--dry-run` and deletions
+    send nothing. A `git update-ref` or `git symbolic-ref` that names a ref under `refs/remotes/` (also a computed
+    ref, or `--stdin`) is "not scanned", because the push scan takes the remote-tracking refs as what the remote
+    already has; the user's approval passes it. So is a command that re-points a remote (`git remote set-url`, `git
+    remote rename`, a `git config` write of `remote.<n>.url`, `remote.<n>.pushurl`, `url.<base>.insteadOf` or
+    `url.<base>.pushInsteadOf`, keys in any case, and a `-c` of those keys on the push itself, which is also scanned),
+    because after it the remote's name means another destination whose tracking refs are not what it has; a computed
+    key or subcommand (`git config "$K" x`, `git remote "$A" origin x`) counts as one, as a computed ref counts for
+    `update-ref`: the key is the first word that is no option and no option's value (`git config --file F "$K" x`), and git
+    2.46's `git config set|unset|edit|remove-section|rename-section …` are writes (`get` and `list` read). Editing `.git/config` by a file write stays a limit.
+  - Not scanned, and blocking: NUL in the first 8 KB, not UTF-8, a binary extension, over 4 MB, past the budgets (64 MB
+    and 20000 blobs per call, 200000 listed objects, the call's 40 s or the hook clock; the rest is one entry), and a
+    command whose tree or message cannot be told: `-p`/`--interactive`, `--pathspec-from-file`, a stdin message that
+    is no heredoc, a message built from a variable or a substitution other than a `cat` heredoc, `-a` with paths, git
+    config or repository moved by the environment (the commit issue rule's names, and also `GIT_INDEX_FILE`,
+    `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_NAMESPACE`, whether on the call, exported or
+    assigned in an earlier segment: `export`, `declare`, `typeset`, `readonly`, a bare assignment; an `env` prefix of
+    another segment does not count), a command the reader cannot follow, a git call whose repository cannot be told,
+    more than 6 scanned commits and pushes in one command (calls in a project without real data are not counted), and
+    a segment before the call that can change what it reads (an index-changing git command before a commit, so `git add … && git commit` must be split; for a
+    commit that reads the work tree (`-a`, paths, or a `-F` file) any segment that writes a file, meaning an output
+    redirect `>`, `>>`, `>|`, `&>`, `<>` as its own word or glued into one (`echo hi>README.md`; quotes are gone from the
+    words, so a quoted `>` counts too: fail closed; not `2>&1` or `>&2`; no file is `/dev/null`, `/dev/stdout`,
+    `/dev/stderr`, `/dev/tty` or `/dev/fd/N` once `..` is resolved, so `/dev/shm/x` is a write), `tee` or `sort -o`/`--output`/its abbreviations, and any program that is not on a short read-only list
+    (`rg --pre` and `--hostname-bin` run a program, so `rg` with them is not on it; `uniq IN OUT` writes OUT), and the
+    git commands that change the tree or the index (`add`, `rm`, `mv`, `restore`, `apply`, `stash` but not `stash list` or
+    `show`, `checkout`, `switch`, `reset`, `merge`, `pull`, `cherry-pick`, `revert`, `rebase`, `am`, `clean`); a commit- or ref-changing git command or another program before a push), as the push
+    test check's `runFirst`. The message is tied to the commit (rounds 3 and 4):
+    `-F <(…)`, an empty `-F`, and a `/dev/fd/…` or `/proc/self/fd/…` other than descriptor 0 are never read. A commit that
+    reads its message from its own stdin (`-F -`, `--file=-`, `/dev/stdin`, descriptor 0, or a bare `-m "$(cat)"`) is
+    scanned only when that stdin is, exactly, one heredoc of the commit's own segment (`git commit -F - <<TAG`), or a pipe
+    whose only producer is a plain `cat` (no file operand, nothing piped into it) fed by one heredoc (`cat <<TAG | git commit
+    -F -`). Any `<` or `<>` file redirect on the segment or the producer, a producer with a file operand (`cat real.txt
+    <<EOF | …`), a here-string, several heredocs on one segment, another producer, and a `$(cat)` with no heredoc of its own
+    are "not scanned" (fixed reason: the message comes from a file or a stream goodboy does not read). The nth commit of a
+    command that reads stdin takes the nth such heredoc, counted over all the command's commits, so a second commit never
+    reuses another commit's heredoc, and a decoy heredoc (`cat <<EOF >/dev/null`) feeds none. A message word counts as a
+    heredoc body only when it is `$(cat <<TAG … TAG)` (the reader leaves `$(cat` and a line break, so the word carries its
+    own heredoc); `$(cat FILE)`, `$(cat < FILE)`, a backtick `cat` and any other substitution are "not scanned" (read from a
+    file when the command runs). A shell reads a heredoc as its script by the same tie: `sh <<EOF < s.sh` is a shell
+    reading a file, noted as unread. An option that takes a value but has none the reader can see is "not scanned" too.
+    The heredoc segments are found with `HeredocOwner.at` (`lib/bash-write.ts`) by binary search over the separators, so
+    many heredocs or a long line of repeated words cost no square.
+  - The reader notes as "not scanned", in a real-data shell, every shape that hides what runs (review H2; each has a
+    fixed reason with no command text, shown beside the general one): a program word built at run time (`g=git; $g
+    push`, `` `echo git` push ``, `$(echo git) push`), a git subcommand that is no literal name even in a known repo
+    (`git $S`, `git $(echo push)`), `eval` of text with a variable or substitution, a shell reading its script from
+    stdin or a pipe that is no heredoc of the command (`echo git push | sh`, `sh < f`, `bash -s`, a here-string; one
+    heredoc feeds one shell), `xargs git` with no subcommand of its own, and a `git config` write (any form but
+    `--get`, `--get-all`, `--get-regexp`, `--list`/`-l`, `--show-origin`, `--show-scope`, `--name-only`,
+    `--get-urlmatch`, `--get-color`, `--get-colorbool`) before a commit, a push or an unknown subcommand in the same
+    command (it can define the alias the reader looked up before). Only the collect mode does this; the commit issue
+    rule's own path is unchanged (checked with a differential run of HEAD's file against the working copy).
+  - Options are read by their full names (review H3): git takes any unambiguous abbreviation of a long option and
+    `--no-<option>`, so `--pathspec-from=…`, `--mess=…`, `--amen`, `--mir` would be read as another commit or push.
+    Any long option that is not a full name of git 2.39's list for `commit` or `push` (and `--branches`, git 2.46),
+    and `--end-of-options`, is "not scanned" (spell the option out); so is the negation of an option that changes what
+    is read (commit: `all include only interactive patch amend dry-run message file trailer pathspec-from-file
+    reuse-message reedit-message fixup squash`; push: `repo all branches mirror delete tags dry-run follow-tags`),
+    and an option of that kind never leaves a call skipped as a dry run (`--dry-run --no-dry-run` is scanned).
+    `lib/push-test.ts` has the same flaw in its own option reading; that gate is unchanged here.
+  - A `-F` link is followed to the file git reads (a link that leads nowhere is "not scanned").
+  - An `email` in a commit or tag message is no hit only when it is (a) a no-reply address: local part `noreply` or
+    `no-reply` with an optional `+tag`, or a `users.noreply.github.com` address (the Claude Code attribution trailer
+    `Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>`, GitHub's), or (b) the commit's own author or committer
+    address: for a pushed commit the addresses in that object's own `author` and `committer` headers (a tag: its
+    `tagger`), for a commit at PreToolUse time and in the `commit-msg` hook `git var GIT_AUTHOR_IDENT` and
+    `GIT_COMMITTER_IDENT` of the repo (one git call each, only in a real-data project; a failure gives no exemption).
+    Exact, case-insensitive, on any line, with no trailer-line logic. Every other address is a hit wherever it is, so a
+    customer's address in `Reported-by:` or `Leaked-By:` hits, and a teammate's `Co-authored-by: T <t@corp.io>` needs
+    the user's approval in a real-data project (a `-by:` line exemption was tried in round 2 and dropped: it let a list
+    of addresses through). Other kinds are unaffected; files are never read this way (round 3). The exempt set is the
+    repo's configured identity read WITHOUT the call's own `-c` settings and without the command's environment (`git var` gets
+    only the repo-locating options, and `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT/KEY_/VALUE_`, `GIT_AUTHOR_*`,
+    `GIT_COMMITTER_*` and `EMAIL` are left out of its environment, so a git hook inherits none of them), so `git -c
+    user.email=<real> commit -m "… <real>"` exempts nothing (round 4).
+  - Who the commit is by (round 4): the author and committer lines of a commit are text the command can set, so the
+    values it shows are scanned as text at path `<author>` with no exemption: `-c user.name=`, `-c user.email=`, `-c
+    author.name/email=`, `-c committer.name/email=`, `--author=` / `--author <v>`, and `GIT_AUTHOR_NAME`,
+    `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL`, `EMAIL` on the call (`NAME=value git commit`), assigned
+    in a bare assignment or exported earlier. A value the words do not show (`="$N"`, `export EMAIL` with no value, a
+    computed `-c` or `--author`) is "not scanned". In the `commit-msg` hook, when git's environment carries such an override
+    (`GIT_AUTHOR_*`/`GIT_COMMITTER_*` name or email, `EMAIL`, a `GIT_CONFIG_PARAMETERS` or `GIT_CONFIG_KEY_n` naming
+    `user.`/`author.`/`committer.` name or email), `git var GIT_AUTHOR_IDENT` and `GIT_COMMITTER_IDENT` (name and address,
+    without the date) are scanned as `<author>` text, the configured identity's own address exempt. The push scan does NOT
+    read the `author`, `committer` or `tagger` headers of pushed objects (a teammate's address there would block every
+    push): a commit made outside both checks with a crafted identity (a terminal with `--no-verify`, a script file) is not
+    seen at push time.
+
+- PreToolUse (`lib/commit-scan-guard.ts`, block A0.895 of `hooks/pre-tool-use.ts`): Bash, Monitor and PowerShell
+  commands, read by `gitCallsOf` (`lib/commit-issue.ts` in a collect mode that reuses the commit issue rule's alias,
+  `-C`, shell, heredoc and `xargs`/`find -exec` reader, and reads past `rtk`). A hit or anything not scanned is denied
+  with a fixed English text (up to 20 entries) and a Korean systemMessage. The main session's way past is the user's
+  one-use marker of kind `commit-scan` whose content is that digest (`! echo <digest> > <marker>`; an empty `touch`
+  or another digest does not pass; the model's writes to it are denied as for every marker); a subagent has none
+  and returns BLOCKED. A check that throws passes in the main session and denies in a subagent (logged), as the
+  sandbox rule; a scan that fails inside a real-data project is itself "not scanned". No switch. (`GOODBOY_TEST_COMMIT_SCAN_FAIL=1`
+  is a test seam read from the hook process's own environment, like `GOODBOY_TEST_HOOK_CLOCK_MS`: it makes the check
+  throw, which passes in the main session as above. A command the model runs cannot set it for the hook.)
+- Git hooks (`lib/git-hooks.ts`): `cli.ts git-hooks install [--force]`, run by the user, writes `pre-commit` (the
+  index git gives it, which is the exact tree for `-a` and paths), `commit-msg` (the message file) and `pre-push`
+  (the refs on stdin, the remote's old ids excluded) into the repo's hooks dir (`git rev-parse --git-path hooks`, so
+  `core.hooksPath` is honoured; install prints the dir it used). Every check runs first: a hook goodboy did not
+  write stops the install unless `--force`, which keeps it as `<name>.goodboy-saved` and runs it after goodboy's with
+  the same arguments and stdin; the three new hooks are written to temp names before any hook is displaced, and the
+  renames then go one by one, so a write that fails displaces nothing, while a failed rename can leave some hooks
+  installed; `uninstall` removes only goodboy's hooks and puts a saved one back. A hook whose CLI or bun is gone stops the
+  commit with a message (fail closed). The hooks pass once on a file `.claude/.goodboy-commit-scan-approved-*.txt` of
+  the project or the repo that holds the digest, consumed when it passes. A model Bash call that makes such a file
+  (any name, also one built at run time) has it removed after the call: the marker sweep of `lib/approval-marker.ts`
+  covers the `.goodboy-commit-scan-approved-*.txt` names with no session tag (review M1); it removes any new such file
+  in that call's dirs, another session's included. `cli.ts commit-scan` and `push-scan` run the same scans by hand
+  and print JSON.
+- Limits: `--no-verify` skips the git hooks (git's own; the PreToolUse check still runs); with the hooks installed, a
+  commit Claude Code runs after the user's approval needs the hook's approval too (two digests); clean filters are
+  not run (content as the work tree has it); a message reused by `-C`, `-c` or `--fixup` is read at push time, not at
+  commit time; the hooks cannot see `--amend` and compare with HEAD (HEAD's own content is scanned at push time); a
+  `git -C` into a real-data repo from a shell outside one with an empty registry, an unreadable registry, and a
+  linked worktree with no `local.json` are not seen as real data; names and addresses have no shape (M6e). Not read,
+  and so not seen by the PreToolUse check (the installed `pre-push` hook is the only layer for them): a script file or
+  build target that runs git (`sh script.sh`, `./push.sh`, `make`, `npm run`), another tool that pushes (`gh pr create`,
+  `gh repo create --push`, `git send-pack`, `git subtree push`, `git svn dcommit`, `git lfs push`), a remote-tracking
+  ref moved some other way than `git update-ref` or `git symbolic-ref` (a `git fetch` from a local path into
+  `refs/remotes`, a file written under `.git`; telling the remote's real state would take a network call per push),
+  `git -C "$X"` from a shell outside every real-data project when the registry holds projects (the call is unknown and
+  skipped there), a name like `$g` for git in a command that never spells `git` (the reader does not look at it), a
+  work-tree file over 4 MB (`-a` or paths) that is keyed by its size and mtime in the digest, so the content can change
+  under the same approval (an index blob is keyed by its object id), and a hook marker made in a directory other than
+  the Bash call's own (the sweep reads that call's `.claude`). The sweep runs after the call, but a git hook runs inside
+  it: a call that prints the digest with one failed commit, writes a marker under a name built at run time and
+  commits again in the same call consumes it before the sweep looks. That needs a script file the reader does not
+  read (`sh run.sh`, already above), so the PreToolUse check does not see the second commit; the model-side block of the
+  hook marker is the sweep for what it leaves, not a guarantee. Also not read: `source <(…)`, `. /dev/stdin`, an
+  interpreter's inline code (`python3 -c`, `node -e`, `perl -e`, `awk`) that runs git, an environment set by `read GIT_DIR`
+  or `printf -v GIT_DIR`, a `cd` into a real-data project followed by a git name never spelled `git` from a shell outside
+  every real-data project, and `.git/config` or refs changed by a file write. The hook install checks everything first but writes and
+  renames one hook at a time.
+- Tests: `tests/m6f-scan.test.ts` (real temp repos: canaries of each kind in a staged file, an `-a` file, path
+  commits, an amend, messages, a path, a push two commits ahead, a tag, `--all`; binary, over-size and budgets; the
+  digest), `m6f-hook.test.ts` (the spawned PreToolUse hook: deny text without the value, the digest marker passing
+  once, a changed file needing a new one, subagents, a project without real data, a failing check) and
+  `m6f-git-hooks.test.ts` (install and uninstall, `core.hooksPath`, a foreign hook refused and chained with
+  `--force`, real `git commit` and `git push` blocked and approved, `--no-verify`) and `m6f-review-fixes.test.ts` (one
+  block per review finding: the push exclusion by remote and `update-ref`, the hidden-program shapes, abbreviated and
+  negated options, the hook marker sweep, the command-bound digest, the index and object environment names, a `-F`
+  link, a batch header that does not match, the call limit and the install order; "round 2": the attribution trailer
+  in every message path, re-pointed remotes, redirect writes, a pipe message file; "round 3": the address rule, glued
+  redirects, the message tied to the commit, computed re-points, `sort --output` and `rg --pre`; "round 4": a stdin
+  message tied to its own commit and a shell's heredoc likewise, who the commit is by (`<author>` text, the configured
+  identity read without the command's settings, the hook's environment), computed re-points after a value-taking option
+  and git 2.46's config subcommands, tree-changing git commands and `uniq IN OUT` before a commit, the `/dev` targets, and
+  heredoc scans that cost no square).
 
 ## 20. N — Fewer repeated runs, a project test inventory, task criteria (proposed, 2026-10-26)
 

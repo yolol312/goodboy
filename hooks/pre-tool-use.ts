@@ -4,6 +4,8 @@
 import { existsSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve as resolvePath, sep } from 'node:path';
 import { addedUserGlobs, diffCoverageMode, isPolicyFile, type UserGlobKey } from '../lib/changed-coverage';
+import { commitScanText, markerHoldsDigest } from '../lib/commit-scan';
+import { commitScanOfCommand } from '../lib/commit-scan-guard';
 import { HOOK_CLOCK_MS, startHookClock } from '../lib/hook-clock';
 import { readStateText } from '../lib/safe-read';
 import { checkRegression, readRegressionRecords, type RegressionOutcome, regressionMessage, regressionMode } from '../lib/regression';
@@ -448,6 +450,8 @@ function main(): void {
       let pendingPushTestApproval: { markerPath: string; what: string } | null = null;
       // (A0.89) The user's approval for one call past the real-data sandbox rule, consumed at the end.
       let pendingSandboxDataApproval: { markerPath: string; what: string } | null = null;
+      // (A0.895) The user's approval for one commit or push past the commit scan, consumed at the end.
+      let pendingCommitScanApproval: { markerPath: string; what: string } | null = null;
 
       // (A00) Policy read gate (track H §14.3): until the main session has read the project's
       //   knowledge files in full, its other tools wait (lib/project-knowledge.ts). First of
@@ -837,6 +841,50 @@ function main(): void {
           logGate(sessionId, 'sandbox-data', 'fail-open', String(err));
           if (inSubagent) {
             emit(deny('The real-data sandbox rule could not check this call, so it is denied inside a subagent. Return BLOCKED.'));
+            return;
+          }
+        }
+      }
+
+      // (A0.895) Commit and push scan (track M, M6f, lib/commit-scan-guard.ts): in a project that holds real data, a
+      //   `git commit` or `git push` (Bash, Monitor, PowerShell; also `-C`, aliases, `sh -c`, `rtk`) is scanned for what it
+      //   would publish: the exact tree of the commit, its message and paths, or the objects a push sends. A match of the
+      //   M6d shapes, or anything that cannot be scanned (binary, over the size budget, a command whose tree cannot be
+      //   told), denies with the list (path:line kind, never a value). The main session's way past is the user's one-use
+      //   marker `commit-scan`, whose content must be the digest the denial prints (bound to that exact content); a
+      //   subagent has none (it returns BLOCKED). A project without real data is not scanned. No switch: the user's
+      //   approval is the way past. A check that fails is denied in a subagent and passes in the main session, like the
+      //   sandbox rule; a scan that fails inside a real-data project is itself a denial (lib/commit-scan-guard.ts).
+      if (typeof toolInput.command === 'string' && (toolName === 'Bash' || toolName === 'Monitor' || toolName === 'PowerShell')) {
+        const inSubagent = !!input.agent_type;
+        try {
+          const found = commitScanOfCommand(toolInput.command, cwd, projectCwd);
+          if (found !== null) {
+            const marker = approvalMarkerPath(projectCwd, 'commit-scan', sessionId);
+            if (!inSubagent && userMarkerPresent(sessionId, marker, input.tool_use_id) && markerHoldsDigest(marker, found.report.digest)) {
+              pendingCommitScanApproval = { markerPath: marker, what: found.what };
+            } else {
+              logGate(sessionId, 'commit-scan', 'deny', `${found.what} ${found.report.digest} ${input.agent_type ?? 'main'}`);
+              if (!inSubagent) ensureApprovalDir(projectCwd);
+              const shownMarker = approvalMarkerShown(projectCwd, 'commit-scan', sessionId, cwd);
+              const tail = inSubagent
+                ? ' Agents never approve content: return BLOCKED and tell the user which files are listed.'
+                : ` Only the user can approve content that is known to be safe (fixtures, synthetic data): they run \`! echo ${found.report.digest} > ${shownMarker}\` (one use, bound to exactly this content: a changed file needs a new approval), then run it again.`;
+              emit({
+                ...deny(commitScanText(found.report, found.what, tail)),
+                ...(inSubagent
+                  ? {}
+                  : {
+                      systemMessage: `[goodboy] 실제 데이터가 든 프로젝트에서 개인정보·비밀값 모양이 있거나 검사하지 못한 내용이 든 ${found.what}을(를) 막았어요. 안전한 내용이면 \`! echo ${found.report.digest} > ${shownMarker}\`(이번 한 번, 이 내용에만)을 실행하세요.`,
+                    }),
+              });
+              return;
+            }
+          }
+        } catch (err) {
+          logGate(sessionId, 'commit-scan', 'fail-open', String(err));
+          if (inSubagent) {
+            emit(deny('The commit scan could not check this command, so it is denied inside a subagent. Return BLOCKED.'));
             return;
           }
         }
@@ -1772,6 +1820,7 @@ function main(): void {
         ['push-test', pendingPushTestApproval, (w: string) => `This hands off ${w} without a passing test result, and its one-use approval was already used. Ask the user to approve it again.`],
         ['outward', pendingOutwardApproval, (w: string) => `This command changes ${w}, listed as production in .goodboy/hosts (stop rule R2), and its one-use approval was already used. Ask the user to approve it again.`],
         ['sandbox-data', pendingSandboxDataApproval, (w: string) => `This call reaches the real data of the sandbox (${w}), and its one-use approval was already used. Ask the user to approve it again.`],
+        ['commit-scan', pendingCommitScanApproval, (w: string) => `This ${w} publishes content the commit scan flagged, and its one-use approval was already used. Ask the user to approve it again.`],
       ] as const;
       const taken: Array<{ markerPath: string; consumed: string }> = [];
       for (const [gate, pending, lost] of approvals) {

@@ -18,26 +18,32 @@ import { hostsFilesFrom, parseHostRules, segmentChanging } from './outward-comma
  *  `stop`: one Stop past a gate the work cannot satisfy (track G: the user's override, which
  *  replaced the count-based escapes). `push-test`: one push or hand-off without a passing test
  *  result for the commit (track G push test check). `sandbox-data`: one command past the real-data
- *  sandbox rule (track M, M6b, lib/sandbox-data-guard.ts). */
-export type ApprovalKind = 'risk' | 'bash-write' | 'outward' | 'stop' | 'push-test' | 'sandbox-data';
+ *  sandbox rule (track M, M6b, lib/sandbox-data-guard.ts). `commit-scan`: one `git commit` or `git push` past the
+ *  commit scan of a real-data project (track M, M6f, lib/commit-scan.ts); the file's content must be the digest the
+ *  denial prints, so the approval is bound to the exact content. */
+export type ApprovalKind = 'risk' | 'bash-write' | 'outward' | 'stop' | 'push-test' | 'sandbox-data' | 'commit-scan';
 
 /** True for a path named like any goodboy approval marker, in any letter case (the default
  *  macOS volume ignores case, so `.Goodboy-Stop-Approved-…` is the same file). Only the user
  *  may create one (`! touch` runs outside the tool hooks); PreToolUse denies the model's
  *  writes to them. */
 export function isApprovalMarkerPath(p: string): boolean {
-  return /^\.goodboy-(?:risk|bash-write|outward|stop|push-test|sandbox-data)-approved-[^/\\]*$/i.test(basename(p));
+  return /^\.goodboy-(?:risk|bash-write|outward|stop|push-test|sandbox-data|commit-scan)-approved-[^/\\]*$/i.test(basename(p));
 }
 
-const MARKER_NAME = /\.goodboy-(?:risk|bash-write|outward|stop|push-test|sandbox-data)-approved-/i;
+const MARKER_NAME = /\.goodboy-(?:risk|bash-write|outward|stop|push-test|sandbox-data|commit-scan)-approved-/i;
 
-/** This session's marker names in `<dir>/.claude`, lower-cased. */
+/** The commit scan's marker for the git hooks (lib/git-hooks.ts): any name `.goodboy-commit-scan-approved-*.txt`, with no
+ *  session tag (a git hook runs in no session). A model Bash call that makes one, whatever name it builds, has it swept. */
+const isGitHookMarker = (lowerName: string): boolean => /^\.goodboy-commit-scan-approved-[^/\\]*\.txt$/.test(lowerName);
+
+/** This session's marker names in `<dir>/.claude`, lower-cased, and the commit scan's git hook markers (any name). */
 function ownMarkerNames(sessionId: string, dir: string): string[] {
   const own = `-approved-${sessionTag(sessionId)}.txt`.toLowerCase();
   try {
     return readdirSync(join(dir, '.claude'))
       .map((n) => n.toLowerCase())
-      .filter((n) => isApprovalMarkerPath(n) && n.endsWith(own));
+      .filter((n) => isApprovalMarkerPath(n) && (n.endsWith(own) || isGitHookMarker(n)));
   } catch {
     return [];
   }
@@ -224,8 +230,10 @@ export function takeBashStart(sessionId: string, toolUseId: string | undefined, 
 
 /** Removes this session's markers that a Bash call created and returns them: in the start
  *  cwd, every marker that was not there when it started (whatever its mtime); in another cwd
- *  the call ended in, those with an mtime at or after the start. The user's own `! touch`
- *  runs outside the tool hooks. Other sessions' markers unlock nothing here and stay. */
+ *  the call ended in, those with an mtime at or after the start. The commit scan's git hook markers (any name, no
+ *  session tag) are swept the same way, another session's included (a commit-scan marker has no session in the name a
+ *  git hook reads). The user's own `! touch` runs outside the tool hooks. Other sessions' markers of the other kinds
+ *  unlock nothing here and stay. */
 export function sweepNewMarkers(sessionId: string, start: BashStart): string[] {
   const removed: string[] = [];
   for (const dir of start.dirs) {
@@ -240,7 +248,7 @@ export function sweepNewMarkers(sessionId: string, start: BashStart): string[] {
     const own = `-approved-${sessionTag(sessionId)}.txt`.toLowerCase();
     for (const name of names) {
       const lower = name.toLowerCase();
-      if (!isApprovalMarkerPath(name) || !lower.endsWith(own)) continue;
+      if (!isApprovalMarkerPath(name) || !(lower.endsWith(own) || isGitHookMarker(lower))) continue;
       const p = join(claudeDir, name);
       try {
         const isNew = before ? !before.has(lower) : statSync(p).mtimeMs >= start.since;

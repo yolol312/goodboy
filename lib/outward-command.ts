@@ -30,7 +30,7 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { stripHeredocs } from './bash-write';
-import { basename, dirname, join, resolve as resolvePath } from 'node:path';
+import { basename, dirname, join, posix, resolve as resolvePath } from 'node:path';
 
 export interface OutwardTarget {
   /** Tool family, e.g. `curl`, `ssh`, `git push`, `kubectl`. */
@@ -380,6 +380,10 @@ interface SegmentMeta {
   /** The `[name, value]` pairs it assigns before its program (`PGHOST=x psql`, `env PGHOST=x
    *  psql`; a bare `PGHOST=x` segment too): the outward classifier reads libpq's env from them. */
   assigns?: [string, string][];
+  /** A command substitution stood where the program is (`$(echo git) push`): readPrefix skipped it. */
+  computed?: true;
+  /** The segment redirects its output into a file (`>`, `>>`, `>|`, `&>`, `<>`, `>&file`; not `2>&1`, not `/dev/…`). */
+  writes?: true;
 }
 
 /** One segment of a command with the directory it runs in. */
@@ -394,6 +398,15 @@ export interface ReadSegment {
    *  in dir. Null when goodboy cannot tell (`cd -`, a computed dir, a `popd` past what it saw,
    *  after a `cd` that moves the shell in zsh only). A cd segment carries the dir it moved to. */
   dir: string | null;
+  /** A whole command substitution was in the program position and was skipped (`$(echo git) push`: `words` is
+   *  `push`); set only then. The commit scan (lib/commit-issue.ts) reads it as a program computed at run time. */
+  computed?: true;
+  /** The segment redirects its output into a file (`echo x >> f`); set only then. The commit scan reads it as a change
+   *  of the work tree before the commit. Quotes are already gone from the words, so `echo ">"` reads as a redirect. */
+  writes?: true;
+  /** The `[name, value]` pairs assigned before its program (`GIT_AUTHOR_NAME=x git commit`, a bare `GIT_DIR=x`); set only
+   *  when there are some. The commit scan reads a commit's author from them. */
+  assigns?: [string, string][];
   /** A cd that moves the shell in zsh but not in bash (`true | cd x`, `cd x && cmd &`): the
    *  shell's dir after it is unclear. */
   unsure?: boolean;
@@ -451,7 +464,8 @@ export function readCommand(command: string, cwd: string, opts: { keepRedirects?
     return d;
   };
   const segments = all.map((words, s): ReadSegment => {
-    const { env: names, scope, chdir, child } = meta[s] ?? { env: [], scope: '0' };
+    const { env: names, scope, chdir, child, computed, writes, assigns } = meta[s] ?? { env: [], scope: '0' };
+    const assigned = assigns !== undefined && assigns.length > 0 ? { assigns } : {};
     const plain = dropRedirects(words);
     const prog = basename(plain[0] ?? '');
     // Only the built-in moves the shell: `/usr/bin/cd x` runs a child shell's cd (round-4
@@ -471,7 +485,7 @@ export function readCommand(command: string, cwd: string, opts: { keepRedirects?
         stacks.set(shell, []);
       }
     };
-    const seg = (dir: string | null): ReadSegment => (unsure ? { words, env: names, scope, dir, unsure } : { words, env: names, scope, dir });
+    const seg = (dir: string | null): ReadSegment => ({ words, env: names, scope, dir, ...(computed ? { computed } : {}), ...(writes ? { writes } : {}), ...assigned, ...(unsure ? { unsure } : {}) });
     const stack = [...(stacks.get(scope) ?? [])];
     if (builtin === 'cd' || builtin === 'pushd') {
       // `pushd -n dir` puts dir on the stack without moving; bare `pushd` and `pushd +N` rotate.
@@ -494,7 +508,7 @@ export function readCommand(command: string, cwd: string, opts: { keepRedirects?
     }
     const dir = chdir === undefined ? from : literalDir(chdir, from);
     if (child !== undefined) dirOf.set(child, dir);
-    return { words, env: names, scope, dir };
+    return { words, env: names, scope, dir, ...(computed ? { computed } : {}), ...(writes ? { writes } : {}), ...assigned };
   });
   return { segments, truncated: budget.truncated };
 }
@@ -527,11 +541,12 @@ function expandSegment(seg: string[], opts: ReadOpts, depth: number, out: string
     return;
   }
   budget.left--;
-  const { rest: raw, names, chdir, assigns } = readPrefix(seg, budget);
+  const { rest: raw, names, chdir, assigns, computed } = readPrefix(seg, budget);
+  const writes = writesFile(raw);
   // `env -C dir` / `sudo -D dir` runs the program, and what it runs, elsewhere: also reported
   //   as the name `:chdir`.
   const child = chdir === undefined ? undefined : `${opts.scope ?? '0'}.c${++budget.nested}`;
-  opts.meta?.push({ env: chdir === undefined ? names : [...names, ':chdir'], scope: opts.scope ?? '0', chdir, child, assigns });
+  opts.meta?.push({ env: chdir === undefined ? names : [...names, ':chdir'], scope: opts.scope ?? '0', chdir, child, assigns, ...(computed ? { computed } : {}), ...(writes ? { writes: true as const } : {}) });
   const inner = child === undefined ? opts : { ...opts, scope: child };
   const read = dropRedirects(raw);
   const plain = programWords(read);
@@ -684,6 +699,25 @@ export function segmentChanging(command: string, names: (word: string) => boolea
 
 const REDIRECT = /^\d*(&>>?|>>?|<<<|<<|<|>&|<&)(.*)$/;
 
+/** Whether a segment's words (redirections kept) send output into a file: a `>`, `>>`, `>|`, `&>` or `<>` as a word of its
+ *  own or glued into one (`echo hi>README.md`; quotes are already gone from the words, so a `>` inside a quoted text reads
+ *  as one too: fail closed), and `>&word` when the word is no descriptor. The target is the rest of the word or the next
+ *  word; `/dev/null`, `/dev/stdout`, `/dev/stderr`, `/dev/tty` and `/dev/fd/N` (after `..` is resolved) are no file
+ *  (`/dev/shm/x` is). */
+function writesFile(words: string[]): boolean {
+  for (let i = 0; i < words.length; i++) {
+    const at = words[i]!.indexOf('>');
+    if (at < 0) continue;
+    const m = /^>>?([|&]?)(.*)$/.exec(words[i]!.slice(at));
+    if (!m) continue;
+    const target = m[2] !== '' ? m[2]! : (words[i + 1] ?? '');
+    if (m[1] === '&' && /^(?:\d+|-)$/.test(target)) continue;
+    if (/^\/dev\/(?:null|stdout|stderr|tty|fd\/\d+)$/.test(posix.normalize(target))) continue;
+    return true;
+  }
+  return false;
+}
+
 /** A segment's words without redirections: `2>&1`, `>out`, `> out`, `&>/dev/null`, `<<EOF`.
  *  An operator standing alone takes the next word as its target. */
 export function dropRedirects(words: string[]): string[] {
@@ -739,8 +773,9 @@ const MAX_SPLIT_STRINGS = 16;
 export function readPrefix(
   words: string[],
   budget?: { truncated: boolean },
-): { rest: string[]; names: string[]; assigns: [string, string][]; chdir?: string | null } {
+): { rest: string[]; names: string[]; assigns: [string, string][]; chdir?: string | null; computed?: true } {
   let ws = words;
+  let computed = false;
   const names: string[] = [];
   const assigns: [string, string][] = [];
   let chdir: string | null | undefined;
@@ -753,8 +788,10 @@ export function readPrefix(
     if (SHELL_KEYWORDS.has(w)) i++;
     // `function f { …; }`: the name is no program (layer-1 round: the body was hidden).
     else if (w === 'function') i += 2;
-    else if (/^\$\([^]*\)$|^`[^]*`$/.test(w)) i++;
-    else if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) {
+    else if (/^\$\([^]*\)$|^`[^]*`$/.test(w)) {
+      computed = true;
+      i++;
+    } else if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) {
       names.push(w.slice(0, w.indexOf('=')));
       assigns.push([w.slice(0, w.indexOf('=')), w.slice(w.indexOf('=') + 1)]);
       i++;
@@ -787,7 +824,7 @@ export function readPrefix(
       if (p === 'timeout' && /^\d+(?:\.\d+)?[smhd]?$/.test(ws[i] ?? '')) i++;
     } else break;
   }
-  return chdir === undefined ? { rest: ws.slice(i), names, assigns } : { rest: ws.slice(i), names, assigns, chdir };
+  return { rest: ws.slice(i), names, assigns, ...(chdir === undefined ? {} : { chdir }), ...(computed ? { computed: true as const } : {}) };
 }
 
 /** Default ports of URL schemes curl, wget and httpie speak. */

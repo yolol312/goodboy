@@ -312,7 +312,8 @@ export function skillHandsOff(cwd: string): boolean {
   return r.stalled || r.code === 0;
 }
 
-const PUSH_VALUE_OPTS = new Set(['--repo', '--receive-pack', '--exec', '-o', '--push-option']);
+/** The options of `git push` that take a value (the commit scan reads a push the same way). */
+export const PUSH_VALUE_OPTS: ReadonlySet<string> = new Set(['--repo', '--receive-pack', '--exec', '-o', '--push-option']);
 /** git commands that are never a push, so their name needs no alias lookup (git never lets an
  *  alias hide a built-in; the commit issue rule uses the list the same way). */
 export const GIT_BUILTINS: ReadonlySet<string> = new Set([
@@ -351,7 +352,7 @@ function aliasOf(sub: string, inline: Map<string, string>, cwd: string): string[
 /** True when the repo's config makes a refspec-less push send more than the current branch.
  *  With no remote named, the one git uses: branch.<b>.pushRemote, remote.pushDefault,
  *  branch.<b>.remote, then origin (layer-1 round). */
-function pushConfigSendsMore(cwd: string, named: string | undefined): boolean {
+export function pushConfigSendsMore(cwd: string, named: string | undefined): boolean {
   let remote = named;
   if (remote === undefined) {
     const branch = git(cwd, ['symbolic-ref', '--short', '-q', 'HEAD']);

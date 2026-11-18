@@ -83,6 +83,7 @@ import { cmdUiCheck } from './ui-check';
 import { cmdUiInventory } from './ui-inventory';
 import { readRunResult, type RunProof } from './sandbox-proof';
 import { sandboxCommand } from './sandbox-run';
+import { commitScanCommand, gitHooksCommand, pushScanCommand } from './git-hooks';
 
 // ---- 유틸 ----
 
@@ -1420,6 +1421,22 @@ async function cmdSandbox(command: string, cwd: string, args: string[]): Promise
   if (r.code !== 0) process.exitCode = r.code;
 }
 
+/** The commit and push scan (track M, M6f; lib/git-hooks.ts): `git-hooks install [--force] | uninstall`, `commit-scan
+ *  [--hook pre-commit|commit-msg <file>]`, `push-scan [<remote> [<refspec>...]] | [--hook pre-push <remote> <url>]`. They
+ *  work on the repo the shell is in (not the session's project dir): the hooks run there. */
+async function cmdCommitScan(command: string, shell: string, args: string[]): Promise<void> {
+  const r =
+    command === 'git-hooks'
+      ? gitHooksCommand(args, shell, resolve(import.meta.dir, 'cli.ts'), process.execPath)
+      : command === 'commit-scan'
+        ? commitScanCommand(args, shell)
+        : pushScanCommand(args, shell, args[0] === '--hook' ? await readStdinCapped(1024 * 1024) : '');
+  if ('error' in r) fail(r.error);
+  if ('stderr' in r && r.stderr !== undefined) process.stderr.write(r.stderr);
+  if (r.out !== undefined) process.stdout.write(JSON.stringify(r.out, null, 2) + '\n');
+  if (r.code !== 0) process.exitCode = r.code;
+}
+
 /** The track M gates (plan §19): `coverage-check <report...> [--root-map from=to]` (M2, every
  *  non-UI code file at 100% lines and branches), `ui-inventory [--summary]` and `ui-check [--run
  *  <ts>] [--log f]... [--report f]... [--inventory f]` (M3, every screen and action by e2e).
@@ -1624,7 +1641,7 @@ async function cmdCheckup(command: string, args: string[]): Promise<void> {
 
 const USAGE =
   '사용법: bun lib/cli.ts <command> [args...]\n' +
-  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | test-survey [--all | --dir <dir>] [--max N] | backfill-plan | backfill-next [--size N] [--pick a,b] | backfill-mark <file> --status done|skipped|suspect [--tests a,b] [--note text] | backfill-status | sandbox-scan | sandbox-init [--force] | sandbox-local --dump <abs path> [--format sql|custom] [--input <abs path>]... | sandbox-check | sandbox-prepare [--timeout-ms N] | sandbox-up [--wait-seconds N] [--app-logs] | sandbox-run [--suite unit|e2e|all] [--timeout-ms N] [-- cmd...] | sandbox-down [--volumes] | sandbox-data schema | sandbox-data shape <table>.<col> | sandbox-data count <table> [--where <json>] | sandbox-data pick <table> --where <json> [--n N] | coverage-check <report...> [--root-map from=to] | ui-inventory [--summary] | ui-check [--run <ts>] [--log f]... [--report f]... [--inventory f] | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text> | checkup-state | checkup-begin [--cli <v>] [--replace] | checkup-changelog [--from <v>|none] [--to <v>] [--ids a,b] [--changelog <path>] [--max-matched N] [--max-unmapped N] [--run <id>] | checkup-write --run <id> --name <file> | checkup-complete --run <id> | checkup-abort --run <id> | checkup-projects [--add <dir>|--remove <dir>] [--suggest] | checkup-inventory [--run <id>] (checkup-changelog --inventory adds its identifiers) | checkup-health [--run <id>] [--timeout-ms N] | checkup-smoke [--run <id>] | checkup-compare --run <id> | checkup-probe --run <id> (--estimate | --estimate-id <id>)';
+  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | test-survey [--all | --dir <dir>] [--max N] | backfill-plan | backfill-next [--size N] [--pick a,b] | backfill-mark <file> --status done|skipped|suspect [--tests a,b] [--note text] | backfill-status | sandbox-scan | sandbox-init [--force] | sandbox-local --dump <abs path> [--format sql|custom] [--input <abs path>]... | sandbox-check | sandbox-prepare [--timeout-ms N] | sandbox-up [--wait-seconds N] [--app-logs] | sandbox-run [--suite unit|e2e|all] [--timeout-ms N] [-- cmd...] | sandbox-down [--volumes] | git-hooks install [--force] | git-hooks uninstall | commit-scan [--hook pre-commit|commit-msg <file>] | push-scan [<remote> [<refspec>...]] | push-scan --hook pre-push <remote> <url> | sandbox-data schema | sandbox-data shape <table>.<col> | sandbox-data count <table> [--where <json>] | sandbox-data pick <table> --where <json> [--n N] | coverage-check <report...> [--root-map from=to] | ui-inventory [--summary] | ui-check [--run <ts>] [--log f]... [--report f]... [--inventory f] | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text> | checkup-state | checkup-begin [--cli <v>] [--replace] | checkup-changelog [--from <v>|none] [--to <v>] [--ids a,b] [--changelog <path>] [--max-matched N] [--max-unmapped N] [--run <id>] | checkup-write --run <id> --name <file> | checkup-complete --run <id> | checkup-abort --run <id> | checkup-projects [--add <dir>|--remove <dir>] [--suggest] | checkup-inventory [--run <id>] (checkup-changelog --inventory adds its identifiers) | checkup-health [--run <id>] [--timeout-ms N] | checkup-smoke [--run <id>] | checkup-compare --run <id> | checkup-probe --run <id> (--estimate | --estimate-id <id>)';
 
 async function main(): Promise<void> {
   // The session's project dir, not the shell's dir after a `cd`: the records written here are
@@ -1697,6 +1714,11 @@ async function main(): Promise<void> {
       case 'ui-inventory':
       case 'ui-check':
         cmdTrackMCheck(command, cwd, shell, args);
+        break;
+      case 'git-hooks':
+      case 'commit-scan':
+      case 'push-scan':
+        await cmdCommitScan(command, shell, args);
         break;
       case 'sandbox-scan':
       case 'sandbox-init':

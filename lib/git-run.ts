@@ -53,6 +53,9 @@ export interface GitOptions {
   left?: () => number;
   /** Environment the caller adds: only OPERATIONAL_ENV names pass, never over the safety ones. */
   env?: Record<string, string>;
+  /** Environment names to leave out of the call (the process's own, which git's hooks inherit): a read of the configured
+   *  identity must not see the command's `GIT_AUTHOR_*` or `GIT_CONFIG_PARAMETERS` (lib/commit-scan.ts). */
+  unsetEnv?: RegExp;
   maxBuffer?: number;
   /** `--no-optional-locks`: a `status` refresh must not hold the user's index.lock. */
   noOptionalLocks?: boolean;
@@ -269,13 +272,14 @@ export function spawnGit(cwd: string, args: readonly string[], opts: GitOptions 
   const env: Record<string, string> = { ...(process.env as Record<string, string>) };
   for (const [k, v] of Object.entries(opts.env ?? {})) if (OPERATIONAL_ENV.has(k)) env[k] = v;
   Object.assign(env, HOOK_GIT_ENV, NO_GRAFTS);
+  if (opts.unsetEnv !== undefined) for (const k of Object.keys(env)) if (opts.unsetEnv.test(k)) delete env[k];
   if (opts.cLocale) {
     env.LC_ALL = 'C';
     delete env.LANGUAGE;
   }
 
   const bin = resolveGitBinary(env, cwd);
-  const overridden = Object.keys(opts.env ?? {}).length > 0 || opts.cLocale === true || opts.maxBuffer !== undefined || opts.honorReplace === true || opts.noMemo === true;
+  const overridden = opts.unsetEnv !== undefined || Object.keys(opts.env ?? {}).length > 0 || opts.cLocale === true || opts.maxBuffer !== undefined || opts.honorReplace === true || opts.noMemo === true;
   // The kind is the subcommand's; the caller's global options (`-c core.quotePath=false`, `-C`) are
   //   part of the key below, so the same question asked with other options is another entry.
   const kept = snapshot !== null && !overridden ? memoCodes(args.slice(at), opts.input) : null;

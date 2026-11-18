@@ -28,7 +28,7 @@ import { stripHeredocs, type HeredocOwner } from './bash-write';
 import { ensureSessionDir } from './file-tracker';
 import { spawnGit } from './git-run';
 import { splitAliasValue } from './hook-git';
-import { GIT_VALUE_OPTS, WHOLE_SUBSTITUTION, cdTarget, mentionsGit, readCommand, shellReadsStdin } from './outward-command';
+import { GIT_VALUE_OPTS, WHOLE_SUBSTITUTION, cdTarget, gitSubcommandAt, mentionsGit, readCommand, shellReadsStdin, stripPrefix, xargsCommandAt } from './outward-command';
 import { GIT_BUILTINS } from './push-test';
 import { readRegular } from './safe-read';
 
@@ -189,6 +189,10 @@ const MAX_GIT_CALLS = 8;
 const MAX_DEPTH = 2;
 /** Env that moves git's config or repository away from what goodboy reads. */
 const ENV_MOVES_GIT = /^(?:GIT_CONFIG\w*|GIT_DIR|GIT_COMMON_DIR|GIT_WORK_TREE|HOME|XDG_CONFIG_HOME)$/;
+/** The same for the commit scan (collect mode), which also reads where the index and the objects are and which ref
+ *  namespace counts: a commit made with another index stores another tree than the one the scan reads. The commit
+ *  issue rule keeps ENV_MOVES_GIT as it was. */
+const ENV_MOVES_GIT_COLLECT = /^(?:GIT_CONFIG\w*|GIT_DIR|GIT_COMMON_DIR|GIT_WORK_TREE|GIT_INDEX_FILE|GIT_OBJECT_DIRECTORY|GIT_ALTERNATE_OBJECT_DIRECTORIES|GIT_NAMESPACE|HOME|XDG_CONFIG_HOME)$/;
 
 const NO_MESSAGE =
   'This `git commit` has no message goodboy can read (it would open an editor, or its message file does not exist yet), and every commit needs an issue number (commit issue rule). Pass the message with -m, including the issue key (e.g. `ABC-123`) or `#123`. If you do not know the issue number, ask the user.';
@@ -225,7 +229,85 @@ interface GitScope {
 }
 const NO_SCOPE: GitScope = { cfg: [], repo: [], moved: false };
 
+/** What the commit scan (lib/commit-scan.ts) asks the reader for: every `git commit` and `git push` a command
+ *  runs, found through aliases, shells and heredocs the way the commit issue rule finds them, and what ran before
+ *  each. In this mode nothing is judged: a text the reader cannot follow is noted instead of denied. */
+interface Collect {
+  calls: GitCall[];
+  /** The segments walked so far, in order (a call keeps how many came before it). */
+  movers: GitMover[];
+  unreadable: string[];
+  /** The fixed texts (READER_NOTES) of the shapes noted, each once: what the scan shows besides the general reason. */
+  notes: string[];
+  /** A `git config` write ran in an earlier segment: it can define an alias or change a setting read before. */
+  configWrite: boolean;
+  /** An earlier segment assigned or exported a name of ENV_MOVES_GIT_COLLECT (`export GIT_DIR=…`, `GIT_DIR=x;`). */
+  envMoved: boolean;
+  /** The values of an identity name (GIT_AUTHOR_NAME …, EMAIL) assigned or exported by an earlier segment, and whether one
+   *  was set to something the words do not show (`export GIT_AUTHOR_NAME`, `="$N"`). */
+  identity: string[];
+  identityComputed: boolean;
+  /** The same for the segment being read (the `NAME=value` prefix of the call itself). */
+  segIdentity: { values: string[]; computed: boolean };
+}
+
+/** The names that set who a commit is by (the commit scan reads the values it can see, and fails closed on the rest). */
+const IDENTITY_ENV = /^(?:GIT_AUTHOR_NAME|GIT_AUTHOR_EMAIL|GIT_COMMITTER_NAME|GIT_COMMITTER_EMAIL|EMAIL)$/;
+function identityOf(pairs: Array<[string, string | undefined]>): { values: string[]; computed: boolean } {
+  const out = { values: [] as string[], computed: false };
+  for (const [name, value] of pairs) {
+    if (!IDENTITY_ENV.test(name)) continue;
+    if (value === undefined || /[$`]/.test(value)) out.computed = true;
+    else out.values.push(value);
+  }
+  return out;
+}
+
+/** What the commit scan shows when the reader meets a shape that hides what runs (collect mode only; no command text). */
+const READER_NOTES = {
+  program: 'a command word is built at run time (a variable or a substitution), so what runs is not known',
+  subcommand: 'a git subcommand is not a literal name (a variable, a substitution or a placeholder)',
+  eval: '`eval` runs text built at run time',
+  stdin: 'a shell reads its script from stdin or a pipe, and the script is no heredoc of this command',
+  xargs: '`xargs` runs git with a subcommand that comes from its input',
+  config: 'a `git config` write comes before a git call in this command, and can define an alias or change a setting the reader looked up',
+} as const;
+
+/** A segment that ran before a call: its words (past `rtk`), whether it is itself one of the collected calls, and whether
+ *  it writes a file by a redirect. */
+export interface GitMover {
+  words: string[];
+  call: boolean;
+  /** The segment redirects its output into a file (`echo x >> f`). */
+  writes: boolean;
+}
+
+/** A `git commit` or `git push` found in a command. `sub` is `unknown` when the repo it runs in cannot be told (a
+ *  computed `-C` dir, a subcommand built at run time), and `refmove` for a `git update-ref` or `git symbolic-ref` that
+ *  may move a remote-tracking ref (the push scan takes those refs as what the remote has), and `repoint` for a command
+ *  that re-points a remote (`git remote set-url`, a config write of a remote's url, `-c remote.x.url=…` on a push). */
+export interface GitCall {
+  sub: 'commit' | 'push' | 'unknown' | 'refmove' | 'repoint';
+  /** The words after the subcommand. */
+  args: string[];
+  /** Where it runs. */
+  dir: string;
+  /** The `-c` settings and repo options (`--git-dir`, `--work-tree`) of the git that runs it, as git arguments. */
+  globals: string[];
+  /** Env or `--config-env` moves git's config or repository away from what goodboy reads. */
+  moved: boolean;
+  /** The segments of the command (shared by all its calls); the first `at` ran before this call (every one of the
+   *  command when it has loops or functions). */
+  movers: GitMover[];
+  at: number;
+  /** The identity values the environment gives it that the words show (its `NAME=value` prefix, an earlier assignment or
+   *  export), and whether some other value is not shown. */
+  identity: string[];
+  identityComputed: boolean;
+}
+
 interface Ctx {
+  collect?: Collect;
   pins: SessionPins;
   deadline: number;
   calls: number;
@@ -303,6 +385,9 @@ function readMessage(ctx: Ctx, p: string, shown: string): string | null {
  *  `-S[keyid]` and `-u[mode]` take one only attached. */
 const VALUE_OPTS: ReadonlySet<string> = new Set(['-m', '-F', '-C', '-c', '-t', '--message', '--file', '--reuse-message', '--reedit-message', '--fixup', '--squash', '--template', '--author', '--date', '--cleanup', '--trailer', '--pathspec-from-file']);
 const ATTACHED_ONLY = new Set(['S', 'u']);
+/** The same tables for the commit scan (lib/commit-scan.ts), which reads a commit's arguments the same way. */
+export const COMMIT_VALUE_OPTS: ReadonlySet<string> = VALUE_OPTS;
+export const COMMIT_ATTACHED_ONLY: ReadonlySet<string> = ATTACHED_ONLY;
 
 interface CommitSource {
   /** `-m` values in order, then `--trailer` values. */
@@ -443,6 +528,54 @@ function aliasOf(ctx: Ctx, sub: string, here: string, scope: GitScope): string[]
 
 const SHELLS = /^(?:ba|z|da|k|c|tc|fi)?sh$/;
 
+/** The forms of `git config` that only read (every other form may write). */
+const CONFIG_READS = ['--get', '--get-all', '--get-regexp', '--list', '-l', '--show-origin', '--show-scope', '--name-only', '--get-urlmatch', '--get-color', '--get-colorbool'];
+
+/** `git update-ref` and `git symbolic-ref` with a ref under `refs/remotes/` (any case: the default macOS volume ignores
+ *  it), a computed ref name (the first word that is no option; a computed new value is no move of a named ref), or
+ *  commands from stdin: they may move a remote-tracking ref. */
+function movesTrackingRef(sub: string, args: string[]): boolean {
+  if (sub !== 'update-ref' && sub !== 'symbolic-ref') return false;
+  const named = args.filter((a, k) => !a.startsWith('-') && args[k - 1] !== '-m');
+  return args.some((a) => /refs\/remotes\//i.test(a) || a === '--stdin') || /[$`]/.test(named[0] ?? '');
+}
+
+/** The config keys that say where a remote is: a remote's url and pushurl, and the rewrites of a url (keys ignore case). */
+const REMOTE_KEY = /^(?:remote\..+\.(?:url|pushurl)|url\..+\.(?:insteadof|pushinsteadof))$/i;
+
+/** `git remote set-url` and `git remote rename`, and a `git config` write of a key of REMOTE_KEY (a value, `--add`,
+ *  `--replace-all`, `--unset`, a section rename or removal): after one, the remote's name means another destination, and the
+ *  push scan would take its tracking refs as what that destination has. A plain read (`git config remote.origin.url`) is none. */
+function repointsRemote(sub: string, args: string[]): boolean {
+  // the words that are no option and no option's value (`--file F "$K" x`: F is the file's name)
+  const positional: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (CONFIG_VALUE_OPTS.has(a)) i++;
+    else if (!a.startsWith('-')) positional.push(a);
+  }
+  // a computed subcommand or key (`git remote "$A" …`, `git config "$K" x`) is whatever it is when it runs, as a computed ref is
+  const computed = (a: string | undefined): boolean => /[$`]/.test(a ?? '');
+  if (sub === 'remote') return positional[0] === 'set-url' || positional[0] === 'rename' || computed(positional[0]);
+  if (sub !== 'config' || CONFIG_READS.some((r) => args.includes(r))) return false;
+  // git 2.46 spells the writes as subcommands: `git config set|unset|edit|remove-section|rename-section …`; `get` and `list` read
+  const verb = ['set', 'unset', 'edit', 'remove-section', 'rename-section'].includes(positional[0] ?? '') ? positional[0]! : null;
+  if (positional[0] === 'get' || positional[0] === 'list') return false;
+  const keys = verb === null ? positional : positional.slice(1);
+  const section = verb === 'remove-section' || verb === 'rename-section' || args.some((a) => /^--(?:rename-section|remove-section)$/.test(a));
+  const writes = verb !== null || positional.length >= 2 || args.some((a) => /^--(?:add|replace-all|unset|unset-all|edit)$/.test(a) || a === '-e');
+  return (writes && (keys.some((a) => REMOTE_KEY.test(a)) || computed(keys[0]))) || (section && keys.some((a) => /^(?:remote|url)\./i.test(a) || computed(a)));
+}
+
+/** The options of `git config` that take the next word as their value. */
+const CONFIG_VALUE_OPTS: ReadonlySet<string> = new Set(['-f', '--file', '--blob', '-t', '--type', '--default', '--comment']);
+
+function note(col: Collect, text: string): void {
+  if (col.notes.includes(text)) return;
+  col.notes.push(text);
+  col.unreadable.push(text);
+}
+
 function checkGit(words: string[], dir: string, ctx: Ctx, depth: number, from: GitScope, src: Src, stdin: Src): string | null {
   let here = dir;
   const cfg = [...from.cfg];
@@ -472,6 +605,48 @@ function checkGit(words: string[], dir: string, ctx: Ctx, depth: number, from: G
   const scope: GitScope = { cfg, repo: [...from.repo, ...repo.map(([n, v]) => `${n}=${resolvePath(here, v)}`)], moved };
   const sub = words[i];
   if (sub === undefined) return null;
+  const col = ctx.collect;
+  if (col !== undefined) {
+    const call = (kind: GitCall['sub'], args: string[]): GitCall => ({
+      sub: kind,
+      args,
+      dir: here,
+      globals: [...scope.cfg.flatMap((c) => ['-c', c]), ...scope.repo],
+      moved: scope.moved || scope.cfg.some((c) => /^(?:include|includeif|core\.worktree)/i.test(c)),
+      movers: col.movers,
+      at: col.movers.length,
+      identity: [...col.identity, ...col.segIdentity.values],
+      identityComputed: col.identityComputed || col.segIdentity.computed,
+    });
+    const args = words.slice(i + 1);
+    // A repo that cannot be told: a commit, a push, or a word that may be an alias of one, is a call whose repo is unknown.
+    if (unknownRepo !== null) {
+      if (sub === 'commit' || sub === 'push' || movesTrackingRef(sub, args) || repointsRemote(sub, args) || !GIT_BUILTINS.has(sub)) col.calls.push(call('unknown', []));
+      return null;
+    }
+    // A subcommand that is no literal name (`git $S`, `git $(echo push)`, `git {}`) is whatever it is when it runs.
+    if (!/^[\w.-]+$/.test(sub)) {
+      note(col, READER_NOTES.subcommand);
+      return null;
+    }
+    // A config write earlier in the command can define the alias this word names, or move what the call reads.
+    if (col.configWrite && (sub === 'commit' || sub === 'push' || !GIT_BUILTINS.has(sub))) note(col, READER_NOTES.config);
+    if (sub === 'config' && !CONFIG_READS.some((r) => args.includes(r))) col.configWrite = true;
+    // `-c remote.x.url=…` on the push itself makes a name mean another destination (the call is scanned too)
+    if (sub === 'push' && scope.cfg.some((c) => REMOTE_KEY.test(c.split('=')[0]!))) col.calls.push(call('repoint', []));
+    if (sub === 'commit' || sub === 'push') {
+      col.calls.push(call(sub, args));
+      return null;
+    }
+    if (movesTrackingRef(sub, args)) {
+      col.calls.push(call('refmove', args));
+      return null;
+    }
+    if (repointsRemote(sub, args)) {
+      col.calls.push(call('repoint', args));
+      return null;
+    }
+  }
   // git never lets an alias hide a built-in, so only `commit` or another word may commit.
   const builtin = GIT_BUILTINS.has(sub) || sub === 'push' || !/^[\w.-]+$/.test(sub);
   // In an unknown repo only a named built-in passes: a subcommand built at run time (`$S`)
@@ -480,10 +655,10 @@ function checkGit(words: string[], dir: string, ctx: Ctx, depth: number, from: G
   const rest = words.slice(i + 1);
   if (sub === 'commit') return checkCommit(rest, here, ctx, scope, src, stdin);
   if (builtin) return null;
-  if (scope.moved) return envConfig(sub);
+  if (scope.moved) return give(ctx, envConfig(sub));
   const expansion = aliasOf(ctx, sub, here, scope);
   if (expansion === null) return null;
-  if (depth >= MAX_DEPTH) return TOO_DEEP;
+  if (depth >= MAX_DEPTH) return give(ctx, TOO_DEEP);
   if (expansion[0]!.startsWith('!')) {
     // A shell alias runs its text with the arguments after it, on the command's stdin.
     const quoted = rest.map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(' ');
@@ -519,16 +694,44 @@ function checkCommand(command: string, cwd: string, ctx: Ctx, depth: number, sco
     read = readCommand(command, cwd);
     src.reads.set(cwd, read);
   }
-  if (read.truncated) return UNREADABLE;
-  for (const { words, dir, env } of read.segments) {
+  if (read.truncated) return give(ctx, UNREADABLE);
+  const col = ctx.collect;
+  // A shell that reads its script from stdin runs a heredoc of this command, or text the reader cannot see (a pipe, a file
+  // redirect, a here-string): one heredoc body for each such shell, the rest are not known.
+  if (col !== undefined) {
+    const reading = read.segments.filter((s) => stdinShell(pastRtk(s.words))).length;
+    if (reading > 0 && reading > heredocShells(src)) note(col, READER_NOTES.stdin);
+  }
+  for (const { words: read0, dir, env, computed, writes, assigns } of read.segments) {
     if (Date.now() > ctx.deadline) throw new Denied(TOO_SLOW);
     const here = dir ?? cwd;
+    // The commit scan reads past the `rtk` proxy (`rtk git commit`); the commit issue rule never did.
+    const words = col !== undefined ? pastRtk(read0) : read0;
     const prog = (words[0] ?? '').split('/').pop() ?? '';
-    const segScope = !scope.moved && env.some((n) => ENV_MOVES_GIT.test(n)) ? { ...scope, moved: true } : scope;
+    const moves = col !== undefined ? ENV_MOVES_GIT_COLLECT : ENV_MOVES_GIT;
+    const segScope = !scope.moved && (env.some((n) => moves.test(n)) || col?.envMoved === true) ? { ...scope, moved: true } : scope;
     const scripts = heredocScripts(words, prog, src);
-    if (scripts === 'eval') return EVAL;
-    if (scripts !== null && scripts.bodies.some(mentionsGit)) {
-      if (depth >= MAX_DEPTH) return TOO_DEEP;
+    if (col !== undefined) col.segIdentity = identityOf(assigns ?? []);
+    if (col !== undefined) {
+      // A program word that is built at run time, an `eval` of such text and an `xargs` that takes git's subcommand from its
+      // input run something the reader cannot name.
+      if ((computed === true && prog !== 'git') || builtAtRunTime(words[0] ?? '')) note(col, READER_NOTES.program);
+      if (prog === 'eval' && scripts === null && words.slice(1).some((w) => /[$`]/.test(w))) note(col, READER_NOTES.eval);
+      if (prog === 'xargs') {
+        const run = words.slice(xargsCommandAt(words));
+        if ((run[0] ?? '').split('/').pop() === 'git' && gitSubcommandAt(run, 1) >= run.length) note(col, READER_NOTES.xargs);
+      }
+    }
+    if (scripts === 'eval') {
+      const stop = give(ctx, EVAL);
+      if (stop !== null) return stop;
+    }
+    if (scripts !== null && scripts !== 'eval' && scripts.bodies.some(mentionsGit)) {
+      if (depth >= MAX_DEPTH) {
+        const stop = give(ctx, TOO_DEEP);
+        if (stop !== null) return stop;
+        continue;
+      }
       // Each script is read once per place and scope (final G1 test round: every shell re-read
       //   every body, which grew with the cube of the command).
       const key = [scripts.kind, depth, here, segScope.moved, ...segScope.cfg, '', ...segScope.repo].join('\0');
@@ -540,11 +743,96 @@ function checkCommand(command: string, cwd: string, ctx: Ctx, depth: number, sco
         src.checked.add(key);
       }
     }
-    if (prog !== 'git') continue;
-    const why = checkGit(words, here, ctx, depth, segScope, src, stdin);
+    const calls = col?.calls.length ?? 0;
+    const why = prog === 'git' ? checkGit(words, here, ctx, depth, segScope, src, stdin) : null;
     if (why !== null) return why;
+    if (col !== undefined) {
+      if (words.length > 0 || writes === true) col.movers.push({ words: words.slice(0, 12), call: col.calls.length > calls, writes: writes === true });
+      // Later segments run with the environment this one set (a bare assignment, or an export of a name that moves git).
+      if (assignsGitEnv(words, env, moves)) col.envMoved = true;
+      const later = words.length === 0 ? identityOf(assigns ?? []) : exportedIdentity(words);
+      col.identity.push(...later.values);
+      if (later.computed) col.identityComputed = true;
+    }
   }
   return null;
+}
+
+/** The identity values an `export`, `declare`, `typeset` or `readonly` segment sets (a name with no value, or a computed one, is
+ *  not shown). */
+function exportedIdentity(words: string[]): { values: string[]; computed: boolean } {
+  if (!['export', 'declare', 'typeset', 'readonly'].includes(words[0] ?? '')) return { values: [], computed: false };
+  return identityOf(words.slice(1).filter((w) => !w.startsWith('-')).map((w): [string, string | undefined] => (w.includes('=') ? [w.slice(0, w.indexOf('=')), w.slice(w.indexOf('=') + 1)] : [w, undefined])));
+}
+
+/** A program word whose name is built at run time (`$g`, `"$BIN"`, `a$(echo b)`): a variable or substitution in it, not only
+ *  in the directory it is found in (`$HOME/bin/tool` is the program `tool`). */
+function builtAtRunTime(word: string): boolean {
+  if (!/[$`]/.test(word)) return false;
+  return !word.includes('/') || /[$`)]/.test(word.slice(word.lastIndexOf('/') + 1));
+}
+
+/** The shells of `src` that a heredoc of the text feeds, exactly: `bash <<'EOF'` (the heredoc's own segment is a shell with no
+ *  file redirect), and `cat <<EOF | sh` (a plain `cat` that nothing pipes into, then the shell). */
+function heredocShells(src: Src): number {
+  return heredocSegments(src.text).filter((h) => feeds(h, stdinShell)).length;
+}
+
+/** A segment that is a shell reading its script from stdin (`sh`, `bash -s`, `sh < file`, `echo … | sh`). */
+function stdinShell(words: string[]): boolean {
+  return SHELLS.test((words[0] ?? '').split('/').pop() ?? '') && shellReadsStdin(words);
+}
+
+/** A bare assignment (`GIT_DIR=x;`) or an `export`, `declare`, `typeset`, `readonly` of a name that moves git's config,
+ *  repository, index or objects. An `env NAME=… cmd` prefix is the command's own and does not count. */
+function assignsGitEnv(words: string[], env: string[], moves: RegExp): boolean {
+  if (words.length === 0) return env.some((n) => moves.test(n));
+  if (!['export', 'declare', 'typeset', 'readonly'].includes(words[0]!)) return false;
+  return words.slice(1).some((w) => !w.startsWith('-') && moves.test(w.split('=')[0]!));
+}
+
+/** Outside collection a text the reader cannot follow is the call's denial; inside it, it is noted and the walk goes on
+ *  (null). */
+function give(ctx: Ctx, why: string): string | null {
+  if (ctx.collect === undefined) return why;
+  ctx.collect.unreadable.push(why);
+  return null;
+}
+
+/** A segment's words past the `rtk` token-filter proxy and the prefix commands after it. */
+function pastRtk(words: string[]): string[] {
+  if ((words[0] ?? '').split('/').pop() !== 'rtk') return words;
+  return stripPrefix(words.slice(words[1] === 'proxy' ? 2 : 1));
+}
+
+/** The `git commit` and `git push` calls a command runs (for the commit scan, lib/commit-scan.ts), found the way
+ *  the commit issue rule finds a commit: through git aliases (also `-c alias.x=…`), `sh -c`, `eval` of a heredoc,
+ *  xargs, find -exec, with each call's dir and repo options. `unreadable` lists what the reader could not follow
+ *  (a script too large or nested, a substitution that runs as a command, an alias past its depth, a git lookup that
+ *  stalled or went over its bounds); the calls found before it are still returned. `notes` are the fixed texts of the
+ *  shapes that hide what runs (a program or subcommand built at run time, `eval` of built text, a shell reading a
+ *  pipe, `xargs git`, a config write before a call); each is also in `unreadable`. A call carries `moved` when an
+ *  earlier segment exported or assigned a git environment name. Reads at most 8 git configs. */
+export function gitCallsOf(command: string, cwd: string): { calls: GitCall[]; unreadable: string[]; notes: string[] } {
+  const collect: Collect = { calls: [], movers: [], unreadable: [], notes: [], configWrite: false, envMoved: false, identity: [], identityComputed: false, segIdentity: { values: [], computed: false } };
+  if (!mentionsGit(command)) return { calls: [], unreadable: [], notes: [] };
+  const ctx: Ctx = { collect, pins: { since: 0, pins: {} }, deadline: Date.now() + BUDGET_MS, calls: 0, bytes: 0, srcs: new Map(), reused: new Map(), aliases: new Map(), files: new Map() };
+  try {
+    checkCommand(command, cwd, ctx, 0, NO_SCOPE);
+  } catch (err) {
+    collect.unreadable.push(err instanceof Denied ? err.message : `the reader failed: ${String(err).slice(0, 120)}`);
+  }
+  // A loop or a function may run any segment before any other.
+  if (/\b(?:for|while|until|select|function)\b|\(\s*\)/.test(command)) {
+    for (const c of collect.calls) {
+      c.at = collect.movers.length;
+      if (collect.envMoved) c.moved = true;
+      c.identity = [...new Set([...c.identity, ...collect.identity])];
+      c.identityComputed = collect.identityComputed;
+    }
+    if (collect.configWrite && collect.calls.length > 0) note(collect, READER_NOTES.config);
+  }
+  return { calls: collect.calls, unreadable: collect.unreadable, notes: collect.notes };
 }
 
 /** Why `command` may not run under the rule, or null. */
@@ -566,9 +854,104 @@ export function commitIssueDenial(command: string, cwd: string, sessionId: strin
   return why;
 }
 
-/** The bodies of every heredoc in `command`, quoted or not. */
-export function heredocBodies(command: string): string[] {
+/** One heredoc of a command with the segment it belongs to, read from the text without its heredocs (the operator is gone
+ *  from it, `HeredocOwner.at` says where it was). */
+interface HeredocSegment {
+  body: string;
+  /** Opens a command substitution (`$(cat <<TAG`): its owner is the `cat` inside it. */
+  substitution: boolean;
+  /** `cat` of `$(cat <<TAG … TAG)`, with no operand: a message word's own body. */
+  cat: boolean;
+  /** The segment's text and words (prefix commands stripped), when it is short enough to read. */
+  text: string;
+  words: string[];
+  /** This is the only heredoc of its segment and the segment has no `<` (a file, a here-string, a descriptor). */
+  clean: boolean;
+  /** Nothing pipes into the segment (the previous separator is no single `|`). */
+  first: boolean;
+  /** The segment the single `|` after it feeds, when it is not itself a heredoc segment and has no `<`. */
+  piped: { text: string; words: string[] } | null;
+}
+
+/** The longest segment read (a longer one is not "clean": fail closed). */
+const MAX_SEGMENT = 4096;
+const SEGMENT_END = /[\n;&|()]/;
+
+function heredocSegments(command: string): HeredocSegment[] {
   const bodies: string[] = [];
-  stripHeredocs(command, { bodies });
-  return bodies;
+  const owners: Array<HeredocOwner | undefined> = [];
+  const text = stripHeredocs(command, { bodies, owners });
+  if (bodies.length === 0) return [];
+  // the separators once: a segment is found by search, so many heredocs on one long line cost no square
+  // (a command substitution inside a word, `-m "$(cat)"`, does not end the segment it is in)
+  const masked = text.replace(/\$\([^()]*\)/g, (m) => 'x'.repeat(m.length));
+  const seps: number[] = [];
+  for (let i = 0; i < masked.length; i++) if (SEGMENT_END.test(masked[i]!)) seps.push(i);
+  // the index in `seps` of the first separator at or after `from`
+  const lowerBound = (from: number): number => {
+    let lo = 0;
+    let hi = seps.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (seps[mid]! < from) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+  const nextSep = (from: number): number => seps[lowerBound(from)] ?? text.length;
+  const startOf = (at: number): number => {
+    const i = lowerBound(at);
+    return i > 0 ? seps[i - 1]! + 1 : 0;
+  };
+  const starts = owners.map((o) => (o === undefined || o.substitution ? -1 : startOf(o.at)));
+  const perSegment = new Map<number, number>();
+  for (const st of starts) if (st >= 0) perSegment.set(st, (perSegment.get(st) ?? 0) + 1);
+  const wordsOf = (t: string): string[] => stripPrefix(t.split(/\s+/).filter(Boolean));
+  return bodies.map((body, k): HeredocSegment => {
+    const o = owners[k];
+    const none = { body, substitution: false, cat: false, text: '', words: [], clean: false, first: false, piped: null };
+    if (o === undefined) return none;
+    if (o.substitution) return { ...none, substitution: true, cat: o.words.trim() === 'cat' };
+    const start = starts[k]!;
+    const end = nextSep(o.at);
+    if (end - start > MAX_SEGMENT) return none;
+    const segText = text.slice(start, end);
+    const clean = perSegment.get(start) === 1 && !segText.includes('<');
+    const before = start > 0 ? text[start - 1] : '\n';
+    const first = before !== '|' || text[start - 2] === '|';
+    let piped: HeredocSegment['piped'] = null;
+    if (text[end] === '|' && text[end + 1] !== '|') {
+      const from = end + 1;
+      const to = nextSep(from);
+      const next = text.slice(from, to);
+      const nextStart = from + (next.length - next.trimStart().length);
+      if (to - from <= MAX_SEGMENT && !next.includes('<') && !perSegment.has(from) && !perSegment.has(nextStart)) piped = { text: next, words: wordsOf(next) };
+    }
+    return { body, substitution: false, cat: false, text: segText, words: wordsOf(segText), clean, first, piped };
+  });
+}
+
+const isPlainCat = (words: string[]): boolean => (words[0] ?? '').split('/').pop() === 'cat' && words.slice(1).every((w) => w.startsWith('-') && w !== '-');
+
+/** Whether the heredoc is, exactly, the stdin of a segment `reads` accepts: that segment itself, or a plain `cat` (no file
+ *  operand, nothing piped into it) piped into it. */
+function feeds(h: HeredocSegment, reads: (words: string[], text: string) => boolean): boolean {
+  if (h.substitution || !h.clean) return false;
+  if (reads(h.words, h.text)) return true;
+  return h.first && isPlainCat(h.words) && h.piped !== null && reads(h.piped.words, h.piped.text);
+}
+
+/** A `git commit` segment whose message comes from its stdin: `-F -`, `--file=-`, `/dev/stdin`, descriptor 0, or a bare
+ *  `$(cat)` word. */
+const STDIN_MESSAGE = /(?:^|\s)(?:-[a-zA-Z]*F|--file)(?:\s*=?\s*)['"]?(?:-|\/dev\/stdin|\/dev\/fd\/0|\/proc\/self\/fd\/0)['"]?(?=\s|$)|\$\([ \t]*cat[ \t]*\)|`[ \t]*cat[ \t]*`/;
+const commitReadingStdin = (words: string[], text: string): boolean => (words[0] ?? '').split('/').pop() === 'git' && words[gitSubcommandAt(words, 1)] === 'commit' && STDIN_MESSAGE.test(text);
+
+/** The heredocs a commit's message can come from: `cats`, the bodies of `$(cat <<TAG … TAG)` (a message word holds only that
+ *  `cat`, so the word carries its own heredoc), and `feeders`, in order, the bodies that are exactly the stdin of a `git
+ *  commit` that reads its message from stdin (see `feeds`): on its own segment with no `<` and no other heredoc, or through a
+ *  plain `cat` piped into it. A decoy heredoc (`cat <<EOF >/dev/null`), a file read instead (`< f`, `cat f <<EOF |`), a
+ *  here-string, several heredocs on one segment feed no commit. */
+export function heredocMessages(command: string): { cats: string[]; feeders: string[] } {
+  const segs = heredocSegments(command);
+  return { cats: segs.filter((h) => h.cat).map((h) => h.body), feeders: segs.filter((h) => feeds(h, commitReadingStdin)).map((h) => h.body) };
 }
