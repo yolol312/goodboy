@@ -34,7 +34,7 @@ const MAX_SRC_TOTAL = 64_000_000;
 const MAX_OUTBOUND = 300;
 const MAX_SECRET_KEYS = 300;
 /** Wall time for a whole scan; past it the rest is left out and said so in a question. */
-const SCAN_BUDGET_MS = 60_000;
+export const SCAN_BUDGET_MS = 60_000;
 
 /** Pinned image tags for a store whose version the project does not state. */
 const DEFAULT_VERSION: Record<StoreKind, string> = { postgres: '16', mysql: '8.4', mariadb: '11', redis: '7', mongo: '7' };

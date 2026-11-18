@@ -15,6 +15,19 @@
 // `.claude/reviews` and from the session's project dir's (where `review-write` writes: they differ when the project dir
 // is a subdirectory of the repository).
 //
+// A sandbox file whose current bytes are exactly what goodboy renders for this project is not asked for (user decision
+// 2026-11-18, after the M6 canary step: goodboy's own code is reviewed in goodboy's repo, and a reviewer cannot judge
+// the Playwright config or the proxy's access log of goodboy's own render in a project's terms, so the gate would block
+// a real-data project for good). The gate re-renders the layout itself, with the pure renderer `sandbox-init` uses, from a
+// FRESH in-memory scan of the project (the read-only scanner `sandbox-scan` runs, `scanSandbox`) and the project's
+// `local.json` (`renderedUnchanged`), and exempts a file only when its bytes equal that render. No file the model can
+// write counts as proof: not the `.written.json` ledger, and not `scan.json` either (a hand-edited scan yields files that
+// differ from the fresh render, so they are asked). A scan that throws, has problems or does not finish within
+// `RENDER_SCAN_BUDGET_MS` (the scanner's own 60 s), a render that fails, or a local file that cannot be read exempts nothing. A project whose
+// sources changed since `sandbox-scan` and `sandbox-init` renders differently now, so its files are asked until `sandbox-init
+// --force` writes the new render. What stays asked: a rendered file that differs from its render, a layout file the render
+// does not make for this scan, `data.json`, and the source files that use the helper.
+//
 // Fails closed: a setup that cannot be listed in full (git cannot list, a cap, an unreadable file) is refused with its
 // own fixed reason. A refusal names relative paths and a fixed text, never file contents, and the run writes no
 // result.json. The user can turn the gate off in their settings; the refusal does not name how, and the PreToolUse data
@@ -25,10 +38,15 @@ import { join, resolve } from 'node:path';
 import { withSameContent } from './changed-coverage';
 import { privacySetupOf } from './privacy-files';
 import { recordPath } from './record-paths';
-import { readRegular } from './safe-read';
+import { MAX_DOC_BYTES, readRegular } from './safe-read';
 import { realish } from './review-scope';
 import type { DiagCode } from './sandbox-boundary';
 import { findRecentReviewFiles, validateReviewCoverage } from './review-validator';
+import { SANDBOX_PREFIX } from './sandbox-gate';
+import { readLocal, SANDBOX_DIR } from './sandbox-mode';
+import { planSandbox } from './sandbox-render';
+import { SCAN_BUDGET_MS, scanSandbox } from './sandbox-scan';
+import type { SandboxLocal, SandboxScan } from './sandbox-types';
 import type { ReviewResult } from './types';
 
 export const PRIVACY_DIMENSION = 'data-privacy';
@@ -73,11 +91,69 @@ const how =
   'and run sandbox-run again. A change to a listed file after its review asks for a new review, and so does a review file the Stop has deleted as old. ' +
   'The user can turn this check off in their settings.';
 
-/** What the gate reads, replaceable by a test (the answers of `privacySetupOf` and `findRecentReviewFiles`). */
+/** What the gate reads, replaceable by a test (the answers of `privacySetupOf`, `findRecentReviewFiles` and `renderedUnchanged`). */
 export interface GateReaders {
   setup?: typeof privacySetupOf;
   reviews?: typeof findRecentReviewFiles;
+  rendered?: typeof renderedUnchanged;
 }
+
+/** The wall time the fresh scan of `renderedUnchanged` may take, in ms: the scanner's own budget (`SCAN_BUDGET_MS`, 60 s),
+ *  so a scan that `sandbox-scan` accepted is one the gate accepts. The scan is synchronous and stops itself at its budget
+ *  (leaving the rest out); a scan that took that long is not trusted. The scan of a typical project takes 10 to 400 ms,
+ *  and it runs only when an uncovered file lies below the sandbox dir. */
+export const RENDER_SCAN_BUDGET_MS = SCAN_BUDGET_MS;
+
+/** Why the files could not be re-rendered, as the fixed words a refusal uses. */
+const RENDER_FAILURE = {
+  'scan-threw': 'the project scan failed',
+  'scan-problems': 'the project scan reports problems (git cannot list the files, or it is not a git repository)',
+  'scan-slow': 'the project scan did not finish within its time budget',
+  'local-unreadable': 'the local answers file of the sandbox cannot be read',
+  'render-failed': 'the render failed',
+} as const;
+export type RenderFailure = keyof typeof RENDER_FAILURE;
+
+/** The sandbox files (paths below the repo top) whose current bytes equal what goodboy renders for this project now: the
+ *  layout `sandbox-init` would write, made by `planSandbox` from a fresh scan of the project (`scanSandbox`, read-only,
+ *  nothing written) and `local.json`. Neither `scan.json` nor the ledger is read. Only a file of that render can be in
+ *  `files`, and only when it is a regular file (no link) of the render's exact bytes. A scan that throws, has problems or
+ *  ran past `RENDER_SCAN_BUDGET_MS`, an unreadable local file, or a render that throws gives no file and says why in
+ *  `failure`: nothing is exempt (fail closed). One scan, one render and at most one read per rendered file. `scanner` is
+ *  a test seam. */
+export function renderedUnchanged(root: string, scanner: typeof scanSandbox = scanSandbox): { files: Set<string>; failure: RenderFailure | null } {
+  const none = (failure: RenderFailure) => ({ files: new Set<string>(), failure });
+  const local = ((): SandboxLocal | Error => {
+    try {
+      return readLocal(root);
+    } catch (err) {
+      return err instanceof Error ? err : new Error(String(err));
+    }
+  })();
+  if (local instanceof Error) return none('local-unreadable');
+  let scan: SandboxScan;
+  const t0 = Date.now();
+  try {
+    scan = scanner(root, { budgetMs: RENDER_SCAN_BUDGET_MS });
+  } catch {
+    return none('scan-threw');
+  }
+  if (Date.now() - t0 >= RENDER_SCAN_BUDGET_MS) return none('scan-slow');
+  if (scan.problems.length > 0) return none('scan-problems');
+  const files = new Set<string>();
+  try {
+    for (const [rel, text] of planSandbox(scan, local, { root }).files) {
+      const cur = readRegular(join(root, SANDBOX_DIR, rel), MAX_DOC_BYTES, true);
+      if (typeof cur === 'object' && cur.text === text && cur.st.size === Buffer.byteLength(text, 'utf8')) files.add(`${SANDBOX_PREFIX}${rel}`);
+    }
+  } catch {
+    return none('render-failed');
+  }
+  return { files, failure: null };
+}
+
+/** The first `SHOWN` paths of a group, and how many more. */
+const listed = (files: readonly string[]): string => files.slice(0, SHOWN).join(', ') + (files.length > SHOWN ? `, and ${files.length - SHOWN} more` : '');
 
 /** The files of the current setup that no passing, fresh `data-privacy` review of `root` covers, as a gate result.
  *  `projectDir` is the session's project dir as the CLI knows it (`cliProjectDir`): its reviews count too. */
@@ -100,16 +176,43 @@ export function privacyGate(root: string, env: Record<string, string | undefined
         'the user can turn this check off in their settings.',
     };
   }
-  const uncovered = uncoveredFiles(root, setup.files, readers.reviews ?? findRecentReviewFiles, projectDir);
-  if (uncovered.length === 0) return { ok: true };
-  const shown = uncovered.slice(0, SHOWN).join(', ') + (uncovered.length > SHOWN ? `, and ${uncovered.length - SHOWN} more` : '');
+  const judge = (files: readonly string[]) => uncoveredFiles(root, files, readers.reviews ?? findRecentReviewFiles, projectDir);
+  let { missing, flagged } = judge(setup.files);
+  // What goodboy rendered and nobody changed is out of scope. The re-render costs a scan, so it runs only when a file below
+  // the sandbox dir is asked for; each file is judged by itself, so dropping the exempt ones from the answer equals judging
+  // the rest. A failure to re-render exempts nothing, and the refusal says so.
+  let failure: RenderFailure | null = null;
+  if ([...missing, ...flagged].some((f) => f.startsWith(SANDBOX_PREFIX))) {
+    let rendered: ReturnType<typeof renderedUnchanged>;
+    try {
+      rendered = (readers.rendered ?? renderedUnchanged)(root);
+    } catch {
+      rendered = { files: new Set(), failure: 'render-failed' };
+    }
+    failure = rendered.failure;
+    missing = missing.filter((f) => !rendered.files.has(f));
+    flagged = flagged.filter((f) => !rendered.files.has(f));
+  }
+  if (missing.length === 0 && flagged.length === 0) return { ok: true };
+  const parts: string[] = [];
+  if (failure !== null && [...missing, ...flagged].some((f) => f.startsWith(SANDBOX_PREFIX))) {
+    parts.push(
+      `goodboy could not re-render its sandbox files (${RENDER_FAILURE[failure]}), so the files below ${SANDBOX_PREFIX} count as unreviewed even when goodboy wrote them. ` +
+        'Fix that cause and run sandbox-run again, or have those files reviewed.',
+    );
+  }
+  if (missing.length > 0) parts.push(`${missing.length} file(s) have no data-privacy review of their current content: ${listed(missing)}.`);
+  if (flagged.length > 0) {
+    parts.push(
+      `${flagged.length} file(s) have a data-privacy review of their current content that does not clear them (its newest record holds a high or medium finding, or a verdict other than pass): ${listed(flagged)}. ` +
+        'Fix the finding in the file, or answer it, and review the file again; the same record does not clear it.',
+    );
+  }
   return {
     ok: false,
     code: 'privacy-review-missing',
-    files: uncovered,
-    reason:
-      `sandbox-run refused (privacy-review-missing): this project holds real data, and ${uncovered.length} file(s) of its sandbox setup or of the source files that use the data helper ` +
-      `have no passing data-privacy review of their current content: ${shown}. ${how}`,
+    files: [...missing, ...flagged],
+    reason: `sandbox-run refused (privacy-review-missing): this project holds real data, and its sandbox setup or the source files that use the data helper are not cleared. ${parts.join(' ')} ${how}`,
   };
 }
 
@@ -132,25 +235,34 @@ function reviewDirs(root: string, projectDir: string | undefined): string[] {
 const clears = (r: ReviewResult): boolean =>
   r.verdict === 'pass' && !(Array.isArray(r.findings) ? r.findings : []).some((f) => f !== null && typeof f === 'object' && (f.severity === 'high' || f.severity === 'medium'));
 
-/** The files (relative paths) with no clearing review that lists `data-privacy`. Any failure to judge counts as uncovered. */
-function uncoveredFiles(root: string, rels: readonly string[], reviewsIn: typeof findRecentReviewFiles, projectDir: string | undefined): string[] {
+/** The files (relative paths) with no review that lists `data-privacy` for their current content (`missing`), and those
+ *  whose newest such review does not clear them (`flagged`). Any failure to judge counts as missing. */
+function uncoveredFiles(root: string, rels: readonly string[], reviewsIn: typeof findRecentReviewFiles, projectDir: string | undefined): { missing: string[]; flagged: string[] } {
+  const all = { missing: [...rels], flagged: [] as string[] };
   let records: ReviewResult[];
   try {
     records = reviewDirs(root, projectDir)
       .flatMap((dir) => reviewsIn(dir, PRIVACY_REVIEW_WINDOW_MIN))
       .filter((r) => typeof r.tree === 'string' && Array.isArray(r.dimensions_checked) && r.dimensions_checked.includes(PRIVACY_DIMENSION));
-    if (records.length === 0) return [...rels];
+    if (records.length === 0) return all;
     const edits = rels.map((rel) => ({ file: recordPath(rel, root), lastEditTimestamp: null as string | null }));
     const judged = withSameContent(edits, records, root, (r) => r.reviewed_files);
     const v = validateReviewCoverage(records, judged);
-    // `byFile` holds, per file, the fresh records that cover it, newest first; a file whose newest one failed is not in it
+    // `byFile` holds, per file, the fresh records that cover it, newest first; a file whose newest one has verdict `fail`
+    // is not in it but in `failed`: a review exists and does not clear it
     const byFile = v.byFile;
-    if (byFile === undefined) return [...rels];
-    return rels.filter((_, i) => {
-      const newest = byFile.get(edits[i]!.file)?.[0];
-      return newest === undefined || !clears(newest);
+    if (byFile === undefined) return all;
+    const failed = new Set(v.failed ?? []);
+    const missing: string[] = [];
+    const flagged: string[] = [];
+    rels.forEach((rel, i) => {
+      const file = edits[i]!.file;
+      const newest = byFile.get(file)?.[0];
+      if (newest === undefined) (failed.has(file) ? flagged : missing).push(rel);
+      else if (!clears(newest)) flagged.push(rel);
     });
+    return { missing, flagged };
   } catch {
-    return [...rels];
+    return all;
   }
 }

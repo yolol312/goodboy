@@ -188,6 +188,28 @@ describe('validateReviewCoverage (v0.26.5, 리뷰 누적 인정)', () => {
     expect(r.ok).toBe(true);
   });
 
+  test('`failed` names the files whose newest covering review has verdict fail, on every result that gets past the per-file loop', () => {
+    const oldPass = review({ reviewed_files: ['/repo/a.ts'], timestamp: T2, verdict: 'pass' });
+    const newFail = review({ reviewed_files: ['/repo/a.ts', '/repo/c.ts'], timestamp: T3, verdict: 'fail' });
+    const other = review({ reviewed_files: ['/repo/d.ts'], timestamp: T3, verdict: 'pass' });
+    // only the failed file: the result fails by `failed`, the file has no byFile entry
+    const only = validateReviewCoverage([newFail, oldPass], edits(['/repo/a.ts'], T1));
+    expect(only.ok).toBe(false);
+    expect(only.failed).toEqual(['/repo/a.ts']);
+    expect(only.byFile?.has('/repo/a.ts')).toBe(false);
+    // next to a file that is covered and one that is not reviewed at all: the failed one is still named, the others are not
+    const mixed = validateReviewCoverage([newFail, other], edits(['/repo/a.ts', '/repo/d.ts', '/repo/z.ts'], T1));
+    expect(mixed.ok).toBe(false);
+    expect(mixed.missing).toEqual(['/repo/z.ts']);
+    expect(mixed.failed).toEqual(['/repo/a.ts']);
+    expect(mixed.byFile?.has('/repo/d.ts')).toBe(true);
+    // a newer pass replaces the fail: nothing failed
+    const newPass = review({ reviewed_files: ['/repo/a.ts'], timestamp: '2026-01-01T10:20:00Z', verdict: 'pass' });
+    const fixed = validateReviewCoverage([newPass, newFail], edits(['/repo/a.ts'], T1));
+    expect(fixed.ok).toBe(true);
+    expect(fixed.failed).toBeUndefined();
+  });
+
   test('미래 timestamp 리뷰만 있으면 => 위조 의심으로 전체 거부', () => {
     const future = new Date(Date.now() + 10 * 60_000).toISOString();
     const forged = review({ reviewed_files: ['/repo/a.ts'], timestamp: future });

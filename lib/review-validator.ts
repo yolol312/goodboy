@@ -261,6 +261,9 @@ export interface CoverageResult extends ValidationResult {
    *  (see ChangedFileEdit.unverifiedTrees): not "never reviewed", and no delta review can start
    *  from a review that cannot be read. */
   unverified?: string[];
+  /** Changed files whose newest fresh covering review has verdict `fail` (they have no `byFile` entry). Set by the
+   *  per-file loop, so it is there on every result after it, whichever list made the result fail. */
+  failed?: string[];
   /** 커버리지를 구성한 리뷰들 — 각 변경 파일을 커버하면서 그 파일의 마지막 편집보다
    *  나중인(fresh) 리뷰 **전부**의 합집합. 후속 검사(가정 검증/차원 커버리지)가 이 집합을 쓴다.
    *
@@ -370,6 +373,7 @@ export function validateReviewCoverage(
       reason: `리뷰되지 않은 변경 파일 ${missing.length}개: ${missing.slice(0, 3).join(', ')}${missing.length > 3 ? ' …' : ''}${futureNote}`,
       effective: Array.from(effective),
       byFile,
+      failed,
       missing,
       stale,
     };
@@ -380,6 +384,7 @@ export function validateReviewCoverage(
       reason: `리뷰가 마지막 편집보다 오래된 파일 ${stale.length}개: ${stale.slice(0, 3).join(', ')}${stale.length > 3 ? ' …' : ''}. 해당 파일을 다시 리뷰하세요.${futureNote}`,
       effective: Array.from(effective),
       byFile,
+      failed,
       stale,
     };
   }
@@ -392,6 +397,7 @@ export function validateReviewCoverage(
         `or an older review's checkout has changed since: this is not "never reviewed". ${unhashed ? NULL_TREE_NOTE : ''}Run the review again so a new result is written${futureNote}`,
       effective: Array.from(effective),
       byFile,
+      failed,
       unverified,
     };
   }
@@ -401,6 +407,7 @@ export function validateReviewCoverage(
       reason: `최신 리뷰 verdict이 fail인 파일 ${failed.length}개: ${failed.slice(0, 3).join(', ')}${failed.length > 3 ? ' …' : ''}`,
       effective: Array.from(effective),
       byFile,
+      failed,
     };
   }
   return { ok: true, effective: Array.from(effective), byFile };

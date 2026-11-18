@@ -11,6 +11,14 @@
 // a privacy file (a changed one), and a setup that cannot be listed in full is refused with a fixed reason. No text of a
 // file leaves this module; the answers are paths. Loaded by the Stop hook: no renderer, no scanner.
 //
+// Not privacy files: goodboy's own record files, the `.json` files directly in a `.claude/reviews/`, `.claude/tests/` or
+// `.claude/tests/regression/` (at the project top or below it: the session's project dir may be a subdirectory of the
+// repository, and `review-write` and `test-write` write to its `.claude/`). A review record names the paths it reviewed,
+// among them the helper's dir, so it would otherwise count as a source file that uses the helper and ask a review of the
+// review itself, for good (found by the M6 canary step, 2026-11-18). Nothing else of `.claude/` is excluded: a source file
+// or script kept there, or a settings file, that names the helper is asked as any other. A `.json` file a model puts in a
+// record dir is not asked for (a data file, not code the project's tests run).
+//
 // Stated limits (the review and the gate decide by what a file names; a program written to hide it is not read): a file
 // that reaches the helper through a barrel or wrapper it imports (`src/testing/db.ts` re-exporting it), through an alias
 // (a tsconfig path, a bundler alias), or by a path computed at run time (`path.join` of pieces) names none of the above
@@ -79,8 +87,13 @@ function relIn(top: string, abs: string): string | null {
   return found;
 }
 
+/** goodboy's record files (see the header): no privacy file, whatever they name. */
+const RECORD_FILE = /(?:^|\/)\.claude\/(?:reviews|tests|tests\/regression)\/[^/]+\.json$/;
+export const isGoodboyRecord = (rel: string): boolean => RECORD_FILE.test(rel);
+
 /** Whether a path below the project top (`/`-separated) is one of the privacy files by its path alone. */
 export function isPrivacyPath(rel: string): boolean {
+  if (isGoodboyRecord(rel)) return false;
   if (rel.startsWith(SANDBOX_PREFIX)) {
     const sub = rel.slice(SANDBOX_PREFIX.length);
     if (sub === MANIFEST) return true;
@@ -125,7 +138,7 @@ export function privacyFilesOf(top: string, files: readonly string[], base: stri
     if (typeof f !== 'string' || f === '') continue;
     const abs = resolve(base, f);
     const rel = relIn(top, abs);
-    if (rel === null) continue;
+    if (rel === null || isGoodboyRecord(rel)) continue;
     if (isPrivacyPath(rel)) {
       out.add(f);
       continue;
@@ -167,6 +180,7 @@ export function privacySetupOf(top: string, caps: PrivacyCaps = {}): PrivacySetu
   let candidates = 0;
   let bytes = 0;
   for (const rel of listed) {
+    if (isGoodboyRecord(rel)) continue;
     if (isPrivacyPath(rel)) {
       files.add(rel);
       continue;

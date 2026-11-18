@@ -3,7 +3,7 @@
 Feature → test type, generated from the test files by goodboy (`cli.ts test-catalog`).
 Regenerate it instead of editing it; the docs rule compares it with a fresh copy.
 
-Totals: unit 252 files, 4739 tests; e2e 2 files, 54 tests.
+Totals: unit 253 files, 4763 tests; e2e 2 files, 54 tests.
 
 | Feature | Type | File | Tests |
 |---|---|---|---|
@@ -157,6 +157,7 @@ Totals: unit 252 files, 4739 tests; e2e 2 files, 54 tests.
 | git-hooks install and uninstall, in process; commit-scan, in process; push-scan, in process; the command reader, in process | unit | tests/m6f-in-process.test.ts | 18 |
 | H1: a push excludes only what its own remote has; H2: what hides the program or the subcommand is not scanned; H3: options are read by their full names; push; M1: the git hooks\; M2: a "not scanned" reason of the command is bound to the command | unit | tests/m6f-review-fixes.test.ts | 63 |
 | a commit: the index; a commit: -a, paths, --amend; a commit: the message and the paths; names that are special to a JavaScript object; not scanned; what runs before the commit in one command | unit | tests/m6f-scan.test.ts | 61 |
+| A: a file that is exactly goodboy’s render is not asked for; B: goodboy’s record files are no privacy file; nothing else of `.claude/` is excluded; C: the refusal tells "no review" from "a review that does not clear" | unit | tests/m6g-canary-fixes.test.ts | 23 |
 | isPrivacyPath: the sandbox files and the manifest, by path; usesDataHelper: the tests that use the helper; privacyFilesOf: the files of a change; privacySetupOf: the current setup of a project | unit | tests/m6g-files.test.ts | 34 |
 | every way a command sets the switch is denied; what is not a command that sets it passes; the denial is one fixed text, with no way around it offered; through the PreToolUse hook | unit | tests/m6g-gate-switch.test.ts | 14 |
 | the dimension and the axis; review-axes in a project; privacyOptionsFor: the Stop’s predicate is bounded by the shared deadline and the hook’s clock; the Stop in a project that holds real data | unit | tests/m6g-review-gate.test.ts | 25 |
@@ -195,7 +196,7 @@ Totals: unit 252 files, 4739 tests; e2e 2 files, 54 tests.
 | axesFor — 병렬 리뷰 축 결정; requiredDimensionsFor | unit | tests/review-dimensions.test.ts | 18 |
 | 리뷰 스코프 — 프로젝트 안으로 한정 (루프 방지); 리뷰 스코프 — 위임 우회 차단; 리뷰 스코프 — 커서 경계; 리뷰 스코프 — 데드락 대응 필터 (A/B/C) | unit | tests/review-scope.test.ts | 12 |
 | review timestamps that are not ISO date-times (round 3) | unit | tests/review-timestamp-trust.test.ts | 1 |
-| validateReview; validateReviewCoverage (v0.26.5, 리뷰 누적 인정); currentFindings (v0.26.6, finding 단위 대체 의미론); currentFindings: what supersedes a finding (round 3); fileModifiedAt (round 3); review timestamps on read (round 3) | unit | tests/review-validator.test.ts | 49 |
+| validateReview; validateReviewCoverage (v0.26.5, 리뷰 누적 인정); currentFindings (v0.26.6, finding 단위 대체 의미론); currentFindings: what supersedes a finding (round 3); fileModifiedAt (round 3); review timestamps on read (round 3) | unit | tests/review-validator.test.ts | 50 |
 | review-write CLI (#7); validateReviewResultInput (unit); review-write path traversal hardening (1-B) | unit | tests/review-write.test.ts | 23 |
 | risk approval withdrawal deletes this session’s risk marker only (A3); the risk deny in a directory without .claude/ (A3) | unit | tests/risk-approval-scope.test.ts | 2 |
 | classifyRisk; isReadOnlyBash (risk-gate exemption, A4); detectRiskOverride | unit | tests/risk-classifier.test.ts | 18 |
