@@ -31,7 +31,7 @@ const asked = (s: SandboxScan, part: string): boolean => s.questions.some((q) =>
 const NODE = { 'package.json': JSON.stringify({ name: 'a', scripts: { start: 'node server.js' }, dependencies: { express: '4' } }) };
 
 describe('config readers: YAML corners, .env and JSON that do not parse', () => {
-  test('quotes with escapes, block scalars, flow lists, a key under a scalar, a bare dash, a line with no key', () => {
+  test('a YAML file with odd corners, a .env with a bad line and an unclosed quote, and a broken JSON config each raise a question and none throws', () => {
     const s = scan({
       ...NODE,
       'config.yml': [

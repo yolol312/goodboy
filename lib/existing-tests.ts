@@ -187,7 +187,8 @@ export function jsLoadGroups(text: string, testRel: string): { target: string; k
   const groups: { target: string; keys: string[] }[] = [];
   const base = posix.dirname(testRel);
   const code = withoutComments(text);
-  for (const m of text.matchAll(JS_SPECIFIER)) {
+  // Comment-free code (same length, strings kept): a commented-out import loads nothing.
+  for (const m of code.matchAll(JS_SPECIFIER)) {
     const spec = m[2]!;
     if (!spec.startsWith('.')) continue;
     if (typeOnlyImport(code, m)) continue;

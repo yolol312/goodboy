@@ -24,7 +24,6 @@ import {
   HOST,
   firstAddress,
   INHIBIT_IPV4,
-  isIpv4,
   KEYSTORE_PASSWORD,
   bareBuildTool,
   buildImage,
@@ -32,13 +31,11 @@ import {
   major,
   mysqlScripts,
   pgScripts,
-  pinned,
   prepScript,
   Raw,
   RESERVED_NAMES,
   runtimeImage,
   type Sql,
-  STORE_DEFAULT_VERSION,
   type StoreEndpoint,
   stackProfile,
   startCommandOf,
@@ -46,11 +43,12 @@ import {
   toYaml,
 } from './sandbox-parts';
 import { SANDBOX_DIR } from './sandbox-mode';
+import { isIpv4, STORE_DEFAULT_VERSION, storeTagVersion } from './sandbox-scan';
 import { DATA_DIR, DATA_FILE, DATA_VOLUME, META_DIR, outDirMounts, outputDirsFor, readerMounts, volumeNames } from './sandbox-volumes';
 import { dataHelperCjs, dataHelperJava, dataHelperTs } from './sandbox-data-helper';
 import type { OutboundKind, SandboxLocal, SandboxOutbound, SandboxScan, SandboxStore } from './sandbox-types';
 
-export { CA_MOUNT, configKeyAt, KEYSTORE_PASSWORD };
+export { configKeyAt, KEYSTORE_PASSWORD };
 
 export const SCAN_FILE = `${SANDBOX_DIR}/scan.json`;
 export const DEFAULT_INNER_SUBNET = '10.231.0.0/24';
@@ -214,6 +212,15 @@ export function planSandbox(scan: SandboxScan, local: SandboxLocal, opts: Render
   };
 
   // ---- stores ----
+  /** The image version of a store: the leading version of its tag (`17-alpine` gives `17`), else the
+   *  default; a tag that names none (`bookworm`) is said in a note, `latest` and no tag are not. */
+  const versionOf = (store: SandboxStore): string => {
+    const raw = (store.version ?? '').trim();
+    const v = storeTagVersion(raw);
+    if (v !== null) return v;
+    if (raw !== '' && raw !== 'latest') notes.push(`${store.kind} store at ${store.where.file}:${store.where.line}: the tag \`${raw}\` names no version; the default ${STORE_DEFAULT_VERSION[store.kind]} is used`);
+    return STORE_DEFAULT_VERSION[store.kind];
+  };
   const sqlStores = scan.stores.filter((s) => s.kind === 'postgres' || s.kind === 'mysql' || s.kind === 'mariadb');
   const endpoints = new Map<SandboxStore, StoreEndpoint>();
   let dbService: string | null = null;
@@ -221,7 +228,7 @@ export function planSandbox(scan: SandboxScan, local: SandboxLocal, opts: Render
   const dumpFile = local.dumpFormat === 'custom' ? 'dump.custom' : 'dump.sql';
   sqlStores.forEach((store, i) => {
     const svc = i === 0 ? 'db' : `db${i + 1}`;
-    const v = pinned(store.version) ? store.version.trim() : STORE_DEFAULT_VERSION[store.kind];
+    const v = versionOf(store);
     const name = dbName(store);
     const sql: Sql = { store, svc, name, v, port: store.kind === 'postgres' ? 5432 : 3306 };
     const first = i === 0;
@@ -269,14 +276,14 @@ export function planSandbox(scan: SandboxScan, local: SandboxLocal, opts: Render
   });
   const redisStore = scan.stores.find((s) => s.kind === 'redis');
   if (redisStore) {
-    const v = pinned(redisStore.version) ? redisStore.version.trim() : STORE_DEFAULT_VERSION.redis;
+    const v = versionOf(redisStore);
     services.redis = { image: `redis:${v}-alpine`, command: ['redis-server', '--save', '', '--appendonly', 'no'], networks: ['inner'], healthcheck: { test: ['CMD', 'redis-cli', 'ping'], interval: '3s', timeout: '3s', retries: 40 } };
     endpoints.set(redisStore, { svc: 'redis', port: 6379, user: '', password: '', name: '0', url: 'redis://redis:6379' });
     upServices.push('redis');
   }
   const mongoStore = scan.stores.find((s) => s.kind === 'mongo');
   if (mongoStore) {
-    const v = pinned(mongoStore.version) ? mongoStore.version.trim() : STORE_DEFAULT_VERSION.mongo;
+    const v = versionOf(mongoStore);
     volumes.mongodata = {};
     services.mongo = {
       image: `mongo:${v}`,

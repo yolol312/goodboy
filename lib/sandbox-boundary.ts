@@ -18,7 +18,7 @@ import type { SandboxLocal } from './sandbox-types';
 
 /** The diagnostic codes of a real-data run: the only text a failure leaves behind. */
 export const DIAG_CODES = [
-  'step-failed', // a suite or preparation step exited non-zero
+  'step-failed', // a suite step (`unit`, `e2e`) of `sandbox-run` exited non-zero: the `diagnostic` of that step and of the result (a timeout is `timed-out`)
   'timed-out',
   'restore-failed', // the database restore
   'reset-failed', // the database reset from its template
@@ -39,7 +39,7 @@ export const DIAG_CODES = [
   'registry-failed', // the user-level registry of real-data sandboxes could not be read or written (M6b)
   'docker-failed', // any other docker call that failed
   'check-failed', // a finding of sandbox-check that names a container or a network
-  'internal', // an exception inside goodboy
+  'internal', // an exception inside goodboy: only the text `internal (<class>)` of `err` says it, never a `diagnostic`
   'withheld', // text that is not a failure but may hold foreign words (a restore or coverage note)
 ] as const;
 export type DiagCode = (typeof DIAG_CODES)[number];
@@ -52,7 +52,8 @@ export interface Diag {
   timedOut?: boolean;
   /** `data-refused`, `data-collision`: the input field that was refused (`where.and[1].col`, `picks.activeUser.n`), a path goodboy builds. */
   field?: string;
-  /** `data-refused`, `data-resolve-failed`, `data-collision`: a fixed reason code. */
+  /** `data-refused`, `data-resolve-failed`, `data-collision`: a fixed reason code. `sweep-failed`: `volume-sweep-skipped`
+   *  (the runs volume was not swept because the setup is not safe to start a container in). */
   reason?: string;
 }
 

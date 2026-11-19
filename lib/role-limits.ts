@@ -7,8 +7,8 @@
 // writes test files only; `docs` writes docs only; `code` writes anything.
 
 import { existsSync, lstatSync } from 'node:fs';
-import { basename, join, relative, resolve as resolvePath, sep } from 'node:path';
-import { openedPath, type RealpathMemo } from './file-tracker';
+import { basename, isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
+import { followedPath, openedPath, type RealpathMemo } from './file-tracker';
 import { commandSegments, dropRedirects, gitSubcommandAt, plainWord, readCommand, xargsCommandAt } from './outward-command';
 import { changesCommits } from './push-test';
 import { namesOwnResultDir } from './result-dir';
@@ -31,6 +31,10 @@ export function projectRelative(absPath: string, projectRoot: string): string | 
 export function isTestPath(rel: string): boolean {
   return isTestFile(rel) || TEST_DIR_EXTRA.test(rel) || TEST_FILE_EXTRA.test(rel) || TEST_RUNNER_CONFIG.test(rel);
 }
+
+/** The one file under `.goodboy/` a test role writes: the real-data sandbox's record of what a run may
+ *  read (`.goodboy/sandbox/data.json`, plan §19 M6). Any nesting under a project's `.goodboy/sandbox/`. */
+const SANDBOX_DATA_FILE = /(?:^|\/)\.goodboy\/sandbox\/data\.json$/;
 
 /** Test output dirs a build tool fills and a test run replaces (Gradle and Maven reports, the
  *  JaCoCo site): the dir itself or anything in it. Group 1 is the module dir above `build/` or
@@ -66,6 +70,25 @@ function noLinkOnPath(projectRoot: string, rel: string): boolean {
   return true;
 }
 
+/** Whether a path is a symlink itself (not a missing path). */
+function isLink(p: string): boolean {
+  try {
+    return lstatSync(p).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/** The dir `prefix` (a path before a pattern, relative to `base`) names with every link followed, `..` after a link going to the
+ *  link's target's parent. The one respelling: macOS names `/var` and `/tmp` as `/private/var` and `/private/tmp` when links are
+ *  followed, which would put a project outside its own root, so that prefix is dropped when `base` has none. */
+function followedLike(base: string, prefix: string): string {
+  const from = resolvePath(base);
+  const real = followedPath(isAbsolute(prefix) ? prefix : `${from}${sep}${prefix}`);
+  if (real === null) return resolvePath(base, prefix); // more links than the OS follows: by name
+  return /^\/private(?=\/)/.test(real) && !/^\/private(?=\/)/.test(from) ? real.slice('/private'.length) : real;
+}
+
 /** Why the role may not write this file, or null when it may. With `removal` (the path is only
  *  being deleted by a parsed `rm`, `rmdir` or `unlink`) a test role may clear the test output
  *  dirs before a re-run: the path must be one of those dirs or inside one, with no symlink on
@@ -82,8 +105,16 @@ export function writeDenial(role: RoleSpec, absPath: string, projectRoot: string
     case 'tests':
       if (opts.expanded === true) return `${role.name} may not remove by a pattern, variable or \`..\` path (what it deletes is not what the command names): ${rel}. Name each path.`;
       if (opts.removal === true && isTestOutputPath(rel, projectRoot) && noLinkOnPath(projectRoot, rel)) return null;
+      // The tester records the sandbox's data use there (agents/test-unit.md); a link on the way
+      //   would write somewhere else, and nothing else under .goodboy/ is a test file.
+      if (SANDBOX_DATA_FILE.test(rel) && noLinkOnPath(projectRoot, rel)) return null;
       return isTestPath(rel) ? null : `${role.name} writes test files only, not ${rel}. Report the needed change instead.`;
     case 'docs':
+      // A pattern or `..` operand (`rm docs/*.md`) is judged by where it expands: a docs dir passes
+      //   (as before the removal rule), the repo top or any other dir reaches outside the role's paths.
+      if (opts.expanded === true) {
+        return classifyPath(`${rel}/x.png`) === 'document' ? null : `${role.name} writes docs only: the pattern or \`..\` path reaches ${rel}, outside the docs. Name each path.`;
+      }
       // Documents and static previews (lib/verification-scope.ts), never code under docs/.
       return classifyPath(rel) !== 'code' ? null : `${role.name} writes docs only, not ${rel}. Report the needed change instead.`;
     case 'result':
@@ -206,11 +237,14 @@ export function bashChangedPaths(command: string, cwd: string, opts: { skip?: Re
         // An operand the shell expands (braces, globs, variables, `~`) is no recognizable
         //   removal: `rm tests/{x,../src/a.ts}` deletes what the text does not name. When the
         //   text before the first such character is a path (`build/test-results/`, `tests/`,
-        //   `./`) the operand counts as expanded at that path (a `..` in it: at the cwd), whatever
-        //   the path is. A leading brace, bracket or wildcard (`{src,docs}`, `[s]rc`, `*`) expands
-        //   at the dir the command runs in, so it counts as expanded there. Only a leading variable,
-        //   backtick or `~` (`"$D"`, `$D/x`, `~/x`) cannot be resolved: that operand is skipped, as
-        //   before (a tester's `rm -rf "$D"` of a mktemp dir stays allowed; the plan lists this limit).
+        //   `./`) the operand counts as expanded at that path, whatever the path is; with a `..` in it
+        //   the operand counts at the cwd and at the dir the path opens to (`..` and links resolved: a docs
+        //   role's `cd docs && rm ../src/*.ts` reaches `src/`). A leading brace, bracket or wildcard
+        //   (`{src,docs}`, `[s]rc`, `*`) expands at the dir the command runs in, so it counts as expanded
+        //   there. Only a leading variable, backtick or `~` (`"$D"`, `$D/x`, `~/x`, and `~+`, which the shell
+        //   turns into the cwd) cannot be resolved: that operand is skipped, as on main (`~+/x` was skipped
+        //   there too, so `rm -rf ~+/src` passes the role limit; a tester's `rm -rf "$D"` of a mktemp dir
+        //   stays allowed; the plan lists this limit).
         //   A `..` in a plain operand counts as expanded too: the kernel follows a link before it
         //   applies `..`, the text cannot know.
         //   Paths are spelled as the OS opens them (`opened`, #31: a `..` after a link resolves through
@@ -219,12 +253,26 @@ export function bashChangedPaths(command: string, cwd: string, opts: { skip?: Re
         if (expands !== null) {
           if (expands.index > 0) {
             const prefix = a.slice(0, expands.index);
-            (opts.expanded ?? out).push(prefix.split('/').includes('..') ? resolvePath(base) : opened(base, prefix));
+            // the dir the pattern expands in, by name and with its links followed (`docs/lnk/*` lists what `lnk` leads to); a
+            //   `..` in the prefix is also judged at the cwd, as before
+            const at = [opened(base, prefix), followedLike(base, prefix)];
+            if (prefix.split('/').includes('..')) at.push(resolvePath(base));
+            (opts.expanded ?? out).push(...new Set(at));
           } else if (!/^[$`~]/.test(a)) {
-            (opts.expanded ?? out).push(resolvePath(base));
+            // a leading pattern expands in the cwd: judged there by name and as the real dir it is (`cd docs/lnk && rm *`
+            //   with `lnk` a link to `src`)
+            (opts.expanded ?? out).push(...new Set([resolvePath(base), followedLike(base, '.')]));
           }
         } else if (removing && a.split('/').includes('..')) (opts.expanded ?? out).push(opened(base, a));
-        else if (literal(a)) (removing ? opts.removed! : out).push(opened(base, a));
+        else if (literal(a)) {
+          const p = opened(base, a);
+          // A link made at the sandbox's data file (`ln -s x data.json`, or `cp -P`/`mv` of a link onto it) would send
+          //   a later write there elsewhere: `writeDenial` allows that file for a test role only as a plain file, and
+          //   a missing one passes. The target is reported as a name under it, which is no test file.
+          const makesLink = prog === 'ln' || ((prog === 'cp' || prog === 'mv' || prog === 'install') && files.slice(0, -1).some((s) => isLink(resolvePath(base, s))));
+          const atDataFile = makesLink && a === files[files.length - 1] && SANDBOX_DATA_FILE.test(p.split(sep).join('/'));
+          (removing ? opts.removed! : out).push(atDataFile ? join(p, 'link') : p);
+        }
       }
     } else if ((prog === 'perl' || prog === 'ruby') && words.some((w) => /^-[a-zA-Z]*i/.test(w))) {
       for (const a of args.slice(1)) if (literal(a)) out.push(opened(base, a)); // the first is the script

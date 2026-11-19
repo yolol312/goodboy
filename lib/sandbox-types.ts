@@ -1,6 +1,6 @@
 // The test sandbox (track M, M1; plan §19): the shapes shared by the scan (lib/sandbox-scan.ts),
-// which reads a project, and the sandbox writer and runner (lib/sandbox.ts), which build the
-// containers from it. The app and every test run on an internal network with no egress;
+// which reads a project, and the sandbox renderer, writer and runner (lib/sandbox-render.ts,
+// lib/sandbox-files.ts, lib/sandbox-run.ts), which build the containers from it. The app and every test run on an internal network with no egress;
 // external hosts resolve to dummies that record what the app sends.
 
 export type SandboxStack = 'jvm' | 'node' | 'python';

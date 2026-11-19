@@ -44,7 +44,7 @@ import { isGeneratedLcov } from './lcov-report';
 import { MAX_MANIFEST_BYTES, needsTests } from './verification-scope';
 import { sandboxExemptRel, sandboxUsed, sandboxUsers, type SandboxUsers } from './sandbox-gate';
 import { privacyFilesOf } from './privacy-files';
-import { realDataForReading } from './sandbox-mode';
+import { realDataHeld } from './real-data-held';
 import type { DimensionOptions } from './review-dimensions';
 import type { ChangedFileEdit } from './review-validator';
 import type { TestResult } from './types';
@@ -330,14 +330,15 @@ export function sandboxOwnFile(sessionId: string, cwd: string, file: string, top
 }
 
 /** (Track M, M6g) The privacy predicate of the review gate for `files`: per group, when its repo holds real data
- *  (`realDataForReading`, fail closed: an unreadable state counts as real data), the files that are privacy files
+ *  (`realDataHeld`: the sandbox's state, fail closed: an unreadable state counts as real data, or the registry, as the
+ *  PreToolUse rule reads it), the files that are privacy files
  *  (lib/privacy-files.ts) need the `data-privacy` dimension. Other projects are asked nothing. A throw is the caller's:
  *  both review paths fail closed on one. The groups share `deadline` (the Stop's group budget, and never the hook's
  *  clock): what is not read before it runs out counts as a privacy file, so the review is asked for it. */
 export function privacyOptionsFor(sessionId: string, cwd: string, files: readonly string[], deadline: Deadline = newDeadline()): DimensionOptions {
   const privacy = new Set<string>();
   for (const g of groupsOf(sessionId, cwd, files)) {
-    if (g.edits.length === 0 || !realDataForReading(g.top)) continue;
+    if (g.edits.length === 0 || !realDataHeld(g.top)) continue;
     // one deadline for all groups (never past the hook's clock): a file not read in time counts as a privacy file
     for (const f of privacyFilesOf(g.top, g.edits, cwd, { until: deadline.left })) privacy.add(f);
   }

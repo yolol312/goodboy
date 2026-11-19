@@ -108,7 +108,8 @@ const IDENTITY_UNSEEN = 'its author or committer comes from the environment or a
 const IDENTITY_KEY = /^(?:user|author|committer)\.(?:name|email)$/i;
 
 /** The heredocs of the command (`heredocMessages`) and which of the commits that read their message from stdin this is (the
- *  nth of them, in order, takes the nth feeder: a second commit never reuses another's heredoc). */
+ *  nth of them, in order, takes the nth feeder, when there are as many feeders as such commits; with any other count none takes
+ *  one: a second commit never reuses another's heredoc). */
 interface MessageTie {
   cats: string[];
   feeders: string[];
@@ -400,6 +401,10 @@ export function commitScanOfCommand(command: string, cwd: string, projectCwd: st
   const ordinals = new Map<GitCall, number>();
   let stdinCommits = 0;
   for (const call of calls) if (call.sub === 'commit' && commitInputOf(call, command).stdin) ordinals.set(call, stdinCommits++);
+  // Pairing by order holds only when every stdin commit has a feeder and every feeder a commit; when the counts differ (a
+  // commit fed by a pipe or a file next to a decoy heredoc) which commit a heredoc feeds is a guess, so no stdin commit
+  // takes one: each is "not scanned".
+  if (stdinCommits !== heredocs.feeders.length) heredocs.feeders = [];
   try {
     for (const call of calls) {
       if (call.sub === 'unknown') {

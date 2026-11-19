@@ -11,6 +11,7 @@ import { SCAN_FILE } from '../lib/sandbox-render';
 import { type Ctx, loadCtx, sandboxCommand } from '../lib/sandbox-run';
 import type { SandboxLocal, SandboxScan } from '../lib/sandbox-types';
 import { FAKE_DOCKER } from './m6a-fake';
+import { keepEnv } from './m6b-helpers';
 
 export const CLI = resolve(import.meta.dir, '..', 'lib', 'cli.ts');
 
@@ -132,17 +133,14 @@ export function fakeProject(local: SandboxLocal | null, scan: SandboxScan = plai
     },
     inproc: async (command, args = [], extra = {}) => {
       const e = env(extra);
-      const saved = Object.keys(e).map((k) => [k, process.env[k]] as const);
+      const restoreEnv = keepEnv(...Object.keys(e));
       for (const [k, v] of Object.entries(e)) process.env[k] = v;
       try {
         const r = await sandboxCommand(command, root, args);
         if ('error' in r) return { out: {}, code: 1, error: r.error, text: r.error };
         return { out: r.out as Record<string, any>, code: r.code, text: JSON.stringify(r.out, null, 2) };
       } finally {
-        for (const [k, v] of saved) {
-          if (v === undefined) delete process.env[k];
-          else process.env[k] = v;
-        }
+        restoreEnv();
       }
     },
     hostFiles,

@@ -81,21 +81,24 @@ export function realDataOfRoot(root: string): boolean {
 /** Whether raw host files of a run that may have held real data can still be there, for a command that
  *  cannot ask docker (`ui-check`): the old `out/live/` dir, or a run dir whose `result.json` does not say
  *  `realData: false` (a run before M6a has no such field, a real-data run says true). A dir with no
- *  result (a run that stopped at once) says nothing. Bounded: the newest 200 run dirs are looked at, 64 KiB
+ *  result (a run that stopped at once) says nothing; a result that is refused (a link, over 64 KiB, unreadable) or
+ *  an `out/` dir that cannot be listed counts as raw. Bounded: the newest 200 run dirs are looked at, 64 KiB
  *  each, and more than that count as raw (fail closed: an older run past the cap may be a real-data one). */
 export function rawMayRemain(root: string): boolean {
   const out = join(root, SANDBOX_DIR, 'out');
   let names: string[];
   try {
     names = readdirSync(out);
-  } catch {
-    return false;
+  } catch (e) {
+    // no `out/` dir: nothing was left; a dir that cannot be listed may hold anything (fail closed)
+    return (e as NodeJS.ErrnoException).code !== 'ENOENT';
   }
   if (names.includes('live')) return true;
   const runs = names.filter((x) => RUN_NAME.test(x)).sort().reverse();
   if (runs.length > 200) return true;
   for (const n of runs) {
     const r = readRegular(join(out, n, 'result.json'), 64 * 1024, true);
+    if (r === 'refused') return true; // a result that is a link, too big or unreadable may be any run's
     if (typeof r !== 'object') continue;
     try {
       if ((JSON.parse(r.text) as { realData?: unknown } | null)?.realData !== false) return true;

@@ -730,9 +730,10 @@ describe('round 4, item 1: a stdin message is tied to its own commit', () => {
   test('a second commit never reuses another commit\'s heredoc', () => {
     put(f, 'real.txt', `mail ${CANARY.email} #1\n`);
     const first = `git commit --allow-empty -F - <<EOF\nfix #1 ${CANARY.phone}\nEOF\n`;
+    // one heredoc for two stdin commits: which commit it feeds is a guess, so neither takes it (both "not scanned")
     for (const second of ['git commit --allow-empty -F - < real.txt', `echo '${CANARY.email} #1' | git commit --allow-empty -F -`, 'git commit --allow-empty -F -']) {
       const r = scan(first + second);
-      expect([second, whys(r).includes(NOT_HEREDOC), where(r)]).toEqual([second, true, ['<commit message>:1 phone']]);
+      expect([second, whys(r).includes(NOT_HEREDOC), where(r)]).toEqual([second, true, []]);
     }
     // each commit with a heredoc of its own takes its own, in order
     const both = scan(`${first}git commit --allow-empty -F - <<EOF\nmore ${CANARY.card}\nEOF\n`);
@@ -767,7 +768,7 @@ describe('round 4, item 1: a stdin message is tied to its own commit', () => {
 });
 
 describe('round 4, item 2: who the commit is by', () => {
-  const FAKE = 'kim.minsu@naver.com';
+  const FAKE = CANARY.email;
 
   test('the settings and the environment the command gives are scanned as text at <author>', () => {
     for (const [c, hit] of [

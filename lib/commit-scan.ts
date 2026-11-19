@@ -39,9 +39,9 @@ import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path
 import { spawnGit } from './git-run';
 import { hookLeft } from './hook-clock';
 import { findSensitive, redactText, type SensitiveKind } from './pii-patterns';
+import { realDataRootOf } from './real-data-held';
 import { readRegular } from './safe-read';
-import { realDataForReading, realOrSelf, SANDBOX_DIR } from './sandbox-mode';
-import { readRegistry, RegistryError } from './sandbox-registry';
+import { realOrSelf, SANDBOX_DIR } from './sandbox-mode';
 import { RENDER_SCAN_BUDGET_MS, renderSandboxFiles } from './sandbox-render-files';
 
 const MAX_BLOB = 4 * 1024 * 1024;
@@ -160,10 +160,16 @@ export class Acc {
     let line = 1;
     let from = 0;
     for (const s of spans) {
-      if (own !== undefined && s.kind === 'email' && exemptAddress(text.slice(s.start, s.end), own)) continue;
       for (let nl = text.indexOf('\n', from); nl !== -1 && nl < s.start; nl = text.indexOf('\n', from)) {
         line++;
         from = nl + 1;
+      }
+      const address = text.slice(s.start, s.end);
+      if (own !== undefined && s.kind === 'email' && exemptAddress(address, own)) {
+        // `findSensitive` merges overlapping spans into the kind of the first, so a number inside the address
+        // (`noreply+900101-1234567@x.com`) is read as the email: read it again without the `@`, and keep what is no email
+        for (const inner of findSensitive(address.replace('@', ' '))) this.hit(path, key, inner.kind, line);
+        continue;
       }
       this.hit(path, key, s.kind, line);
     }
@@ -217,7 +223,7 @@ const UTF8 = new TextDecoder('utf-8', { fatal: true });
 /** An address a message may carry without being a hit: a no-reply address (local part `noreply` or `no-reply`, with an
  *  optional `+tag`, or a `users.noreply.github.com` address: the Claude Code and GitHub attribution trailers), or one of
  *  the object's own addresses. Exact, case-insensitive. */
-const NO_REPLY = /^no-?reply(?:\+[^@]*)?@[^@]+$|^[^@]+@(?:[^@]*\.)?users\.noreply\.github\.com$/i;
+const NO_REPLY = /^no-?reply(?:\+[A-Za-z0-9._-]{1,64})?@[^@]+$|^(?:\d{1,12}\+)?[A-Za-z0-9._-]{1,64}@(?:[^@]*\.)?users\.noreply\.github\.com$/i;
 function exemptAddress(address: string, own: ReadonlySet<string>): boolean {
   return NO_REPLY.test(address) || own.has(address.toLowerCase());
 }
@@ -862,41 +868,8 @@ export function pushInputFromHook(dir: string, remote: string, stdin: string): P
 
 // ---- real data ----
 
-const isDir = (p: string): boolean => {
-  try {
-    return lstatSync(p).isDirectory();
-  } catch {
-    return false;
-  }
-};
-
-const inside = (p: string, root: string): boolean => p === root || p.startsWith(root.endsWith('/') ? root : `${root}/`);
-
-/** The real-data project `dir` belongs to (its dir), or null: a project dir whose sandbox says real data
- *  (lib/sandbox-mode.ts `realDataForReading`), or one the user-level registry holds. No git call. A registry that
- *  cannot be read is left out, as the sandbox rule does (it logs it). */
-export function realDataRootOf(dir: string, env: NodeJS.ProcessEnv = process.env): string | null {
-  const start = resolve(dir);
-  const real = realOrSelf(start);
-  const reg = readRegistry(env);
-  if (!(reg instanceof RegistryError)) {
-    for (const e of reg) if (inside(real, e.top) || inside(start, e.top)) return e.top;
-  }
-  let cur = start;
-  for (let i = 0; i < 64; i++) {
-    if (isDir(join(cur, SANDBOX_DIR)) && realDataForReading(cur)) return cur;
-    const up = dirname(cur);
-    if (up === cur) break;
-    cur = up;
-  }
-  return null;
-}
-
-/** Whether the user-level registry names any project (a command anywhere may then touch one). */
-export function registryHoldsProjects(env: NodeJS.ProcessEnv = process.env): boolean {
-  const reg = readRegistry(env);
-  return !(reg instanceof RegistryError) && reg.length > 0;
-}
+// In lib/real-data-held.ts, a light module the PreToolUse hook reads before it loads this one.
+export { realDataRootOf, registryHoldsProjects } from './real-data-held';
 
 // ---- the user's approval ----
 

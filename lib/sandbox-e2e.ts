@@ -217,6 +217,7 @@ export function coverageRc(): string {
 # paths relative to the source, data saved when the app is stopped with SIGTERM.
 [run]
 parallel = True
+branch = True
 relative_files = True
 sigterm = True
 omit =

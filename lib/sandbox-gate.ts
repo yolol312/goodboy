@@ -26,7 +26,7 @@ import { isTestFile } from './test-validator';
 import { isTrustedTimestamp } from './trusted-time';
 import type { TestResult } from './types';
 
-/** Where goodboy's sandbox commands write, with a trailing slash (lib/sandbox-render.ts
+/** Where goodboy's sandbox commands write, with a trailing slash (lib/sandbox-mode.ts
  *  SANDBOX_DIR is the same path without it; tests/m5-sandbox-gate.test.ts keeps them equal). */
 export const SANDBOX_PREFIX = '.goodboy/sandbox/';
 

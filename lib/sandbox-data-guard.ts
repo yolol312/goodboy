@@ -6,7 +6,8 @@
 // data (lib/sandbox-mode.ts `realDataForReading`), or that the registry holds (its `.goodboy/sandbox` or `local.json` may
 // be gone). Everything applies there:
 //   - docker, podman, nerdctl and compose verbs that open, copy out, log, inspect or run beside the sandbox's
-//     containers (`exec cp logs inspect attach export commit run create start top diff save`), and an attached
+//     containers (`exec cp logs inspect attach export commit run create start top diff save debug checkpoint mount`, and
+//     `volume export` and `volume mount`; also as `docker container <verb>`), and an attached
 //     `compose up` (it streams logs), when the target is the sandbox: any word of the command naming its project, a
 //     `gb-` name or `.goodboy/sandbox` (env assignments and `export` included), a `-f`, `--file`, `--project-directory`
 //     or `--env-file` that resolves into the sandbox dir, a cwd inside it, `--volumes-from`, `container:`; and for the
@@ -23,6 +24,11 @@
 //     holds it (the project, `.goodboy`, `.goodboy/sandbox`), and names a substitution, a pipe or `xargs` feeds them, while
 //     some are left; `rg`, `ag` and the Grep tool skip the ignored `out/` of a git repository (`out/` in the sandbox's
 //     `.gitignore`) unless told not to. The deny text says the files are leftovers and how they go;
+//   - a `docker run`, `create` or `compose run` that binds the host's `/` or an engine's data or socket (`/var`, `/var/lib/docker*`,
+//     `/var/lib/containers*`, `/run/podman*`, any path ending in `docker.sock`, links followed), or is `--privileged` or
+//     `--pid=host`, with no sandbox word: such a container reaches every container's volumes. This is for a real-data project
+//     only, not machine-wide: it would stop every other project's containers. The options after the image are read too, so
+//     `docker run alpine rsync -av /var /backup` is held by its `-v`; `--device`, `--cap-add` and `--security-opt` are not read;
 //   - a command the rule cannot read in time: a word over 2048 characters, a segment of more than 400 words, a command
 //     over 100 KB, glob matching past the call's work budget.
 // Every guarded context, this one and the next, denies:
@@ -30,15 +36,22 @@
 //     NFC-normalized) to a dump or a registered input log, a word or the value of an assignment that holds one of those
 //     absolute paths as text ending at a path boundary (`DUMP=/path; head $DUMP`), a recursive reader (`grep -r`, `rg`,
 //     `ag`, `ack`, `tar`, `zip`, `cp -r`, `rsync`, `scp`, `find -exec`) over a dir that holds one, and a reader with no
-//     file operand or a name a substitution builds (`ls | xargs cat`, `cat $(ls)`) in such a dir; `ls`, `stat`, `wc`,
-//     `du`, `file` and `test` on them pass;
+//     file operand or a name a substitution builds (`ls | xargs cat`, `cat $(ls)`) in such a dir; `ls`, `stat`, `test` on
+//     them pass, and `wc`, `du` and `file` with options that print a count, a size or a type only (SAFE_OPTIONS; not
+//     `file -f`, `-m`, `wc --files0-from`: they show the file's lines in an error text); a glob is matched as text against
+//     the protected paths, and in a project that holds real data also expanded on disk with each match judged with its links
+//     followed (`*/dump.sql` through a link to the dumps; a call whose globs need more than 20,000 directory entries or 2,000
+//     matches is denied, to be narrowed); a group in a word (`@(a|b)`, `(a|b)`) is held when its dir holds a protected path;
+//     a link made to a protected path or a dir that holds one (`ln -s`, `cp -s`, a link moved or copied as a link); a `docker run` or `create` (and `compose run`) that binds a protected path,
+//     a dir above one or the registry dir (`-v`, `--volume`, `--mount source=`, links followed);
 //   - Read, Grep and Glob (a subagent's too) on those.
 // The registry file and its dir are changed by no tool call (Write, Edit, MultiEdit, NotebookEdit, and a shell segment with
 // a program that is no reader and a word naming them, a redirect into them, a glob listing them, `rm` or `mv` of a dir above
 // them), in any context. Reading them, and recursive readers over `~` or `~/.claude`, pass: they hold paths, not data.
 // The REGISTRY-ONLY context is a project of the user-level registry (lib/sandbox-registry.ts) that the call's dirs do not
 // belong to: there only (a) docker deny verbs with a word of the command or an assignment that names that project's exact
-// name (`gb-<slug>-<hash>`, whole or as the prefix of `<name>-<svc>-<n>` and `<name>_<vol>`), and (b) its protected paths.
+// name (`gb-<slug>-<hash>`, whole or as the prefix of `<name>-<svc>-<n>` and `<name>_<vol>`), (b) its protected paths, and (c) the
+// data binds of a `docker run` or `create` (a bind of a protected path, a dir above one, or the registry dir; not the engine rules).
 // No generic `gb-` rule, no unknown-container rule, no wrappers, no socket rule, no database host rule, and the size caps
 // only when a cwd or segment dir holds a protected path (a relative spelling could reach it): a plain project behaves as
 // with an empty registry. The rule applies to any tool whose input has a shell `command` (Bash, Monitor, PowerShell).
@@ -53,10 +66,9 @@
 // Pure: the hook calls `sandboxDataDenial` and decides what to do with the answer.
 
 import { existsSync, lstatSync, readdirSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { followedPath } from './file-tracker';
-import { plainWord, readCommand, readPrefix, shellReadsStdin, stripPrefix } from './outward-command';
+import { homeOf, plainWord, readCommand, readPrefix, shellReadsStdin, stripPrefix } from './outward-command';
 import { projectDir } from './project-dir';
 import { readRegular } from './safe-read';
 import { HOST_RAW_NAMES, projectName, readLocal, realDataForReading, realOrSelf, RUN_NAME, SANDBOX_DIR } from './sandbox-mode';
@@ -111,6 +123,9 @@ interface Context {
   prot: Protected;
   /** The work left for matching globs against protected paths in this call (in cells of the matcher), and whether it ran out. */
   work: { left: number; over: boolean };
+  /** What the call may spend expanding its globs on disk (`expandGlob`): directory entries left, the time it may take (`until`, set
+   *  at the first expansion), what it already expanded, and why one could not be (`over`: past a budget, or unreadable). */
+  fs: { left: number; over: false | 'big' | 'unreadable'; until: number; cache: Map<string, string[] | 'big' | 'unreadable'> };
   /** The words of the call (a Bash call's first 1600, as `sandboxDataDenial` reads them), read only when a call is denied:
    *  the registered projects it names. */
   words: readonly string[];
@@ -139,6 +154,15 @@ const norm = (p: string): string => (process.platform === 'darwin' ? p.normalize
 const isDirSync = (p: string): boolean => {
   try {
     return lstatSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+};
+
+/** Whether a path is a link itself (not what it leads to), false when it is not there. */
+const isLinkSync = (p: string): boolean => {
+  try {
+    return lstatSync(p).isSymbolicLink();
   } catch {
     return false;
   }
@@ -388,13 +412,11 @@ function sandboxTopOf(dir: string, cache: Map<string, string | null>): string | 
   return found;
 }
 
-const homeDir = (): string => process.env.HOME?.trim() || homedir();
-
 /** The path a word names: `~` and `$HOME` expanded, relative to `dir`; null when it holds another variable or a
  *  substitution (it cannot be told). */
 function pathOfWord(w: string, dir: string): string | null {
   let p = w;
-  const home = homeDir();
+  const home = homeOf();
   if (p === '~' || p.startsWith('~/')) p = join(home, p.slice(1));
   else if (p.startsWith('$HOME/') || p === '$HOME') p = join(home, p.slice(5));
   else if (p.startsWith('${HOME}/') || p === '${HOME}') p = join(home, p.slice(7));
@@ -430,7 +452,7 @@ interface RegistryBase {
 
 /** The text a word may hold of each path: as compared, and its `~/`, `$HOME/` and `${HOME}/` spellings (compared the same way). */
 function needlesOf(paths: readonly string[]): string[] {
-  const home = norm(homeDir());
+  const home = norm(homeOf());
   const out = new Set<string>();
   for (const p of paths) {
     const q = norm(p);
@@ -455,7 +477,7 @@ function registryBase(): RegistryBase | RegistryError {
   } catch {
     // no file
   }
-  const key = `${file}|${stamp}|${homeDir()}|${process.platform}`;
+  const key = `${file}|${stamp}|${homeOf()}|${process.platform}`;
   if (registryCache?.key === key) return registryCache.base;
   const entries = readRegistry();
   if (entries instanceof RegistryError) return entries;
@@ -467,7 +489,7 @@ function registryBase(): RegistryBase | RegistryError {
 
 /** The projects this call may reach, and what they protect (see the header). `note` hears of a registry that cannot be
  *  read: the rule then keeps the per-repo reading only. */
-function contextFor(dirs: readonly string[], words: readonly string[], cwd: string, where: { answers: string; roots: readonly string[] }, note?: (n: string) => void): Context {
+function contextFor(dirs: readonly string[], words: readonly string[], cwd: string, where: Pick<Context, 'answers' | 'roots'>, note?: (n: string) => void): Context {
   const registry = registryBase();
   if (registry instanceof RegistryError) note?.('registry-unreadable');
   const base = registry instanceof RegistryError ? null : registry;
@@ -519,7 +541,7 @@ function contextFor(dirs: readonly string[], words: readonly string[], cwd: stri
     needles: [...(base?.needles ?? []), ...needlesOf(paths)],
     dirNeedles: [...(base?.dirNeedles ?? []), ...dirNeedlesOf(paths)],
   };
-  return { local: [...local.values()], remote, prot, work: { left: WORK_CELLS, over: false }, words, ...where };
+  return { local: [...local.values()], remote, prot, work: { left: WORK_CELLS, over: false }, fs: { left: FS_ENTRIES, over: false, until: 0, cache: new Map() }, words, ...where };
 }
 
 /** The dir a glob lists: what is before its first glob character, up to the last `/`. */
@@ -542,8 +564,10 @@ function holdsProtected(prot: Protected, path: string): boolean {
 }
 
 /** Whether a path (or a glob that can match one) names a protected file: a dump, an input log, inside an input dir. A glob
- *  the matcher cannot read is held when the dir it lists holds a protected path. The matching is bounded by the call's work
- *  budget (`cx.work`): past it nothing more is matched and the caller reads `cx.work.over`. */
+ *  the matcher cannot read (an extended glob in a Glob or Grep tool pattern; in a shell word the reader has split it at the
+ *  parenthesis already, see `groupAfterDir`) is held when the dir it lists holds a protected path. The matching is bounded by
+ *  the call's work budget (`cx.work`) and, for the expansion on disk, its directory budget (`cx.fs`): past either nothing more
+ *  is matched and the caller reads `overBudget`. */
 function protectedHit(cx: Context, path: string, glob: boolean): boolean {
   const prot = cx.prot;
   if (prot.all.length === 0) return false;
@@ -553,6 +577,178 @@ function protectedHit(cx: Context, path: string, glob: boolean): boolean {
       return prot.exact.some((set) => set.has(n)) || prot.dirs.some((d) => inside(p, d));
     });
   }
+  // the dir the glob lists may be (or pass through) a link: the pattern is also judged with that part resolved, as a plain path is
+  const listed = headDir(path);
+  const dirPart = listed.length > 1 && listed.endsWith(sep) ? listed.slice(0, -1) : listed;
+  const realDir = realOf(dirPart);
+  if (globHit(cx, path) || (realDir !== dirPart && globHit(cx, (realDir === sep ? '' : realDir) + path.slice(dirPart.length)))) return true;
+  // a link anywhere in the pattern (`*/dump.sql` with `dl` a link to the dumps, `h*/dumps/*`): in a project that holds real data
+  // the pattern is expanded on disk and each match judged as a plain path, links followed. A shell in another project (the
+  // registry-only context) judges the pattern as text, as above: no walk of its dirs. Past the budget the call is denied
+  // (`cx.fs.over`, read by `overBudget`): a glob that large cannot be told from one that reaches a protected path.
+  if (cx.local.length === 0) return false;
+  const found = expandGlob(cx, path);
+  // (a string: the glob could not be expanded, `cx.fs.over` says why and `overBudget` denies the call)
+  return typeof found !== 'string' && found.some((p) => protectedHit(cx, p, false));
+}
+
+/** What a call's globs may cost to expand on disk: directory entries read (a link followed costs LINK_COST of them), matches of
+ *  one glob, the matcher's work (charged to the call's work budget like the text matching) and WALL_MS of time, well under the
+ *  hook's timeout (a call that runs out of it would run). Past any, the call is denied (see `protectedHit`). */
+const FS_ENTRIES = 20_000;
+const MAX_MATCHES = 2000;
+const LINK_COST = 50;
+const WALL_MS = 2000;
+const GLOB_TOO_BIG = 'a glob that matches too much to check (narrow the pattern)';
+const GLOB_UNREADABLE = 'a glob the rule cannot read (a bracket range that runs backwards, an unknown class, an extended glob, more than 64 alternatives): write the path out or simplify the pattern';
+
+/** Why a call is denied for its size or a glob it cannot read: in a project that holds real data. */
+function overBudget(cx: Context): string | null {
+  if (cx.local.length === 0) return null;
+  return cx.work.over ? TOO_LONG : cx.fs.over === 'unreadable' ? GLOB_UNREADABLE : cx.fs.over === 'big' ? GLOB_TOO_BIG : null;
+}
+
+/** What a glob matches on disk, links followed as the shell follows them (`**` too, which some shells do not: the rule reads
+ *  what any of them could), or why it cannot be told: 'big' (more than MAX_MATCHES matches, the call's directory, work or time
+ *  budget spent), 'unreadable' (a class that cannot be read, an extended glob, more than 64 alternatives); `cx.fs.over` is then
+ *  set. Only existing names are returned. Hidden names are matched by `*` (the shell would not: more held, not less). Each link
+ *  looked up (`holdsProtected`: a real path) is charged LINK_COST entries, each name tried against a pattern its tokens x its
+ *  length to the work budget. An expansion is kept for the call (the same glob is asked for by more than one rule). */
+function expandGlob(cx: Context, pattern: string): string[] | 'big' | 'unreadable' {
+  const kept = cx.fs.cache.get(pattern);
+  if (kept !== undefined) return kept;
+  const result = expandUncached(cx, pattern);
+  cx.fs.cache.set(pattern, result);
+  if (typeof result === 'string') cx.fs.over = cx.fs.over === 'unreadable' || result === 'unreadable' ? 'unreadable' : 'big';
+  return result;
+}
+
+function expandUncached(cx: Context, pattern: string): string[] | 'big' | 'unreadable' {
+  const alts = alternatives(pattern);
+  if (alts === null) return 'unreadable';
+  const out: string[] = [];
+  let ok = true;
+  let why: 'big' | 'unreadable' = 'big';
+  if (cx.fs.until === 0) cx.fs.until = Date.now() + WALL_MS;
+  let ticks = 0;
+  // the time budget, looked at every 16 steps
+  const late = (): boolean => {
+    if (ok && ++ticks % 16 === 0 && Date.now() > cx.fs.until) ok = false;
+    return !ok;
+  };
+  const list = (dir: string): string[] => {
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      return [];
+    }
+    cx.fs.left -= names.length + 1;
+    if (cx.fs.left < 0 || Date.now() > cx.fs.until) ok = false;
+    return ok ? names : [];
+  };
+  const found = (p: string): void => {
+    out.push(p);
+    if (out.length > MAX_MATCHES) ok = false;
+  };
+  const isDir = (p: string): boolean => {
+    try {
+      return statSync(p).isDirectory();
+    } catch {
+      return false;
+    }
+  };
+  // whether what a link leads to holds a protected path, the real-path walk charged to the budget
+  const linkHolds = (p: string): boolean => {
+    cx.fs.left -= LINK_COST;
+    if (cx.fs.left < 0) {
+      ok = false;
+      return false;
+    }
+    return holdsProtected(cx.prot, p);
+  };
+  const walk = (cur: string, segs: readonly string[], i: number): void => {
+    if (!ok) return;
+    const seg = segs[i]!;
+    const last = i === segs.length - 1;
+    if (seg === '.') return last ? found(cur) : walk(cur, segs, i + 1);
+    if (seg === '..') {
+      const up = dirname(followedPath(cur) ?? cur);
+      return last ? found(up) : walk(up, segs, i + 1);
+    }
+    if (/^\*{2,}$/.test(seg)) {
+      // zero or more dirs, then the rest; as the last part, every name below
+      const seen = new Set<string>();
+      const queue = [cur];
+      for (let q = 0; q < queue.length && !late(); q++) {
+        const d = queue[q]!;
+        const names = list(d);
+        if (last) for (const n of names) found(join(d, n));
+        else walk(d, segs, i + 1);
+        for (const n of names) {
+          const child = join(d, n);
+          // a linked dir is entered only when what it leads to holds a protected path (any other cannot lead to one), and once
+          //   (a link back up would loop); a plain dir is entered as it is, the tree below it has no loop
+          if (isLinkSync(child)) {
+            if (!isDir(child) || !linkHolds(child)) continue;
+            const real = followedPath(child) ?? child;
+            if (seen.has(real)) continue;
+            seen.add(real);
+            queue.push(child);
+          } else if (isDirSync(child)) queue.push(child);
+        }
+      }
+      return;
+    }
+    if (!/[*?[\\]/.test(seg)) {
+      const next = join(cur, seg);
+      if (last) {
+        try {
+          lstatSync(next);
+          found(next);
+        } catch {
+          // no such name
+        }
+      } else walk(next, segs, i + 1);
+      return;
+    }
+    const toks = compileGlob(seg);
+    if (toks === null) {
+      ok = false;
+      why = 'unreadable';
+      return;
+    }
+    for (const n of list(cur)) {
+      if (late()) return;
+      // the matcher's work, charged as the text matching of globs is: a long pattern over many long names would take minutes
+      cx.work.left -= (toks.length + 1) * (n.length + 1);
+      if (cx.work.left < 0) {
+        ok = false;
+        return;
+      }
+      if (!matchTokens(toks, n)) continue;
+      const next = join(cur, n);
+      if (last) found(next);
+      else if (isDir(next)) {
+        // a link is looked up (and charged) so that the budget counts the real paths it costs; the walk enters it either way
+        if (isLinkSync(next)) linkHolds(next);
+        walk(next, segs, i + 1);
+      }
+    }
+  };
+  for (const alt of alts) {
+    if (!isAbsolute(alt)) return 'unreadable';
+    const segs = alt.split(sep).filter((s) => s !== '');
+    if (segs.length === 0) continue;
+    walk(sep, segs, 0);
+    if (!ok) return why;
+  }
+  return out;
+}
+
+/** The glob half of `protectedHit`, for a pattern as spelled. */
+function globHit(cx: Context, path: string): boolean {
+  const prot = cx.prot;
   const listed = headDir(path);
   const alts = alternatives(path);
   const compiled = alts === null ? null : alts.map((a) => ({ toks: compileGlob(a), prefix: norm(literalPrefix(a)) }));
@@ -650,20 +846,34 @@ function skipsIgnored(prog: string, words: readonly string[]): boolean {
   return !words.slice(1).some((w) => /^-[A-Za-z]*[uU][A-Za-z]*$/.test(w) || w === '--unrestricted' || w.startsWith('--no-ignore') || w === '--skip-vcs-ignores');
 }
 
-/** Whether a path or glob reaches the raw output of one of the guards (a glob: the dir it lists is in `out/` while some is left). */
-function rawHit(guards: readonly Guarded[], path: string, glob: boolean): boolean {
-  if (glob) return guards.some((g) => inside(headDir(path), join(g.sandboxDir, 'out')) && rawLeft(g));
-  const real = realOf(path);
-  return guards.some((g) => rawPath(g, path) || rawPath(g, real));
+/** Whether a path or glob reaches the raw output of one of the guards. A glob: the dir it lists (as spelled, or with a link in it
+ *  followed) is in `out/` while some is left; in a project that holds real data it is also expanded on disk, as `protectedHit`
+ *  does, and each match judged with its links followed (`ll/*` with `ll` a link to `out/live`; `ol/*` + `/x.log` with `ol` a
+ *  link to `out/`). A glob that cannot be expanded is read by `overBudget`. */
+function rawHit(cx: Context, guards: readonly Guarded[], path: string, glob: boolean): boolean {
+  if (!glob) {
+    const real = realOf(path);
+    return guards.some((g) => rawPath(g, path) || rawPath(g, real));
+  }
+  const listed = headDir(path);
+  const dirPart = listed.length > 1 && listed.endsWith(sep) ? listed.slice(0, -1) : listed;
+  const realDir = realOf(dirPart);
+  const outOf = (g: Guarded): string => join(g.sandboxDir, 'out');
+  if (guards.some((g) => rawLeft(g) && (inside(listed, outOf(g)) || inside(realDir, realOrSelf(outOf(g)))))) return true;
+  if (cx.local.length === 0 || !guards.some(rawLeft)) return false;
+  const found = expandGlob(cx, path);
+  return typeof found !== 'string' && found.some((p) => rawHit(cx, guards, p, false));
 }
 
 // ---- docker ----
 
 const DOCKER_PROGS = new Set(['docker', 'podman', 'nerdctl']);
 const COMPOSE_PROGS = new Set(['docker-compose', 'podman-compose']);
-const DENY_VERBS = new Set(['exec', 'cp', 'logs', 'inspect', 'attach', 'export', 'commit', 'run', 'create', 'start', 'top', 'diff', 'save']);
+/** `debug` (docker debug), `checkpoint` (a container's memory), `mount` (podman: a container's file system on the host) and
+ *  the two `volume` verbs that hand out a volume's files (`dockerVerb` reads `volume export` as one verb). */
+const DENY_VERBS = new Set(['exec', 'cp', 'logs', 'inspect', 'attach', 'export', 'commit', 'run', 'create', 'start', 'top', 'diff', 'save', 'debug', 'checkpoint', 'mount', 'volume export', 'volume mount']);
 /** The verbs whose argument names a container: an argument that cannot be read (a variable, a hex id) is denied. */
-const CONTAINER_VERBS = new Set(['exec', 'cp', 'logs', 'inspect', 'attach', 'export', 'commit', 'start', 'top', 'diff']);
+const CONTAINER_VERBS = new Set(['exec', 'cp', 'logs', 'inspect', 'attach', 'export', 'commit', 'start', 'top', 'diff', 'debug', 'mount', 'checkpoint', 'volume export', 'volume mount']);
 /** Of those, the verbs that take one container and then a command or nothing. */
 const ONE_CONTAINER = new Set(['exec', 'logs', 'attach', 'export', 'top']);
 const GLOBAL_VALUED = new Set(['-H', '--host', '--context', '-c', '--config', '-l', '--log-level', '--tlscacert', '--tlscert', '--tlskey', '--namespace', '-n', '--connection', '--url', '--identity', '--remote', '--cgroup-manager', '--root', '--runroot', '--storage-driver', '--address', '-a']);
@@ -681,6 +891,11 @@ const VERB_VALUED: Record<string, ReadonlySet<string>> = {
   start: new Set(['--detach-keys']),
   top: new Set(),
   diff: new Set(),
+  debug: new Set(['--shell', '--host']),
+  mount: new Set(['--format']),
+  checkpoint: new Set(['--checkpoint-dir']),
+  'volume export': new Set(['-o', '--output']),
+  'volume mount': new Set(),
 };
 
 /** The words after `from` that are no option, with the option values skipped; stops after `limit` words. */
@@ -720,8 +935,14 @@ const GATE_SWITCH_TEXT = "This command sets one of goodboy's own gate switches. 
 const GATE_ASSIGN = new RegExp(`^${GATE_SWITCH}\\+?=`, 'i');
 /** The same anywhere in a text, quotes out, with blanks allowed around the `=` (PowerShell `$env:NAME = 'x'`, cmd `set NAME=x`). */
 const GATE_SPELLED = new RegExp(`(?:^|[^A-Za-z0-9_])${GATE_SWITCH}\\s*\\+?=`);
-/** Programs whose next word is an assignment, not a command. */
-const ASSIGNING = new Set(['export', 'declare', 'typeset', 'readonly', 'local']);
+/** The assignment of the switch anywhere in a word (quotes out), after any character a name cannot hold (a blank, `;`, `/`, a quote:
+ *  a `-c` string, a wrapper's argument, a `sed` expression): `X${GATE_SWITCH}=…` and `${GATE_SWITCH}x=…` are other names. */
+const GATE_IN_WORD = new RegExp(`(?:^|[^A-Za-z0-9_])${GATE_SWITCH}\\+?=`, 'i');
+/** Programs known to only show or search the text they are given, with no way to run it or to make it the environment of one:
+ *  a segment that holds the assignment and runs one of them (`echo NAME=x`, `grep NAME=x file`, `git commit -m "…NAME=x…"`) sets
+ *  nothing. `sed` is one unless it edits in place. Every other program with the assignment among its words is denied (a wrapper
+ *  such as `caffeinate`, `stdbuf`, `arch`, `doas`, `npx cross-env`, a shell or interpreter with a `-c` string, an unknown tool). */
+const TEXT_ONLY = new Set(['echo', 'printf', 'grep', 'egrep', 'fgrep', 'rg', 'ag', 'ack', 'git', 'cat', 'less', 'more', 'head', 'tail', 'sed']);
 /** Programs that run text they are given (a script, a string, stdin) the reader of the command has not followed: a
  *  command that spells the assignment and runs one of them is denied (`echo 'NAME=x cmd' | sh`, `eval "$(…)"`,
  *  `python -c`, a heredoc fed to a shell). `git commit -m` and a `grep` that only name it are no such program. */
@@ -748,7 +969,10 @@ function setsGateSwitch(toolName: string, command: string, segments: readonly { 
     //   `NAME+=x cmd`: not a name `readPrefix` takes)
     if (w.slice(0, w.length - rest.length + 1).some((x) => GATE_ASSIGN.test(x))) return true;
     const prog = basename(rest[0] ?? '');
-    if (ASSIGNING.has(prog) && rest.slice(1).some((x) => GATE_ASSIGN.test(x))) return true;
+    // the class of wrappers and strings `readPrefix` does not follow (`caffeinate env NAME=x cmd`, `npx cross-env NAME=x cmd`,
+    //   `doas`, `stdbuf`, `arch`, `sh -c 'a; NAME=x b'`, a word after `--`): the assignment anywhere among the words of a segment
+    //   whose program is not known to be text-only
+    if (words.some((x) => GATE_IN_WORD.test(x)) && !(TEXT_ONLY.has(prog) && !(prog === 'sed' && rest.some((x) => /^-[A-Za-z]*i|^--in-place/.test(x))))) return true;
     if (RUNS_TEXT.has(prog)) runsText = true;
   }
   return spelled && runsText;
@@ -802,6 +1026,13 @@ function dockerVerb(words: readonly string[]): { verb: string; compose: boolean;
     const o = operands(words, after, new Set(), 1);
     verb = o.rest[0];
     after = o.end;
+  } else if (verb === 'volume') {
+    // `volume export` and `volume mount` hand out a volume's files; the other volume verbs do not
+    const o = operands(words, after, new Set(), 1);
+    if (o.rest[0] === 'export' || o.rest[0] === 'mount') {
+      verb = `volume ${o.rest[0]}`;
+      after = o.end;
+    }
   }
   return verb === undefined ? null : { verb, compose, after };
 }
@@ -809,9 +1040,73 @@ function dockerVerb(words: readonly string[]): { verb: string; compose: boolean;
 /** `compose up` that streams the containers' logs: no `-d`, `--detach` or `--wait`. */
 const attachedUp = (words: readonly string[], after: number): boolean => !words.slice(after).some((w) => w === '--detach' || w === '--wait' || w.startsWith('--wait-timeout') || /^-[A-Za-z]*d[A-Za-z]*$/.test(w));
 
+/** Host dirs that hold or lead to a container engine's data: `/` and the dirs above `/var/lib/docker`, podman's storage and the
+ *  sockets, and anything below `/var/lib/docker*`, `/var/lib/containers*`, `/var/run/docker*`, `/run/docker*`, `/run/podman*`,
+ *  `/run/containers*`, `/run/user/<uid>/(docker|podman)*`, `$XDG_RUNTIME_DIR/(docker|podman)*` and the rootless storage under
+ *  `~/.local/share/(containers|docker)` (macOS spells `/var` as `/private/var`). */
+const ENGINE_DIRS = new Set(['/', '/var', '/var/lib', '/var/run', '/run', '/run/user']);
+const ENGINE_PREFIXES = ['/var/lib/docker', '/var/lib/containers', '/var/run/docker', '/var/run/podman', '/run/docker', '/run/podman', '/run/containers'];
+const ENGINE_USER_RUN = /^\/run\/user\/\d+(?:\/(?:docker|podman)[^/]*(?:\/.*)?)?$/;
+
+/** Whether one spelling of a host path is an engine's data or a dir above it, or a socket (any path ending in `docker.sock`). */
+function engineDir(p: string): boolean {
+  const canon = (x: string): string => resolve('/', x.replace(/^\/private(?=\/)/, '')).toLowerCase();
+  const n = canon(p);
+  const home = homeOf();
+  const xdg = process.env.XDG_RUNTIME_DIR;
+  const own = [join(home, '.local', 'share', 'containers'), join(home, '.local', 'share', 'docker'), ...(xdg ? [join(xdg, 'podman'), join(xdg, 'docker')] : [])].map(canon);
+  return ENGINE_DIRS.has(n) || ENGINE_USER_RUN.test(n) || ENGINE_PREFIXES.some((x) => n.startsWith(x)) || own.some((x) => n === x || n.startsWith(`${x}/`)) || n.endsWith('docker.sock');
+}
+
+/** Whether a host path, as spelled or with its links followed (`ln -s /var/run/docker.sock s`, a link to `/var/run`), is one. */
+const engineHostPath = (p: string): boolean => engineDir(p) || engineDir(followedPath(p) ?? p);
+
+/** The host path a `-v`/`--volume` value (`SRC:DST[:opts]`) or a `--mount` value (`type=bind,source=SRC,…`) binds, when it is one:
+ *  a source that starts with `/`, `.`, `~` or `$HOME` (any other is the name of a volume). Null when a variable makes it unreadable. */
+function bindSource(value: string, mount: boolean, dir: string): string | null {
+  const src = mount ? value.split(',').map((kv) => /^(?:source|src)=(.*)$/.exec(kv)?.[1]).find((x) => x !== undefined) : value.split(':')[0];
+  return src === undefined || !/^(?:[/.~]|\$\{?HOME\b)/.test(src) ? null : pathOfWord(src, dir);
+}
+
+/** Whether a bind of a host path gives the container the dump, an input log, the registry or raw sandbox output: the path is one of
+ *  them, inside an input dir, or a dir above one (links followed). */
+function bindReachesData(cx: Context, src: string): boolean {
+  if (protectedHit(cx, src, false) || holdsProtected(cx.prot, src)) return true;
+  const reg = registryDir();
+  if (inside(src, reg) || inside(realOf(src), realOrSelf(reg)) || inside(reg, src) || inside(realOrSelf(reg), realOf(src))) return true;
+  return cx.local.some((g) => rawLeft(g) && (inOut(g, src) || holdsOut(g, src)));
+}
+
+/** A `run` or `create` that gives the container the host's engine or root (a bind of one of the ENGINE dirs or a docker socket,
+ *  `--privileged`, `--pid=host`), or the data the rule protects (a bind whose source `bindReachesData`). Said without a sandbox
+ *  word: the container then reaches every container's volumes, or the files the rule keeps from the model. With `engine` false
+ *  (a shell in another project, the registry-only context) only the data binds count: the engine, `--privileged` and
+ *  `--pid=host` rules are for a project that holds real data, as they would stop every other project's containers machine-wide.
+ *  The options after the image are read too (`docker run alpine rsync -av /var /backup` is held by its `-v`); `--device`,
+ *  `--cap-add` and `--security-opt` are not read. */
+function riskyRun(cx: Context, words: readonly string[], from: number, dir: string, engine = true): string | null {
+  for (let i = from; i < words.length; i++) {
+    const w = plainWord(words[i]!);
+    if (w === '--') break;
+    // a Go boolean option: bare, or `=` with 1, t, T, TRUE, true or True (`=false`, `=0`, `=f` are off)
+    const flag = /^--(privileged|pid)(?:=(.*))?$/.exec(w);
+    if (engine && flag?.[1] === 'privileged' && (flag[2] === undefined || /^(?:1|t|T|TRUE|true|True)$/.test(flag[2]))) return `a privileged container: it reaches every container's volumes`;
+    if (engine && (w === '--pid=host' || (w === '--pid' && plainWord(words[i + 1] ?? '') === 'host'))) return `the host process namespace: it reaches every container's volumes`;
+    const m = /^(?:--(volume|mount)(?:=(.*))?|-[A-Za-z]*(v)(?:=?(.+))?)$/.exec(w);
+    if (m === null) continue;
+    // the value: attached, or the next word; in a short cluster `-v` ends it (`-itv /a:/b`) or is followed by it (`-v/a:/b`)
+    const value = m[2] ?? m[4] ?? plainWord(words[i + 1] ?? '');
+    const src = bindSource(value, m[1] === 'mount', dir);
+    if (src === null) continue;
+    if (engine && engineHostPath(src)) return `a bind of ${src}: it reaches every container's volumes`;
+    if (bindReachesData(cx, src)) return `a bind of ${src}, which is or holds the dump, an input log, the registry or raw sandbox output`;
+  }
+  return null;
+}
+
 /** The docker rule for one segment in the LOCAL context: the hit when it reaches a container, volume or network of a
- *  guarded sandbox, or a container that cannot be told from one. */
-function dockerHit(guards: readonly Guarded[], all: readonly string[], words: readonly string[], dir: string | null): string | null {
+ *  guarded sandbox, or a container that cannot be told from one; a `run` or `create` that binds the engine's data or socket. */
+function dockerHit(cx: Context, guards: readonly Guarded[], all: readonly string[], words: readonly string[], dir: string | null, cwd: string): string | null {
   const v = dockerVerb(words);
   if (v === null) return null;
   const up = v.compose && v.verb === 'up';
@@ -820,12 +1115,25 @@ function dockerHit(guards: readonly Guarded[], all: readonly string[], words: re
     if (!targetsSandbox(g, all, words, dir)) continue;
     if (!up || attachedUp(words, v.after)) return up ? 'docker compose up (attached: it streams the logs)' : `docker ${v.verb} (a sandbox container, volume or network)`;
   }
+  if (v.verb === 'run' || v.verb === 'create') {
+    const risky = riskyRun(cx, words, v.after, cwd);
+    if (risky !== null) return `docker ${v.verb} (${risky})`;
+  }
   if (v.compose || !CONTAINER_VERBS.has(v.verb)) return null;
   // a container named by a variable or a hex id, or by nothing (an `xargs` supplies it), cannot be told from a sandbox container
   const o = operands(words, v.after, VERB_VALUED[v.verb] ?? new Set(), ONE_CONTAINER.has(v.verb) ? 1 : Infinity);
   const named = v.verb === 'cp' ? o.rest.map((x) => (x.includes(':') ? x.slice(0, x.indexOf(':')) : '')).filter((x) => x !== '') : o.rest;
   if (named.length === 0 || named.some(unreadable)) return `docker ${v.verb} (a container that cannot be told from a sandbox one)`;
   return null;
+}
+
+/** The REGISTRY-ONLY context's bind rule for a `run` or `create`: a bind of a registered path or a dir above one, or the registry
+ *  dir (`riskyRun` with the engine rules off). */
+function remoteBindHit(cx: Context, words: readonly string[], cwd: string): string | null {
+  const v = dockerVerb(words);
+  if (v === null || (v.verb !== 'run' && v.verb !== 'create')) return null;
+  const risky = riskyRun(cx, words, v.after, cwd, false);
+  return risky === null ? null : `docker ${v.verb} (${risky})`;
 }
 
 const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -860,6 +1168,28 @@ function socketHit(prog: string, words: readonly string[]): boolean {
 
 /** Programs that tell about a file and read none of it: the dump's name is no read of it. */
 const METADATA_PROGS = new Set(['ls', 'stat', 'wc', 'du', 'file', 'test', '[']);
+/** The options of `file`, `wc` and `du` that print a count, a size or a type and nothing of the file's text: these programs are
+ *  exempt only with options from this list (letters of a short cluster, and the long names). Any other option drops the
+ *  exemption: `file -f`/`--files-from` and `wc`/`du --files0-from` read the file as a list of names, `file -m`/`--magic-file`
+ *  reads it as a magic file, and both show its lines in the error text of what they cannot parse. */
+const SAFE_OPTIONS: Readonly<Record<string, { letters: string; long: RegExp }>> = {
+  file: { letters: 'biILhzZkspnN0rv', long: /^--(?:brief|mime|mime-type|mime-encoding|dereference|no-dereference|keep-going|uncompress|uncompress-noreport|special-files|preserve-date|no-pad|raw|print0|no-buffer|apple|extension|version|help)$/ },
+  wc: { letters: 'lcwmL', long: /^--(?:lines|bytes|words|chars|max-line-length|total(?:=\w+)?|version|help)$/ },
+  du: { letters: 'abcdghHkLmPsSx', long: /^--(?:summarize|human-readable|apparent-size|bytes|total|si|one-file-system|dereference|max-depth=\d+|block-size=\w+|time|all|count-links|separate-dirs|version|help)$/ },
+};
+
+/** Whether a metadata program's options are all of the kind that reveal nothing of the file (ls, stat, test: any). */
+function onlySafeOptions(prog: string, words: readonly string[]): boolean {
+  const safe = SAFE_OPTIONS[prog];
+  if (safe === undefined) return true;
+  for (const raw of words.slice(1)) {
+    const w = plainWord(raw);
+    if (w === '--') break;
+    if (!w.startsWith('-') || w === '-') continue;
+    if (w.startsWith('--') ? !safe.long.test(w) : [...w.slice(1)].some((c) => !safe.letters.includes(c))) return false;
+  }
+  return true;
+}
 const DB_CLIENTS = new Set(['psql', 'mysql', 'mariadb', 'mongosh', 'pg_dump', 'mysqldump']);
 const SANDBOX_HOST = /^(?:db\d*|gb-[a-z0-9._-]+)$/i;
 
@@ -993,8 +1323,11 @@ function toolHit(cx: Context, tool: string, input: Record<string, unknown>, cwd:
   const guards = [...cx.local, ...cx.remote];
   for (const t of targets) {
     if (protectedHit(cx, t.path, t.glob)) return `${tool} of the dump or an input log`;
-    if (t.glob) continue;
-    if (rawHit(guards, t.path, false)) return `${tool} of ${RAW_NOTE}`;
+    if (t.glob) {
+      if (rawHit(cx, guards, t.path, true)) return `${tool} of ${RAW_NOTE}`;
+      continue;
+    }
+    if (rawHit(cx, guards, t.path, false)) return `${tool} of ${RAW_NOTE}`;
     // a search below `out/` reads the raw files in it
     if (tool !== 'Read' && guards.some((g) => inOut(g, t.path) && rawLeft(g))) return `${tool} over ${RAW_NOTE}`;
     // a Grep over a dir above `out/` reads them too, unless ripgrep (what the tool runs) skips the ignored `out/`
@@ -1002,7 +1335,7 @@ function toolHit(cx: Context, tool: string, input: Record<string, unknown>, cwd:
     // a Grep over a dir that holds the dump or an input reads them too (a Glob lists names only)
     if (tool === 'Grep' && holdsProtected(cx.prot, t.path)) return `${tool} over a dir that holds the dump or an input log`;
   }
-  return cx.work.over && cx.local.length > 0 ? TOO_LONG : null;
+  return overBudget(cx);
 }
 
 // ---- the registry file ----
@@ -1103,8 +1436,9 @@ function located(what: string, cx: Context): DataGuardHit {
   return { what, ...(from.length > 0 ? { from } : {}), ...(nested.length > 0 ? { nested } : {}) };
 }
 
-/** The characters a reader of the deny text may not see, escaped in a shown dir: DEL and the C1 controls (U+0085 among
- *  them), the Arabic letter mark, zero-width and direction marks, line and paragraph separators, bidi embeddings,
+/** The invisible and direction-changing characters of these kinds, escaped in a shown dir (other Unicode format characters,
+ *  such as the soft hyphen or the tag characters, are not in the list and stay as they are): DEL and the C1 controls (U+0085
+ *  among them), the Arabic letter mark, zero-width and direction marks, line and paragraph separators, bidi embeddings,
  *  overrides and isolates, invisible operators, and the byte order mark. */
 const UNSEEN = /[\u{7f}-\u{9f}\u{61c}\u{200b}-\u{200f}\u{2028}-\u{202e}\u{2060}-\u{2069}\u{feff}]/gu;
 
@@ -1125,11 +1459,13 @@ function projectsAt(dirs: readonly string[]): string {
 export function sandboxDataMessage(hit: DataGuardHit, o: { cli: string; subagent: boolean; marker?: string }): string {
   if (hit.fixed !== undefined) return hit.fixed;
   const where: string[] = [];
-  if ((hit.from ?? []).length > 0) {
-    where.push(`Raw rows stay in the sandbox of ${projectsAt(hit.from!)}: \`bun "${o.cli}" sandbox-data schema|shape|count|pick\` answers for the dir it runs in, so run it there (\`cd\` into that project's dir first), not from here: structure, counts and handles.`);
+  const from = hit.from ?? [];
+  const nested = hit.nested ?? [];
+  if (from.length > 0) {
+    where.push(`Raw rows stay in the sandbox of ${projectsAt(from)}: \`bun "${o.cli}" sandbox-data schema|shape|count|pick\` answers for the dir it runs in, so run it there (\`cd\` into that project's dir first), not from here: structure, counts and handles.`);
   }
-  if ((hit.nested ?? []).length > 0) {
-    where.push(`Raw rows stay in the sandbox of ${projectsAt(hit.nested!)}, inside this session's project dir: \`bun "${o.cli}" sandbox-data\` answers for this session's project from any dir below it, so no \`cd\` reaches that sandbox from here; its structure, counts and handles come from a Claude Code session started in that project's dir.`);
+  if (nested.length > 0) {
+    where.push(`Raw rows stay in the sandbox of ${projectsAt(nested)}, inside this session's project dir: \`bun "${o.cli}" sandbox-data\` answers for this session's project from any dir below it, so no \`cd\` reaches that sandbox from here; its structure, counts and handles come from a Claude Code session started in that project's dir.`);
   }
   const use =
     where.length > 0
@@ -1157,12 +1493,18 @@ interface Seg {
   listed: boolean;
 }
 
-/** Whether the command holds a protected path's dir followed by a group that builds the rest of the name: `dumps/(dump|x).sql`
- *  (zsh), `dumps/@(a|b)` (extglob); the shell reader splits the word at the parenthesis (a substitution `$(` is not one). Linear:
- *  only the first 100 KB, at most 256 characters after each occurrence, and the call's work budget. */
-function groupAfterDir(cx: Context, command: string): boolean {
-  if (cx.prot.dirNeedles.length === 0 || !command.includes('(')) return false;
-  const text = norm(command.length > MAX_COMMAND ? command.slice(0, MAX_COMMAND) : command);
+/** Whether the command builds a name with a group in a dir that holds a protected path: `dumps/(dump|x).sql` (zsh),
+ *  `dumps/@(a|b)`, `!(…)`, `+(…)`, `*(…)`, `?(…)` (extglob), `dump.s(ql|x)`. The shell reader splits a word at the parenthesis
+ *  (a substitution `$(` or process substitution `<(` is not one), so the matcher never sees the group: the glob cannot be
+ *  expanded and is held when its literal dir holds a protected path. That dir is found two ways: as the text of a protected
+ *  dir (`dirNeedles`, any context), and as the dir the word before the `(` names, from each dir the command runs in, `~`,
+ *  `$HOME` and links resolved (a project that holds real data: `dl/@(dump).sql` with `dl` a link to the dumps; another
+ *  project's shell: its protected paths as text only). A bare `(` (a subshell, `x=(a b)`) is no group. Linear: only the first
+ *  100 KB, at most 256 characters after each occurrence, 64 groups, and the call's work budget. */
+function groupAfterDir(cx: Context, command: string, dirs: readonly string[]): boolean {
+  if (cx.prot.all.length === 0 || !command.includes('(')) return false;
+  const cut = command.length > MAX_COMMAND ? command.slice(0, MAX_COMMAND) : command;
+  const text = norm(cut);
   for (const d of cx.prot.dirNeedles) {
     cx.work.left -= text.length;
     if (cx.work.left < 0) {
@@ -1176,6 +1518,25 @@ function groupAfterDir(cx: Context, command: string): boolean {
         if (c === '(') return true;
         if (/[\s;|&)$]/.test(c)) break;
       }
+    }
+  }
+  const from = [...new Set(dirs)].slice(0, 8);
+  let groups = 0;
+  for (let at = cut.indexOf('('); at >= 0 && groups < 64; at = cut.indexOf('(', at + 1)) {
+    if (at === 0 || '$<>'.includes(cut[at - 1]!)) continue;
+    // the word before the `(` as the shell reads it: quotes are part of a word, not its end (`"dl/"(a|b)`, `dump.s"(ql|x)"`);
+    // the `$` of an ANSI-C or locale quote (`$'dl/'`, `$"dl/"`) is part of the quote, not of the name
+    let s = at;
+    while (s > 0 && !/[\s;|&()<>`]/.test(cut[s - 1]!)) s--;
+    const prefix = plainWord(cut.slice(s, at).replace(/\$(?=['"])/g, ''));
+    if (prefix === '' || prefix.endsWith('=') || prefix.length > MAX_WORD) continue;
+    groups++;
+    const slash = prefix.lastIndexOf('/');
+    const dirText = slash >= 0 ? prefix.slice(0, slash + 1) : '.';
+    for (const d of from) {
+      const p = pathOfWord(dirText, d);
+      if (p === null) continue;
+      if (cx.local.length > 0 ? holdsProtected(cx.prot, p) : cx.prot.all.some((t) => inside(t, p))) return true;
     }
   }
   return false;
@@ -1242,22 +1603,164 @@ export function sandboxDataDenial(input: { toolName: string; toolInput: Record<s
         return p !== null && (holdsProtected(cx.prot, p) || protectedHit(cx, p, hasGlob(p)) || cx.local.some((g) => (inOut(g, p) || holdsOut(g, p)) && rawLeft(g)));
       });
     });
-  if (groupAfterDir(cx, command)) return located('a path of the dump or an input log', cx);
+  if (groupAfterDir(cx, command, dirs)) return located('a path of the dump or an input log', cx);
   let wrapped = false;
   for (const { seg, words, dir, own } of parsed) {
-    if (own) continue;
+    if (own) {
+      // goodboy's command holds the boundary, but its redirects are the shell's: `sandbox-data schema 2> DUMP` truncates the dump
+      if (redirectsToProtected(cx, seg.words, dir)) return located('a path of the dump or an input log', cx);
+      continue;
+    }
     wrapped ||= runsItsArguments(words);
     const hit = segmentHit({ cx, all, raw: seg.words, words, segDir: seg.dir, dir, command, caps, listed }, dirHolds);
     if (hit !== null) return located(hit, cx);
   }
   // glob matching ran past the call's budget: a command that long is not read to the end
-  if (cx.work.over && cx.local.length > 0) return located(TOO_LONG, cx);
+  const big = overBudget(cx);
+  if (big !== null) return located(big, cx);
   // a program that runs its arguments or stdin as a command, with docker text and a verb the rule would deny
   if (wrapped) {
     const text = command.replace(/["'\\]/g, '');
     if (DOCKER_TEXT.test(text) && (cx.local.length > 0 || cx.remote.some((g) => text.includes(g.project)))) return located('a docker call the rule cannot read', cx);
   }
   return null;
+}
+
+/** A redirect operator that names a file, with an optional fd before it: `>`, `>>`, `>|`, `>&`, `&>`, `&>>`, `<`, `<&`, `<>`. Not a
+ *  here-document (`<<`) or here-string (`<<<`): their word is text. */
+const FILE_REDIRECT = /^(?:\d*>>|\d*>\||\d*>&|\d*>|&>>|&>|\d*<>|\d*<&|\d*<(?!<))/;
+
+/** Whether a segment redirects from or to a protected path (`2> DUMP`, `>DUMP`, `< DUMP`, `>& DUMP`, `<> DUMP`, a glob that
+ *  expands to one: a star, a slash and `dump.sql` after `>`). */
+function redirectsToProtected(cx: Context, raw: readonly string[], dir: string): boolean {
+  let pending = false;
+  for (const rawWord of raw.slice(0, UNCAPPED_WORDS)) {
+    const t = plainWord(rawWord);
+    const m = FILE_REDIRECT.exec(t);
+    let target: string | null = null;
+    if (pending) target = t;
+    else if (m !== null) target = t.slice(m[0].length);
+    pending = !pending && m !== null && target === '';
+    if (target === null || target === '') continue;
+    const p = pathOfWord(target, dir);
+    if (p !== null && protectedHit(cx, p, hasGlob(p))) return true;
+  }
+  return false;
+}
+
+// ---- links made to what the rule protects ----
+
+/** Whether a link may not lead to this path: a protected file (or inside an input dir), or a dir that holds one, or the registry
+ *  dir or a dir above it. Not `/`, `$HOME` or a dir above `$HOME` (`ln -s ~ h` is a common link and holds everything; what is
+ *  read through it is judged word by word). */
+function linkTargetHeld(cx: Context, p: string): boolean {
+  if (cx.prot.all.length > 0) {
+    if (protectedHit(cx, p, false)) return true;
+    if (!aboveHome(p)) {
+      if (holdsProtected(cx.prot, p)) return true;
+      const reg = registryDir();
+      if (inside(p, reg) || inside(reg, p) || inside(realOf(p), realOrSelf(reg)) || inside(realOrSelf(reg), realOf(p))) return true;
+    }
+  }
+  // raw output a sandbox left on the host: `out/`, what is in it, and `.goodboy` and `.goodboy/sandbox` above it (not the project)
+  return cx.local.some((g) => rawLeft(g) && (inOut(g, p) || (holdsOut(g, p) && inside(p, g.top) && norm(p) !== norm(g.top))));
+}
+
+/** Whether a path is `$HOME`, `/` or a dir above `$HOME`. */
+function aboveHome(p: string): boolean {
+  const home = homeOf();
+  return inside(home, p) || inside(realOrSelf(home), realOf(p));
+}
+
+/** Whether a glob can match a path a link may not lead to (`linkTargetHeld`), judged as text: a protected path, the dirs above
+ *  it up to but not including `$HOME`, the registry file and its dir. Any context; no walk of the dirs. 'unreadable' for a
+ *  pattern the matcher cannot read. */
+function globReachesHeld(cx: Context, pattern: string): 'held' | 'unreadable' | null {
+  const alts = alternatives(pattern);
+  if (alts === null) return 'unreadable';
+  const roots = [...cx.prot.all, registryDir(), registryFile()];
+  for (const alt of alts) {
+    const toks = compileGlob(alt);
+    if (toks === null) return 'unreadable';
+    for (const t of roots) {
+      for (let d = t; ; d = dirname(d)) {
+        cx.work.left -= (toks.length + 1) * (d.length + 1);
+        if (cx.work.left < 0) {
+          cx.work.over = true;
+          return null;
+        }
+        if (matchTokens(toks, d) && !aboveHome(d)) return 'held';
+        if (dirname(d) === d) break;
+      }
+    }
+  }
+  return null;
+}
+
+const LINK_VALUED = new Set(['-t', '--target-directory', '-S', '--suffix']);
+const LINK_HELD = 'a link to the dump, an input log, raw sandbox output or a dir that holds one';
+
+/** What a link source word comes to: the paths a brace and a glob in it stand for, each judged. `asTarget`: the source is what a
+ *  link will lead to (`ln -s`, `cp -s`); else it is a link that is copied or moved, and what it leads to is judged. A glob is
+ *  matched as text in any context (`globReachesHeld`) and, in a project that holds real data, expanded on disk to a budget
+ *  (`expandGlob`). The verdict is the deny text: held, a pattern too large to expand, or one the rule cannot read. */
+function linkSourceVerdict(cx: Context, word: string, base: string, asTarget: boolean): string | null {
+  const alts = braceExpand(word);
+  if (alts === null) return GLOB_UNREADABLE;
+  for (const a of alts) {
+    const p = pathOfWord(a, base);
+    if (p === null) continue;
+    let concrete = [p];
+    if (hasGlob(p)) {
+      if (asTarget) {
+        const text = globReachesHeld(cx, p);
+        if (text === 'held') return LINK_HELD;
+        if (text === 'unreadable') return GLOB_UNREADABLE;
+      }
+      concrete = [];
+      if (cx.local.length > 0) {
+        const found = expandGlob(cx, p);
+        if (found === 'big') return GLOB_TOO_BIG;
+        if (found === 'unreadable') return GLOB_UNREADABLE;
+        concrete = found;
+      }
+    }
+    for (const c of concrete) {
+      const to = asTarget ? c : isLinkSync(c) ? followedPath(c) : null;
+      if (to !== null && linkTargetHeld(cx, to)) return LINK_HELD;
+    }
+  }
+  return null;
+}
+
+/** A command that puts a link into a tree whose target is protected: `ln` (symbolic or hard), `cp -s`, and a link copied as a link
+ *  or moved (`cp -P -d -a -R`, `mv`: the link already points there). A link is the way a model gets a protected dir into a path
+ *  that no word of a later command names (`ln -s ~/dumps dl; cat dl/dump.sql`). Any guarded context. */
+function linkHit(cx: Context, prog: string, words: readonly string[], dir: string): string | null {
+  if (prog !== 'ln' && prog !== 'cp' && prog !== 'mv') return null;
+  const flags = words.slice(1).filter((w) => w.startsWith('-') && w !== '-');
+  const has = (short: string, long: RegExp): boolean => flags.some((w) => (w.startsWith('--') ? long.test(w) : new RegExp(`^-[A-Za-z]*[${short}]`).test(w)));
+  const ops = operands(words, 1, LINK_VALUED).rest.map(plainWord);
+  const t = words.findIndex((w, i) => i > 0 && (w === '-t' || w === '--target-directory'));
+  const tAttached = flags.find((w) => w.startsWith('--target-directory='))?.slice('--target-directory='.length);
+  const into = t > 0 ? plainWord(words[t + 1] ?? '') : tAttached !== undefined ? plainWord(tAttached) : null;
+  const sources = into !== null ? ops : ops.slice(0, ops.length > 1 ? -1 : ops.length);
+  const dest = into ?? (ops.length > 1 ? ops[ops.length - 1]! : '.');
+  // where a relative target of a symbolic link is read from: the dir the link is made in
+  const destPath = pathOfWord(dest, dir);
+  const linkDir = destPath === null ? dir : isDirSync(destPath) || dest.endsWith('/') || into !== null ? destPath : dirname(destPath);
+  const judge = (asTarget: boolean, base: string): string | null => {
+    for (const s of sources) {
+      const v = linkSourceVerdict(cx, s, base, asTarget);
+      if (v !== null) return v;
+    }
+    return null;
+  };
+  if (prog === 'ln') return judge(true, has('s', /^--symbolic$/) && !has('r', /^--relative$/) ? linkDir : dir);
+  if (prog === 'cp' && has('s', /^--symbolic-link$/)) return judge(true, linkDir);
+  // a link copied or moved as a link
+  if (prog === 'cp' && !has('PdaRr', /^--(?:no-dereference|archive|recursive)$/)) return null;
+  return judge(false, dir);
 }
 
 /** A word that names where a sandbox keeps its raw output: `sandbox/out`, `out/live`, `out/<run>`, `out/*`. */
@@ -1267,9 +1770,12 @@ function segmentHit(k: Seg, dirHolds: (d: string) => boolean): string | null {
   const { cx, words, raw, dir } = k;
   const prog = basename(words[0] ?? '');
   const local = cx.local.length > 0;
+  // a link whose target is protected (any context)
+  const link = linkHit(cx, prog, words, dir);
+  if (link !== null) return link;
   // docker: a project of the call's own dirs generically, a registered one by its exact name
   if (DOCKER_PROGS.has(prog) || COMPOSE_PROGS.has(prog)) {
-    const d = (local ? dockerHit(cx.local, k.all, words, k.segDir) : null) ?? (cx.remote.length > 0 ? remoteDockerHit(cx.remote, words, k.all) : null);
+    const d = (local ? dockerHit(cx, cx.local, k.all, words, k.segDir, dir) : null) ?? (cx.remote.length > 0 ? remoteDockerHit(cx.remote, words, k.all) : null) ?? (!local && cx.remote.length > 0 ? remoteBindHit(cx, words, dir) : null);
     if (d !== null) return d;
   }
   if (local && socketHit(prog, raw)) return 'the docker socket';
@@ -1289,7 +1795,9 @@ function segmentHit(k: Seg, dirHolds: (d: string) => boolean): string | null {
   if (k.listed && ops !== null && (ops.length === 0 || ops.some((o) => o.includes('{}')))) return 'a reader fed the names of a dir that holds the dump, an input log or raw output';
   // a name built in a substitution that names the raw output (`cat $(ls .goodboy/sandbox/out/*/output.log)`)
   if (ops !== null && raw.some((w) => /[$`]/.test(w) && MENTIONS_OUT.test(w)) && cx.local.some(rawLeft)) return `a path of ${RAW_NOTE}`;
-  const metadata = METADATA_PROGS.has(prog);
+  // a metadata program tells about no file only with options that print no text of it (`file -f`, `wc --files0-from` and
+  // `file -m` read the file and show its lines in an error text)
+  const metadata = METADATA_PROGS.has(prog) && onlySafeOptions(prog, raw);
   for (const rawWord of raw.slice(0, k.caps ? MAX_WORDS : UNCAPPED_WORDS)) {
     // a redirect's target (`<dump.sql`), `--file=/path` and `if=/path` (the value too); a bare option names no file
     const w = plainWord(rawWord).replace(REDIRECT_PREFIX, '');
@@ -1310,7 +1818,7 @@ function segmentHit(k: Seg, dirHolds: (d: string) => boolean): string | null {
         if (p === null) continue;
         const glob = hasGlob(p);
         if (!metadata && protectedHit(cx, p, glob)) return 'a path of the dump or an input log';
-        if (!metadata && rawHit(guards, p, glob)) return `a path of ${RAW_NOTE}`;
+        if (!metadata && rawHit(cx, guards, p, glob)) return `a path of ${RAW_NOTE}`;
       }
     }
   }

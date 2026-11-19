@@ -38,6 +38,8 @@ export interface RunProof {
   /** SHA-256 of `result.json` as read. */
   sha256: string;
   exit: number | null;
+  /** The result's own `timedOut` (any step ran out of time); a result that does not say counts as not timed out. */
+  timedOut: boolean;
   command: string[];
   /** `unit`, `e2e` or `all`: what the run ran (null in a result that does not say). */
   suite: string | null;
@@ -82,7 +84,7 @@ export function readRunResult(root: string, run: string): RunProof | Error {
     ) {
       const e = j.e2e;
       const e2e = typeof e === 'object' && e !== null ? { exit: typeof (e as { exit?: unknown }).exit === 'number' ? ((e as { exit: number }).exit) : null, timedOut: (e as { timedOut?: unknown }).timedOut === true, report: typeof j.playwrightReport === 'string' } : null;
-      return { run, sha256: sha(r.text), exit: exit as number | null, command: j.command as string[], suite: typeof j.suite === 'string' ? j.suite : null, e2e, realData: j.realData !== false, check: { inner_only: c.inner_only, egress_blocked: c.egress_blocked, hosts_to_dummies: c.hosts_to_dummies } };
+      return { run, sha256: sha(r.text), exit: exit as number | null, timedOut: j.timedOut === true, command: j.command as string[], suite: typeof j.suite === 'string' ? j.suite : null, e2e, realData: j.realData !== false, check: { inner_only: c.inner_only, egress_blocked: c.egress_blocked, hosts_to_dummies: c.hosts_to_dummies } };
     }
   } catch {
     // below
@@ -92,8 +94,8 @@ export function readRunResult(root: string, run: string): RunProof | Error {
 
 /** The start of a sandbox run (its directory name is a UTC timestamp to the second). */
 export function runStart(run: string): number {
-  const m = RUN_NAME_PARTS.exec(run)!;
-  return Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z`);
+  // the shape is RUN_NAME's: 20261022T031816Z
+  return Date.parse(`${run.slice(0, 4)}-${run.slice(4, 6)}-${run.slice(6, 8)}T${run.slice(9, 11)}:${run.slice(11, 13)}:${run.slice(13, 15)}Z`);
 }
 
 /** Whether a run counts for a file last changed at `editMs`: it started in or after the second of
@@ -108,7 +110,6 @@ export function runStartsAfter(run: string, editMs: number): boolean {
 export function e2ePassed(proof: RunProof): boolean {
   return proof.e2e !== null && proof.e2e.exit === 0 && !proof.e2e.timedOut && proof.e2e.report;
 }
-const RUN_NAME_PARTS = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/;
 
 /** The run a record's sandbox claim stands on, or why it does not hold: all three check flags
  *  true in the record, a run and the hash of its result.json, and that file read again now
@@ -122,6 +123,7 @@ export function sandboxProof(root: string, r: TestResult): RunProof | string {
   if (proof.sha256 !== sb.result_sha256) return `result.json of run ${sb.run} changed after the record`;
   if (!proof.check.inner_only || !proof.check.egress_blocked || !proof.check.hosts_to_dummies) return `run ${sb.run} did not pass its sandbox check`;
   if (proof.exit !== 0) return `run ${sb.run} did not exit 0`;
+  if (proof.timedOut) return `run ${sb.run} ran out of time (result.json says timedOut)`;
   if (runStart(sb.run) > Date.parse(r.timestamp)) return `run ${sb.run} is later than the record`;
   return proof;
 }

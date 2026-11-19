@@ -36,8 +36,16 @@ const MAX_SECRET_KEYS = 300;
 /** Wall time for a whole scan; past it the rest is left out and said so in a question. */
 export const SCAN_BUDGET_MS = 60_000;
 
-/** Pinned image tags for a store whose version the project does not state. */
-const DEFAULT_VERSION: Record<StoreKind, string> = { postgres: '16', mysql: '8.4', mariadb: '11', redis: '7', mongo: '7' };
+/** Pinned image tags for a store whose version the project does not state. The one table: the scan names
+ *  it in its question and the renderer (lib/sandbox-render.ts) uses it for a version it cannot read. */
+export const STORE_DEFAULT_VERSION: Record<StoreKind, string> = { postgres: '16', mysql: '8.4', mariadb: '11', redis: '7', mongo: '7' };
+
+/** The version a store image tag names: `17-alpine` gives `17`, `8.4-oracle` gives `8.4`, `16.2` stays;
+ *  null for a tag with no leading version (`alpine`, `bookworm`, `lts`, `latest`). */
+export function storeTagVersion(tag: string): string | null {
+  const m = /^(\d+(?:\.\d+){0,2})(?:[-_].*)?$/.exec(tag.trim());
+  return m ? m[1]! : null;
+}
 
 // --- Which files count --------------------------------------------------------------------
 
@@ -489,7 +497,7 @@ export function resolveDefaults(v: string): string {
 // --- Hosts ----------------------------------------------------------------------------------
 
 const IPV4 = /^(?:\d{1,3}\.){3}\d{1,3}$/;
-const isIpv4 = (h: string) => IPV4.test(h) && h.split('.').every((o) => Number(o) <= 255);
+export const isIpv4 = (h: string) => IPV4.test(h) && h.split('.').every((o) => Number(o) <= 255);
 // A bare `12:30:45` is a time, not an address: an IPv6 literal has `::` or all eight groups.
 const isIpv6 = (h: string) => /^[0-9a-f:.]+$/i.test(h) && (h.includes('::') || h.split(':').length === 8);
 
@@ -854,7 +862,6 @@ interface StackInfo {
   app: SandboxApp;
   /** Store drivers or clients the dependencies name, for a store with no config. */
   deps: { kind: StoreKind; where: Where }[];
-  /** Repo-relative text of the dependency files, to find the line of a dependency. */
   questions: string[];
   problems: string[];
 }
@@ -1195,10 +1202,10 @@ function scanNode(ctx: Ctx): StackInfo {
   return { frameworks, build, app: { port, contextPath: '/', healthPath: health ?? '/', configFiles: ctx.configFiles }, deps, questions, problems };
 }
 
-/** The question for an app with no health route to find (no actuator, no `/health` handler): the
- *  health check falls back to the root of the app, and a 404 there counts as down. */
+/** The question for an app with no health route to find (no actuator, no `/health` route in a form the scan
+ *  reads): the health check falls back to the root of the app, and a 404 there counts as down. */
 function noHealthRoute(path: string): string {
-  return `no health route found (no actuator, no /health handler): the health check requests \`${path}\`, and a 404 there counts as down; if the app answers 404 at that path, set app.healthPath to one that answers 2xx, 3xx, 401 or 403`;
+  return `no health route found (no actuator, and goodboy found no \`.get('/health')\`-style route in the code; a route read another way, as with node:http or a router of your own, is not seen): the health check requests \`${path}\`, and a 404 there counts as down; if the app answers 404 at that path, set app.healthPath to one that answers 2xx, 3xx, 401 or 403`;
 }
 
 /** A `/health`-like route written in code (`app.get('/health'`, `@app.get("/healthz")`). */
@@ -1382,10 +1389,12 @@ const IMAGE_KIND: [RegExp, StoreKind][] = [
   [/^(?:mongo|mongodb)$/, 'mongo'],
 ];
 
-/** Image tags the repo's compose files already run, per store kind. `latest`, a missing tag and a
- *  variable tag are no version. */
-function composeVersions(root: string, files: string[]): Map<StoreKind, string> {
+/** The versions the repo's compose files already run, per store kind (`17-alpine` gives `17`), and the
+ *  first tag per kind that names none (`bookworm`, `lts`). `latest`, a missing tag and a variable tag
+ *  are no version and not odd either. */
+function composeVersions(root: string, files: string[]): { found: Map<StoreKind, string>; odd: Map<StoreKind, string> } {
   const out = new Map<StoreKind, string>();
+  const odd = new Map<StoreKind, string>();
   const composes = files.filter((f) => /^(?:docker-)?compose[\w.-]*\.ya?ml$/.test(posix.basename(f)) && !inSkippedDir(f)).sort((a, b) => depthOf(dirOf(a)) - depthOf(dirOf(b)) || (a < b ? -1 : 1));
   for (const f of composes) {
     const t = readText(root, f, MAX_CONFIG_BYTES);
@@ -1397,10 +1406,14 @@ function composeVersions(root: string, files: string[]): Map<StoreKind, string> 
       const name = posix.basename(ref.split(':')[0]!);
       const tag = ref.includes(':') ? ref.slice(ref.lastIndexOf(':') + 1) : '';
       const kind = IMAGE_KIND.find(([re]) => re.test(name))?.[1];
-      if (kind && tag !== '' && tag !== 'latest' && !tag.includes('$') && !out.has(kind)) out.set(kind, tag);
+      if (!kind || tag === '' || tag === 'latest' || tag.includes('$')) continue;
+      const v = storeTagVersion(tag);
+      if (v === null) {
+        if (!odd.has(kind)) odd.set(kind, tag);
+      } else if (!out.has(kind)) out.set(kind, v);
     }
   }
-  return out;
+  return { found: out, odd };
 }
 
 // --- The scan -------------------------------------------------------------------------------
@@ -1575,16 +1588,18 @@ export function scanSandbox(root: string, opts: ScanOptions = {}): SandboxScan {
       if (g.database === null && g.kind !== 'redis' && (name === 'database' || name === 'dbname') && /^[\w.-]+$/.test(e.value) && !isSecretKey(e.key)) g.database = e.value;
     }
   }
-  const versions = composeVersions(root, files);
+  const { found: versions, odd: oddTags } = composeVersions(root, files);
   const versionAsked = new Set<StoreKind>();
   const versionOf = (kind: StoreKind): string => {
     const v = versions.get(kind);
     if (v) return v;
     if (!versionAsked.has(kind)) {
       versionAsked.add(kind);
-      questions.push(`${kind}: no version found in a compose file; the pinned default ${DEFAULT_VERSION[kind]} is used: confirm it matches production`);
+      const odd = oddTags.get(kind);
+      const why = odd === undefined ? 'no version found in a compose file' : `the compose image tag \`${odd}\` names no version`;
+      questions.push(`${kind}: ${why}; the pinned default ${STORE_DEFAULT_VERSION[kind]} is used: confirm it matches production`);
     }
-    return DEFAULT_VERSION[kind];
+    return STORE_DEFAULT_VERSION[kind];
   };
   const stores: SandboxStore[] = [...groups.values()].map((g) => ({
     kind: g.kind,
@@ -1600,9 +1615,10 @@ export function scanSandbox(root: string, opts: ScanOptions = {}): SandboxScan {
   for (const d of info.deps) {
     if (stores.some((s) => s.kind === d.kind)) continue;
     stores.push({ kind: d.kind, version: versionOf(d.kind), database: null, configKeys: [], where: d.where });
-    questions.push(`${d.kind}: a driver or client is a dependency (${d.where.file}:${d.where.line}) but no connection config was found: its address and database name are unknown`);
+    questions.push(`${d.kind}: a driver or client is a dependency (${d.where.file}:${d.where.line}) but goodboy found no connection config for it (it reads a store URL, or a key prefix that names the store, such as spring.datasource or ${d.kind}; a \`db.*\` or \`database.*\` prefix alone is not inferred): its address and database name are unknown`);
   }
-  stores.sort((a, b) => (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : a.where.file < b.where.file ? -1 : a.where.line - b.where.line));
+  // A total order (kind, file, line): the first SQL store gets the dump, so the order must not depend on the input.
+  stores.sort((a, b) => (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : a.where.file < b.where.file ? -1 : a.where.file > b.where.file ? 1 : a.where.line - b.where.line));
 
   // 6. Outbound hosts.
   const outbound = opts.sources === false ? [] : outboundHosts(src, entries, questions, deadline);

@@ -2,7 +2,11 @@
 // project reaches 100% lines and branches in the merged coverage of the unit, integration and
 // e2e runs, minus the user's approved `coverage-exempt:` entries. Read-only: the reports are
 // read (JaCoCo XML, lcov, Cobertura XML), git lists the files, nothing runs and nothing is
-// written. Fail closed: a malformed or oversized report is an error, never a pass.
+// written. Fail closed: a malformed or oversized report is an error, never a pass; so is a report
+// with lines and no branch data at all is a problem (0 of 0 branches is no proof: coverage.py needs
+// `branch = True`, a Cobertura line a `branch` attribute; JaCoCo always has the counters). The one
+// exception is a report whose format has no branch records (Bun's lcov: no BRDA and no BRF anywhere):
+// it passes on full lines, and the result says `branches: "unmeasured"` with the files.
 //
 // Merging several reports never overstates: a line is covered when any report covers it;
 // lcov branches are united by (line, block, branch); JaCoCo and Cobertura only give a count per
@@ -43,6 +47,11 @@ export interface CoverageCheck {
   /** Over the required files that a report has, after the exemptions; a file no report has adds
    *  nothing (its size is unknown) and shows as a gap. */
   totals: { lines: { covered: number; total: number }; branches: { covered: number; total: number } };
+  /** `unmeasured`: every file with coverage comes from a report whose format has no branch records (Bun's lcov), so
+   *  `ok` rests on lines alone; `partly`: some do; `measured`: none. */
+  branches: 'measured' | 'partly' | 'unmeasured';
+  /** The files (repo-relative) whose reports carry no branch records. */
+  branches_unmeasured: string[];
   problems: string[];
   /** The reports that could not be read or parsed (also in `problems`). */
   report_errors: string[];
@@ -71,6 +80,16 @@ class FileCov {
   private readonly counts = new Map<number, Branch>();
   /** lcov: taken or not per (block, branch), united. */
   private readonly keyed = new Map<number, Map<string, boolean>>();
+  /** The report measured branches for this file (even if it has none): a lcov BRF/BRDA record,
+   *  JaCoCo's branch counters, a Cobertura `branch` attribute. Without it, "no branches" is only
+   *  the absence of data. */
+  branchData = false;
+  /** The report's FORMAT carries no branch record at all (an lcov with no BRDA and no BRF anywhere, Bun's):
+   *  branches are not measured, which is not the same as the tool having measured none. */
+  formatUnmeasured = false;
+  /** The report says, explicitly, that the file has no executable line (lcov `LF:0`, a JaCoCo LINE counter of 0 and 0,
+   *  a Cobertura class with an empty `<lines>`): nothing to cover. An entry with neither lines nor this says nothing. */
+  zeroLines = false;
 
   addLine(line: number, covered: boolean): void {
     this.lines.set(line, (this.lines.get(line) ?? false) || covered);
@@ -103,6 +122,9 @@ class FileCov {
 
   /** Another report's data for the same file. */
   absorb(o: FileCov): void {
+    this.branchData ||= o.branchData;
+    this.formatUnmeasured &&= o.formatUnmeasured;
+    this.zeroLines ||= o.zeroLines;
     for (const [line, c] of o.lines) this.addLine(line, c);
     for (const [line, b] of o.counts) this.addCount(line, b);
     for (const [line, m] of o.keyed) for (const [k, t] of m) this.addKey(line, k, t);
@@ -303,7 +325,10 @@ function parseJacoco(text: string): Entry[] {
       const cb = integer(ev.attrs.get('cb'), 'line cb');
       // JaCoCo counts a line as run when one of its instructions ran.
       if (mi + ci > 0) cur.cov.addLine(nr, ci > 0);
+      cur.cov.branchData = true; // mb and cb are required above: the counters are there
       cur.cov.addCount(nr, { covered: cb, total: mb + cb });
+    } else if (ev.name === 'counter' && cur && ev.attrs.get('type') === 'LINE' && ev.attrs.get('missed') === '0' && ev.attrs.get('covered') === '0') {
+      cur.cov.zeroLines = true; // the source file's own LINE counter says it has none
     }
   });
   return out;
@@ -321,6 +346,8 @@ function parseCobertura(text: string): Entry[] {
     }
     if (ev.t === 'close') {
       path.pop();
+      // The class's own `<lines>` with no line in it (coverage.py writes `<lines/>` for an empty module): nothing to cover.
+      if (ev.name === 'lines' && cur && path[path.length - 1] === 'class' && cur.cov.lines.size === 0) cur.cov.zeroLines = true;
       if (ev.name === 'class' && cur) {
         classes.push(cur);
         cur = null;
@@ -337,11 +364,20 @@ function parseCobertura(text: string): Entry[] {
       const hits = ev.attrs.get('hits');
       if (hits === undefined || !/^[0-9]{1,15}(?:\.[0-9]+)?$/.test(hits)) throw new Error(`line hits is not a number: ${String(hits).slice(0, 40)}`);
       cur.cov.addLine(nr, Number(hits) > 0);
-      const cc = ev.attrs.get('branch') === 'true' ? /\(([0-9]{1,12})\/([0-9]{1,12})\)/.exec(ev.attrs.get('condition-coverage') ?? '') : null;
-      if (cc) cur.cov.addCount(nr, { covered: Number(cc[1]), total: Number(cc[2]) });
+      const branch = ev.attrs.get('branch');
+      if (branch !== undefined) cur.cov.branchData = true; // coverage.py writes it only with branch = True
+      if (branch === 'true') {
+        // A branch line without its counts cannot be judged: fail closed.
+        const cc = /\(([0-9]{1,12})\/([0-9]{1,12})\)/.exec(ev.attrs.get('condition-coverage') ?? '');
+        if (!cc) throw new Error(`line ${nr} has branch="true" but no readable condition-coverage`);
+        cur.cov.addCount(nr, { covered: Number(cc[1]), total: Number(cc[2]) });
+      }
     }
     path.push(ev.name);
   });
+  // Branches are a setting of the whole report here (coverage.py writes `branch` only on a branch line, so a
+  //   file with no branch point has none): one `branch` attribute anywhere makes every file of it measured.
+  if (classes.some((c) => c.cov.branchData)) for (const c of classes) c.cov.branchData = true;
   // The class names its file relative to a `source` dir (coverage.py) or to the run's cwd.
   return classes.map((c) => ({
     candidates: [...(isAbsolute(c.filename) ? [] : sources.map((s) => `${s.replace(/[\\/]+$/, '')}/${c.filename}`)), c.filename],
@@ -378,7 +414,16 @@ function parseLcov(text: string): Entry[] {
       if (!cur || !m) throw new Error(`${at}: bad BRDA record`);
       const nr = Number(m[1]);
       if (nr > MAX_LINE_NO) throw new Error(`${at}: line number out of range`);
+      cur.branchData = true;
       if (nr >= 1) cur.addKey(nr, `${m[2]}:${m[3]}`, m[4] !== '-' && Number(m[4]) > 0);
+    } else if (line === 'LF:0') {
+      // The file's own summary says it has no line (istanbul writes it for a re-export barrel): nothing to cover.
+      if (!cur) throw new Error(`${at}: LF outside a record`);
+      cur.zeroLines = true;
+    } else if (/^BRF:[0-9]{1,12}$/.test(line)) {
+      // The branch summary, also BRF:0: the tool measured branches and this file has none.
+      if (!cur) throw new Error(`${at}: BRF outside a record`);
+      cur.branchData = true;
     } else if (/^(?:TN|FN|FNDA|FNF|FNH|LF|LH|BRF|BRH|VER|FNL|FNA):/.test(line) || line.trim() === '') {
       // function counts, summaries and the test name do not decide line or branch coverage
     } else {
@@ -387,6 +432,9 @@ function parseLcov(text: string): Entry[] {
   }
   if (cur) throw new Error('lcov file ends inside a record (no end_of_record): truncated?');
   if (files.size === 0) throw new Error('lcov file has no SF record');
+  // Istanbul, c8 and Jest write BRF for every file; a report with no BRDA and no BRF at all comes from a tool whose
+  //   lcov has no branch records (Bun): its branches are unmeasured, and the result says so.
+  if (![...files.values()].some((c) => c.branchData)) for (const c of files.values()) c.formatUnmeasured = true;
   return [...files].map(([p, cov]) => ({ candidates: [p], suffix: false, cov }));
 }
 
@@ -464,6 +512,8 @@ function emptyCheck(): CoverageCheck {
     exempt_used: [],
     stale_exemptions: [],
     totals: { lines: { covered: 0, total: 0 }, branches: { covered: 0, total: 0 } },
+    branches: 'measured',
+    branches_unmeasured: [],
     problems: [],
     report_errors: [],
   };
@@ -612,12 +662,20 @@ export function coverageCheck(root: string, reports: string[], opts: { rootMap?:
   }
 
   // Per required file: what is missed, after the line exemptions.
+  let withCoverage = 0;
+  const linesOnly: string[] = [];
   for (const rel of required) {
     const cov = merged.get(rel);
-    if (!cov) {
+    // A file a report says, explicitly, has no executable line (istanbul's `LF:0` for a re-export barrel) has nothing
+    //   to cover; one it names with no line and no such statement (an lcov SF with no DA and no LF) proves nothing ran.
+    if (cov && cov.lines.size === 0 && cov.zeroLines) continue;
+    if (!cov || cov.lines.size === 0) {
       res.gaps.push({ rel, lines_missed: [], branches_missed: [], missing_from_report: true });
       continue;
     }
+    withCoverage++;
+    if (cov.formatUnmeasured && !cov.branchData) res.branches_unmeasured.push(rel);
+    else if (!cov.branchData) linesOnly.push(rel);
     const mine = exemptions.filter((e) => e.ranges.length > 0 && e.glob.match(rel));
     // Only a missed line or branch uses a range up: one that exempts only covered code is stale.
     const exemptLine = (line: number) => {
@@ -644,6 +702,19 @@ export function coverageCheck(root: string, reports: string[], opts: { rootMap?:
       if (b.covered < b.total) gap.branches_missed.push({ line, missed: b.total - b.covered, total: b.total });
     }
     if (gap.lines_missed.length > 0 || gap.branches_missed.length > 0) res.gaps.push(gap);
+  }
+
+  // A file with lines and no branch data would read "0 of 0 branches" as full, so each covered file needs its own
+  //   evidence: branch records in its report (lcov BRDA, or BRF, also BRF:0, which istanbul writes for a file with
+  //   no branch), JaCoCo's counters, a Cobertura report with a `branch` attribute anywhere (coverage.py writes it
+  //   only on branch lines, so that one is a setting of the report). Two kinds of lines-only: a report whose FORMAT
+  //   has no branch records (Bun's lcov: no BRDA and no BRF anywhere in it) passes on full lines and says
+  //   `branches: unmeasured`; a file lines-only in a report that can carry them (an lcov file without BRF next to
+  //   files with it, a Cobertura from coverage.py without branch = True) is a problem, as the tool can measure.
+  res.branches = res.branches_unmeasured.length === 0 ? 'measured' : res.branches_unmeasured.length === withCoverage ? 'unmeasured' : 'partly';
+  if (linesOnly.length > 0) {
+    const shown = linesOnly.slice(0, 5).join(', ') + (linesOnly.length > 5 ? `, … (${linesOnly.length} files)` : '');
+    problem(`no branch data for ${shown}: its report has lines only; enable branch coverage in the coverage tool (coverage.py: branch = True; Jest/c8/nyc/vitest: branch records in the lcov) and run again`);
   }
 
   // Fail closed on an empty requirement: a report that maps only to docs, config or exempted

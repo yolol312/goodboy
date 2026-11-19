@@ -6,7 +6,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getCurrentTurn, recordEdit } from '../lib/file-tracker';
+import { getCurrentTurn, recordEdit, sessionDir } from '../lib/file-tracker';
 import { sandboxOwnFile, sandboxUsersOf } from '../lib/stop-groups';
 import { cmdUiCheck, parseReport } from '../lib/ui-check';
 import { jsxActions } from '../lib/ui-js';
@@ -16,8 +16,10 @@ import { springRoutes, stringConstants } from '../lib/ui-spring';
 import { addCalls, jsCalls, scanTemplate, urlPattern } from '../lib/ui-templates';
 
 const tmpDirs: string[] = [];
+const sessions: string[] = [];
 afterEach(() => {
   while (tmpDirs.length) rmSync(tmpDirs.pop()!, { recursive: true, force: true });
+  while (sessions.length) rmSync(sessionDir(sessions.pop()!), { recursive: true, force: true });
 });
 
 const env = (routes: string[] = []) => ({ has: (p: string) => routes.includes(p), ctx: '/' });
@@ -57,7 +59,7 @@ describe('jsCalls and addCalls', () => {
 });
 
 describe('scanTemplate', () => {
-  test('a form action it cannot read is a note; labels fall back to handler, data attribute, icon, class, tag', () => {
+  test('a form action it cannot read is a note; button labels fall back to handler, data attribute, data-bs-toggle, icon, class, tag', () => {
     const sink = new Sink();
     scanTemplate(
       file(
@@ -75,11 +77,10 @@ describe('scanTemplate', () => {
       sink,
       env(),
     );
-    expect(sink.notes.some((n) => n.includes('form action'))).toBe(true);
+    expect(sink.notes).toEqual(['p.html:1 form action ${x} is not an internal path it can read: not an item']);
     // a Thymeleaf link whose closing paren has no opener is read whole
     expect(urlPattern('@{/x)}')).toBe('/x)');
-    const labels = [...sink.items.values()].map((i) => i.label);
-    expect(labels.join('|')).toContain('openModal');
+    expect([...sink.items.values()].map((i) => i.label)).toEqual(['openModal', 'dlg', 'modal', 'fa fa-trash', 'danger', 'button']);
   });
 });
 
@@ -138,6 +139,7 @@ describe('sandboxUsersOf', () => {
     writeFileSync(join(root, '.goodboy', 'sandbox', 'compose.yml'), 'services: {}\n');
     writeFileSync(join(root, 'src', 'a.ts'), "export const a = 'unrelated';\n");
     const sid = `m6-users-${Math.random().toString(36).slice(2, 10)}`;
+    sessions.push(sid);
     recordEdit(sid, join(root, 'src', 'a.ts'), getCurrentTurn(sid), undefined, Date.now());
     const first = sandboxUsersOf(sid, root);
     expect(first.all).toBe(false);

@@ -23,8 +23,9 @@ const POSITIVE: ReadonlyArray<readonly [string, SensitiveKind]> = [
   ['900101\u20091234567', 'resident-number'],
   // business-number: 3-2-5 with the check digit
   ['123-45-67891', 'business-number'],
-  ['220-81-62517', 'business-number'],
-  ['2208162517', 'business-number'],
+  // synthetic: made up (987654321 and the check digit its weights give), not a registered number
+  ['987-65-43215', 'business-number'],
+  ['9876543215', 'business-number'],
   // card: Luhn and an issuer prefix, contiguous or grouped
   ['4111111111111111', 'card'],
   ['4111 1111 1111 1111', 'card'],
@@ -66,7 +67,7 @@ const POSITIVE: ReadonlyArray<readonly [string, SensitiveKind]> = [
   ['010\u20091234\u20095678', 'phone'],
   // email
   ['person@corp-mail.co.kr', 'email'],
-  ['kim.minsu+tag@naver.com', 'email'],
+  ['canary.fixture+tag@naver.com', 'email'],
   ['a_b%c@sub.domain.example.co', 'email'],
   ['x@y.io', 'email'],
   // Hangul and other scripts in the local part or the domain, an IDN top level, a long local part whole

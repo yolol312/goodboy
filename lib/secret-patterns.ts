@@ -7,8 +7,10 @@
 export const PEM_PRIVATE_KEY_BEGIN = '-----BEGIN [A-Z ]*PRIVATE KEY';
 
 /** `password = x`, `"token": "x"`: a keyword, a `:` or `=`, and a value with a letter in it (a token count is no secret).
- *  lib/pii-patterns.ts judges each match of it once more (a `:` type annotation such as `token: string` is no secret). */
-export const KEYWORD_SECRET = '(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)["\']?\\s*[:=]\\s*["\']?(?=[^\\s"\']*[A-Za-z])[^\\s"\',;]{6,}';
+ *  The keyword may end a longer name (`JWT_SECRET_KEY`, `jwt.secret-key`, `privateKey`: `secret[_-]?key`, `private[_-]?key`).
+ *  lib/pii-patterns.ts judges each match of it once more (a `:` type annotation such as `token: string`, or a reference to the
+ *  environment such as `process.env.X` or `${NAME}`, is no secret). */
+export const KEYWORD_SECRET = '(?:password|passwd|pwd|secret[_-]?key|private[_-]?key|secret|token|api[_-]?key|access[_-]?key)["\']?\\s*[:=]\\s*["\']?(?=[^\\s"\']*[A-Za-z])[^\\s"\',;]{6,}';
 
 /** Tokens, keys and passwords as they appear in output and config. */
 export const SECRET_PATTERNS: readonly string[] = [

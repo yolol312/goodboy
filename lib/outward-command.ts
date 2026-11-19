@@ -413,7 +413,7 @@ export interface ReadSegment {
 }
 
 /** The home dir `~` and `$HOME` name: HOME as the process has it now, else the account's. */
-const homeOf = (): string => process.env.HOME?.trim() || homedir();
+export const homeOf = (): string => process.env.HOME?.trim() || homedir();
 
 /** `dir` resolved from `from`, or null when it is computed (`$`, a glob) or `from` is unknown. */
 function literalDir(dir: string | null, from: string | null): string | null {

@@ -7,6 +7,7 @@
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { suiteRan } from './existing-tests';
+import { redactText } from './pii-patterns';
 import { E2E_DIR } from './sandbox-e2e';
 import { type RunProof, runStartsAfter, sandboxProof } from './sandbox-proof';
 import { MAX_STATE_BYTES, readRegular } from './safe-read';
@@ -436,7 +437,8 @@ export function markTarget(s: BackfillState, projectDir: string, root: string, m
   const rel = repoRel(root, m.rel);
   const t = s.targets.find((x) => x.rel === rel);
   if (!t) return new Error(`${m.rel} is not a target`);
-  const note = (m.note ?? '').trim();
+  // the note lands in `.goodboy/test-backfill.json`, which a project commits: no personal data or secret in it (M6d)
+  const note = redactText((m.note ?? '').trim());
   if ((m.status === 'skipped' || m.status === 'suspect') && note === '') return new Error(`${m.status} needs --note: ${m.status === 'skipped' ? 'why it was skipped' : 'what looks wrong'}`);
   let tests: string[] = [];
   if (m.status !== 'skipped') {

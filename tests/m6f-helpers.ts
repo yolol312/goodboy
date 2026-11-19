@@ -12,7 +12,8 @@ export const CANARY = {
   rrn: '900101-1234567',
   card: '4111111111111111',
   phone: '010-1234-5678',
-  email: 'kim.minsu@naver.com',
+  // synthetic: a made-up local part on a made-up domain that is no reserved example domain (the detector skips those)
+  email: 'canary.fixture@goodboy-canary-fixture.net',
   secret: 'AKIAIOSFODNN7EXAMPLE',
 } as const;
 export const KINDS = { rrn: 'resident-number', card: 'card', phone: 'phone', email: 'email', secret: 'secret' } as const;

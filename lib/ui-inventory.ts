@@ -172,12 +172,67 @@ export function uiInventory(root: string, opts: { budgetMs?: number } = {}): UiI
   return { root, contextPath, items, notes: sink.notes, ...(sink.truncated.length > 0 ? { truncated: sink.truncated } : {}), ...(noUi ? { noUi: true } : {}) };
 }
 
+/** `import … from 'name'`, `import 'name'` or `require('name')`; `name` as a whole module name, or
+ *  as a scope prefix when it ends with `/`. */
+function importsModule(t: string, name: string): boolean {
+  if (!t.includes(name)) return false;
+  const close = name.endsWith('/') ? '' : '[\'"]';
+  return new RegExp(`(?:\\bfrom\\s*|\\bimport\\s*|\\brequire\\s*\\(\\s*)['"]${name.replace(/[/@.]/g, '\\$&')}${close}`).test(t);
+}
+
+/** The text between the parentheses of the call whose `(` is at `open`: balanced, quotes skipped
+ *  (not escapes inside template literals), at most 20 000 characters. */
+function callArguments(t: string, open: number): string {
+  let depth = 0;
+  let quote = '';
+  const end = Math.min(t.length, open + 20_000);
+  for (let i = open; i < end; i++) {
+    const c = t[i]!;
+    if (quote !== '') {
+      if (c === '\\') i++;
+      else if (c === quote) quote = '';
+    } else if (c === '"' || c === "'" || c === '`') quote = c;
+    else if (c === '(') depth++;
+    else if (c === ')' && --depth === 0) return t.slice(open + 1, i);
+  }
+  return t.slice(open + 1, end);
+}
+
+/** A node:http server that routes by hand: `createServer` from http or https, in a file that is no Express or
+ *  Next app, with an inline handler (a function or an arrow, as the first or second argument) that itself
+ *  reads `req.url` or `req.method`. `createServer(app)` and `createServer(opts, app)` hand an app over, which
+ *  is read where it is built; an Express app with a CORS or logging middleware in the same file, and the
+ *  Next.js custom server (`createServer((req, res) => handle(req, res, parse(req.url, true)))` with `next`),
+ *  are no hand-routed servers. */
+function nodeHttpServer(t: string): boolean {
+  if (!t.includes('createServer')) return false;
+  if (!/['"](?:node:)?https?['"]/.test(t)) return false;
+  if (importsModule(t, 'express') || importsModule(t, 'next') || importsModule(t, 'next/')) return false;
+  let at = t.indexOf('createServer');
+  for (let n = 0; at >= 0 && n < 20; n++, at = t.indexOf('createServer', at + 1)) {
+    const open = /^createServer\s*\(/.exec(t.slice(at, at + 40));
+    if (open === null) continue;
+    const args = callArguments(t, at + open[0].length - 1);
+    if (/=>|\bfunction\b/.test(args) && /\b(?:req|request)\.(?:url|method)\b/.test(args)) return true;
+  }
+  return false;
+}
+
 /** The web frameworks the inventory does not read, by a marker in a source file: Flask, Django, JAX-RS
- *  and Quarkus, Micronaut, Ktor and Spring WebFlux. A project that serves routes through one has UI
+ *  and Quarkus, Micronaut, Ktor, Spring WebFlux, Koa, Fastify, NestJS, Hapi, a hand-routed node:http
+ *  server and plain servlets. A project that serves routes through one has UI
  *  the inventory cannot list, so `truncated` says "framework not read" (ui-check fails) instead of
  *  leaving the inventory empty and `noUi` true. Plain `includes` checks, a few per file. */
 function unreadFramework(f: SrcFile): string | null {
   const t = f.text;
+  if (JS_EXT.test(f.rel)) {
+    if (importsModule(t, 'koa')) return 'Koa';
+    if (importsModule(t, 'fastify')) return 'Fastify';
+    if (importsModule(t, '@nestjs/')) return 'NestJS';
+    if (importsModule(t, '@hapi/hapi')) return 'Hapi';
+    if (nodeHttpServer(t)) return 'node:http server';
+    return null;
+  }
   if (f.rel.endsWith('.py')) {
     if (t.includes('Blueprint(') || decoratedRoute(t)) return 'Flask';
     if (posix.basename(f.rel) === 'urls.py' && t.includes('urlpatterns')) return 'Django';
@@ -188,6 +243,8 @@ function unreadFramework(f: SrcFile): string | null {
   if (t.includes('@Path(') || t.includes('@Path ')) return 'JAX-RS (Quarkus, Jersey, RESTEasy)';
   if (t.includes('io.ktor') && /\brouting\s*\{/.test(t)) return 'Ktor'; // (`routing`, blanks, `{`: linear)
   if (t.includes('RouterFunction')) return 'Spring WebFlux functional routes';
+  // `HttpServletRequest` alone is a Spring controller's argument; a servlet extends or annotates.
+  if (/\bHttpServlet\b/.test(t) || t.includes('@WebServlet')) return 'Servlet (HttpServlet, @WebServlet)';
   return null;
 }
 

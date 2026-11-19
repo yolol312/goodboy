@@ -20,7 +20,6 @@ export function firstAddress(subnet: string): string {
 }
 
 export const DEFAULT_RUNTIME: Record<SandboxStack, string> = { jvm: '21', node: '20', python: '3.12' };
-export const STORE_DEFAULT_VERSION: Record<SandboxStore['kind'], string> = { postgres: '16', mysql: '8.0', mariadb: '11', redis: '7', mongo: '7' };
 /** Dummy credentials every sandbox store and secret gets. */
 export const DUMMY_PASSWORD = 'sandbox';
 export const DUMMY_SECRET = 'goodboysandboxdummysecret0123456789abcdef0123456789abcdef0123456';
@@ -107,16 +106,10 @@ export function startCommandOf(argv: readonly string[]): string[] {
   return ['sh', '-c', lines.join('\n')];
 }
 
-export const IPV4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
-export function isIpv4(s: string): boolean {
-  const m = IPV4.exec(s);
-  return m !== null && m.slice(1).every((o) => Number(o) <= 255);
-}
 export const HOST = /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
 export const RESERVED_NAMES = new Set(['inner', 'prep', 'app', 'runner', 'probe', 'proxy', 'e2e', 'e2e-prep', 'mail', 'stubs', 'ldap', 'db', 'redis', 'mongo', 'localhost']);
 
 export const major = (v: string): number => Number(v.split('.')[0]);
-export const pinned = (v: string | null | undefined): v is string => typeof v === 'string' && /^\d+(\.\d+){0,2}$/.test(v.trim());
 
 export function runtimeImage(stack: SandboxStack, raw: string | null): string {
   let v = (raw ?? '').trim().replace(/^v/, '');
@@ -317,7 +310,7 @@ export function mysqlScripts(s: Sql, hasDump: boolean): { restore: string; reset
   const t = `${s.name}_template`;
   const load = hasDump
     ? `ERR=/tmp/goodboy-restore.err
-if ! $MY "$TEMPLATE" < /dump/dump.sql 2>"$ERR"; then
+if ! $MY "$TEMPLATE" < /dump/dump.sql >/dev/null 2>"$ERR"; then
   # the client's message can quote a row: only the code, the state and the line leave
   echo "${RESTORE_TAG} ${cli} failed: $(sed -n 's/^ERROR \\([0-9]*\\) (\\([0-9A-Z]*\\)) at line \\([0-9]*\\):.*/error \\1 (\\2) at dump line \\3/p' "$ERR" | head -n 1)" >&2
   rm -f "$ERR"

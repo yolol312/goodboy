@@ -39,7 +39,7 @@ import { changedLineCount, realish, reviewPlan, reviewPlanNote } from './review-
 import { agentName, ROUTE } from './routing-policy';
 import { findDevCycleArtifacts, prototypeContractWarnings, readAcceptance, VERIFY_STAGE } from './acceptance';
 import { privacyFilesOf } from './privacy-files';
-import { realDataForReading } from './sandbox-mode';
+import { realDataHeld } from './real-data-held';
 import { AXIS_DIMENSIONS, axesFor, requiredDimensionsFor } from './review-dimensions';
 import { MAX_DOC_BYTES, readRegular } from './safe-read';
 import { appendSkillGapLog, recordSkillEvidence, validateSkillGapNote } from './skill-rule';
@@ -1168,7 +1168,7 @@ function privacyFilesByRepo(cwd: string, files: readonly string[]): Set<string> 
   }
   const own = new Set<string>();
   for (const [top, group] of byTop) {
-    if (!realDataForReading(top)) continue;
+    if (!realDataHeld(top)) continue;
     for (const f of privacyFilesOf(top, group, cwd)) own.add(f);
   }
   return own;

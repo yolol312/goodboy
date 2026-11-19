@@ -40,6 +40,7 @@ function lcov(sf: string, lines: [number, number][], branches: [number, number, 
     `SF:${sf}`,
     ...lines.map(([n, h]) => `DA:${n},${h}`),
     ...branches.map(([n, b, k, t]) => `BRDA:${n},${b},${k},${t}`),
+    `BRF:${branches.length}`, // a branch-measuring tool writes the summary, BRF:0 for a file with none
     `LF:${lines.length}`,
     `LH:${lines.filter(([, h]) => h > 0).length}`,
     'end_of_record',
@@ -77,7 +78,7 @@ function cobertura(sources: string[], classes: { filename: string; lines: [numbe
       (c) =>
         `<class name="c" filename="${c.filename}"><methods><method name="m" signature="()"><lines><line number="${c.lines[0]?.[0] ?? 1}" hits="1"/></lines></method></methods><lines>` +
         c.lines
-          .map(([n, h, br]) => (br ? `<line number="${n}" hits="${h}" branch="true" condition-coverage="50% (${br})"/>` : `<line number="${n}" hits="${h}"/>`))
+          .map(([n, h, br]) => (br ? `<line number="${n}" hits="${h}" branch="true" condition-coverage="50% (${br})"/>` : `<line number="${n}" hits="${h}" branch="false"/>`))
           .join('') +
         '</lines></class>',
     ),

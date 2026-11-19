@@ -262,10 +262,14 @@ describe('uiCheck', () => {
     expect(r.ok).toBe(true);
   });
 
-  test('several claims in one header each count; the header name is matched without regard to case', () => {
-    const line = JSON.stringify({ request: { method: 'GET', uri: '/shop/orders', headers: { 'x-goodboy-ui': ['screen:GET:/orders:ok, button:t.html#refresh:ok'] } }, status: 200 });
+  test('the claims header is no evidence: a request that carries it, with a passing test that holds no such annotation, covers nothing', () => {
+    const line = JSON.stringify({ request: { method: 'GET', uri: '/shop/orders', headers: { 'x-goodboy-ui': ['screen:GET:/orders:ok'], 'X-Goodboy-Test': [nonceOf(['screen:GET:/orders:ok'])], 'Upgrade-Insecure-Requests': ['1'] } }, status: 200 });
     const reqs = parseAccessLog(line, 'log', []);
-    expect([...reqs[0]!.claims]).toEqual(['screen:GET:/orders:ok', 'button:t.html#refresh:ok']);
+    expect(reqs).toEqual([{ method: 'GET', path: '/shop/orders', status: 200, nonce: nonceOf(['screen:GET:/orders:ok']), nav: true }]);
+    const inv: UiInventory = { ...INVENTORY, items: [item({ id: 'screen:GET:/orders', kind: 'screen', method: 'GET', route: '/orders' })] };
+    const r = uiCheck(inv, [line], [report([{ title: 'visits orders' }])]);
+    expect(r.ok).toBe(false);
+    expect(r.covered).toBe(0);
   });
 
   test('an ANY method serves every request method', () => {
@@ -450,9 +454,9 @@ describe('malformed input fails closed', () => {
     }
   });
 
-  test('headers that are not an object or an X-Goodboy-Ui value that is not text fail the check', () => {
+  test('headers that are not an object or an X-Goodboy-Test value that is not text fail the check', () => {
     const a = JSON.stringify({ request: { method: 'GET', uri: '/x', headers: [] }, status: 200 });
-    const b = JSON.stringify({ request: { method: 'GET', uri: '/x', headers: { 'X-Goodboy-Ui': [7] } }, status: 200 });
+    const b = JSON.stringify({ request: { method: 'GET', uri: '/x', headers: { 'X-Goodboy-Test': [7] } }, status: 200 });
     for (const line of [a, b]) expect(check(`${FULL_LOG}\n${line}`).ok).toBe(false);
   });
 

@@ -747,7 +747,7 @@ describe('the text a denied call is told', () => {
     expect(both).toContain('return BLOCKED');
   });
 
-  test('a shown dir escapes every character a reader may not see: C1 (U+0085), the Arabic letter mark, zero-width, BOM', () => {
+  test('a shown dir escapes the invisible and direction characters it lists: DEL, C1 (U+0085), the Arabic letter mark, zero-width, bidi, BOM', () => {
     const at = (c: number): string => `/w/a${String.fromCodePoint(c)}b`;
     for (const c of [0x7f, 0x85, 0x9f, 0x61c, 0x200b, 0x200d, 0x200e, 0x200f, 0x2028, 0x2029, 0x202a, 0x202c, 0x202e, 0x2060, 0x2061, 0x2066, 0x2067, 0x2069, 0xfeff]) {
       expect([c, shownDir(at(c))]).toEqual([c, `"/w/a\\u${c.toString(16).padStart(4, '0')}b"`]);

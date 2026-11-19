@@ -4,12 +4,11 @@
 import { existsSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve as resolvePath, sep } from 'node:path';
 import { addedUserGlobs, diffCoverageMode, isPolicyFile, type UserGlobKey } from '../lib/changed-coverage';
-import { commitScanText, markerHoldsDigest } from '../lib/commit-scan';
-import { commitScanOfCommand } from '../lib/commit-scan-guard';
 import { HOOK_CLOCK_MS, startHookClock } from '../lib/hook-clock';
 import { readStateText } from '../lib/safe-read';
 import { checkRegression, readRegressionRecords, type RegressionOutcome, regressionMessage, regressionMode } from '../lib/regression';
 import { projectDir, projectRoot } from '../lib/project-dir';
+import { realDataRootOf, registryHoldsProjects } from '../lib/real-data-held';
 import { agentName, ROUTE } from '../lib/routing-policy';
 import { testTypesMode } from '../lib/test-types';
 import { classifyPath } from '../lib/verification-scope';
@@ -111,6 +110,7 @@ import {
   MAX_LINK_HOPS,
   isRequiredKnowledgeFile,
   markerWriteDenial,
+  mentionsGit,
   policyReadDenial,
   sandboxDataDenial,
   sandboxDataMessage,
@@ -348,6 +348,36 @@ function deny(reason: string): HookOutput {
       permissionDecisionReason: gateMessage(reason),
     },
   };
+}
+
+/** The skeleton the two real-data rules share (A0.89, A0.895): `check` finds a hit or null; `decide` turns a hit into
+ *  a one-use approval to record (`pending`, the call goes on) or a denial to emit; a check that throws is logged and
+ *  passes in the main session, and is denied in a subagent (`failText`). True: the call was denied, the caller returns. */
+function dataRule<H>(
+  name: string,
+  failText: string,
+  sessionId: string,
+  inSubagent: boolean,
+  check: () => H | null,
+  decide: (hit: H) => { pending: () => void } | { out: HookOutput; log: string },
+): boolean {
+  try {
+    const hit = check();
+    if (hit === null) return false;
+    const d = decide(hit);
+    if ('pending' in d) {
+      d.pending();
+      return false;
+    }
+    logGate(sessionId, name, 'deny', d.log);
+    emit(d.out);
+    return true;
+  } catch (err) {
+    logGate(sessionId, name, 'fail-open', String(err));
+    if (!inSubagent) return false;
+    emit(deny(failText));
+    return true;
+  }
 }
 
 /** 통과(비차단) 출력. 경고가 있으면 함께 실어 보낸다.
@@ -813,17 +843,22 @@ function main(): void {
       //   the main session, like the outward rule.
       if (envStr('GOODBOY_SANDBOX_DATA_GATE', 'on') !== 'off') {
         const inSubagent = !!input.agent_type;
-        try {
-          const hit = sandboxDataDenial({ toolName, toolInput, cwd, projectCwd, also: [process.env.CLAUDE_PROJECT_DIR], note: (n) => logGate(sessionId, 'sandbox-data', 'warn', n) });
-          if (hit !== null) {
+        const denied = dataRule(
+          'sandbox-data',
+          'The real-data sandbox rule could not check this call, so it is denied inside a subagent. Return BLOCKED.',
+          sessionId,
+          inSubagent,
+          () => sandboxDataDenial({ toolName, toolInput, cwd, projectCwd, also: [process.env.CLAUDE_PROJECT_DIR], note: (n) => logGate(sessionId, 'sandbox-data', 'warn', n) }),
+          (hit) => {
             const marker = approvalMarkerPath(projectCwd, 'sandbox-data', sessionId);
             // A command that sets a goodboy gate switch (`hit.fixed`) has no marker: the user sets switches in their settings.
             if (hit.fixed === undefined && !inSubagent && userMarkerPresent(sessionId, marker, input.tool_use_id)) {
-              pendingSandboxDataApproval = { markerPath: marker, what: hit.what };
-            } else {
-              logGate(sessionId, 'sandbox-data', 'deny', `${hit.what} ${input.agent_type ?? 'main'}`);
-              if (!inSubagent && hit.fixed === undefined) ensureApprovalDir(projectCwd);
-              emit({
+              return { pending: () => void (pendingSandboxDataApproval = { markerPath: marker, what: hit.what }) };
+            }
+            if (!inSubagent && hit.fixed === undefined) ensureApprovalDir(projectCwd);
+            return {
+              log: `${hit.what} ${input.agent_type ?? 'main'}`,
+              out: {
                 ...deny(sandboxDataMessage(hit, { cli: CLI_PATH, subagent: inSubagent, marker: approvalMarkerShown(projectCwd, 'sandbox-data', sessionId, cwd) })),
                 ...(inSubagent
                   ? {}
@@ -833,17 +868,11 @@ function main(): void {
                           ? `[goodboy] 실제 데이터가 든 샌드박스에 닿는 호출을 막았어요: ${hit.what}`
                           : '[goodboy] goodboy의 게이트 스위치를 명령으로 바꾸려는 호출을 막았어요. 스위치는 사용자가 설정(settings)에서 정합니다.',
                     }),
-              });
-              return;
-            }
-          }
-        } catch (err) {
-          logGate(sessionId, 'sandbox-data', 'fail-open', String(err));
-          if (inSubagent) {
-            emit(deny('The real-data sandbox rule could not check this call, so it is denied inside a subagent. Return BLOCKED.'));
-            return;
-          }
-        }
+              },
+            };
+          },
+        );
+        if (denied) return;
       }
 
       // (A0.895) Commit and push scan (track M, M6f, lib/commit-scan-guard.ts): in a project that holds real data, a
@@ -855,39 +884,48 @@ function main(): void {
       //   subagent has none (it returns BLOCKED). A project without real data is not scanned. No switch: the user's
       //   approval is the way past. A check that fails is denied in a subagent and passes in the main session, like the
       //   sandbox rule; a scan that fails inside a real-data project is itself a denial (lib/commit-scan-guard.ts).
-      if (typeof toolInput.command === 'string' && (toolName === 'Bash' || toolName === 'Monitor' || toolName === 'PowerShell')) {
+      //   The scan modules (about 14 ms to load, most of this hook's own cost) are loaded only for a command that mentions
+      //   git, and only when a real-data project may be reached: the shell or the project is in one, or the registry
+      //   names some (the same test lib/commit-scan-guard.ts starts with, from the light lib/real-data-held.ts).
+      const command = toolInput.command;
+      if (
+        typeof command === 'string' &&
+        (toolName === 'Bash' || toolName === 'Monitor' || toolName === 'PowerShell') &&
+        mentionsGit(command) &&
+        (realDataRootOf(cwd) !== null || realDataRootOf(projectCwd) !== null || registryHoldsProjects())
+      ) {
         const inSubagent = !!input.agent_type;
-        try {
-          const found = commitScanOfCommand(toolInput.command, cwd, projectCwd);
-          if (found !== null) {
+        const denied = dataRule(
+          'commit-scan',
+          'The commit scan could not check this command, so it is denied inside a subagent. Return BLOCKED.',
+          sessionId,
+          inSubagent,
+          () => (require('../lib/commit-scan-guard') as typeof import('../lib/commit-scan-guard')).commitScanOfCommand(command, cwd, projectCwd),
+          (found) => {
+            const scan = require('../lib/commit-scan') as typeof import('../lib/commit-scan');
             const marker = approvalMarkerPath(projectCwd, 'commit-scan', sessionId);
-            if (!inSubagent && userMarkerPresent(sessionId, marker, input.tool_use_id) && markerHoldsDigest(marker, found.report.digest)) {
-              pendingCommitScanApproval = { markerPath: marker, what: found.what };
-            } else {
-              logGate(sessionId, 'commit-scan', 'deny', `${found.what} ${found.report.digest} ${input.agent_type ?? 'main'}`);
-              if (!inSubagent) ensureApprovalDir(projectCwd);
-              const shownMarker = approvalMarkerShown(projectCwd, 'commit-scan', sessionId, cwd);
-              const tail = inSubagent
-                ? ' Agents never approve content: return BLOCKED and tell the user which files are listed.'
-                : ` Only the user can approve content that is known to be safe (fixtures, synthetic data): they run \`! echo ${found.report.digest} > ${shownMarker}\` (one use, bound to exactly this content: a changed file needs a new approval), then run it again.`;
-              emit({
-                ...deny(commitScanText(found.report, found.what, tail)),
+            if (!inSubagent && userMarkerPresent(sessionId, marker, input.tool_use_id) && scan.markerHoldsDigest(marker, found.report.digest)) {
+              return { pending: () => void (pendingCommitScanApproval = { markerPath: marker, what: found.what }) };
+            }
+            if (!inSubagent) ensureApprovalDir(projectCwd);
+            const shownMarker = approvalMarkerShown(projectCwd, 'commit-scan', sessionId, cwd);
+            const tail = inSubagent
+              ? ' Agents never approve content: return BLOCKED and tell the user which files are listed.'
+              : ` Only the user can approve content that is known to be safe (fixtures, synthetic data): they run \`! echo ${found.report.digest} > ${shownMarker}\` (one use, bound to exactly this content: a changed file needs a new approval), then run it again.`;
+            return {
+              log: `${found.what} ${found.report.digest} ${input.agent_type ?? 'main'}`,
+              out: {
+                ...deny(scan.commitScanText(found.report, found.what, tail)),
                 ...(inSubagent
                   ? {}
                   : {
                       systemMessage: `[goodboy] 실제 데이터가 든 프로젝트에서 개인정보·비밀값 모양이 있거나 검사하지 못한 내용이 든 ${found.what}을(를) 막았어요. 안전한 내용이면 \`! echo ${found.report.digest} > ${shownMarker}\`(이번 한 번, 이 내용에만)을 실행하세요.`,
                     }),
-              });
-              return;
-            }
-          }
-        } catch (err) {
-          logGate(sessionId, 'commit-scan', 'fail-open', String(err));
-          if (inSubagent) {
-            emit(deny('The commit scan could not check this command, so it is denied inside a subagent. Return BLOCKED.'));
-            return;
-          }
-        }
+              },
+            };
+          },
+        );
+        if (denied) return;
       }
 
 

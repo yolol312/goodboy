@@ -16,8 +16,9 @@
 // repository, and `review-write` and `test-write` write to its `.claude/`). A review record names the paths it reviewed,
 // among them the helper's dir, so it would otherwise count as a source file that uses the helper and ask a review of the
 // review itself, for good (found by the M6 canary step, 2026-11-18). Nothing else of `.claude/` is excluded: a source file
-// or script kept there, or a settings file, that names the helper is asked as any other. A `.json` file a model puts in a
-// record dir is not asked for (a data file, not code the project's tests run).
+// or script kept there, or a settings file, that names the helper is asked as any other. The exclusion goes by place and
+// extension alone (goodboy cannot tell a record it wrote from a `.json` file put in its place), so a `.json` file a model
+// puts in a record dir is not asked for either: it is data, and no code of the project runs it.
 //
 // Stated limits (the review and the gate decide by what a file names; a program written to hide it is not read): a file
 // that reaches the helper through a barrel or wrapper it imports (`src/testing/db.ts` re-exporting it), through an alias
@@ -107,6 +108,10 @@ export function isPrivacyPath(rel: string): boolean {
  *  as text. Comments are ignored in JS/TS and JVM files (a mention in another kind of file, whose comment syntax this
  *  does not read, counts: more to review, never less). */
 export function usesDataHelper(rel: string, text: string): boolean {
+  // Every form below spells `goodboy` (GOODBOY_DATA, GoodboyData, `.goodboy/sandbox/…`, and an import of the helper
+  // names `goodboy-data`): a text without the word is no user, and skips the comment stripping, which costs tens of ms on
+  // a big file (a setup lists thousands of them).
+  if (!/goodboy/i.test(text)) return false;
   const ext = extname(rel).toLowerCase();
   const commented = JS_EXT.has(ext) || JVM_EXT.has(ext);
   const code = commented ? withoutComments(text) : text;
@@ -155,7 +160,7 @@ export function privacyFilesOf(top: string, files: readonly string[], base: stri
       out.add(f);
       continue;
     }
-    bytes += text.text.length;
+    bytes += Buffer.byteLength(text.text, 'utf8');
     if (usesDataHelper(rel, text.text)) out.add(f);
   }
   return out;
@@ -194,7 +199,7 @@ export function privacySetupOf(top: string, caps: PrivacyCaps = {}): PrivacySetu
       if (isTestOrE2e(rel)) return { ok: false, why: 'unreadable' };
       continue;
     }
-    bytes += text.text.length;
+    bytes += Buffer.byteLength(text.text, 'utf8');
     if (bytes > maxTotal) return { ok: false, why: 'cap' };
     if (usesDataHelper(rel, text.text)) files.add(rel);
   }

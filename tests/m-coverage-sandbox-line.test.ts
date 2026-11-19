@@ -13,16 +13,14 @@ import { SANDBOX_DIR } from '../lib/sandbox-mode';
 import { planSandbox } from '../lib/sandbox-render';
 import { checkSandbox, loadCtx, sandboxCommand } from '../lib/sandbox-run';
 import type { SandboxOutbound, SandboxScan, SandboxStore } from '../lib/sandbox-types';
+import { keepEnv } from './m6b-helpers';
 
 setDefaultTimeout(120_000);
 
 const tmpDirs: string[] = [];
-const saved = { bin: process.env.GOODBOY_DOCKER_BIN, host: process.env.DOCKER_HOST, home: process.env.HOME, fake: process.env.FAKE_DOCKER_DIR };
+const restoreEnv = keepEnv('GOODBOY_DOCKER_BIN', 'DOCKER_HOST', 'HOME', 'FAKE_DOCKER_DIR');
 afterEach(() => {
-  for (const [k, v] of [['GOODBOY_DOCKER_BIN', saved.bin], ['DOCKER_HOST', saved.host], ['HOME', saved.home], ['FAKE_DOCKER_DIR', saved.fake]] as const) {
-    if (v === undefined) delete process.env[k];
-    else process.env[k] = v;
-  }
+  restoreEnv();
   while (tmpDirs.length) rmSync(tmpDirs.pop()!, { recursive: true, force: true });
 });
 

@@ -1,10 +1,11 @@
 // Track M, M6f (plan §19): the same commands the git hooks and the CLI run (lib/git-hooks.ts, lib/commit-scan.ts
 // `scanIndex`), called in this process on real temp repos, so the coverage tool sees them (tests/m6f-git-hooks.test.ts
-// runs them as spawned hooks, which it cannot see). Plus two push-option forms and a too deeply nested script of the
-// command reader, on the way the PreToolUse check takes them.
+// runs them as spawned hooks, which it cannot see). The install, uninstall, approval and push cases restate those of that
+// file on purpose: the same lines, run where the coverage tool sees them. Plus the five push-option forms and a too deeply
+// nested script of the command reader, on the way the PreToolUse check takes them.
 
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { Acc, commitScanText, scanIndex } from '../lib/commit-scan';
 import { commitScanOfCommand, type GuardResult } from '../lib/commit-scan-guard';
@@ -145,9 +146,12 @@ describe('commit-scan, in process', () => {
     const digest = digestIn(stderr);
     expect(digest).toMatch(/^[0-9a-f]{16}$/);
 
-    // another content's digest, a link and a name that is no marker approve nothing
+    // another content's digest, a link to a file with the right digest and a name that is no marker approve nothing
     marker('.goodboy-commit-scan-approved-hook.txt', '0000000000000000\n');
     marker('not-a-marker.txt', `${digest}\n`);
+    const target = join(f.base, 'approval-target.txt');
+    writeFileSync(target, `${digest}\n`);
+    symlinkSync(target, join(f.repo, '.claude', '.goodboy-commit-scan-approved-link.txt'));
     expect(commitScanCommand(['--hook', 'pre-commit'], f.repo)).toMatchObject({ code: 1 });
     // the right digest passes once and is used up
     const m = marker('.goodboy-commit-scan-approved-hook.txt', `${digest}\n`);
@@ -165,6 +169,7 @@ describe('commit-scan, in process', () => {
     // read but no search permission: the entry is listed, but looking at it fails (root is not stopped by modes)
     chmodSync(dir, 0o444);
     try {
+      // as root (modes do not stop it) this assertion is skipped, so the case checks less there than anywhere else
       if (process.getuid?.() !== 0) expect(commitScanCommand(['--hook', 'pre-commit'], f.repo)).toMatchObject({ code: 1 });
     } finally {
       chmodSync(dir, 0o755);
@@ -202,7 +207,7 @@ describe('commit-scan, in process', () => {
     }
   });
 
-  test('scanIndex reads the index against HEAD: a hit with its path and line, and the report is blocked', () => {
+  test('scanIndex reads a staged file: a hit with its path and line, and the report is blocked (against HEAD: m6f-scan.test.ts)', () => {
     stage('data/a.txt', `1\n2\n${CANARY.rrn}\n`);
     const acc = new Acc();
     scanIndex(f.repo, acc);
@@ -278,7 +283,9 @@ describe('the command reader, in process', () => {
   test('a script nested past the reader\'s depth is "not scanned", never silently passed', () => {
     const nested = ['bash <<\'A\'', 'bash <<\'B\'', 'bash <<\'C\'', 'git commit --allow-empty -m "x #1"', 'C', 'B', 'A'].join('\n');
     const r = scan(nested);
-    expect(r).not.toBeNull();
-    expect(whys(r).length).toBeGreaterThan(0);
+    expect(r?.report.blocked).toBe(true);
+    expect(whys(r)).toContain('goodboy cannot read this command well enough to tell what it commits or pushes');
+    // the control: one level less is read, and a commit with an issue number passes
+    expect(scan(['bash <<\'A\'', 'bash <<\'B\'', 'git commit --allow-empty -m "x #1"', 'B', 'A'].join('\n'))).toBeNull();
   });
 });

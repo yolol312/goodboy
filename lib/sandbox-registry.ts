@@ -18,7 +18,7 @@
 // Light on purpose (no renderer, no scanner): the hook loads it on every tool call.
 
 import { randomBytes } from 'node:crypto';
-import { closeSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
+import { closeSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { readRegular } from './safe-read';
@@ -209,7 +209,7 @@ export function registerRealData(entry: RegistryEntry, env: NodeJS.ProcessEnv = 
       if (at < 0 && have.length >= REGISTRY_MAX) {
         return new RegistryError('full', `the registry of real-data sandboxes is full (${REGISTRY_MAX} projects); goodboy never drops an entry: remove ${file} by hand if those projects are gone`);
       }
-      if (existsSync(file) && lstatSync(file).isSymbolicLink()) return new RegistryError('unreadable', 'the registry of real-data sandboxes is a link');
+      // (a link at `file` was refused by readRegistry above; the rename below replaces a link, it never writes through it)
       const entries = at >= 0 ? have.map((e, i) => (i === at ? next : e)) : [...have, next];
       writeFileSync(tmp, `${JSON.stringify({ schema: 1, entries }, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
       renameSync(tmp, file);

@@ -3,7 +3,7 @@
 Feature → test type, generated from the test files by goodboy (`cli.ts test-catalog`).
 Regenerate it instead of editing it; the docs rule compares it with a fresh copy.
 
-Totals: unit 255 files, 4790 tests; e2e 2 files, 54 tests.
+Totals: unit 262 files, 4928 tests; e2e 2 files, 54 tests.
 
 | Feature | Type | File | Tests |
 |---|---|---|---|
@@ -95,6 +95,10 @@ Totals: unit 255 files, 4790 tests; e2e 2 files, 54 tests.
 | problems that were already there, kept apart from regressions; projects to suggest for the registry; the session probe; the model probes; the CLI; the comparison, check by check (layer-1 additions) | unit | tests/k1d-update-check.test.ts | 49 |
 | L2: Java and Kotlin test files; L1: the survey; L3: the backfill state | e2e | tests/l-test-backfill.test.ts | 29 |
 | T5-1: an unknown repo matters only to a command that may commit; T5-3: chmod modes are no paths | unit | tests/l-trial5-fixes.test.ts | 3 |
+| inGoodboySessionDir | unit | tests/m-coverage-file-tracker.test.ts | 1 |
+| planSandbox hosts and stores; the scan, the local file and the ledger of a project that is not what goodboy wrote; sandboxCommand in this process; checkSandbox | unit | tests/m-coverage-sandbox-line.test.ts | 11 |
+| config readers: YAML corners, .env and JSON that do not parse; IPv6 URLs and string literals in code; Node: the port, Prisma stores; JVM: a WAR with no Spring Boot, a module with settings.gradle above it; Python layouts; caps and the time budget | unit | tests/m-coverage-sandbox-scan.test.ts | 14 |
+| jsxActions; jsCalls and addCalls; scanTemplate; springRoutes on Kotlin and odd annotations; parseReport shapes; cmdUiCheck | unit | tests/m-coverage-ui-line.test.ts | 7 |
 | A8: the sandbox run results are written only by sandbox-run; A8: the shell command families that write a result dir also cover the sandbox out dir; followedPath: where the OS lands for a path (in-process) | unit | tests/m-fix-a-guard.test.ts | 16 |
 | A6: the DB restore fails closed and never prints a row of the dump | unit | tests/m-fix-a-restore.test.ts | 8 |
 | A1: a start command with a glob is resolved through a shell; A2: the health URL joins the context path once; A3: no wrapper means the official build image, and the offline test run is prepared; the gateway probe runs its attempts side by side | unit | tests/m-fix-a-runtime.test.ts | 17 |
@@ -117,10 +121,6 @@ Totals: unit 255 files, 4790 tests; e2e 2 files, 54 tests.
 | a tests-role agent removes test output; bashChangedPaths and isTestOutputPath; writeDenial with removal and expanded (in-process) | unit | tests/m5-role-removal.test.ts | 17 |
 | the sandbox dir and what a sandbox file is; sandboxGaps (in-process); sandboxGaps and sandboxGapReason say what is missing (in-process); sandboxUsers fails closed on too many changed files; Stop, end to end: a session that changed only sandbox files; only the files the sandbox commands write are exempt | unit | tests/m5-sandbox-gate.test.ts | 31 |
 | jsLoads: type-only imports do not load a module; result-guard log reason | unit | tests/m5-type-imports.test.ts | 4 |
-| inGoodboySessionDir | unit | tests/m6-file-tracker-coverage.test.ts | 1 |
-| planSandbox hosts and stores; the scan, the local file and the ledger of a project that is not what goodboy wrote; sandboxCommand in this process; checkSandbox | unit | tests/m6-sandbox-line-coverage.test.ts | 11 |
-| config readers: YAML corners, .env and JSON that do not parse; IPv6 URLs and string literals in code; Node: the port, Prisma stores; JVM: a WAR with no Spring Boot, a module with settings.gradle above it; Python layouts; caps and the time budget | unit | tests/m6-sandbox-scan-coverage.test.ts | 14 |
-| jsxActions; jsCalls and addCalls; scanTemplate; springRoutes on Kotlin and odd annotations; parseReport shapes; cmdUiCheck | unit | tests/m6-ui-line-coverage.test.ts | 7 |
 | writeAtomic; clearRealData; the sweep of host raw files and of a broken context; a ui-check verdict that cannot be stored | unit | tests/m6a-gaps.test.ts | 5 |
 | the text policy (lib/sandbox-boundary.ts); the counts of a run (lib/sandbox-summary.ts); the volume scripts and what they print (lib/sandbox-volumes.ts); expiry (lib/sandbox-expiry.ts); the ui-check verdict without titles (lib/ui-check.ts); the real-data flag in local.json | unit | tests/m6a-parts.test.ts | 47 |
 | real data: a full run prints and records no canary; real data: every failure prints a code, never the words of what failed; without real data the old output stays; raw artifacts expire; raw files of runs before M6a and of non-real-data runs; real data found in the volumes when local.json is gone | unit | tests/m6a-run.test.ts | 30 |
@@ -157,7 +157,7 @@ Totals: unit 255 files, 4790 tests; e2e 2 files, 54 tests.
 | install and uninstall; a commit through the hooks; a push through the hooks; by hand | unit | tests/m6f-git-hooks.test.ts | 27 |
 | the denial; the user\; the hook\; a check that fails; where the scan applies | unit | tests/m6f-hook.test.ts | 18 |
 | git-hooks install and uninstall, in process; commit-scan, in process; push-scan, in process; the command reader, in process | unit | tests/m6f-in-process.test.ts | 18 |
-| H1: a push excludes only what its own remote has; H2: what hides the program or the subcommand is not scanned; H3: options are read by their full names; push; M1: the git hooks\; M2: a "not scanned" reason of the command is bound to the command | unit | tests/m6f-review-fixes.test.ts | 63 |
+| H1: a push excludes only what its own remote has; H2: what hides the program or the subcommand is not scanned; H3: options are read by their full names; push; M1: the git hooks\; M2: a "not scanned" reason of the command is bound to the command | unit | tests/m6f-review-fixes.test.ts | 64 |
 | a commit: the index; a commit: -a, paths, --amend; a commit: the message and the paths; names that are special to a JavaScript object; not scanned; what runs before the commit in one command | unit | tests/m6f-scan.test.ts | 61 |
 | A: a file that is exactly goodboy’s render is not asked for; B: goodboy’s record files are no privacy file; nothing else of `.claude/` is excluded; C: the refusal tells "no review" from "a review that does not clear"; the two guards of renderedUnchanged that need a broken input | unit | tests/m6g-canary-fixes.test.ts | 25 |
 | isPrivacyPath: the sandbox files and the manifest, by path; usesDataHelper: the tests that use the helper; privacyFilesOf: the files of a change; privacySetupOf: the current setup of a project | unit | tests/m6g-files.test.ts | 34 |
@@ -166,6 +166,13 @@ Totals: unit 255 files, 4790 tests; e2e 2 files, 54 tests.
 | a real-data run without a covering review is refused; a covering review lets it run; what does not count as a covering review; what the gate leaves alone, and what it cannot read; the newest review of a file decides, and an open high or medium finding is no pass; the reviews of the repository top and of the project dir both count | unit | tests/m6g-run-gate.test.ts | 33 |
 | one definition of the helper facts; the surface | unit | tests/m6g-shared.test.ts | 5 |
 | the reviewers and the skill; the README | unit | tests/m6g-texts.test.ts | 7 |
+| the data rule reads a glob the way a shell would; a link source glob too long to match as text within the work budget is denied, not let through; a lock that cannot be taken after two tries; a node:http handler whose call never closes is still read, to a bound | unit | tests/m7-cov-lines.test.ts | 9 |
+| item 1: a docs role removing by a pattern is judged where the pattern expands, `..` and links resolved; item 1: the sandbox data file of a test role cannot be a link made by a command | unit | tests/m7-d1-fixes.test.ts | 7 |
+| G1-1: a suffixed store image tag keeps its version; G1-2: the stores have one order, whatever the order they were found in; G1 low: the questions say what goodboy did not read; G1 low: raw files fail closed; G1 low: the MySQL restore keeps the client output off the host | unit | tests/m7-g1-fixes.test.ts | 12 |
+| G2-1: one sandbox command at a time per project; G2 low: the result of --suite all, and the step-failed diagnostic; G2 low: a run that timed out is no proof; G2 low: the volume sweep that cannot run says so; G2 low: the privacy file caps count bytes, and the helper words are looked for first | unit | tests/m7-g2-fixes.test.ts | 12 |
+| item 1: a glob whose dir is a link is judged with the link followed; item 2: `file -f`, `wc --files0-from` and `du --files0-from` read the file as a list of names; item 3: docker verbs that open a container or a volume; item 4: the gate switch behind a wrapper; item 5: `run` and `create` that bind the engine, its socket or the host, with no sandbox word; item 5b: a bind whose source is a protected path or a dir that holds one | unit | tests/m7-g3-fixes.test.ts | 57 |
+| item 1: stdin commits and heredocs are paired by order only when the counts match; item 2: a no-reply address hides no number and takes only a plain tag; item 3: a hash is no number; item 4: the keyword secret, placeholders and compound names; item 5: the backfill note passes the sanitizer; item 6: `rtk git commit -F -` reads its heredoc like `git commit` | unit | tests/m7-g4-fixes.test.ts | 14 |
+| G5 high 1: a report without branch data is not "100% lines and branches"; G5 low: an lcov file named without a DA line, and a Cobertura branch line without counts; G5 medium 2: web servers the inventory does not read are named, not a silent partial or noUi; G5 low: jsLoadGroups reads code without comments; G6 medium 1: a tester writes .goodboy/sandbox/data.json and nothing else under .goodboy/; G6 low: the review gate reads the registry like the PreToolUse rule | unit | tests/m7-g5-fixes.test.ts | 26 |
 | marker names and Bash writes; PreToolUse; a marker made during a model Bash call that never reported back (`exit N`, G0 M18); a marker made in another directory during a finished call (security review round 2); round 3; PostToolUse sweep | unit | tests/marker-guard.test.ts | 14 |
 | redirections; shellSegments; hostOf; curl, wget, httpie; ssh family; git push | unit | tests/outward-command.test.ts | 22 |
 | unlisted external hosts; production hosts; gate modes | unit | tests/outward-gate-hooks.test.ts | 12 |

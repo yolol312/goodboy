@@ -1,8 +1,9 @@
 // The UI check (track M, M3; plan §19): did the browser tests reach every screen and action of the
 // inventory, as the server saw it? Two records are joined:
 //   - the proxy's access log (Caddy, JSON lines): each request with its method, URI, status, the
-//     `X-Goodboy-Test` nonce of the test that sent it, the `X-Goodboy-Ui` claims, and the headers
-//     that tell a page navigation from a script's request;
+//     `X-Goodboy-Test` nonce of the test that sent it and the headers that tell a page navigation
+//     from a script's request (the `X-Goodboy-Ui` claims header is logged for a person to read,
+//     this check does not use it: the claims come from the report's annotations);
 //   - the Playwright JSON report: each test with its status, its `goodboy-ui` annotations
 //     (`<id>:ok|error`) and its `goodboy-test` nonce, which `uiTest` in
 //     `.goodboy/sandbox/e2e/goodboy-ui.ts` writes.
@@ -72,7 +73,6 @@ export interface Req {
   method: string;
   path: string;
   status: number;
-  claims: Set<string>;
   /** The `X-Goodboy-Test` nonce of the test that sent it; null when it carries none. */
   nonce: string | null;
   /** The browser made it to load a page (see the rules above). */
@@ -89,7 +89,6 @@ interface TestClaims {
   nonce: string | null;
 }
 
-const CLAIM_HEADER = 'x-goodboy-ui';
 const MAX_PROBLEMS = 20;
 
 /** Calls `on` for each request of one access log, one line at a time (no list of all requests is
@@ -133,7 +132,6 @@ function eachRequest(text: string, label: string, problems: string[], on: (r: Re
       fail('has no numeric status');
       continue;
     }
-    const claims = new Set<string>();
     let nonce: string | null = null;
     let nav = false;
     const headers = r.headers;
@@ -144,16 +142,14 @@ function eachRequest(text: string, label: string, problems: string[], on: (r: Re
     let badHeader: string | null = null;
     for (const [k, v] of Object.entries((headers as Record<string, unknown> | undefined) ?? {})) {
       const name = k.toLowerCase();
-      if (name !== CLAIM_HEADER && name !== NONCE_HEADER && !NAV_HEADERS.has(name)) continue;
+      if (name !== NONCE_HEADER && !NAV_HEADERS.has(name)) continue;
       const values = Array.isArray(v) ? v : [v];
       for (const one of values) {
         if (typeof one !== 'string') {
           badHeader = k;
           break;
         }
-        if (name === CLAIM_HEADER) {
-          for (const c of one.split(',')) if (c.trim() !== '') claims.add(c.trim());
-        } else if (name === NONCE_HEADER) {
+        if (name === NONCE_HEADER) {
           if (NONCE_RE.test(one.trim())) nonce = one.trim();
         } else if (isNavHeader(name, one)) nav = true;
       }
@@ -162,7 +158,7 @@ function eachRequest(text: string, label: string, problems: string[], on: (r: Re
       fail(`has a ${badHeader} header that is not text`);
       continue;
     }
-    on({ method: r.method.toUpperCase(), path: pathOf(r.uri), status, claims, nonce, nav });
+    on({ method: r.method.toUpperCase(), path: pathOf(r.uri), status, nonce, nav });
   }
   if (bad > MAX_PROBLEMS) problems.push(`${label}: ${bad} unreadable lines in all`);
 }

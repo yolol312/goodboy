@@ -154,8 +154,9 @@ export function privacyGate(root: string, env: Record<string, string | undefined
   const judge = (files: readonly string[]) => uncoveredFiles(root, files, readers.reviews ?? findRecentReviewFiles, projectDir);
   let { missing, flagged } = judge(setup.files);
   // What goodboy rendered and nobody changed is out of scope. The re-render costs a scan, so it runs only when a file below
-  // the sandbox dir is asked for; each file is judged by itself, so dropping the exempt ones from the answer equals judging
-  // the rest. A failure to re-render exempts nothing, and the refusal says so.
+  // the sandbox dir is asked for. The files were judged together (the freshness check shares its caps and time budget across
+  // them), and the exempt ones are dropped from that answer afterwards: judging the rest alone could only be as strict or
+  // looser, so this is the stricter side. A failure to re-render exempts nothing, and the refusal says so.
   let failure: RenderFailure | null = null;
   if ([...missing, ...flagged].some((f) => f.startsWith(SANDBOX_PREFIX))) {
     let rendered: ReturnType<typeof renderedUnchanged>;

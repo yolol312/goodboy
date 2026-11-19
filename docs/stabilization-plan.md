@@ -51,7 +51,7 @@ so work is released in batches:
 | v0.36.2 | the review gate judges net change and content (#26, §15.18). Released 2026-10-22 |
 | v0.36.3 | testkit harness files need no layer-1 test (#28, §15.19). Released 2026-10-26 |
 | v0.36.4 | repository metadata and version-only manifests need no test record (#30), `..` after a link is recorded as opened (#29), §15.20. Released 2026-10-26 |
-| v0.36.5–v0.36.19 | gate fixes from field reports and reviews, one release each (§15.21–§15.35; #12, #25, #27, #31–#42). Released 2026-10-26 to 2026-11-12. The 2026-10-26 proposal to ship N1–N8 (§20.3) as v0.36.5 did not happen: v0.36.5 shipped §15.21 instead |
+| v0.36.5–v0.36.19 | gate fixes from field reports and reviews, one release each (§15.21–§15.35; #12, #25, #27 in part, #31–#42). Released 2026-10-26 to 2026-11-12. The 2026-10-26 proposal to ship N1–N8 (§20.3) as v0.36.5 did not happen: v0.36.5 shipped §15.21 instead |
 | v0.37.0 | track M (full tests in an isolated container sandbox: a real database copy, dummy external services, no egress; 100% line and branch coverage, every screen and action in e2e), §19 |
 | v0.38.0 | proposed: track N (fewer repeated runs, a project test inventory, task criteria, §20.4–§20.6), with a push judged by the test results gathered since the last push (§21, N24–N30, #43, #45); its order against v0.37.0 is the user's decision |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
@@ -4680,7 +4680,7 @@ Design:
   - Source: the design v2 of 2026-10-27 (kept outside the repo with the Codex round-7 notes).
 - M7 release v0.37.0 (M; L shipped as v0.36.0).
 
-As built (M1-M4; M5, M6 and M7 are open):
+As built (M1-M4; M5 and M6 have their own sections below, M7 is the release review):
 - `lib/sandbox-scan.ts` (`sandbox-scan`): read-only scan of build, port, data stores and outbound
   hosts (call sites apart from literals); `lib/sandbox-types.ts` holds the shared shapes.
 - `lib/sandbox-render.ts` and `lib/sandbox-parts.ts`: pure text of `.goodboy/sandbox/` (compose
@@ -4921,7 +4921,7 @@ goodboy sandbox command, crash leftovers too.
   where they stand; a suite that wraps others is not counted with them; nothing that is not closed
   is read), so it is linear in the text. `unreadable` for a file that is not JUnit; a file over the
   2 MiB cap or not a regular file is skipped and counted (`skipped_files`); `partial` when the read
-  budget (16 MiB in all) was hit; `truncated` over 500 files or 2000 suites; `counts: "missing"`
+  budget (16 MiB in all) was hit; `truncated` at 500 files or past 2000 suites; `counts: "missing"`
   when a JVM run left no JUnit XML in a volume (any other runner has exit and duration only). No
   case name, message, title or annotation is read.
 - Raw artifacts live in Docker volumes (`lib/sandbox-volumes.ts`): `runout` (`/outroot`, one dir
@@ -4966,7 +4966,7 @@ goodboy sandbox command, crash leftovers too.
 - Docker calls (fake docker, `--suite all` of a real-data project): 35 invocations before the
   review round (12 reader, 2 `context inspect`, 2 `compose config`), 28 after (6 reader, 1 of each
   of those, 1 `volume ls`). `sandbox-down` of a project that never ran: 5 (and a network and the
-  volumes made) before, 3 after.
+  volumes made) before, 3 after. (Measured at M6a; the later M6 steps added calls and were not recounted.)
 - goodboy's own echoes: `readRunResult` no longer quotes the run name it was given.
 - Tests: `tests/m6a-parts.test.ts` (policy, counts and the scanner's timing, volume scripts run under
   `sh`, expiry rules, stored verdict, flag, compose), `tests/m6a-run.test.ts` (canaries on every
@@ -5223,7 +5223,7 @@ names, and "registered input logs" are paths registered with `sandbox-local --in
   guarded project nested inside the session's project dir (CLAUDE_PROJECT_DIR) is told apart (M6c start): the CLI
   answers for the session's project anywhere below that dir (`cliProjectDir`, a linked worktree answering for itself),
   so no `cd` reaches its sandbox, and the text says its structure and counts come from a session started in its dir;
-  the guard asks the same `projectDir` the CLI does (the CLI's `repoTop` after it is not repeated: a registered dir is
+  the guard asks the same `projectDir` the CLI does (the CLI's `repoTop` after it is not repeated: a dir goodboy registers is
   a repo top already). A shell inside the nested project counts as reaching it, so a call there that reaches the outer
   project's data is told only the nested project, and the text then reads as if the outer data could not be asked
   either (an over-tell, chosen over sending the model to the outer sandbox for the nested one's data). The live
@@ -5490,7 +5490,8 @@ As built (M6g, the privacy review, 2026-11-17):
 - A review dimension and axis `data-privacy` (`lib/review-dimensions.ts`). `requiredDimensionsFor`,
   `missingDimensionsByFile` and `axesFor` stay path-only and take an optional `privacy(file)` predicate; the callers
   compute it: the Stop review gate per repo group (`privacyOptionsFor`, `lib/stop-groups.ts`: the group's top is real
-  data by `realDataForReading`, and the file is a privacy file; within a 16 MB read cap and the Stop's clock, past
+  data by `realDataForReading`, since M7 `realDataHeld`, which also reads the registry, and the file is a privacy
+  file; within a 16 MB read cap and the Stop's clock, past
   which the remaining files count as privacy files) and `review-axes` (per nested repo, as the Stop's groups).
 - Privacy files (`lib/privacy-files.ts`, sharing the import and file rules of `lib/sandbox-gate.ts`): the sandbox
   layout files and `data.json` (not the state files that change with every `sandbox-local` or `sandbox-init`:
@@ -5551,7 +5552,8 @@ rendered files that differ from the render, `data.json`, and source files that u
   from `lib/sandbox-scan.ts` and handed to the scan, then checked on the clock; the same bound as `sandbox-scan`, so a
   scan that `sandbox-scan` accepted is one the gate accepts), when `local.json` cannot be read, or when the render
   throws. The re-render runs only when the review-coverage check leaves an uncovered file below `.goodboy/sandbox/`
-  (each file is judged by itself, so dropping the exempt ones from that answer equals judging the rest): a run whose
+  (all files are judged together and the exempt ones are dropped after; the tree cap and the time budget are shared,
+  so this can only ask for more than judging the rest alone, the stricter side): a run whose
   files are all covered, or whose asked files are only sources, pays no scan. One scan, one render and one read per
   rendered file per such run. Measured on an idle machine (2026-11-18): the scan alone takes 108 to 150 ms on this
   repository (first run cold) and 9 to 39 ms on the canary project; `renderedUnchanged` as a whole (scan, render, 12 or
@@ -5654,9 +5656,11 @@ As built (M6f, the commit and push scan, 2026-11-17):
     whose only producer is a plain `cat` (no file operand, nothing piped into it) fed by one heredoc (`cat <<TAG | git commit
     -F -`). Any `<` or `<>` file redirect on the segment or the producer, a producer with a file operand (`cat real.txt
     <<EOF | …`), a here-string, several heredocs on one segment, another producer, and a `$(cat)` with no heredoc of its own
-    are "not scanned" (fixed reason: the message comes from a file or a stream goodboy does not read). The nth commit of a
-    command that reads stdin takes the nth such heredoc, counted over all the command's commits, so a second commit never
-    reuses another commit's heredoc, and a decoy heredoc (`cat <<EOF >/dev/null`) feeds none. A message word counts as a
+    are "not scanned" (fixed reason: the message comes from a file or a stream goodboy does not read). When the number
+    of commits that read stdin equals the number of heredocs that feed one, the nth such commit takes the nth heredoc,
+    counted over all the command's commits, so a second commit never reuses another commit's heredoc. When the counts
+    differ (a commit fed by a pipe or a file next to a decoy heredoc), which heredoc feeds which commit is a guess, so
+    every stdin commit is "not scanned" (M7). A decoy heredoc (`cat <<EOF >/dev/null`) feeds none. A message word counts as a
     heredoc body only when it is `$(cat <<TAG … TAG)` (the reader leaves `$(cat` and a line break, so the word carries its
     own heredoc); `$(cat FILE)`, `$(cat < FILE)`, a backtick `cat` and any other substitution are "not scanned" (read from a
     file when the command runs). A shell reads a heredoc as its script by the same tie: `sh <<EOF < s.sh` is a shell
@@ -5889,6 +5893,135 @@ As built (M6 canaries on real docker, 2026-11-18):
 - Not exercised by this run, from the release criterion's canary list: a failing e2e test with its screenshots and
   traces, restore failures, M6e classifier output (not built), crash cleanup and timeouts, pushes (no remote), proxy
   URLs that carry a value, and a dynamic test name built from a value (no model wrote one).
+
+As built (M5 session 3 and M7, the release review, 2026-11-19):
+- M5 session 3 ran `/backfill-tests` on the JVM trial project with the real dump (sessions S3b to S3d; S3c was cut
+  by a machine restart). The sandbox came up with the real restore, the privacy gate asked for exactly the two files
+  that needed a review, every test ran inside `sandbox-run`, and the batch of 5 ended with all 5 marked `suspect`
+  (the tests found behavior that looks wrong; the test role's attempt to edit production code was denied by its role
+  limit). goodboy's own pattern scan found no value in the backfill notes, the test records or the review records.
+  Denials were by design (Bash file writes, the result guard).
+- The release review split track M into six groups (setup; run and output boundary; data access; commit scan and
+  records; coverage and UI checks; hooks and docs), one all-axes reviewer each, and each judged its open lows. One
+  high and fifteen mediums came back; all were fixed, each with a test that fails without the fix.
+- Fixed, setup and run: a suffixed store image tag keeps its leading version (`17-alpine` gives 17; a tag that names
+  no version gives the default and a question or note), with one default table (postgres 16, mysql 8.4, mariadb 11,
+  redis 7, mongo 7); the store order is a total order (kind, file, line), so the dump goes to the right store;
+  `sandbox-prepare`, `-up`, `-run` and `-down` hold `.goodboy/sandbox/out/.lock` (pid, start time, command): a
+  second one fails at once and names the holder; a lock whose pid is gone, or older than 6 h, is taken over;
+  `sandbox-check` and `sandbox-data` do not lock (limit: two commands that find the same stale lock at one instant
+  can take it in turn); `rawMayRemain` treats a refused `result.json` as raw output left; in real-data mode a
+  failing unit or e2e step carries `diagnostic {code: "step-failed"}` (a timeout stays `timed-out`; `internal` is
+  only the text of a thrown error); the run proof refuses a run that timed out.
+- Fixed, data access (four rounds: the release review, then three reviews of the fixes): creating a link to a
+  protected path or to a directory that holds one (the dump, an input dir, the registry dir and the dirs above them,
+  except `$HOME`, the dirs above it and `/`; raw output, `.goodboy` and `.goodboy/sandbox` while raw output is left)
+  with `ln`, `cp -s`, or a copy or move of such a link is denied in every guarded context, with glob and brace
+  sources expanded first; in a real-data project a glob operand is expanded on disk and each match is judged with
+  its links followed (`*/dump.sql`, `[d]l/*`, `**/*.sql` through a linked dir, raw output through a link too); a
+  glob that needs more than 20,000 directory entries (a link counting as 50), matches more than 2,000 names, costs
+  more than the call's matching work or takes more than 2 s is denied until the pattern is narrowed, and a glob the
+  rule cannot read is denied with its own text; `**` enters a linked dir only when its target holds a protected
+  path; a shell in another project judges a glob as text and walks nothing (a project with no real data stays at
+  about 0.1 to 0.7 ms per call even with the registry in use); a word group (`@(…)`, `!(…)`, `(a|b)`, also with
+  quotes before the parenthesis) is held when the directory before it holds a protected path;
+  `file`, `wc` and `du` keep the metadata exemption only with options from a known-safe list (so `file -f`, `-m`,
+  `--magic-file`, `wc --files0-from`, `du --exclude-from` read nothing unchecked); `docker debug`, `checkpoint`,
+  `mount` and `volume export|mount` are denied verbs, on a container or volume name too; an assignment of `GOODBOY_SANDBOX_PRIVACY_GATE` anywhere among
+  a segment's words (after wrappers, after `--`, inside a readable `-c` string) is denied unless the program is
+  text-only (echo, printf, the grep family, git, cat, less, more, head, tail, `sed` without `-i`); in a real-data
+  project `docker run`/`create`/`compose run` with `--privileged` (also `=1`, `=t`, `=true`), `--pid=host`, a host
+  bind of `/`, `/var`, `/run`, docker's or podman's dirs and sockets (with links followed), or a bind whose host
+  source is a protected path or a directory that holds one (the dump, the registry, raw output while it is left) is
+  denied, and the last kind is denied from a shell in any other project too; the redirects of goodboy's own CLI
+  commands (`>`, `2>`, `>&`, `<>`, `>|`, globs) are checked against protected paths.
+- Fixed, commit scan and records: see the heredoc sentence in M6f; the no-reply exemption takes only a plain tag
+  (`[A-Za-z0-9._-]{1,64}`; GitHub: an id of at most 12 digits, `+`, a name) and the exempt address is read again
+  with its `@` removed, so a number inside it is a hit of its own kind; a digit shape inside a run of 32 or more hex
+  characters or inside a dashed uuid is no number (measured: 0 hits per 10k random sha1, sha256, sha512 and uuid,
+  against tens to a few hundred before, varying with the random sample); a keyword match is no secret when its
+  whole value is an environment reference (`process.env.X`, `os.environ[...]`, `os.getenv(...)`,
+  `System.getenv(...)`, `${NAME}` or a dotted config name `${app.jwt-secret}`; a shell default such as
+  `${X-pw}`, `${X:-pw}` or `${DB_PASS-pw.prod}` stays a hit), and the keyword may end a longer name (`secret_key`,
+  `private_key`); `backfill-mark --note` passes `redactText`; `rtk git commit -F -` is
+  read like `git commit`.
+- Fixed, coverage and UI: branch evidence is judged per covered file, and a file whose report could carry branches
+  but has none for it is a problem, not "100% branches". In lcov a file needs `BRDA` or `BRF` (`BRF:0` too); a
+  report whose format carries no branch records at all (an lcov with no BRDA and no BRF anywhere, as Bun 1.3 writes
+  it) passes on 100% lines and the result says `branches: "unmeasured"` with the files it applies to (`"partly"`
+  when only some files come from such a report; user decision 2026-11-19). A Cobertura report counts as measured
+  when any line has a `branch` attribute (coverage.py writes it only on branch lines); one with none (coverage.py
+  without `branch = True`) remains a problem because that tool can measure branches, and the sandbox's coverage.py
+  rc sets `branch = True`. JaCoCo is always measured. A Cobertura `branch="true"` line without `condition-coverage`
+  is a report error. A report entry that says it has no executable line (lcov `LF:0`, a JaCoCo LINE counter of 0
+  and 0, a Cobertura class with an empty `<lines/>`, as istanbul writes for a re-export barrel) has nothing to
+  cover; an entry with neither lines nor that statement is a gap. `ui-inventory` reports Koa, Fastify, NestJS, Hapi
+  and Java servlets as "framework not read" instead of a silent partial inventory, and a `node:http` server only
+  when its file is not an Express or Next app and its own inline handler routes on `req.url` or `req.method`
+  (`createServer(app)`, `createServer(opts, app)`, a handler passed by name and the Next.js custom server are not
+  flagged). The unused `x-goodboy-ui` claims parse is gone (the proxy still logs the header for people);
+  `jsLoadGroups` reads comment-free code. The lock's busy message names the lock file, so a lock held by a reused
+  pid can be removed by hand.
+- Fixed, hooks: a tester may write `.goodboy/sandbox/data.json` (no other `.goodboy` file; no link on the path), as
+  the agent and skill texts tell it to; a docs role may `rm` by pattern inside a docs dir again; the review gate and
+  `review-axes` read the user registry like the PreToolUse rules (`lib/real-data-held.ts`), so `git clean -xfd`
+  with the DB volume kept still asks for the data-privacy axis; the commit-scan modules load only for commands that
+  mention git and only when a real-data project may be reached (the shell or the project is in one, or the
+  registry names some; `realDataRootOf` moved to `lib/real-data-held.ts` for that). Median PreToolUse `Bash ls` on a
+  project with no sandbox, one machine: 87 ms on main, 108 ms before the fix, 96 ms after (another run of the review
+  measured 124, 145 and 138 ms: the order holds, the absolute numbers vary by machine and load).
+- Limits stated by the review (not fixed):
+  - Data access: the rule guards Read, Grep, Glob and shell commands, not MCP file tools, and not git reads of a
+    dump tracked in a repository (`git show REV:path`, `git grep`, `git log -p`, `git diff`): keep real dumps
+    untracked. It does not stop a model writing `GOODBOY_SANDBOX_*_GATE=off` into `.claude/settings*.json`, which
+    the CLI then reads from its environment: those files are the user's to protect. `find ~/.claude -delete` and
+    `rm -rf ~/.cl*` over a directory that merely holds the registry's parent are not caught. A shell that expands
+    names by running code (`for f in *; do …`) or builds them from variables (`$PWD/…`, `"$(pwd)"`), including a
+    bind source, is not read. A shell in another project judges a glob as text, so a link in the middle of a glob
+    there is not followed. Links made other than by `ln`, `cp` or `mv` (`rsync -l`, `tar`, `install`, a program, an
+    editor), and link sources the shell builds at run time (`$VAR`, `$(…)`), are not read, and reads through a
+    pre-existing link by a tool that walks links itself (`grep -R`, `find -L … -exec cat`, `cp -rL`, `rsync -L`) are
+    not read. `docker checkpoint --help` and `docker debug --help` are denied like `docker logs --help`. zsh extended-glob forms without a parenthesis (`^name`, `a~b`,
+    qualifiers) are not read, and brace padding past 64 alternatives is judged only by its listed directory. `docker run` and `create` are not read for `--device`, `--cap-add`, `--security-opt`,
+    `--userns`, `--net=host` or a volume created with `--opt device=/`. Only `GOODBOY_SANDBOX_PRIVACY_GATE` is
+    guarded as a command; the data gate's switch is read from the hook's own environment, which a command cannot
+    set. Over-denials: the switch assignment among the words of any program that is not text-only, even as an
+    argument (`node -e`, `python -c`, `sed -i`), and a mention of the switch name in text a program sends out
+    (`gh pr create --body`, `awk`, `tee`; use `--body-file`); `docker run alpine rsync -av /var /backup` (the option
+    scan reads every word after the verb); in a real-data project a glob over the budget (`rm -rf node_modules/*` in
+    a pnpm-sized tree, `**/*.ts` over 50k files) until it is narrowed, and a word with an attached `(` when the dump
+    sits inside the directory it runs in; a link to the dump's directory or an ancestor below `$HOME`, even a
+    harmless one; binding the project dir while raw output is left, and binding home, `~/.claude` or `/` from any
+    project once the registry has an entry; `file -F : DUMP` (an option outside the safe list). A `bunfig.toml` preload can set `GOODBOY_SANDBOX_PRIVACY_GATE` (the gate
+    checks `.env*` and `--env-file` only).
+  - Commit scan: identity words computed at run time (`export $(cat vars)`, `env $(cat vars) git commit`,
+    `source vars`) are not seen; the `commit-msg` hook covers them when installed. `echo "a > b"` before a `-a`
+    commit is read as a redirect (the reader keeps no quote information), so the commit is "not scanned".
+    `git add … && git commit` is "not scanned" because the check runs before the add: run the add first. The M6d
+    run-line flag names are matched by their full spelling. The detectors do not find base64, `%xx` or `\uXXXX`
+    encoded values, `82-10-…` without a leading `+`, or `Authorization: Basic` headers; `ssh://git@host/…` reads as
+    an email (only the scp form `git@host:path` is exempt); a real number glued to 32 or more hex characters is not
+    found. The push scan names a blob by its first `rev-list` path; the commit scan checks the other names.
+  - Setup and run: an interrupted run (SIGINT or SIGTERM) kills only the runner; its `state.json` stays `running`
+    and the data volume keeps its values, so the scratch volumes are cleared up to 24 h later. The compose check
+    does not look at `uts`/`cgroup` host, `sysctls`, `build.network` or `build.privileged`, and `maskProblems`
+    handles only a bind of exactly the repo top (both need a hand-edited compose file). A `db.*` or `database.*`
+    config prefix alone names no store kind and is not inferred (the question says so); a health route in
+    `node:http` or a router of the project's own is not found (the question says goodboy did not find one).
+    Commands the model runs on the host (the project's `npm test`, probes of host ports such as `pg_isready`) are
+    outside goodboy's protection.
+  - Coverage and UI: a 3xx answer counts as the screen reached; an api item counts as reached with any status; one
+    form POST meets both `:ok` and `:error`; a stored real-data verdict is not re-judged against the current
+    inventory. `coverage-check` (`isTestCode`) and the inventory (`notOwnReason`) define test code differently
+    (`cypress/support`, `testdata`, `__mocks__`), so such files show as `missing_from_report`
+    until exempted (fails closed). The spec id is an unsalted 48-bit SHA-256 of file and title, and
+    `coverage-check` echoes up to 40 characters of an attribute value from any file it is pointed at.
+  - Hooks: a removal operand `~+` is skipped (as on main); `cd "$D" && rm -rf *` with an unreadable `$D` is denied
+    for the tests role (the cwd stays the base). For the docs role a pattern or a `..` path is resolved through
+    links before it is judged, but `rm docs/lnk/a.ts` without a pattern is judged by its name; a link created at
+    `.goodboy/sandbox/data.json` is not the tester's data file. The risk gate matches its keywords as substrings of the prompt, so `--force` in a
+    sentence about a past action trips it (older than track M). The result guard denies a read-only
+    `python3 -c "json.load(open('…/result.json'))"`; `cat` and `jq` pass.
 
 ## 20. N — Fewer repeated runs, a project test inventory, task criteria (proposed, 2026-10-26)
 

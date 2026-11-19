@@ -944,7 +944,11 @@ function feeds(h: HeredocSegment, reads: (words: string[], text: string) => bool
 /** A `git commit` segment whose message comes from its stdin: `-F -`, `--file=-`, `/dev/stdin`, descriptor 0, or a bare
  *  `$(cat)` word. */
 const STDIN_MESSAGE = /(?:^|\s)(?:-[a-zA-Z]*F|--file)(?:\s*=?\s*)['"]?(?:-|\/dev\/stdin|\/dev\/fd\/0|\/proc\/self\/fd\/0)['"]?(?=\s|$)|\$\([ \t]*cat[ \t]*\)|`[ \t]*cat[ \t]*`/;
-const commitReadingStdin = (words: string[], text: string): boolean => (words[0] ?? '').split('/').pop() === 'git' && words[gitSubcommandAt(words, 1)] === 'commit' && STDIN_MESSAGE.test(text);
+const commitReadingStdin = (segment: string[], text: string): boolean => {
+  // past the `rtk` proxy: `rtk git commit -F - <<EOF` is a `git commit`
+  const words = pastRtk(segment);
+  return (words[0] ?? '').split('/').pop() === 'git' && words[gitSubcommandAt(words, 1)] === 'commit' && STDIN_MESSAGE.test(text);
+};
 
 /** The heredocs a commit's message can come from: `cats`, the bodies of `$(cat <<TAG … TAG)` (a message word holds only that
  *  `cat`, so the word carries its own heredoc), and `feeders`, in order, the bodies that are exactly the stdin of a `git

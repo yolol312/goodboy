@@ -3,7 +3,7 @@
 // here calls the network except `sandbox-prepare` (image pulls and the preparation step, the
 // only places the compose file gives network access to).
 
-import { existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmdirSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { type Bounded, onInterrupt, runBounded } from './bounded';
 import { type Boundary, boundary, type Diag, type DiagCode, OPEN, realDataOf } from './sandbox-boundary';
@@ -15,6 +15,7 @@ import { COVERAGE_REPORT, E2E_DIR } from './sandbox-e2e';
 import { planSandbox, type SandboxPlan } from './sandbox-render';
 import { dbName, INHIBIT_IPV4, RESTORE_TAG } from './sandbox-parts';
 import { type DataCtx, isRefusal, sandboxData } from './sandbox-data';
+import { lockSandbox } from './sandbox-lock';
 import { privacyGate } from './sandbox-privacy-gate';
 import { hasDataVolume, isEmpty, manifestCounts, type Memo, newToken, NO_DATA_VOLUME, readManifest, refusedStop, type ResolveStop, resolveValues } from './sandbox-resolve';
 import { scanSandbox } from './sandbox-scan';
@@ -30,6 +31,8 @@ const SHORT_MS = 60_000;
 const DEFAULT_RUN_MS = 3_600_000;
 const MAX_RUN_MS = 7_200_000;
 const TAIL_CHARS = 2000;
+/** What a suite or preparation step keeps of its output: the end of it, within these caps. */
+const BIG = { keep: 'tail' as const, max: { stdout: 256 * 1024, stderr: 64 * 1024 } };
 
 export const dockerBin = (): string => process.env.GOODBOY_DOCKER_BIN?.trim() || 'docker';
 
@@ -271,10 +274,14 @@ function register(ctx: Ctx): void {
 
 /** The expiry sweep of every command but scan and init: raw files the host kept from before are removed
  *  where the host keeps none now, and the runs volume is swept when it exists and the setup is safe. A
- *  command with no runs volume (a down of a project that never ran) starts no container for it. */
+ *  command with no runs volume (a down of a project that never ran) starts no container for it. When the runs
+ *  volume is there but the setup is not safe to start a container in, the volume is not swept and the diagnostic
+ *  says so (`reason: volume-sweep-skipped`): old raw files stay until a command can sweep. */
 async function sweepIfSafe(ctx: Ctx, pre: { volumes: string[] | null | undefined }): Promise<Diag | null> {
   const here = pre.volumes?.includes(`${ctx.project}_runout`) === true;
-  return sweepRaw(ctx, here && (await guard(ctx)) === null);
+  const safe = here && (await guard(ctx)) === null;
+  const swept = await sweepRaw(ctx, safe);
+  return swept === null && here && !safe ? { code: 'sweep-failed', step: 'sweep', reason: 'volume-sweep-skipped' } : swept;
 }
 
 /** The problems of the compose file as docker resolves it (`config --format json`): the static
@@ -544,12 +551,11 @@ async function prepare(ctx: Ctx, args: string[]): Promise<Result> {
   if (unsafe !== null) return { error: `sandbox-prepare: ${unsafe}` };
   const pull = await comp(ctx, ['--profile', '*', 'pull'], 30 * 60_000, { keep: 'tail' });
   if (pull.code !== 0) return { out: { step: 'pull', exit: pull.code, tail: OPEN.tail(pull, TAIL_CHARS) }, code: 1 };
-  const big = { keep: 'tail' as const, max: { stdout: 256 * 1024, stderr: 64 * 1024 } };
-  const prep = await comp(ctx, ['--profile', 'prep', 'run', '--rm', '-T', 'prep'], msOpt(args, DEFAULT_RUN_MS), big);
+  const prep = await comp(ctx, ['--profile', 'prep', 'run', '--rm', '-T', 'prep'], msOpt(args, DEFAULT_RUN_MS), BIG);
   const out: Record<string, unknown> = { step: 'prep', exit: prep.code, timedOut: prep.timedOut, durationMs: prep.ms, tail: OPEN.tail(prep, TAIL_CHARS) };
   if (prep.code !== 0 || !ctx.plan.hasE2e) return { out, code: prep.code === 0 ? 0 : 1 };
   // the e2e packages go into their own volume, so a failure here leaves the build usable
-  const e2e = await comp(ctx, ['--profile', 'prep', 'run', '--rm', '-T', 'e2e-prep'], msOpt(args, DEFAULT_RUN_MS), big);
+  const e2e = await comp(ctx, ['--profile', 'prep', 'run', '--rm', '-T', 'e2e-prep'], msOpt(args, DEFAULT_RUN_MS), BIG);
   out.e2e = { step: 'e2e-prep', exit: e2e.code, timedOut: e2e.timedOut, durationMs: e2e.ms, tail: OPEN.tail(e2e, TAIL_CHARS) };
   return { out, code: e2e.code === 0 ? 0 : 1 };
 }
@@ -678,8 +684,6 @@ function rmContainer(name: string): void {
 
 const stamp = (d = new Date()): string => d.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
 
-const BIG = { keep: 'tail' as const, max: { stdout: 256 * 1024, stderr: 64 * 1024 } };
-
 // ---- the suites ----
 
 /** What a suite step leaves in the result. */
@@ -688,9 +692,15 @@ interface StepResult {
   durationMs: number;
   timedOut: boolean;
   tail: string;
+  /** Real-data mode, a step that did not pass: the fixed code that stands where its tail would be (`timed-out`, else `step-failed`). */
+  diagnostic?: Diag;
 }
 
-const stepOf = (ctx: Ctx, b: Bounded): StepResult => ({ exit: b.code ?? 1, durationMs: b.ms, timedOut: b.timedOut, tail: ctx.out.tail(b, TAIL_CHARS) });
+const stepOf = (ctx: Ctx, b: Bounded, step: 'unit' | 'e2e'): StepResult => {
+  const failed = b.code !== 0 || b.timedOut;
+  const diagnostic = failed ? ctx.out.fail(b, 'step-failed', step).diagnostic : undefined;
+  return { exit: b.code ?? 1, durationMs: b.ms, timedOut: b.timedOut, tail: ctx.out.tail(b, TAIL_CHARS), ...(diagnostic ? { diagnostic } : {}) };
+};
 
 /** The e2e dir of the project exists and has something in it. */
 function hasE2eTests(ctx: Ctx): boolean {
@@ -721,7 +731,7 @@ async function runUnit(ctx: Ctx, outDir: string, ts: string, custom: string[], t
   const after = await unitAfter(ctx, ts, log, ctx.scan.stack === 'jvm');
   if (!after.wrote) problems.push('output.log could not be written to the run volume');
   if (ctx.out.hostCopies) writeAtomic(join(outDir, OUTPUT_LOG_FILE), log);
-  const step = stepOf(ctx, r);
+  const step = stepOf(ctx, r, 'unit');
   return { step, summary: { exit: step.exit, durationMs: step.durationMs, timedOut: step.timedOut, ...after.counts } };
 }
 
@@ -820,7 +830,7 @@ async function runE2e(ctx: Ctx, outDir: string, ts: string, custom: string[], ti
     kept = after?.left === true ? 'kept' : 'removed';
     if (kept === 'kept') problems.push('the e2e traces and screenshots could not be removed');
   }
-  return { step: { ...stepOf(ctx, r), artifacts: kept, accessLog, playwrightReport, problems }, summary };
+  return { step: { ...stepOf(ctx, r, 'e2e'), artifacts: kept, accessLog, playwrightReport, problems }, summary };
 }
 
 interface CoverageResult {
@@ -972,15 +982,19 @@ async function run(ctx: Ctx, args: string[], projectDir?: string): Promise<Resul
     ctx.scan.build.testCommand.length > 0 ? await runCoverage(ctx, outDir, ts, e2e !== null) : { ok: false, exit: null, reports: [], note: 'the scan has no test command, so there is no runner service to make the coverage report' };
   if ((ctx.roleFailed ?? []).length > 0) problems.push(ROLE_NOTE);
   const first = unit ?? e2e!;
-  const exit = unit !== null && unit.exit !== 0 ? unit.exit : e2e !== null && e2e.exit !== 0 ? e2e.exit : first.exit;
+  // The deciding step: the first one that failed (its exit, its tail, its diagnostic), else the first one that ran.
+  const decisive = unit !== null && unit.exit !== 0 ? unit : e2e !== null && e2e.exit !== 0 ? e2e : first;
+  const exit = decisive.exit;
   const timedOut = unit?.timedOut === true || e2e?.timedOut === true;
   const result = {
     ...head,
     check,
     exit,
-    durationMs: first.durationMs,
+    // both steps' time with `--suite all`; each step's own is in `unit` and `e2e`
+    durationMs: (unit?.durationMs ?? 0) + (e2e?.durationMs ?? 0),
     timedOut,
-    tail: first.tail,
+    tail: decisive.tail,
+    ...(decisive.diagnostic ? { diagnostic: decisive.diagnostic } : {}),
     ...(manifest !== null ? { data: manifestCounts(manifest) } : {}),
     ...(unit !== null && e2e !== null ? { unit } : {}),
     ...(e2e !== null ? { e2e } : {}),
@@ -1048,6 +1062,10 @@ function withSweep(r: Result, sweep: Diag | null, ctx: Ctx): Result {
   return { ...r, out: { ...r.out, ...(sweep !== null ? { sweep } : {}), ...(ctx.registryProblem !== undefined ? { registry: ctx.registryProblem } : {}) } };
 }
 
+/** The commands that hold the project's lock (lib/sandbox-lock.ts): they clear scratch volumes, reset the database or
+ *  start and stop services. `sandbox-check` and `sandbox-data` only read. */
+const EXCLUSIVE = new Set(['sandbox-prepare', 'sandbox-up', 'sandbox-run', 'sandbox-down']);
+
 /** The `sandbox-init|local|check|prepare|up|run|down` commands. `error` is a message for the
  *  user; `code` is the exit code (for `sandbox-run`, the suite's). Every command but `sandbox-scan`
  *  and `sandbox-init` starts with `preflight` (is the daemon local, does the project hold real data) and
@@ -1100,6 +1118,33 @@ export async function sandboxCommand(command: string, root: string, args: string
   }
   const ctx = loadCtx(root, true);
   if (ctx instanceof Error) return { error: `${command}: ${ctx.message}` };
+  // One command at a time per project for the ones that reset, clear or start and stop what the others use; taken
+  // before the first await, so two commands started together cannot both pass.
+  let lock: { release: () => void } | null = null;
+  if (EXCLUSIVE.has(command)) {
+    const outDir = join(ctx.dir, 'out');
+    // a command that leaves nothing behind (a refused run) leaves no `out/` either: the dir the lock made goes with it
+    const madeOut = !existsSync(outDir);
+    const rmOut = (): void => {
+      try {
+        if (madeOut) rmdirSync(outDir);
+      } catch {
+        // not empty: a run wrote there
+      }
+    };
+    try {
+      ensureRealDir(root, `${SANDBOX_DIR}/out`);
+      const l = lockSandbox(outDir, command);
+      if ('busy' in l) {
+        rmOut();
+        return { error: `${command}: ${l.busy}` };
+      }
+      lock = { release: () => (l.release(), rmOut()) };
+    } catch (err) {
+      rmOut();
+      return { error: ctx.out.err(command, err) };
+    }
+  }
   try {
     const sweep = await sweepIfSafe(ctx, await preflight(ctx));
     switch (command) {
@@ -1123,5 +1168,7 @@ export async function sandboxCommand(command: string, root: string, args: string
   } catch (err) {
     // e.g. a planted directory where a result file goes: stop with the reason, not a stack; in real-data mode the error class only
     return { error: ctx.out.err(command, err) };
+  } finally {
+    lock?.release();
   }
 }

@@ -273,6 +273,7 @@ describe('coverage across the unit and the e2e run', () => {
     expect(c.services.runner!.environment).toMatchObject({ COVERAGE_PROCESS_START: '/sandbox/coveragerc', COVERAGE_FILE: '/out/coverage-raw/unit/py/.coverage' });
     expect(c.services.app!.volumes).toContain('./runtime/coveragerc:/sandbox/coveragerc:ro');
     expect(p.files.get('runtime/coveragerc')).toContain('parallel = True');
+    expect(p.files.get('runtime/coveragerc')).toContain('branch = True');
     expect(p.files.get('runtime/coveragerc')).toContain('relative_files = True');
     const sh = p.files.get('runtime/coverage.sh')!;
     expect(sh).toContain('coverage combine --keep');
@@ -358,11 +359,18 @@ describe.skipIf(process.env.GOODBOY_DOCKER_IT !== '1')('real docker: the logging
       const problems: string[] = [];
       const reqs = parseAccessLog(log, 'access.log', problems);
       expect(problems).toEqual([]);
-      const home = reqs.find((r) => r.path === '/' && r.claims.has('screen:GET:/:ok'));
-      expect(home).toMatchObject({ method: 'GET', status: 200 });
-      const orders = reqs.find((r) => r.path === '/orders' && r.claims.size === 2);
-      expect([...orders!.claims].sort()).toEqual(['link:GET:/orders/new:ok', 'screen:GET:/orders:ok']);
-      expect(reqs.some((r) => r.path === '/orders' && r.claims.size === 0)).toBe(true);
+      // the claims header is logged for a person to read; ui-check does not parse it, so read the raw lines
+      const claimsOf = (path: string): (string | undefined)[] =>
+        log
+          .split('\n')
+          .filter((l) => l.trim() !== '')
+          .map((l) => JSON.parse(l) as { request: { uri: string; headers?: Record<string, string[]> } })
+          .filter((e) => e.request.uri.split('?')[0]!.replace(/\/$/, '') === path)
+          .map((e) => e.request.headers?.['X-Goodboy-Ui']?.[0]);
+      expect(reqs.some((r) => r.path === '/' && r.status === 200 && r.method === 'GET')).toBe(true);
+      expect(claimsOf('')).toContain('screen:GET:/:ok');
+      expect(claimsOf('/orders')).toContain('screen:GET:/orders:ok,link:GET:/orders/new:ok');
+      expect(claimsOf('/orders')).toContain(undefined);
       // the same log through the container, as `sandbox-run` truncates it
       expect(docker(['exec', names[1]!, 'sh', '-c', ': > /live/access.log']).exitCode).toBe(0);
       expect(readFileSync(join(live, 'access.log'), 'utf8')).toBe('');

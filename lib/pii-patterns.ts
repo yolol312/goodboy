@@ -5,7 +5,8 @@
 //
 // Rules (each one scans the text once, or once per anchor, with bounded repeats: a record can hold a
 // megabyte of suite output, and the cost tests of tests/m6d-detectors.test.ts pin it):
-//   - A digit shape is bounded by non-digits on both sides (a longer digit run is no match).
+//   - A digit shape is bounded by non-digits on both sides (a longer digit run is no match). One inside a hash (a run of
+//     32 or more hex characters, or a uuid with dashes) is no match: sha1, sha256 and uuids read as numbers otherwise.
 //   - resident-number: YYMMDD, a gap (nothing, one space or dot, or a hyphen, also padded with spaces), a gender
 //     digit 1-8, six digits, a real month and day (Feb 29 allowed). The old check digit is not required:
 //     numbers issued since 2020-10 have none.
@@ -28,7 +29,10 @@
 //     `apiKey: number | null`, `token: Map<string, string>`: generics, `[]`, `?`, unions, then the end of a
 //     declaration; a default value (`= "…"`), a dotted path (`password: Tr0ub4dor.string`) or a quoted value keeps
 //     the hit). Any other value, a regex-looking one included (`password = "Hunter[2]xx?"`), `PGPASSWORD=sandbox`
-//     included, still is a secret.
+//     included, still is a secret. Nor is a keyword match whose whole value is a reference to the environment
+//     (`password: process.env.X`, `token="${TOKEN}"`, `os.environ["X"]`, `os.getenv("X")`, `System.getenv("X")`); a
+//     default after it (`${X:-hunter2}`, `|| "hunter2"`) keeps the hit. The keyword may end a longer name:
+//     `SECRET_KEY=`, `jwt.secret-key:`, `privateKey:`.
 // Stated limits: about 3% of the 13-digit epoch-millisecond numbers of 2001-2024 (measured by sampling)
 // read as an unhyphenated resident number, and a bare 10-digit number can pass the business-number
 // check; both are redacted (the safe side). Digits are read after folding full-width and Arabic-Indic
@@ -70,6 +74,34 @@ function fold(text: string): string {
     if (n === 0x3000 || n === 0x00a0 || (n >= 0x2000 && n <= 0x200a) || n === 0x202f || n === 0x205f) return ' ';
     return '-';
   });
+}
+
+// A hash, not a number: a digit shape inside a run of HASH_HEX or more hex characters (sha1, sha256, a uuid without dashes) or
+// inside a uuid with dashes. A hash is bounded by hex letters as often as by non-digits, so its digit runs read as numbers (a
+// 400-entry yarn.lock: several hits before M7). Judged per digit-shape span, from a window of at most HASH_WINDOW characters
+// around it.
+const HASH_HEX = 32;
+const HASH_WINDOW = 40;
+const UUID_RE = /(?<![0-9a-fA-F])[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?![0-9a-fA-F])/g;
+const isHex = (code: number): boolean => (code >= 48 && code <= 57) || (code >= 97 && code <= 102) || (code >= 65 && code <= 70);
+
+function insideHash(v: string, s: Span): boolean {
+  let allHex = true;
+  for (let i = s.start; i < s.end && allHex; i++) allHex = isHex(v.charCodeAt(i));
+  if (allHex) {
+    let l = s.start;
+    while (l > 0 && s.start - l < HASH_WINDOW && isHex(v.charCodeAt(l - 1))) l--;
+    let r = s.end;
+    while (r < v.length && r - s.end < HASH_WINDOW && isHex(v.charCodeAt(r))) r++;
+    if (r - l >= HASH_HEX) return true;
+  }
+  const from = Math.max(0, s.start - 37);
+  const win = v.slice(from, Math.min(v.length, s.end + 37));
+  UUID_RE.lastIndex = 0;
+  for (let m = UUID_RE.exec(win); m !== null; m = UUID_RE.exec(win)) {
+    if (from + m.index <= s.start && s.end <= from + m.index + m[0].length) return true;
+  }
+  return false;
 }
 
 const dayOk = (mm: number, dd: number): boolean => {
@@ -276,10 +308,35 @@ function unionEnd(s: string, j: number, depth: number): number {
 function isTypeValue(s: string): boolean {
   const e = typeExprEnd(s, 0, 0);
   if (e < 0) return false;
+  return endsDeclaration(s, e);
+}
+
+/** Whether only the end of a declaration follows `s[e]` (after blanks): the end of the line or window, `;` `,` `}` `)` `]` `>`,
+ *  or a comment (a `#` only after a blank). A default (`= "…"`, `|| "…"`, `?? "…"`) or another word is not that end. */
+function endsDeclaration(s: string, e: number): boolean {
   let k = e;
   while (isSpace(s[k])) k++;
   const c = s[k];
   return c === undefined || c === '\n' || c === '\r' || c === ';' || c === ',' || c === '}' || c === ')' || c === ']' || c === '>' || (c === '/' && (s[k + 1] === '/' || s[k + 1] === '*')) || (c === '#' && k > e);
+}
+
+// A reference to a secret kept elsewhere (the environment), not the secret: the WHOLE value is one of these, spelled with a
+// plain name, and nothing but the end of a declaration follows it (a default after it, `${X:-hunter2}` or `|| "hunter2"`, keeps
+// the hit). Only a `${NAME}` may sit inside quotes (a template or a config expands it); a quoted `process.env.X` is a string.
+const REF_NAME = '[A-Za-z_]\\w*';
+const REF_ARG = `\\(\\s*["']${REF_NAME}["']\\s*\\)`;
+const ENV_REF = new RegExp(
+  `^(?:process\\.env\\.${REF_NAME}|process\\.env\\[\\s*["']${REF_NAME}["']\\s*\\]|os\\.environ\\[\\s*["']${REF_NAME}["']\\s*\\]|os\\.(?:getenv|environ\\.get)${REF_ARG}|System\\.getenv${REF_ARG})`,
+);
+// A plain name, or a dotted config name whose parts after the first dot may hold `-` (`${app.jwt-secret}`). A `-` in the
+// first part is a shell default (`${X-hunter2}`, `${DB_PASS-hunter2.prod}`), so it keeps the hit.
+const TEMPLATE_REF = /^\$\{[A-Za-z_]\w*(?:\.[\w-]+)*\}/;
+
+/** Whether the value after a keyword's separator is such a reference (`quote`: the quote character that opened it, or ''). */
+function isPlaceholder(value: string, quote: string): boolean {
+  const m = (quote === '' ? ENV_REF.exec(value) : null) ?? TEMPLATE_REF.exec(value);
+  if (m === null) return false;
+  return quote === '' ? endsDeclaration(value, m[0].length) : value[m[0].length] === quote;
 }
 
 /** Whether the keyword match at `at` (`token: string`) is a type annotation, not a secret: the separator is a `:` (never `=`,
@@ -289,8 +346,12 @@ function isTypeValue(s: string): boolean {
 function keywordIsNoSecret(text: string, at: number): boolean {
   const s = text.slice(at, at + WINDOW);
   const head = KEYWORD_HEAD.exec(s);
-  if (head === null || head[1] !== ':' || head[2] !== '') return false;
-  return isTypeValue(s.slice(head[0].length));
+  if (head === null) return false;
+  const value = s.slice(head[0].length);
+  // a reference to the environment is no secret after `:` or `=`
+  if (isPlaceholder(value, head[2]!)) return true;
+  if (head[1] !== ':' || head[2] !== '') return false;
+  return isTypeValue(value);
 }
 
 /** A PEM private key reaches its END line (the secret pattern matches only the BEGIN line); without one,
@@ -335,6 +396,10 @@ export function findSensitive(text: string): Span[] {
     }
     cardSpans(v, raw);
     for (const m of v.matchAll(PHONE_RE)) raw.push({ kind: 'phone', start: m.index!, end: m.index! + m[0].length });
+    // the digit shapes so far: those inside a hash are no numbers
+    let kept = 0;
+    for (const s of raw) if (!insideHash(v, s)) raw[kept++] = s;
+    raw.length = kept;
   }
   if (v.includes('@')) emailSpans(v, raw);
   secretSpans(v, raw);
