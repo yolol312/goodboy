@@ -52,7 +52,8 @@ so work is released in batches:
 | v0.36.3 | testkit harness files need no layer-1 test (#28, §15.19). Released 2026-10-26 |
 | v0.36.4 | repository metadata and version-only manifests need no test record (#30), `..` after a link is recorded as opened (#29), §15.20. Released 2026-10-26 |
 | v0.36.5–v0.36.19 | gate fixes from field reports and reviews, one release each (§15.21–§15.35; #12, #25, #27 in part, #31–#42). Released 2026-10-26 to 2026-11-12. The 2026-10-26 proposal to ship N1–N8 (§20.3) as v0.36.5 did not happen: v0.36.5 shipped §15.21 instead |
-| v0.37.0 | track M (full tests in an isolated container sandbox: a real database copy, dummy external services, no egress; 100% line and branch coverage, every screen and action in e2e), §19 |
+| v0.37.0 | track M (full tests in an isolated container sandbox: a real database copy, dummy external services, no egress; 100% line and branch coverage, every screen and action in e2e; M6 real-data protection; M7 release review), §19. Released 2026-11-19 |
+| v0.37.1 | planned: #44 items 3, 4, 5 (+1), first planned as the v0.36.20 hotfix (user 2026-11-19: after v0.37.0, from main) |
 | v0.38.0 | proposed: track N (fewer repeated runs, a project test inventory, task criteria, §20.4–§20.6), with a push judged by the test results gathered since the last push (§21, N24–N30, #43, #45); its order against v0.37.0 is the user's decision |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
 
