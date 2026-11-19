@@ -38,10 +38,12 @@ describe('G2-1: one sandbox command at a time per project', () => {
   test('a command that changes state fails at once and names the holder while a live one holds the lock; no docker call is made', async () => {
     for (const command of ['sandbox-run', 'sandbox-up', 'sandbox-down', 'sandbox-prepare']) {
       const f = fakeProject(PLAIN);
-      holdLock(f, process.pid, '2026-11-19T01:02:03.000Z', 'sandbox-run');
+      // a start time well inside the 6 h takeover age, relative to now (a fixed date turns stale as the day goes on)
+      const started = new Date(Date.now() - 60_000).toISOString();
+      holdLock(f, process.pid, started, 'sandbox-run');
       const r = await f.inproc(command, command === 'sandbox-run' ? ['--suite', 'unit'] : []);
       expect([command, r.code]).toEqual([command, 1]);
-      expect(r.error).toContain(`${command}: another sandbox command of this project is running: sandbox-run (pid ${process.pid}, started 2026-11-19T01:02:03.000Z)`);
+      expect(r.error).toContain(`${command}: another sandbox command of this project is running: sandbox-run (pid ${process.pid}, started ${started})`);
       // the message names the lock file, so a user can remove a lock held by a reused pid
       expect(r.error).toContain(`remove ${lockPath(f)}`);
       expect([command, f.calls()]).toEqual([command, []]);
