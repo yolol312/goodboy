@@ -53,7 +53,7 @@ so work is released in batches:
 | v0.36.4 | repository metadata and version-only manifests need no test record (#30), `..` after a link is recorded as opened (#29), §15.20. Released 2026-10-26 |
 | v0.36.5–v0.36.19 | gate fixes from field reports and reviews, one release each (§15.21–§15.35; #12, #25, #27, #31–#42). Released 2026-10-26 to 2026-11-12. The 2026-10-26 proposal to ship N1–N8 (§20.3) as v0.36.5 did not happen: v0.36.5 shipped §15.21 instead |
 | v0.37.0 | track M (full tests in an isolated container sandbox: a real database copy, dummy external services, no egress; 100% line and branch coverage, every screen and action in e2e), §19 |
-| v0.38.0 | proposed: track N (fewer repeated runs, a project test inventory, task criteria, §20.4–§20.6), with a push judged by the test results gathered since the last push (§21, N24–N29, #43); its order against v0.37.0 is the user's decision |
+| v0.38.0 | proposed: track N (fewer repeated runs, a project test inventory, task criteria, §20.4–§20.6), with a push judged by the test results gathered since the last push (§21, N24–N30, #43, #45); its order against v0.37.0 is the user's decision |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
 
 ## 4. A — Fix silent failures and deadlocks
@@ -6155,7 +6155,8 @@ fix blocks seen in real use; where track N proper goes against M (v0.37.0) is op
 
 Status: proposed, planned at the user's request on 2026-11-12. §19 (track M) and §20 (track N)
 came from `feat/m-sandbox`, rebased onto this plan on 2026-11-13; this section continues track N's numbering
-(N24–N29). It changes the push check, so it waits for its place in the order like the rest of N.
+(N24–N30; N30 added on 2026-11-19 for #45). It changes the push check, so it waits for its place
+in the order like the rest of N.
 It also changes N9's push rule: the user's 2026-10-26 point "before a push the whole project suite
 runs" becomes "before a push every change is covered by the results gathered since the last push;
 the whole suite runs only when a global file changed" (N26). Two other N9 push rules stay where a
@@ -6257,6 +6258,22 @@ The user's answers (2026-11-12), each the recommended option:
   2. run the gaps: the push passes, the records are gone and a summary is written;
   3. a second cycle starts empty;
   4. an edit of a global file asks for the full regression.
+- **N30, failures the base already has (#45; user 2026-11-19).** Today a full regression passes
+  only when every run exits 0 (`regressionPassed`, lib/regression.ts), so a project whose base
+  branch already has failing tests can never push, and N26 keeps that block for every range that
+  changes a global file. N30 counts only new failures:
+  - each regression record stores the ids of the tests that failed, read from the runner's
+    report; a run whose failing ids cannot be read fails as today;
+  - for a failing run, goodboy runs the same commands on the merge-base of the pushed commit and
+    the destination branch in a clean linked worktree (`regression --worktree`, #41), once per
+    base commit, and keeps that record as the base's;
+  - the push passes when the pushed tree's failing ids are all among the base's; the push
+    summary (N27) and a notice name the pre-existing failures;
+  - otherwise the denial lists only the new failures (N28).
+
+  Until N30 ships, a project in this state sets `GOODBOY_PUSH_REGRESSION=warn`
+  (lib/regression.ts `regressionMode`). N29 applies: a
+  test that fails without N30, and a live probe whose base has one failing test.
 
 ### 21.4 What it gives up (known limits)
 - **Weaker trust than N9.** Outside a full run, the push is judged by the test role's
@@ -6273,6 +6290,9 @@ The user's answers (2026-11-12), each the recommended option:
 - **A failed push with exit 0.** A push command whose failure still exits 0 (`git push || true`)
   deletes records that were still needed. The summary claims only that the content was covered,
   and that stays true.
+- **Pre-existing failures (N30).** A test that fails on the base for one reason and on the
+  pushed tree for another counts as pre-existing: ids are compared, not failure messages. The
+  base run costs one more full run per new base commit.
 
 ## Appendix — mutation set (2026-10-12 review)
 
