@@ -95,8 +95,10 @@ export function followedPath(absPath: string, maxHops: number = MAX_LINK_HOPS): 
   return cur;
 }
 
-/** True for a path inside any goodboy session state dir (`$TMPDIR/goodboy-session-*`), also
- *  through the real path of $TMPDIR (`/var` is `/private/var` on macOS). */
+/** True for a path inside any goodboy session state dir (`$TMPDIR/goodboy-session-*`) or
+ *  project state dir (`$TMPDIR/goodboy-project-*`, which holds the validation pass record,
+ *  lib/validation-state.ts), also through the real path of $TMPDIR (`/var` is `/private/var`
+ *  on macOS). The hooks write both; a model's file-tool write there would forge a pass (#44). */
 export function inGoodboySessionDir(absPath: string): boolean {
   const roots = new Set([tmpdir()]);
   try {
@@ -131,7 +133,7 @@ export function inGoodboySessionDir(absPath: string): boolean {
   for (const root of roots) {
     for (const p of [absPath, linked, target, ...(followed === null ? [] : [followed])]) {
       const rel = relative(root, p);
-      if (!rel.startsWith('..') && !isAbsolute(rel) && /^goodboy-session-[^/\\]*(?:[/\\]|$)/.test(rel)) return true;
+      if (!rel.startsWith('..') && !isAbsolute(rel) && /^goodboy-(?:session|project)-[^/\\]*(?:[/\\]|$)/.test(rel)) return true;
     }
   }
   return false;

@@ -27,6 +27,10 @@ import {
   sessionCoverageStart,
 } from '../lib/changed-coverage';
 import { beginGitSnapshot } from '../lib/git-run';
+import { treeRecordWindow } from '../lib/unpushed-work';
+import { refreshCatalog, takeJudgedRows, TEST_CATALOG_FILE } from '../lib/test-catalog';
+import { deferralOpen, runningAgents, type RunningAgents, tasksSummary } from '../lib/agent-deferral';
+import { resnapshotAgentCalls } from '../lib/write-sweep';
 import { FLUSH_PAST_CLOCK_MS, HOOK_CLOCK_MS, hookLeft, startHookClock } from '../lib/hook-clock';
 import { projectDir, projectRoot } from '../lib/project-dir';
 import { START_PIN_BUDGET_MS, startPinDeadline } from '../lib/start-pins';
@@ -208,6 +212,18 @@ let userPassUsed = false;
 /** The shell's current dir of this Stop (the hook's `cwd`), where the user's `! touch` runs; the
  *  gates' `cwd` is the project dir (I10). Set in main. */
 let stopShellCwd: string | undefined;
+
+/** (#44) This Stop's `background_tasks` as the payload gave them, and the running agents among them (lib/agent-deferral.ts). Set in main. */
+let stopTasks: unknown;
+let stopAgents: RunningAgents = { types: [], test: [], review: [] };
+
+/** Whether a gate may wait for running agents now (lib/agent-deferral.ts: 45 minutes from the session's first deferral,
+ *  closed when the clock cannot be read). The Stop writes the clock after `finishOpenBashCalls` re-snapshotted the open
+ *  agent calls, so when the clock is new those calls are snapshotted again with it in: otherwise a call's post hook would
+ *  remove it as a hook-only file the call created, and the 45 minutes would start over. */
+function deferring(sessionId: string): boolean {
+  return deferralOpen(sessionId, Date.now(), () => resnapshotAgentCalls(sessionId));
+}
 
 /** The user's override for a blocking gate: uses `.claude/.goodboy-stop-approved-<tag>.txt`
  *  once. The caller passes the gate as its old escape did (cursor moves, counter resets). */
@@ -1302,7 +1318,7 @@ function tryAcceptPendingTest(sessionId: string, cwd: string): boolean {
     if (recentEdits.length === 0 && sandboxEditsSince(sessionId, cwd, cursorTurn).length === 0) return false;
     const acceptance = acceptanceFor(cwd);
     if (!testGateActive(cwd, acceptance, sessionId).active) return false;
-    const results = findRecentTestFiles(resolvePath(cwd, '.claude', 'tests'), testWindowMinutes());
+    const results = findRecentTestFiles(resolvePath(cwd, '.claude', 'tests'), testWindowMinutes(), false, treeRecordWindow(cwd));
     if (results.length === 0) return false;
     if (sandboxRule(sessionId, cwd, cursorTurn, results) !== null) return false;
     if (recentEdits.length === 0) {
@@ -1383,7 +1399,8 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
     statusSnapshot.testPending = true;
 
     const testsDir = resolvePath(cwd, '.claude', 'tests');
-    const results = findRecentTestFiles(testsDir, testWindowMinutes());
+    // (#44) While a commit is unpushed, a record with a tree is read up to 30 days (a rebase keeps its content).
+    const results = findRecentTestFiles(testsDir, testWindowMinutes(), false, treeRecordWindow(cwd));
     // (#32 #34 #37) The edits since the last full Stop that judged layer 1 (a stop_hook_active Stop
     //   moves the turn counter too, so "the turn before" would miss edits made after a block). A turn
     //   that changed no code adds nothing to verify; the earlier, unverified edits stay pending (the
@@ -1393,6 +1410,7 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
     const habit = readHabitState(sessionId);
     const marks = { ...(habit.testGateTurns ?? {}) };
     const changedThisTurn = testEditsSince(sessionId, cwd, marks[cwd] ?? 0).length > 0 || sandboxEditsSince(sessionId, cwd, marks[cwd] ?? 0).length > 0;
+    const previousMark = marks[cwd]; // (#44) put back when a running test agent defers this Stop's block
     marks[cwd] = getCurrentTurn(sessionId);
     habit.testGateTurns = marks;
     writeHabitState(sessionId, habit);
@@ -1414,11 +1432,31 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
         );
         return null;
       }
+      // (#44) A running `goodboy:test-*` agent is the test result this gate asks for: the block waits (a warning, the
+      //   Stop ends), for 45 minutes from the session's first deferral. Not for the start gate, which no record can
+      //   end, and never as evidence: the record must still exist and match on a later Stop. The turn mark is put back,
+      //   so the next Stop still sees this turn's code as changed.
+      if (!start && stopAgents.test.length > 0 && deferring(sessionId)) {
+        const h = readHabitState(sessionId);
+        const m = { ...(h.testGateTurns ?? {}) };
+        if (previousMark === undefined) delete m[cwd];
+        else m[cwd] = previousMark;
+        h.testGateTurns = m;
+        writeHabitState(sessionId, h);
+        logGate(sessionId, 'test', 'warn', `deferred-for-agents(${stopAgents.test.join(', ')})`);
+        habitWarnings.push(
+          `[goodboy] 테스트 에이전트(${stopAgents.test.join(', ')})가 아직 실행 중이라 테스트 게이트의 차단을 보류했어요. ` +
+            '결과가 기록되면 다음 턴 종료 때 그 기록으로 판정해요(보류는 근거가 아니에요; 최대 45분).',
+        );
+        return {};
+      }
       const count = readRetryCount(sessionId, TEST_COUNT_FILE) + 1;
       writeRetryCount(sessionId, count, TEST_COUNT_FILE);
       // 자르지 않는다 — gate-log가 자체 상한(300자)으로 다듬는다. 80자로 잘랐더니
       //   라이브 로그에서 어떤 파일이 문제인지 보이지 않았다(경로가 `/pr` 에서 끊김).
       logGate(sessionId, 'test', 'deny', reason);
+      // (#44) What the payload said about background work at this deny, one line (a deny while an agent ran needs it).
+      logGate(sessionId, 'test', 'warn', tasksSummary(stopTasks));
       if (start) return blockOutput(sessionId, cwd, reason, 'test', 'GOODBOY_TEST_GATE=off', count, true);
       return blockOutput(
         sessionId,
@@ -1485,9 +1523,35 @@ function staleDocsNow(sessionId: string, cwd: string): StaleDoc[] | null {
   return edits.length === 0 ? [] : staleDocs({ root, edits, docs: map.docs });
 }
 
+/** (#44) `stale` without the test catalog once it is rewritten, by the generator of `cli.ts test-catalog`, before the
+ *  rule judges it. Every Stop does this, the stop_hook_active one too: the docs block usually comes on the Stop that
+ *  answers another gate's block (live verify of v0.37.1: a full-Stop-only rewrite left that block in place). The doc
+ *  must be mapped and the rule must already name it (project mode, covered files changed); nothing is written during
+ *  a rebase or a merge, through a link, or when git cannot list the test files. The write is goodboy's own: no edit
+ *  record, so no gate treats it as the session's change. A failure leaves the rule to block as before. */
+function refreshStaleCatalog(sessionId: string, cwd: string, stale: StaleDoc[] | null): StaleDoc[] | null {
+  const catalogDoc = TEST_CATALOG_FILE.split(sep).join('/');
+  if (stale === null || !stale.some((s) => s.doc === catalogDoc)) return stale;
+  try {
+    const root = knowledgeRoot(cwd).root;
+    // The rows the rule's own judgement just built are reused: the test files are listed and read once per Stop.
+    const done = refreshCatalog(root, takeJudgedRows(root));
+    if (done.ok && done.changed) {
+      logGate(sessionId, 'docs', 'warn', 'catalog-regenerated');
+      habitWarnings.push('[goodboy] 테스트 카탈로그(.goodboy/test-catalog.md)가 오래돼 다시 만들었어요.');
+      // The catalog is now what a fresh render says, which is all the rule asks of it: no second judgement.
+      return stale.filter((s) => s.doc !== catalogDoc);
+    }
+    if (!done.ok) logGate(sessionId, 'docs', 'warn', `catalog-not-regenerated(${done.why})`);
+  } catch (err) {
+    hookError(sessionId, 'stop', 'catalog regeneration error', err);
+  }
+  return stale;
+}
+
 function docsGate(sessionId: string, cwd: string): HookOutput | null {
   try {
-    const stale = staleDocsNow(sessionId, cwd);
+    const stale = refreshStaleCatalog(sessionId, cwd, staleDocsNow(sessionId, cwd));
     if (stale === null) return null;
     if (stale.length === 0) {
       resetRetryCount(sessionId, DOCS_COUNT_FILE);
@@ -1675,7 +1739,7 @@ function tryAcceptPendingReview(
     if (recentEdits.length === 0) return null;
     if (startProblem(sessionId, cwd, recentEdits) !== null) return null; // (#33)
     const reviewsDir = resolvePath(cwd, '.claude', 'reviews');
-    const reviews = findRecentReviewFiles(reviewsDir, reviewWindowMinutes());
+    const reviews = findRecentReviewFiles(reviewsDir, reviewWindowMinutes(), treeRecordWindow(cwd));
     if (reviews.length === 0) return null;
     const deadline = newDeadline();
     const v = reviewCoverage(sessionId, cwd, netEdits, reviews, deadline);
@@ -1747,6 +1811,9 @@ function main(): void {
       const sessionId = input.session_id ?? 'unknown';
       snapshotSessionId = sessionId;
       frictionCwd = cwd;
+      // (#44) The running agents, once: the validation, test and review gates wait only for their own kind.
+      stopTasks = input.background_tasks;
+      stopAgents = runningAgents(input.background_tasks);
       // Layer 0 runs at most once per Stop. The stop_hook_active path checks it for a
       //   warning and, after accepting a test result, continues to the full gates; running
       //   it twice doubled the flush wait (past the 15 s hook timeout at the 8 s maximum)
@@ -1811,6 +1878,9 @@ function main(): void {
           const pruned = pruneOldReviewFiles(
             resolvePath(cwd, '.claude', 'reviews'),
             Math.max(retention, reviewWindowMinutes()),
+            undefined,
+            // (#44) A review with a tree stays while a commit is unpushed (up to the 30 days it is read).
+            treeRecordWindow(cwd),
           );
           if (pruned > 0) logGate(sessionId, 'review', 'warn', `pruned-old-reviews(${pruned})`);
         }
@@ -1825,6 +1895,8 @@ function main(): void {
           const pruned = pruneOldTestFiles(
             resolvePath(cwd, '.claude', 'tests'),
             Math.max(retention, testWindowMinutes()),
+            undefined,
+            treeRecordWindow(cwd),
           );
           if (pruned > 0) logGate(sessionId, 'test', 'warn', `pruned-old-tests(${pruned})`);
         }
@@ -1927,7 +1999,7 @@ function main(): void {
         let docsFixed = false;
         let docsPending = false;
         try {
-          const docsNow = staleDocsNow(sessionId, cwd);
+          const docsNow = refreshStaleCatalog(sessionId, cwd, staleDocsNow(sessionId, cwd));
           const blocked = readRetryCount(sessionId, DOCS_COUNT_FILE) > 0;
           if (docsNow !== null && docsNow.length > 0) {
             if (blocked) {
@@ -2083,6 +2155,15 @@ function main(): void {
         if (userPass(sessionId, cwd, 'validation')) {
           resetRetryCount(sessionId, VALIDATION_COUNT_FILE);
           clearValidationFailure(sessionId);
+        } else if (stopAgents.test.length > 0 && deferring(sessionId)) {
+          // (#44) A running `goodboy:test-*` agent may be running the failed command itself: only this block waits
+          //   (a warning), for 45 minutes from the session's first deferral; the claim gate and every later gate
+          //   still judge this Stop. The marker stays, so the next Stop judges it again; a deferral clears nothing.
+          logGate(sessionId, 'validation', 'warn', `deferred-for-agents(${stopAgents.test.join(', ')})`);
+          habitWarnings.push(
+            `[goodboy] 테스트 에이전트(${stopAgents.test.join(', ')})가 아직 실행 중이라 자동 검증 실패(${cmds}) 차단을 보류했어요. ` +
+              '검증이 통과로 기록되면 해제되고, 아니면 다음 턴 종료 때 다시 막아요(최대 45분).',
+          );
         } else {
           const count = readRetryCount(sessionId, VALIDATION_COUNT_FILE) + 1;
           writeRetryCount(sessionId, count, VALIDATION_COUNT_FILE);
@@ -2117,11 +2198,11 @@ function main(): void {
       //   background agent runs, since its result (often the review or test the gate asks
       //   for) has not arrived; blocking now made the model start a duplicate. Only agents
       //   count: a long-running background shell (a dev server) would defer the gates forever.
-      const runningAgents = (input.background_tasks ?? []).filter(
-        (t) => t && t.type === 'subagent' && t.status === 'running',
-      );
-      if (runningAgents.length > 0) {
-        logGate(sessionId, 'stop', 'warn', `deferred-for-agents(${runningAgents.length})`);
+      //   (#44) Only `goodboy:review-*` agents defer here, for 45 minutes from the session's first
+      //   deferral; the test and validation gates wait for `goodboy:test-*` agents on their own
+      //   (stopAgents, computed once above). Any other agent defers nothing.
+      if (stopAgents.review.length > 0 && deferring(sessionId)) {
+        logGate(sessionId, 'stop', 'warn', `deferred-for-agents(${stopAgents.review.join(', ')})`);
         emit({});
         return;
       }
@@ -2307,7 +2388,7 @@ function main(): void {
       const reviewsDir = resolvePath(cwd, '.claude', 'reviews');
       const reviews = (() => {
         try {
-          return findRecentReviewFiles(reviewsDir, reviewWindowMinutes());
+          return findRecentReviewFiles(reviewsDir, reviewWindowMinutes(), treeRecordWindow(cwd));
         } catch {
           return [] as ReturnType<typeof findRecentReviewFiles>;
         }

@@ -42,8 +42,9 @@ import { ensureSessionDir, parseTurn, TURN_FILE, turnFloor } from './file-tracke
 import { segmentChanging } from './outward-command';
 import { safeToolUseId } from './approval-marker';
 import { MAX_STATE_BYTES, readRegular, readStateText } from './safe-read';
+import { failureMarkerRoot, findProjectRoot, validationPassFile } from './validation-state';
 
-const GUARDED = /^(?:turn\.txt|oversized-logs\.json|edits\.jsonl|unswept\.jsonl|dispatch-log\.jsonl|skill-evidence\.jsonl|commit-issue-pins\.json|marker-evidence\.jsonl|project-mode-pin\.json|coverage-pin\.json|criteria-pin\.json|criteria-seen\.json|judged-weakened\.json|worktrees\.txt|start-tips(?:-[0-9a-f]{16})?\.json|(?:start-pin|criteria-pin|criteria-seen)-[0-9a-f]{16}\.json|\.goodboy-last-(?:review|test)-[0-9a-f]+\.json|\.goodboy-validation-failed\.json)$/;
+const GUARDED = /^(?:turn\.txt|oversized-logs\.json|edits\.jsonl|unswept\.jsonl|dispatch-log\.jsonl|skill-evidence\.jsonl|commit-issue-pins\.json|marker-evidence\.jsonl|project-mode-pin\.json|coverage-pin\.json|criteria-pin\.json|criteria-seen\.json|judged-weakened\.json|agent-deferral\.json|worktrees\.txt|start-tips(?:-[0-9a-f]{16})?\.json|(?:start-pin|criteria-pin|criteria-seen)-[0-9a-f]{16}\.json|\.goodboy-last-(?:review|test)-[0-9a-f]+\.json|\.goodboy-validation-failed\.json|validation-passed\.json)$/;
 const CURSOR = /^\.goodboy-last-(?:review|test)-[0-9a-f]+\.json$/;
 /** Evidence logs: a line added during a model Bash call would be forged evidence (a skill run,
  *  the user's non-project answer), so these keep only their old lines, and one the call
@@ -59,8 +60,10 @@ const EVIDENCE = /^(?:skill-evidence|marker-evidence)\.jsonl$/;
  *  The start pins of v0.36.7 (#33: the frozen ref tips, one start pin and one criteria baseline per
  *  checkout, the criteria a Stop required there) are the same kind: a forged one would set a
  *  checkout's start. The tips are one file per repository (#39): `start-tips.json` for the session's
- *  own, `start-tips-<hash>.json` for each nested repo of a project dir that is no repo. */
-const HOOK_ONLY = /^(?:(?:project-mode-pin|coverage-pin|criteria-pin|criteria-seen|judged-weakened|oversized-logs)\.json|worktrees\.txt|start-tips(?:-[0-9a-f]{16})?\.json|(?:start-pin|criteria-pin|criteria-seen)-[0-9a-f]{16}\.json)$/;
+ *  own, `start-tips-<hash>.json` for each nested repo of a project dir that is no repo. The deferral clock
+ *  (`agent-deferral.json`, lib/agent-deferral.ts, #44) is the Stop's: a call that restarted or removed it would
+ *  lengthen the time the gates wait for agents. */
+const HOOK_ONLY = /^(?:(?:project-mode-pin|coverage-pin|criteria-pin|criteria-seen|judged-weakened|agent-deferral|oversized-logs)\.json|worktrees\.txt|start-tips(?:-[0-9a-f]{16})?\.json|(?:start-pin|criteria-pin|criteria-seen)-[0-9a-f]{16}\.json)$/;
 
 function keptEvidenceLine(name: string, line: string): boolean {
   if (name !== 'skill-evidence.jsonl') return false;
@@ -180,8 +183,9 @@ function seal(key: string, body: IndexBody): string {
 
 const sha = (data: Buffer | string): string => createHash('sha256').update(data).digest('hex');
 
-/** Copies the guarded gate files before a model Bash call. */
-export function snapshotGateState(sessionId: string, toolUseId: string): void {
+/** Copies the guarded gate files before a model Bash call. `cwd`: the shell's dir, for the project whose pass record
+ *  is kept too (omitted: only the project the session's failure marker names). */
+export function snapshotGateState(sessionId: string, toolUseId: string, cwd?: string): void {
   try {
     const dir = ensureSessionDir(sessionId);
     const snap = snapDir(sessionId, toolUseId);
@@ -212,6 +216,16 @@ export function snapshotGateState(sessionId: string, toolUseId: string): void {
         // unreadable: not guarded this time
       }
     }
+    // The project's pass record (#44), which lives outside the session dir: a copy of it, with its project root,
+    //   is kept under its own name so the restore can put it back. On every call, marker or not: a pass planted before
+    //   the breaking edit would make the next failure stale at once.
+    const passCopy = passRecordCopy(sessionId, cwd);
+    if (passCopy !== null) {
+      const data = Buffer.from(passCopy, 'utf8');
+      writeFileSync(join(snap, PASS_RECORD), data);
+      names.push(PASS_RECORD);
+      sums.push(sha(data));
+    }
     const body: IndexBody = { id: safeToolUseId(toolUseId), names, present, sums };
     const key = sealKey(sessionId, true);
     writeFileSync(join(snap, INDEX_FILE), JSON.stringify({ t: Date.now(), ...body, ...(key !== null ? { seal: seal(key, body) } : {}) }), 'utf8');
@@ -221,6 +235,86 @@ export function snapshotGateState(sessionId: string, toolUseId: string): void {
   } catch {
     // best-effort
   }
+}
+
+/** The pass record (lib/validation-state.ts) is in the project's state dir, not the session dir. A pass there lifts
+ *  a failed validation, and only the post hook records one, after it ran the exact command (#44). A model Bash call
+ *  that wrote one (an `echo` of a passes object into the project dir's validation-passed.json) forged a pass, so the
+ *  snapshot keeps `{ root, text }` under this name and the restore puts the record back. */
+const PASS_RECORD = 'validation-passed.json';
+
+/** The copy of the pass records of the projects a call may touch, as `{ records: [{ root, text }] }`: the root of the
+ *  call's cwd (where the next edit's checks will record, so a pass planted before any failure is caught) and the root
+ *  the session's failure marker names. `text` is null for no record. Null when there is no root at all. Nothing is
+ *  created: no project state dir is made for a project that has none. */
+function passRecordCopy(sessionId: string, cwd: string | undefined): string | null {
+  try {
+    const roots = new Set<string>();
+    const fromMarker = failureMarkerRoot(sessionId);
+    if (fromMarker !== null) roots.add(fromMarker);
+    const fromCwd = cwd === undefined || cwd === '' ? null : findProjectRoot(cwd)?.root ?? null;
+    if (fromCwd !== null) roots.add(fromCwd);
+    const records: { root: string; text: string | null }[] = [];
+    for (const root of roots) {
+      const file = validationPassFile(root, false);
+      // No trusted dir: nothing is read or written there, by the gates or by this guard.
+      if (file === null) {
+        records.push({ root, text: null });
+        continue;
+      }
+      const r = readRegular(file, MAX_STATE_BYTES, true);
+      // Absent, or a link, a FIFO or a file past the cap: no record to keep (a restore removes what a call puts there).
+      records.push({ root, text: r === 'absent' || r === 'refused' ? null : r.text });
+    }
+    return records.length === 0 ? null : JSON.stringify({ records });
+  } catch {
+    return null;
+  }
+}
+
+/** Puts one pass record back as the snapshot saw it: the file goes when `text` is null. True when it changed. */
+function restoreOnePassRecord(root: string, text: string | null): boolean {
+  const file = validationPassFile(root, false);
+  if (file === null) return false;
+  const now = readRegular(file, MAX_STATE_BYTES, true);
+  if (text === null) {
+    if (now === 'absent') return false;
+    rmSync(file, { recursive: true, force: true });
+    return true;
+  }
+  if (now !== 'absent' && now !== 'refused' && now.text === text) return false;
+  rmSync(file, { recursive: true, force: true });
+  writeFileSync(file, text, 'utf8');
+  return true;
+}
+
+/** Puts the pass records back as the snapshot saw them; an untrusted copy is not believed: those records go (the
+ *  failed validation passes again, which re-records them). True when it changed any. */
+function restorePassRecord(sessionId: string, before: string, trusted: boolean): boolean {
+  const records: { root: string; text: string | null }[] = [];
+  try {
+    const c = JSON.parse(before) as { records?: unknown } | null;
+    if (c && Array.isArray(c.records)) {
+      for (const r of c.records as { root?: unknown; text?: unknown }[]) {
+        if (r && typeof r.root === 'string' && r.root !== '') records.push({ root: r.root, text: trusted && typeof r.text === 'string' ? r.text : null });
+      }
+    }
+  } catch {
+    // an unreadable copy names no root
+  }
+  if (records.length === 0) {
+    const root = failureMarkerRoot(sessionId);
+    if (root !== null) records.push({ root, text: null });
+  }
+  let changed = false;
+  for (const { root, text } of records) {
+    try {
+      if (restoreOnePassRecord(root, text)) changed = true;
+    } catch {
+      // this one could not be put back; the others still are
+    }
+  }
+  return changed;
 }
 
 const strings = (v: unknown): string[] | null => (Array.isArray(v) && v.every((n) => typeof n === 'string') ? (v as string[]) : null);
@@ -320,6 +414,14 @@ function restoreFrom(sessionId: string, snap: string): string[] {
     //   the gates skip what they compare with it (delta security review), a planted copy is no worse than a
     //   planted file.
     if (!trusted && (CURSOR.test(name) || EVIDENCE.test(name))) continue;
+    if (name === PASS_RECORD) {
+      try {
+        if (restorePassRecord(sessionId, before, trusted)) restored.push(name);
+      } catch {
+        // the record could not be put back; the others still are
+      }
+      continue;
+    }
     const p = join(dir, name);
     // A file the call made oversized, or replaced with a FIFO, a link or a directory, is
     //   replaced unread (final G1 test rounds: reading a 3 GB sparse file killed the hook, and
@@ -423,7 +525,8 @@ function restoreFrom(sessionId: string, snap: string): string[] {
     if (!GUARDED.test(name) || existed.has(name)) continue;
     const p = join(dir, name);
     if (!trusted && HOOK_ONLY.test(name) && plainState(p)) continue;
-    const hookOnly = CURSOR.test(name) || EVIDENCE.test(name) || HOOK_ONLY.test(name);
+    // The pass record is never a session file: one there is a call's, and goes.
+    const hookOnly = CURSOR.test(name) || EVIDENCE.test(name) || HOOK_ONLY.test(name) || name === PASS_RECORD;
     if (!hookOnly && plainState(p) && (name !== TURN_FILE || parseTurn(textOrNull(p)) !== null)) continue;
     try {
       let kept = '';
@@ -499,10 +602,11 @@ export function restoreOrphanGateState(sessionId: string, open: readonly string[
 //   `more -O <file>` write a log, and no session reads through a pager (v0.36.16 reviews).
 const READ_PROGS = new Set(['cat', 'ls', 'head', 'tail', 'grep', 'rg', 'wc', 'jq', 'stat', 'test', '[', 'file', 'tree', 'find', 'du', 'echo', 'cut', 'diff', 'cmp', 'od', 'nl', 'strings', 'readlink', 'realpath', 'shasum', 'md5', 'sha256sum']);
 
-/** A word that names a goodboy session dir (`goodboy-session-…`) or a glob that can match one (`goodboy-s*`,
- *  `goodboy*`). A separator is required before `session`: an identifier such as `inGoodboySessionDir` in a searched
- *  pattern is no path (it was taken for one). */
-const SESSION_DIR_WORD = /goodboy(?:[-_](?:session|sess\*|s\*|\*)|\*)/i;
+/** A word that names a goodboy session dir (`goodboy-session-…`) or project state dir (`goodboy-project-…`, which
+ *  holds the validation pass record, v0.37.1), or a glob that can match one (`goodboy-s*`, `goodboy-p*`, `goodboy*`).
+ *  A separator is required before `session`: an identifier such as `inGoodboySessionDir` in a searched pattern is no
+ *  path (it was taken for one). */
+const SESSION_DIR_WORD = /goodboy(?:[-_](?:session|sess\*|s\*|project|proj\*|p\*|\*)|\*)/i;
 
 /** True when a shell command changes a goodboy session dir: a segment that names
  *  `goodboy-session` (or a glob that matches it) and runs anything but a read, or redirects. */

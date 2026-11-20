@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { OBJECT_ID as TREE_ID } from './git-run';
 import { recordPath } from './record-paths';
 import { axesOfDimensions } from './review-dimensions';
-import { freshness, listsFile, NULL_TREE_NOTE } from './test-validator';
+import { freshness, isTreeBoundFile, listsFile, NULL_TREE_NOTE, readRecordJson, type TreeWindow, treeWindowCheck } from './test-validator';
 import { canonicalTimestamp, isTrustedTimestamp, MAX_CLOCK_SKEW_MS } from './trusted-time';
 import type { ReviewFinding, ReviewResult, Verdict } from './types';
 
@@ -15,8 +15,7 @@ function isVerdict(v: unknown): v is Verdict {
 
 function safeReadReview(path: string): ReviewResult | null {
   try {
-    const raw = readFileSync(path, 'utf8');
-    const parsed = JSON.parse(raw) as Partial<ReviewResult>;
+    const parsed = readRecordJson(path) as Partial<ReviewResult>;
     if (typeof parsed !== 'object' || parsed === null) return null;
     // Stored in one format, so the string comparisons below follow time order.
     const timestamp = canonicalTimestamp(parsed.timestamp);
@@ -73,20 +72,24 @@ export function findRecentReviewFile(reviewsDir: string, withinMinutes: number):
 /** reviewsDir 안의 모든 유효 리뷰 파일을 최신순으로 반환 (withinMinutes 이내만).
  *  v0.26.5 — 리뷰 누적 인정: 최신 리뷰 1개만 보면 부분 리뷰 2개가 서로를 무효화하는
  *  두더지잡기가 된다(실측: 리뷰 A{4파일} 후 "README 미리뷰" 차단 → README만 리뷰 B로
- *  돌리면 "4파일 미리뷰" 차단). 파일별 커버리지는 validateReviewCoverage가 판정한다. */
-export function findRecentReviewFiles(reviewsDir: string, withinMinutes: number): ReviewResult[] {
+ *  돌리면 "4파일 미리뷰" 차단). 파일별 커버리지는 validateReviewCoverage가 판정한다.
+ *  (#44) `treeWithinMinutes` (the caller passes it only while a commit is unpushed): a review with a `tree` is
+ *  read up to that age, a longer window than `withinMinutes`; the tree binds it to content, not to time. */
+export function findRecentReviewFiles(reviewsDir: string, withinMinutes: number, treeWithinMinutes: TreeWindow = 0): ReviewResult[] {
   try {
     const entries = readdirSync(reviewsDir);
-    const candidates: Array<{ path: string; mtime: number }> = [];
+    const candidates: Array<{ path: string; mtime: number; late: boolean }> = [];
     const now = Date.now();
+    const inTreeWindow = treeWindowCheck(treeWithinMinutes);
     for (const name of entries) {
       if (!name.endsWith('.json')) continue;
       const full = join(reviewsDir, name);
       try {
         const st = statSync(full);
         if (!st.isFile()) continue;
-        if ((now - st.mtimeMs) / 60000 > withinMinutes) continue;
-        candidates.push({ path: full, mtime: st.mtimeMs });
+        const age = (now - st.mtimeMs) / 60000;
+        if (age > withinMinutes && !inTreeWindow(age)) continue;
+        candidates.push({ path: full, mtime: st.mtimeMs, late: age > withinMinutes });
       } catch {
         continue;
       }
@@ -95,7 +98,9 @@ export function findRecentReviewFiles(reviewsDir: string, withinMinutes: number)
     const out: ReviewResult[] = [];
     for (const c of candidates) {
       const r = safeReadReview(c.path);
-      if (r !== null) out.push(r);
+      if (r === null) continue;
+      if (c.late && !(typeof r.tree === 'string' && r.tree !== '')) continue;
+      out.push(r);
     }
     return out;
   } catch {
@@ -117,18 +122,24 @@ export function pruneOldReviewFiles(
   reviewsDir: string,
   olderThanMinutes: number,
   nowMs?: number,
+  keepTreeBoundMinutes: TreeWindow = 0,
 ): number {
   if (!Number.isFinite(olderThanMinutes) || olderThanMinutes <= 0) return 0;
   let pruned = 0;
   try {
     const now = typeof nowMs === 'number' && Number.isFinite(nowMs) ? nowMs : Date.now();
+    const keeps = treeWindowCheck(keepTreeBoundMinutes);
     for (const name of readdirSync(reviewsDir)) {
       if (!name.endsWith('.json')) continue;
       const full = join(reviewsDir, name);
       try {
         const st = statSync(full);
         if (!st.isFile()) continue;
-        if ((now - st.mtimeMs) / 60000 <= olderThanMinutes) continue;
+        const age = (now - st.mtimeMs) / 60000;
+        if (age <= olderThanMinutes) continue;
+        // (#44) A review with a `tree` is kept up to this age (the caller passes it only while a commit is
+        //   unpushed); past it the review is dead data, never read.
+        if (keeps(age) && isTreeBoundFile(full)) continue;
         unlinkSync(full);
         pruned++;
       } catch {

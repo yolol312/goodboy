@@ -3,9 +3,10 @@
 // is current is decided by evidence: the docs rule regenerates it and compares
 // (lib/doc-map.ts), and the output carries no date so that regenerating changes nothing.
 
-import { readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { join, resolve as resolvePath } from 'node:path';
 import { gitOut } from './git-run';
+import { readRegular } from './safe-read';
 import { JVM_TEST_SOURCE_SET, stripLiteralsAndComments } from './test-validator';
 import type { TestType } from './types';
 
@@ -36,6 +37,7 @@ const JVM_TEST = /\.(?:java|kt)$/;
  *  `@TestConfiguration`). */
 export const JVM_CASE = /@(?:[\w.]+\.)?(?:Test|ParameterizedTest|RepeatedTest|TestFactory|TestTemplate)\b/g;
 const MAX_FILE_BYTES = 512 * 1024;
+const MAX_CATALOG_BYTES = 8 * 1024 * 1024;
 const MAX_FEATURES = 6;
 
 export interface CatalogRow {
@@ -107,14 +109,25 @@ export function catalogRows(root: string): CatalogRow[] | null {
     let text = '';
     try {
       const abs = join(root, file);
-      if (!statSync(abs).isFile() || statSync(abs).size > MAX_FILE_BYTES) continue;
-      text = readFileSync(abs, 'utf8');
+      // A link is no test file of this repo (#44 security review): its text, and the describe() titles read from it, would
+      //   come from wherever it points. Not followed, and a FIFO or a huge file is not read.
+      if (lstatSync(abs).isSymbolicLink()) continue;
+      const read = readRegular(abs, MAX_FILE_BYTES, true);
+      if (read === 'absent' || read === 'refused') continue;
+      text = read.text;
     } catch {
       continue; // listed but gone (deleted, not staged)
     }
     rows.push({ file, type: testTypeOf(file, text), features: featuresOf(file, text), tests: testCount(file, text) });
   }
   return rows;
+}
+
+/** A table cell: a line break in a file name or a describe() title would start a new Markdown line (a heading, a
+ *  forged row), and `|` would split the cell. Line breaks become a space, `|` is escaped. */
+function cell(text: string): string {
+  // \p{Zl} and \p{Zp} are the Unicode line and paragraph separators; \x85 is NEL.
+  return text.replace(/[\r\n\x85\p{Zl}\p{Zp}]+/gu, ' ').replace(/\|/g, '\\|');
 }
 
 export function renderCatalog(rows: CatalogRow[]): string {
@@ -133,9 +146,89 @@ export function renderCatalog(rows: CatalogRow[]): string {
     '',
     '| Feature | Type | File | Tests |',
     '|---|---|---|---|',
-    ...rows.map((r) => `| ${r.features.join('; ')} | ${r.type} | ${r.file} | ${r.tests} |`),
+    ...rows.map((r) => `| ${cell(r.features.join('; '))} | ${r.type} | ${cell(r.file)} | ${r.tests} |`),
     '',
   ].join('\n');
+}
+
+export type CatalogWrite =
+  | { ok: true; path: string; files: number; changed: boolean }
+  | { ok: false; why: 'git' | 'symlink' | 'busy' | 'error'; detail?: string };
+
+const isLink = (p: string): boolean => {
+  try {
+    return lstatSync(p).isSymbolicLink();
+  } catch {
+    return false; // missing: nothing to follow
+  }
+};
+
+/** The catalog file's text, or null when it is missing, not a plain file, too large or not readable. */
+function catalogText(root: string): string | null {
+  // A link is followed for reading (a catalog kept elsewhere and linked in is judged by what it says); writing refuses it.
+  const r = readRegular(join(root, TEST_CATALOG_FILE), MAX_CATALOG_BYTES);
+  return r === 'absent' || r === 'refused' ? null : r.text;
+}
+
+/** (#44) Regenerates `.goodboy/test-catalog.md` under `root`: what `cli.ts test-catalog` runs, and what the Stop runs
+ *  (`refreshCatalog`) before the docs rule. Never replaces the catalog when git cannot list the test files (not "no
+ *  tests"), never writes through a link (`.goodboy` or the catalog being one), and writes only when the content
+ *  differs, to a temp file in the same dir renamed over the target (a reader never sees half a catalog). Never throws.
+ *  `known`: rows the caller just built (the docs judge's), so the test files are not listed and read again. */
+export function writeCatalog(root: string, known?: CatalogRow[]): CatalogWrite {
+  const rows = known ?? catalogRows(root);
+  if (rows === null) return { ok: false, why: 'git' };
+  const dir = join(root, '.goodboy');
+  const path = join(root, TEST_CATALOG_FILE);
+  try {
+    if (isLink(dir) || isLink(path)) return { ok: false, why: 'symlink' };
+    const text = renderCatalog(rows);
+    if (catalogText(root) === text) return { ok: true, path, files: rows.length, changed: false };
+    mkdirSync(dir, { recursive: true });
+    const tmp = join(dir, `.test-catalog.${process.pid}.${Date.now()}.tmp`);
+    try {
+      writeFileSync(tmp, text, { flag: 'wx' });
+      renameSync(tmp, path);
+    } catch (err) {
+      try {
+        unlinkSync(tmp);
+      } catch {
+        // not created, or already moved
+      }
+      throw err;
+    }
+    return { ok: true, path, files: rows.length, changed: true };
+  } catch (err) {
+    return { ok: false, why: 'error', detail: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** Whether a rebase or a merge is in progress in the repo of `root` (`rebase-merge`, `rebase-apply`, `MERGE_HEAD`, as
+ *  git names them for this checkout, a linked worktree's own too). When git cannot say, it counts as in progress. */
+export function gitOperationInProgress(root: string): boolean {
+  const out = gitOut(root, ['rev-parse', '--git-path', 'rebase-merge', '--git-path', 'rebase-apply', '--git-path', 'MERGE_HEAD']);
+  if (out === null) return true;
+  const paths = out.split('\n').filter((p) => p !== '');
+  return paths.length === 0 || paths.some((p) => existsSync(resolvePath(root, p)));
+}
+
+/** (#44) The Stop's regeneration of a stale catalog: `writeCatalog`, but not while a rebase or a merge runs (the test
+ *  files are mid-change and the catalog would record a state nobody has). `known`: see `writeCatalog`. */
+export function refreshCatalog(root: string, known?: CatalogRow[]): CatalogWrite {
+  if (gitOperationInProgress(root)) return { ok: false, why: 'busy' };
+  return writeCatalog(root, known);
+}
+
+/** The rows of the latest `catalogIsCurrent(root)`, kept for the Stop's regeneration right after it (the docs judge
+ *  built them; listing and reading every test file again took ~140 ms a time). */
+let judged: { root: string; rows: CatalogRow[]; at: number } | null = null;
+const JUDGED_FRESH_MS = 30_000;
+
+/** Takes (once) the rows the latest `catalogIsCurrent(root)` built, or undefined when there are none or they are old. */
+export function takeJudgedRows(root: string): CatalogRow[] | undefined {
+  const j = judged;
+  judged = null;
+  return j !== null && j.root === root && Date.now() - j.at <= JUDGED_FRESH_MS ? j.rows : undefined;
 }
 
 /** True when the catalog file matches a fresh one; false when it differs, is missing or cannot
@@ -144,9 +237,7 @@ export function renderCatalog(rows: CatalogRow[]): string {
 export function catalogIsCurrent(root: string): boolean {
   const rows = catalogRows(root);
   if (rows === null) return true;
-  try {
-    return readFileSync(join(root, TEST_CATALOG_FILE), 'utf8') === renderCatalog(rows);
-  } catch {
-    return false;
-  }
+  judged = { root, rows, at: Date.now() };
+  const text = catalogText(root);
+  return text !== null && text === renderCatalog(rows);
 }

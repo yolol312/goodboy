@@ -29,7 +29,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve as resolvePath } from 'node:path';
+import { dirname, join, resolve as resolvePath } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
 import { readStateText } from './safe-read';
 import { isTrustedTimestamp } from './trusted-time';
@@ -44,6 +44,9 @@ export interface ValidationFailureState {
 
 export const VALIDATION_FAILURE_FILE = '.goodboy-validation-failed.json';
 const VALIDATION_PASS_FILE = 'validation-passed.json';
+/** How far a recorded pass may start past the record's write time or past now: the file system's time resolution and
+ *  a hook's own start-to-write order, not the 5-minute clock skew other records get. */
+const PASS_SLACK_MS = 2_000;
 
 function markerPath(sessionId: string): string {
   return join(ensureSessionDir(sessionId), VALIDATION_FAILURE_FILE);
@@ -55,11 +58,11 @@ function markerPath(sessionId: string): string {
  *  is trusted only as a real directory that this user owns, with no group or other
  *  access. Otherwise this returns null and no pass is recorded or read. That fails closed:
  *  the failure keeps blocking until its own session passes or escapes. */
-function projectStateDir(root: string): string | null {
+function projectStateDir(root: string, create = true): string | null {
   const key = createHash('sha256').update(resolvePath(root)).digest('hex').slice(0, 16);
   const dir = join(tmpdir(), `goodboy-project-${key}`);
   try {
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    if (create) mkdirSync(dir, { recursive: true, mode: 0o700 });
     const st = lstatSync(dir); // lstat: a symlink to a directory is not a directory here
     if (!st.isDirectory()) return null;
     if (typeof process.getuid === 'function' && (st.uid !== process.getuid() || (st.mode & 0o077) !== 0)) {
@@ -77,16 +80,60 @@ function projectStateDir(root: string): string | null {
 function readPasses(dir: string): Record<string, string> {
   const out: Record<string, string> = {};
   try {
-    const p = JSON.parse(readStateText(join(dir, VALIDATION_PASS_FILE))) as { passes?: unknown } | null;
+    const file = join(dir, VALIDATION_PASS_FILE);
+    const p = JSON.parse(readStateText(file)) as { passes?: unknown } | null;
+    // A run starts before the record that names it is written. An entry that starts after the file's own write time
+    //   was planted (a shell write of `now + 4 min` before the breaking edit made the next failure stale at once;
+    //   #44 security review), so it is not read. The slack covers file systems with coarse times.
+    const wroteMs = lstatSync(file).mtimeMs + PASS_SLACK_MS;
     if (p && typeof p.passes === 'object' && p.passes !== null && !Array.isArray(p.passes)) {
       for (const [cmd, startedAt] of Object.entries(p.passes as Record<string, unknown>)) {
-        if (typeof startedAt === 'string') out[cmd] = startedAt;
+        if (typeof startedAt === 'string' && Date.parse(startedAt) <= wroteMs) out[cmd] = startedAt;
       }
     }
   } catch {
     // no record, or an unreadable one: no passes
   }
   return out;
+}
+
+/** The pass record's path for the project at `root`, or null when its state dir is not trusted
+ *  (projectStateDir). For the state guard: a shell call must not write it (#44). */
+export function validationPassFile(root: string, create = true): string | null {
+  const dir = projectStateDir(root, create);
+  return dir === null ? null : join(dir, VALIDATION_PASS_FILE);
+}
+
+/** The project a validation runs in: the nearest dir at or above `startCwd` with a package marker, and which marker.
+ *  One definition for the checks (hooks/post-tool-use.ts) and the state guard, which keeps that project's pass record
+ *  around every Bash call (#44). */
+export function findProjectRoot(startCwd: string): { root: string; marker: string } | null {
+  const markers = ['package.json', 'pyproject.toml', 'Cargo.toml', 'go.mod'];
+  let cur = resolvePath(startCwd);
+  const seen = new Set<string>();
+  while (cur && !seen.has(cur)) {
+    seen.add(cur);
+    for (const m of markers) {
+      if (existsSync(resolvePath(cur, m))) return { root: cur, marker: m };
+    }
+    const parent = dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+  return null;
+}
+
+/** The project root this session's failure marker names, read as it is (no staleness check,
+ *  no session check: the state guard asks which pass record to keep). Null when none. */
+export function failureMarkerRoot(sessionId: string): string | null {
+  try {
+    const path = markerPath(sessionId);
+    if (!existsSync(path)) return null;
+    const parsed = JSON.parse(readStateText(path)) as { root?: unknown } | null;
+    return parsed && typeof parsed.root === 'string' && parsed.root !== '' ? parsed.root : null;
+  } catch {
+    return null;
+  }
 }
 
 function stringList(v: unknown): string[] {
@@ -174,6 +221,6 @@ function passedSince(root: string, since: string, commands: string[]): boolean {
   const nowMs = Date.now();
   return commands.every((cmd) => {
     const startedAt = passes[cmd];
-    return isTrustedTimestamp(startedAt, nowMs) && Date.parse(startedAt) > sinceMs;
+    return isTrustedTimestamp(startedAt, nowMs) && Date.parse(startedAt) <= nowMs + PASS_SLACK_MS && Date.parse(startedAt) > sinceMs;
   });
 }

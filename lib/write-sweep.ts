@@ -55,10 +55,24 @@ export function finishOpenBashCalls(sessionId: string, opts: { keepAgentsOpen?: 
     if (r.notice) notices.push(r.notice);
     if (opts.keepAgentsOpen && n.agent) {
       noteBashStart(sessionId, n.tuid, n.cwd, n.command, n.agent, undefined, r.swept === false ? n.t : at);
-      snapshotGateState(sessionId, n.tuid);
+      snapshotGateState(sessionId, n.tuid, n.cwd);
     }
   }
   return { ...(contexts.length > 0 ? { context: contexts.join('\n') } : {}), ...(notices.length > 0 ? { notice: notices.join('\n') } : {}) };
+}
+
+/** (#44) Takes the gate state snapshot again of every Bash call of a running agent that is still open, so that a hook-only
+ *  file the Stop wrote after `finishOpenBashCalls` re-snapshotted them (the agent-deferral clock, lib/agent-deferral.ts) is
+ *  in their snapshots: a call's post hook removes a hook-only file that appeared after its snapshot, which would delete the
+ *  clock and restart the 45 minutes. Never throws. */
+export function resnapshotAgentCalls(sessionId: string): void {
+  try {
+    for (const n of openBashCalls(sessionId).slice(-20)) {
+      if (n.tuid && n.agent) snapshotGateState(sessionId, n.tuid, n.cwd);
+    }
+  } catch {
+    // best-effort
+  }
 }
 
 /** What goodboy does after a model Bash call, from PostToolUse or PostToolUseFailure (a

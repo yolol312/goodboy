@@ -52,9 +52,31 @@ export function listsFile(files: readonly unknown[] | undefined, key: string): b
   return paths.includes(key) || hasSpelling('', key, paths);
 }
 
+/** Records `isTreeBoundFile` parsed while pruning, by path, mtime and size, for the first read of the same file
+ *  (#44: with the 30-day window the prune and the read would parse each old record twice). A read takes its entry out,
+ *  so nothing is shared, and a file changed since is read again. */
+const parsedStash = new Map<string, unknown>();
+const MAX_STASHED = 500;
+const stashKey = (path: string, mtimeMs: number, size: number) => `${path}\0${mtimeMs}\0${size}`;
+
+/** A record file parsed: a regular file within the state cap (never a FIFO waited on or a huge file read whole), else
+ *  it throws. The parse `isTreeBoundFile` just made of the same unchanged file is handed over once instead. */
+export function readRecordJson(path: string): unknown {
+  const st = statSync(path);
+  const key = stashKey(path, st.mtimeMs, st.size);
+  if (parsedStash.has(key)) {
+    const value = parsedStash.get(key);
+    parsedStash.delete(key);
+    return value;
+  }
+  const r = readRegular(path, MAX_STATE_BYTES);
+  if (r === 'absent' || r === 'refused') throw new Error(`record not readable: ${r}`);
+  return JSON.parse(r.text);
+}
+
 function safeReadTest(path: string): TestResult | null {
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<TestResult>;
+    const parsed = readRecordJson(path) as Partial<TestResult>;
     if (typeof parsed !== 'object' || parsed === null) return null;
     // Stored in one format, so the string comparisons below follow time order (as for reviews).
     const timestamp = canonicalTimestamp(parsed.timestamp);
@@ -75,22 +97,59 @@ function safeReadTest(path: string): TestResult | null {
   }
 }
 
+/** (#44) How long a record that carries a git `tree` is read while a commit is unpushed (30 days): the tree binds it
+ *  to content, not to time, so a rebase that rewrote files with the same content still finds it. */
+export const TREE_RECORD_WINDOW_MIN = 30 * 24 * 60;
+
+/** Whether a record's JSON text carries a git tree hash (`tree` is a string). A record with `tree: null` or none
+ *  is judged by time and is not tree-bound. Not a regular file, past the state cap, unreadable or malformed: false.
+ *  The parse is kept for the next `readRecordJson` of the same unchanged file. */
+export function isTreeBoundFile(path: string): boolean {
+  try {
+    const r = readRegular(path, MAX_STATE_BYTES);
+    if (r === 'absent' || r === 'refused') return false;
+    const parsed = JSON.parse(r.text) as { tree?: unknown } | null;
+    if (parsedStash.size < MAX_STASHED) parsedStash.set(stashKey(path, r.st.mtimeMs, r.st.size), parsed);
+    return typeof parsed === 'object' && parsed !== null && typeof parsed.tree === 'string' && parsed.tree !== '';
+  } catch {
+    return false;
+  }
+}
+
+/** The window of the records that carry a tree, in minutes: a number, or a function asked lazily. */
+export type TreeWindow = number | (() => number);
+
+/** Whether a record `ageMin` minutes old is inside `window`. A function window is asked only for a record older than
+ *  the caller's plain window and within the 30 days, and once (a Stop whose records are all fresh asks git nothing). */
+export function treeWindowCheck(window: TreeWindow): (ageMin: number) => boolean {
+  let value: number | undefined;
+  return (ageMin) => {
+    if (typeof window === 'function' && ageMin > TREE_RECORD_WINDOW_MIN) return false;
+    value ??= typeof window === 'function' ? window() : window;
+    return ageMin <= value;
+  };
+}
+
 /** testsDir 안의 유효 테스트 결과를 최신순으로 반환 (withinMinutes 이내만).
  *  (#42) A record for a repo outside the project dir (`repo`) is push evidence of that repo only: left out
  *  unless `withOutside` (the push check). Its files are outside the project dir, whose edits are the only
- *  ones the Stop gates. */
-export function findRecentTestFiles(testsDir: string, withinMinutes: number, withOutside = false): TestResult[] {
+ *  ones the Stop gates.
+ *  (#44) `treeWithinMinutes` (the caller passes the 30 days only while a commit is unpushed): a record with a `tree`
+ *  is read up to that age, a longer window than `withinMinutes`. */
+export function findRecentTestFiles(testsDir: string, withinMinutes: number, withOutside = false, treeWithinMinutes: TreeWindow = 0): TestResult[] {
   try {
     const now = Date.now();
-    const candidates: Array<{ path: string; mtime: number }> = [];
+    const inTreeWindow = treeWindowCheck(treeWithinMinutes);
+    const candidates: Array<{ path: string; mtime: number; late: boolean }> = [];
     for (const name of readdirSync(testsDir)) {
       if (!name.endsWith('.json')) continue;
       const full = join(testsDir, name);
       try {
         const st = statSync(full);
         if (!st.isFile()) continue;
-        if ((now - st.mtimeMs) / 60000 > withinMinutes) continue;
-        candidates.push({ path: full, mtime: st.mtimeMs });
+        const age = (now - st.mtimeMs) / 60000;
+        if (age > withinMinutes && !inTreeWindow(age)) continue;
+        candidates.push({ path: full, mtime: st.mtimeMs, late: age > withinMinutes });
       } catch {
         continue;
       }
@@ -99,7 +158,9 @@ export function findRecentTestFiles(testsDir: string, withinMinutes: number, wit
     const out: TestResult[] = [];
     for (const c of candidates) {
       const r = safeReadTest(c.path);
-      if (r !== null && (withOutside || r.repo === undefined)) out.push(r);
+      if (r === null || !(withOutside || r.repo === undefined)) continue;
+      if (c.late && !(typeof r.tree === 'string' && r.tree !== '')) continue;
+      out.push(r);
     }
     return out;
   } catch {
@@ -109,23 +170,29 @@ export function findRecentTestFiles(testsDir: string, withinMinutes: number, wit
 
 /** 보존 기간이 지난 테스트 결과 파일 삭제 (리뷰 파일 정리와 동일 위생 작업).
  *  @param nowMs 기준 시각. 생략하면 `Date.now()`. pruneOldReviewFiles와 같은 이유로
- *    주입 가능하다 — 경계를 벽시계 경쟁 없이 검증하기 위해서다. */
+ *    주입 가능하다 — 경계를 벽시계 경쟁 없이 검증하기 위해서다.
+ *  @param keepTreeBoundMinutes (#44) A record with a `tree` is kept up to this age even past `olderThanMinutes`
+ *    (the caller passes it only while a commit is unpushed; past it the record is dead data, never read). */
 export function pruneOldTestFiles(
   testsDir: string,
   olderThanMinutes: number,
   nowMs?: number,
+  keepTreeBoundMinutes: TreeWindow = 0,
 ): number {
   if (!Number.isFinite(olderThanMinutes) || olderThanMinutes <= 0) return 0;
   let pruned = 0;
   try {
     const now = typeof nowMs === 'number' && Number.isFinite(nowMs) ? nowMs : Date.now();
+    const keeps = treeWindowCheck(keepTreeBoundMinutes);
     for (const name of readdirSync(testsDir)) {
       if (!name.endsWith('.json')) continue;
       const full = join(testsDir, name);
       try {
         const st = statSync(full);
         if (!st.isFile()) continue;
-        if ((now - st.mtimeMs) / 60000 <= olderThanMinutes) continue;
+        const age = (now - st.mtimeMs) / 60000;
+        if (age <= olderThanMinutes) continue;
+        if (keeps(age) && isTreeBoundFile(full)) continue;
         unlinkSync(full);
         pruned++;
       } catch {

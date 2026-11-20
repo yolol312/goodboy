@@ -53,7 +53,7 @@ so work is released in batches:
 | v0.36.4 | repository metadata and version-only manifests need no test record (#30), `..` after a link is recorded as opened (#29), §15.20. Released 2026-10-26 |
 | v0.36.5–v0.36.19 | gate fixes from field reports and reviews, one release each (§15.21–§15.35; #12, #25, #27 in part, #31–#42). Released 2026-10-26 to 2026-11-12. The 2026-10-26 proposal to ship N1–N8 (§20.3) as v0.36.5 did not happen: v0.36.5 shipped §15.21 instead |
 | v0.37.0 | track M (full tests in an isolated container sandbox: a real database copy, dummy external services, no egress; 100% line and branch coverage, every screen and action in e2e; M6 real-data protection; M7 release review), §19. Released 2026-11-19 |
-| v0.37.1 | planned: #44 items 3, 4, 5 (+1), first planned as the v0.36.20 hotfix (user 2026-11-19: after v0.37.0, from main) |
+| v0.37.1 | #44 items 1 (in part), 3, 4, 5: Stop gates that block on evidence already there (records of unpushed work read for 30 days, deferral only for goodboy test and review agents capped at 45 minutes, a shell rerun of a failed validation command, the Stop regenerates a stale test catalog), §15.36; first planned as the v0.36.20 hotfix (user 2026-11-19: after v0.37.0, from main). Released 2026-11-20 |
 | v0.38.0 | proposed: track N (fewer repeated runs, a project test inventory, task criteria, §20.4–§20.6), with a push judged by the test results gathered since the last push (§21, N24–N30, #43, #45); its order against v0.37.0 is the user's decision |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
 
@@ -499,7 +499,7 @@ Tool skills (hidden from the menu; main session and agents):
 | PreToolUse, Bash in a read-only role | besides redirects: `cp`/`mv`/`rm`/`touch`/`chmod`…, `perl -i`, mutating git commands, and no `.git/`/`.claude/` exemptions |
 | PreToolUse, search | relax H2-03 so small searches run in the main session; a path the shell expands (`~`, `$VAR`, `$(…)`) is never small |
 | UserPromptSubmit | every prompt that is not a task notification gets the R1 (ask when unclear) and R2 lines; a workflow command gets R2 plus its checklist; fixed slash regex; argument-free commands allowed; the risk gate only from commands the user typed. Moved to G3: delegation lines and a skill or agent suggestion, registering a task once, and the effort check before a task's first action |
-| Stop | effort advice; accept evidence-backed `BLOCKED`; defer the review and test gates while `background_tasks` lists running agents (M10); no count-based escape: a gate blocks until its evidence is there, and only the user's one-use marker (`.goodboy-stop-approved-<tag>`) passes it, with a Korean notice from the 2nd block; H1-03 compaction is a notice, never a block. Review and test messages from the policy table move to G2 (they name G2 agents) |
+| Stop | effort advice; accept evidence-backed `BLOCKED`; defer the review and test gates while `background_tasks` lists running agents (M10; since v0.37.1 only `goodboy:test-*` agents defer the test and validation gates and only `goodboy:review-*` agents the review gate, for at most 45 minutes, §15.36); no count-based escape: a gate blocks until its evidence is there, and only the user's one-use marker (`.goodboy-stop-approved-<tag>`) passes it, with a Korean notice from the 2nd block; H1-03 compaction is a notice, never a block. Review and test messages from the policy table move to G2 (they name G2 agents) |
 | PostToolUse, Agent | completion status into the log |
 | PostToolUseFailure, Agent and Bash (new) | a failed Agent call counts as done/blocked, so it stops counting as running and gets one retry (M16); a failing Bash call gets the same after-Bash sweeps as PostToolUse (M18) |
 
@@ -656,7 +656,7 @@ without model/effort.
 | M7 | Does ExitPlanMode return to bypassPermissions? | Not measurable headless: plan-mode tools are absent in `-p` | prepare-migration asks for approval in chat; plan mode is not used |
 | M8 | Do subagents receive CLAUDE.md? | Yes (a project CLAUDE.md canary was answered without reading files) | follow-agent-rules does not repeat CLAUDE.md |
 | M9 | Does `Skill(name)` in an agent's tools restrict which skills it can call? | No, with bare or namespaced names: the agent ran a skill not in the list | goodboy hooks enforce tool-skill access (PreToolUse on Skill with `agent_type`) |
-| M10 | Can a Stop hook tell that background agents are still running? | Yes: Stop and SubagentStop carry `background_tasks` (`id`, `type`, `status`, `description`, `agent_type`) and `session_crons`. Agents run in the background unless the call sets `run_in_background: false`, and each background completion reaches the main session as a UserPromptSubmit whose prompt is a `<task-notification>` block | Stop defers the review/test gates while agents run; UserPromptSubmit treats task notifications as non-user prompts (no injection, no task registration, never "a new user request") |
+| M10 | Can a Stop hook tell that background agents are still running? | Yes: Stop and SubagentStop carry `background_tasks` (`id`, `type`, `status`, `description`, `agent_type`) and `session_crons`. Agents run in the background unless the call sets `run_in_background: false`, and each background completion reaches the main session as a UserPromptSubmit whose prompt is a `<task-notification>` block | Stop defers the review/test gates while agents run (since v0.37.1 only goodboy test and review agents, capped at 45 minutes, §15.36); UserPromptSubmit treats task notifications as non-user prompts (no injection, no task registration, never "a new user request") |
 | M11 | Does an effort change invalidate the prompt cache? | No: high → low on a resumed session read 48.5k cached tokens and wrote 2.6k; the turn before, low (left by a skill) → high, read 43.4k and wrote 2.6k. Both reused the whole cached prefix | effort advice has no cache cost |
 | M12 | What does the hook payload hold for a typed `/plugin:skill …` command? | The raw text, e.g. `/probe:probe-b hello there` | the slash regex accepts `:` |
 | M13 | Codex CLI | `codex login status` exits 0 ("Logged in using ChatGPT"). `codex review --uncommitted` (also `--base`, `--commit`) runs without prompts; a 5-line diff took 91 s and found the planted off-by-one as `[P1] … file:line`. Failures exit 1: the configured default model was rejected for a ChatGPT login (logged in `m13-default-model.err`), and once the model was "at capacity" (seen in the session; that log was overwritten by the successful run). No token count is printed | run-codex-review passes the model explicitly (`GOODBOY_CODEX_MODEL`), parses `[P0]`–`[P3]`, and records `skipped` with stderr on a non-zero exit; tokens are not tracked for Codex |
@@ -817,7 +817,9 @@ file every session reads first, splits every check into `ai` (evidence decides) 
   (from the start of its second, as `date -u` writes) and no later than this task's edit of
   docs.json, with no skew, so a time written ahead passes nothing. The test catalog is
   checked by regenerating it (its CLI write leaves no edit record), so it carries no date;
-  when git cannot list the test files the CLI writes nothing and the rule fails open. Test
+  when git cannot list the test files the CLI writes nothing and the rule fails open. Since
+  v0.37.1 every Stop regenerates a stale mapped catalog itself before judging the rule
+  (§15.36 item 4), so a test edit no longer blocks on the catalog alone. Test
   types come from paths and imports (e2e, integration, ui, else unit). The /init suggestion
   is once per project per machine (`~/.claude/goodboy/logs/init-suggested.json`, startup
   only) and only when the session gets no CLAUDE.md at all (the cwd and its parents count);
@@ -3623,6 +3625,59 @@ committed B; the push was denied `no-result` naming A's `.claude/tests`, then `t
 test file's next edit: every test builds two repos with remotes (about 45 s for the file), repeated
 helper lines, and `sh -c` strings with the test's own temp paths.
 
+### 15.36 v0.37.1: Stop gates that block on evidence already there (#44 items 1, 3, 4, 5)
+
+Field report #44 (2026-11-13; the same frictions seen again in the M7 session of 2026-11-19). Item 2 (a deferral the
+user records for a named later point) goes to track N (§20.3 N8b). The user decided the design on 2026-11-20:
+1. **Records across a rebase (item 1, in part).** While any commit is unpushed (`git rev-list --branches --not
+   --remotes -n1` is non-empty; a git failure counts as unpushed), review and test records that carry a `tree` are not
+   pruned and are read up to 30 days old, so a rebase that rewrote files with the same content still finds the
+   content-bound record. Records without a tree keep the 24 h window and the 3-day prune. The 30-tree cap and the time
+   budget stay. Content equal to a pre-rebase commit is not itself evidence (not in this release). As built
+   (`lib/unpushed-work.ts`): the unpushed check runs only when a record is older than the plain window (a Stop with
+   fresh records makes no extra git call); tree-bound records older than 30 days are pruned even while work is
+   unpushed (the read window ends there, and a repo with no remote would otherwise never prune); the push check reads
+   tree-bound records for 30 days, since a push is unpushed work and `checkHandoff` matches the tree, not the age.
+2. **A running test agent (item 3).** The test and validation gates turn a block into a warning only while a
+   `goodboy:test-*` agent runs, and the review gate's existing deferral holds only for `goodboy:review-*` agents; both
+   end 45 minutes after the first deferral of the session (kept in session state). A deferral never counts as evidence:
+   the record must still exist and match. As built (`lib/agent-deferral.ts`): running agents are read once from the
+   Stop payload's `background_tasks`; the validation gate defers by a warning (the marker stays) and the Stop goes on
+   to the claim gate and the later gates; the test gate defers inside its block, never for the start gate, keeps the
+   turn mark so the next Stop still sees the change, and ends that Stop (the docs and review gates wait that turn);
+   the review deferral keeps its place after the claim gate and, as before, ends the Stop, so while a review agent
+   runs the test gate waits too; any other running agent defers nothing (before, any running subagent deferred every
+   gate after the claim gate). Every test deny logs a one-line summary of `background_tasks`. The clock is the
+   session file `agent-deferral.json` (created by the Stop, hook-only and state-guarded, so a shell write or delete is
+   undone); a clock that cannot be read or written means no deferral (fail closed), and the Stop re-snapshots open
+   agent Bash calls when it starts the clock so their post hooks keep it. Limit: an agent that only sleeps still
+   defers for up to 45 minutes; a deferral is never evidence, so this only delays a block.
+3. **A passing validation in the shell (item 4).** A Bash command exactly equal to a failed validation command
+   (optionally after `cd <project root> &&`, and after one `rtk ` or `rtk proxy ` prefix, which the user's command
+   rewriter adds), run from the project root and ending with exit 0, records a pass that clears the failed marker;
+   pipes, `;`, `||`, `&`, redirects, `$(…)`, backticks and newlines are not accepted, nor a run that started before the
+   failure. Only ASCII spaces and tabs separate words (a no-break space is no match). The pass record
+   (`validation-passed.json`) joins the state guard: on every guarded Bash call it is saved and restored for the
+   shell's project root and for the root the session's failure marker names, whether or not a marker exists (so a
+   pass planted before the breaking edit is undone), an untrusted snapshot removes it, and the hook records its own
+   pass after the restore (`lib/shell-validation-pass.ts`). Write, Edit, MultiEdit and NotebookEdit to goodboy's
+   project state dir (`goodboy-project-*`) are denied like the session dir. A pass entry that starts more than 2 s
+   after the record's write time, or after now, is not trusted (a bound on top of the 5-minute skew check, which
+   stays). The shell pre-check names `goodboy-project-*` like the session dir (`SESSION_DIR_WORD`). Limits (the
+   state guard's known class, see the detached background process above): a process that outlives its call
+   (`nohup sh -c 'sleep 2; printf … > …' &`) writes after the post hook and its pass passes every read rule; a call
+   that deletes the snapshot dir together with a guarded file (`agent-deferral.json`, the pass record) leaves nothing
+   to restore, so the deferral clock restarts; a name built at run time passes the textual pre-check. The always-on
+   restore can also drop another session's pass recorded inside a call's window; that session's marker returns and
+   needs one more run (stricter, never looser). `resnapshotAgentCalls` covers the newest 20 agent calls whose start
+   notes are under 30 minutes old.
+4. **The test catalog (item 5).** Before the docs rule, the Stop regenerates `.goodboy/test-catalog.md` when it is
+   mapped and stale, with the CLI's generator, writing only when the content differs, never during a rebase or merge,
+   and failing open; the write is goodboy's own and is no edit record. Every Stop does this, the stop_hook_active one
+   too (`refreshStaleCatalog` in `hooks/stop.ts`): the live verify found the docs block on the Stop that answers
+   another gate's block, where a full-Stop-only rewrite left the model to run `cli.ts test-catalog` itself. After a
+   docs block, a catalog regenerated on that Stop counts as the fix and the Stop goes on to the review.
+
 ## 16. J — Field reports (v0.34.0)
 
 Asked by the user on 2026-10-16: improvements and bugs found while using goodboy elsewhere
@@ -4484,7 +4539,8 @@ Review of L, in four passes:
 
 Limits kept:
 - Kotest spec styles count no cases (their checks count).
-- The test catalog writer still follows a linked `.goodboy` dir (it predates L).
+- The test catalog writer still follows a linked `.goodboy` dir (it predates L). Fixed in v0.37.1:
+  `writeCatalog` refuses a linked `.goodboy` dir or catalog (§15.36).
 - Taking over a stale backfill lock checks its age, then removes it: two waiters after a
   crashed holder can both get it in a narrow window.
 - A JVM class in a test dir named like a test but abstract or a base (`BaseTest`,
@@ -6159,6 +6215,11 @@ message still says "always-true pattern" (`lib/push-test.ts`); N7 for Bash paths
 - **N8, one block lists everything.** A blocked Stop names every known unmet obligation at
   once, with stable ids and the smallest rerun plan. Today the gates report one rule per
   block in places, which is how one requirement reached 26 blocks.
+- **N8b, #44 item 2, a recorded deferral (user 2026-11-16).** A user decision to review or
+  test some files only at a named later point (a release) can be recorded once, bound to the
+  files and that point (a policy entry or session state), and holds until then, shown in the
+  status line; today the one-use Stop marker is spent and every later Stop blocks again on
+  the same files. Items 1 (in part), 3, 4 and 5 of #44 shipped in v0.37.1 (§15.36).
 
 ### 20.4 Track N part 1: tests (proposed)
 - **N9, project test inventory.** A committed `.goodboy/tests.json` lists the project's

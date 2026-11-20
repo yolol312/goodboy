@@ -33,7 +33,7 @@ import { criteriaNow } from './session-criteria';
 import { requiresMutationProbe } from './test-validator';
 import { knowledgeRoot, validateKnowledge } from './project-knowledge';
 import { decisionItems } from './decision-authority';
-import { catalogRows, renderCatalog, TEST_CATALOG_FILE } from './test-catalog';
+import { TEST_CATALOG_FILE, writeCatalog } from './test-catalog';
 import { recordTestProfile } from './test-profile';
 import { changedLineCount, realish, reviewPlan, reviewPlanNote } from './review-scope';
 import { agentName, ROUTE } from './routing-policy';
@@ -1693,12 +1693,15 @@ async function main(): Promise<void> {
       case 'test-catalog': {
         // Writes .goodboy/test-catalog.md, feature → test type, from the test files (§14.5).
         const root = knowledgeRoot(cwd).root;
-        const rows = catalogRows(root);
-        // Never overwrite a catalog with an empty one because git could not list the files.
-        if (rows === null) fail(`test-catalog: git cannot list the test files in ${root} (not a repo, or git is missing)`);
-        mkdirSync(join(root, '.goodboy'), { recursive: true });
-        writeFileSync(join(root, TEST_CATALOG_FILE), renderCatalog(rows));
-        process.stdout.write(JSON.stringify({ ok: true, path: join(root, TEST_CATALOG_FILE), files: rows.length }) + '\n');
+        // (#44) The Stop's generator (lib/test-catalog.ts writeCatalog): never replaces the catalog when git cannot list
+        //   the files, writes through no link, and only when the content differs.
+        const written = writeCatalog(root);
+        if (!written.ok) {
+          if (written.why === 'git') fail(`test-catalog: git cannot list the test files in ${root} (not a repo, or git is missing)`);
+          if (written.why === 'symlink') fail(`test-catalog: ${join(root, TEST_CATALOG_FILE)} or its .goodboy dir is a symbolic link; not written`);
+          fail(`test-catalog: could not write ${join(root, TEST_CATALOG_FILE)}${written.detail ? ` (${written.detail})` : ''}`);
+        }
+        process.stdout.write(JSON.stringify({ ok: true, path: written.path, files: written.files }) + '\n');
         break;
       }
       case 'test-survey':

@@ -177,6 +177,19 @@ export function restoreProductionHosts(start: BashStart): string[] {
   return restored;
 }
 
+/** A Bash call's start note as written, without removing it (afterBash takes it): the start
+ *  time (ms), the cwd the call started in and the command. Null without a usable note. */
+export function peekBashStart(sessionId: string, toolUseId: string | undefined): { t: number; cwd: string; command?: string } | null {
+  if (!toolUseId) return null;
+  try {
+    const rec = JSON.parse(readStateText(noteFile(sessionId, toolUseId))) as Partial<BashStartNote> | null;
+    if (!rec || typeof rec.t !== 'number' || !Number.isFinite(rec.t) || typeof rec.cwd !== 'string') return null;
+    return { t: rec.t, cwd: rec.cwd, ...(typeof rec.command === 'string' ? { command: rec.command } : {}) };
+  } catch {
+    return null;
+  }
+}
+
 /** When and where a Bash call started (noteBashStart), removing the note. Without one, the
  *  call is taken to have started 5 minutes ago in `cwd`. `since` has a 1 s margin for
  *  file-system time resolution. */

@@ -95,6 +95,7 @@ import {
   userMarkerPresent,
   useUserMarker,
   findRecentTestFiles,
+  TREE_RECORD_WINDOW_MIN,
   handoffApprovalAsk,
   handoffsOf,
   isApprovalMarkerPath,
@@ -952,7 +953,9 @@ function main(): void {
           if (handoffs.length > 0) {
             // (#42) With the records of repos outside the project dir, stored here by test-write.
             const resultsDir = resolvePath(projectCwd, '.claude', 'tests');
-            const results = findRecentTestFiles(resultsDir, envInt('GOODBOY_TEST_WINDOW_MIN', 1440), true);
+            //   (#44) A tree-bound record is read up to 30 days: the check matches the tree handed off, not the time, and
+            //   a push is unpushed work by definition (a rebase keeps the tested content).
+            const results = findRecentTestFiles(resultsDir, envInt('GOODBOY_TEST_WINDOW_MIN', 1440), true, TREE_RECORD_WINDOW_MIN);
             // One tree hash per revision for both checks: a deploy hashes the whole working tree,
             //   and two hashes could overrun the hook timeout (I4 review).
             const trees = new Map<string, string | null>();
@@ -1426,7 +1429,7 @@ function main(): void {
         const rawTarget = target.startsWith(sep) ? target : `${resolvePath(cwd)}${sep}${target}`;
         if (target && (inGoodboySessionDir(resolvePath(cwd, target)) || inGoodboySessionDir(rawTarget))) {
           logGate(sessionId, 'state-write', 'deny', target.slice(-80));
-          emit(deny("This edits goodboy's own session state (goodboy-session-*). The gates decide from it; leave it alone and satisfy the gate instead."));
+          emit(deny("This edits goodboy's own session state (goodboy-session-*, goodboy-project-*). The gates decide from it; leave it alone and satisfy the gate instead."));
           return;
         }
       }
@@ -1931,7 +1934,7 @@ function main(): void {
             ? ((s) => (s ? withContentHashes(s) : undefined))(statusFiles(cwd, 5_000))
             : undefined;
         noteBashStart(sessionId, input.tool_use_id, cwd, command, input.agent_id, status);
-        snapshotGateState(sessionId, input.tool_use_id);
+        snapshotGateState(sessionId, input.tool_use_id, cwd);
       }
 
       emitPass(preWarnings);

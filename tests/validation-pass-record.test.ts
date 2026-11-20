@@ -78,10 +78,18 @@ describe('the start time a pass record keeps (A3)', () => {
   });
 });
 
-describe('the 5-minute clock-skew bound (A3)', () => {
-  test('a start time 4 minutes ahead is trusted', () => {
+// #44 security review: the 5-minute skew let a planted `now + 4 min` pass lift a failure recorded later. A pass may
+//   start no later than the record's write time or now, give or take the file system's time resolution (2 s).
+describe('a pass that starts after now or after its record was written is not read (A3, #44)', () => {
+  test('a start time 4 minutes ahead is no longer trusted', () => {
     writeValidationFailure('sess-a', [TYPECHECK], '/repo');
     recordValidationPass('/repo', [TYPECHECK], iso(4 * MIN));
+    expect(readValidationFailure('sess-a')).not.toBeNull();
+  });
+
+  test('a start time within the 2 s slack is', () => {
+    writeValidationFailure('sess-a', [TYPECHECK], '/repo');
+    recordValidationPass('/repo', [TYPECHECK], iso(500));
     expect(readValidationFailure('sess-a')).toBeNull();
   });
 

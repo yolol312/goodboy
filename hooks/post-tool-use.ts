@@ -21,11 +21,13 @@ import {
   isPartialRead,
   envStr,
   extractBashOutput,
+  findProjectRoot,
   getCurrentTurn,
   measureOutput,
   readHabitState,
   recordEdit,
   recordRead,
+  readValidationFailure,
   recordValidationPass,
   recordWebFetch,
   safeMtime,
@@ -41,6 +43,7 @@ import {
 } from '../lib';
 import { noteSessionTop } from '../lib/changed-coverage';
 import { HOOK_CLOCK_MS, startHookClock } from '../lib/hook-clock';
+import { shellValidationPass } from '../lib/shell-validation-pass';
 import { START_PIN_BUDGET_MS, startPinDeadline } from '../lib/start-pins';
 
 interface PostToolInput {
@@ -82,25 +85,6 @@ function emit(out: HookOutput): void {
   } catch {
     // best-effort
   }
-}
-
-function findProjectRoot(startCwd: string): { root: string; marker: string } | null {
-  const markers = ['package.json', 'pyproject.toml', 'Cargo.toml', 'go.mod'];
-  let cur = resolvePath(startCwd);
-  const seen = new Set<string>();
-  while (cur && !seen.has(cur)) {
-    seen.add(cur);
-    for (const m of markers) {
-      const candidate = resolvePath(cur, m);
-      if (existsSync(candidate)) {
-        return { root: cur, marker: m };
-      }
-    }
-    const parent = dirname(cur);
-    if (parent === cur) break;
-    cur = parent;
-  }
-  return null;
 }
 
 interface RunResult {
@@ -548,9 +532,27 @@ function main(): void {
       //   PostToolUseFailure, since a failing command skips PostToolUse, G0 M18).
       let markerNotice: string | undefined;
       if (toolName === 'Bash') {
+        // (#44) A passing run of a failed validation command in the shell. Judged before afterBash, which removes
+        //   the start note; recorded after it, because its state-guard restore puts the pass record back as the
+        //   call's snapshot had it. No work when the session has no failed validation.
+        let shellPass: ReturnType<typeof shellValidationPass> = null;
+        try {
+          shellPass = shellValidationPass(sessionId, input.tool_use_id, toolInput, toolResponse);
+        } catch (err) {
+          hookError(sessionId, 'post-tool-use', 'shell validation pass error', err);
+        }
         const after = afterBash(sessionId, input.tool_use_id, cwd, toolInput.command, agentId);
         if (after.context) additionalContext = additionalContext ? `${additionalContext}\n${after.context}` : after.context;
         markerNotice = after.notice;
+        if (shellPass) {
+          try {
+            recordValidationPass(shellPass.root, [shellPass.command], shellPass.startedAt);
+            // The marker is stale once every command passed since it: remove the file as the Edit path does.
+            if (readValidationFailure(sessionId) === null) clearValidationFailure(sessionId);
+          } catch (err) {
+            hookError(sessionId, 'post-tool-use', 'shell validation pass error', err);
+          }
+        }
       }
 
       // (#33) A checkout the session did not start in is pinned the first time a hook sees it, so the

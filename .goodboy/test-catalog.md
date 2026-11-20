@@ -3,7 +3,7 @@
 Feature → test type, generated from the test files by goodboy (`cli.ts test-catalog`).
 Regenerate it instead of editing it; the docs rule compares it with a fresh copy.
 
-Totals: unit 262 files, 4928 tests; e2e 2 files, 54 tests.
+Totals: unit 266 files, 5049 tests; e2e 2 files, 54 tests.
 
 | Feature | Type | File | Tests |
 |---|---|---|---|
@@ -266,7 +266,11 @@ Totals: unit 262 files, 4928 tests; e2e 2 files, 54 tests.
 | V18-AC-9 resultCliWrite: the CLI reading a file named lib/regression.ts is no test record; V18-AC-10 bashChangedPaths: read-only git commands are no .git write; V18-AC-10 through the PreToolUse hook | unit | tests/v0.36.18-role-limits.test.ts | 22 |
 | V18-AC-1 readStateText; V18-AC-1 callers neither hang nor crash on a FIFO or a directory at their file; V18-AC-2 turn.txt is guarded: it never goes down; V18-AC-3 a guarded name a call created as no regular file is removed; V18-AC-4 the snapshot index is sealed; V18-AC-4 the key file and the notes are under the session dir name write gates | unit | tests/v0.36.18-state-guard.test.ts | 102 |
 | V19-AC-1: outsideRepo gives the copy target only when every condition holds; V19-AC-2: test-write from the sibling repo keeps its record there and copies it to the project dir; V19-AC-2b: a copy that cannot be written warns and the command still succeeds; V19-AC-3: regression from the sibling repo keeps its record there and copies it to the project dir; V19-AC-4: test-write --worktree from the sibling repo copies too; V19-AC-5: findRecentTestFiles leaves repo records out unless asked | unit | tests/v0.36.19-sibling-repo.test.ts | 43 |
-| the start time a pass record keeps (A3); the 5-minute clock-skew bound (A3) | unit | tests/validation-pass-record.test.ts | 7 |
+| peekBashStart (the post hook reads the start note without taking it); shellValidationPass (the pass a finished Bash call proves); failureMarkerRoot; the state guard and an unusable pass record copy; resnapshotAgentCalls; treeRecordWindow | unit | tests/v0.37.1-44-cov.test.ts | 22 |
+| deferralOpen when another Stop starts the clock first | unit | tests/v0.37.1-44-race.test.ts | 4 |
+| a passing shell run clears the failed marker (#44 item 4); exactMarkerCommand; the state guard keeps the pass record (#44); the agent-deferral clock is state-guarded (#44 item 3, lib/agent-deferral.ts); file-tool writes to goodboy-project-* are denied (#44 security review); exactMarkerCommand reads only ASCII spaces and tabs as blanks | unit | tests/v0.37.1-44-validation.test.ts | 36 |
+| item 1: tree-bound records are read longer while a commit is unpushed; item 1: the review gate through the Stop; item 3: agent kinds, the summary and the 45-minute cap; item 3: the review gate through the Stop; item 3: the test gate through the Stop; item 3: the deferral clock and the state guard | unit | tests/v0.37.1-44.test.ts | 58 |
+| the start time a pass record keeps (A3); a pass that starts after now or after its record was written is not read (A3, #44) | unit | tests/validation-pass-record.test.ts | 8 |
 | a pass lifts an older failure only in the same project (A3) | unit | tests/validation-pass-scope.test.ts | 4 |
 | validation failure marker (A3) | unit | tests/validation-state.test.ts | 15 |
 | D4 — 컨텍스트 성장 반복 경고; D5 (H4-03) — 세션 내 모델 전환 감지; D6 (H2-04) — 동일 URL 재페치 경고 | unit | tests/warnings-d4-d5-d6.test.ts | 9 |
