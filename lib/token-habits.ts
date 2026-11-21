@@ -152,8 +152,9 @@ export interface HabitState {
   ctxParseWarned?: boolean;
   /** D4: 컨텍스트 성장 반복 경고를 마지막으로 낸 시점의 점유율(%). 다음 경고는 +step 이상일 때. */
   lastCtxWarnPct?: number;
-  /** H2-01 epoch: 직전 Stop에서 관측한 컨텍스트 점유율(%). 급락(=압축) 감지에 사용. */
-  lastCtxPercent?: number;
+  /** H2-01 epoch: the context tokens the previous Stop measured, for the compaction check (v0.37.2: tokens, not the
+   *  percent, which also drops when the limit estimate moves from 200k to 1M). */
+  lastCtxTokens?: number;
   /** H4-03: 세션 내 모델 전환 경고를 이미 냈는지(세션당 1회). */
   modelSwitchWarned?: boolean;
   /** 층1: 테스트 게이트가 이 저장소에서 비활성이라는 안내를 냈는지(세션당 1회). */

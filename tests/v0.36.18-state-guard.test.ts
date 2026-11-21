@@ -794,7 +794,7 @@ describe('V18-AC-4 the key file and the notes are under the session dir name wri
     const s = sandbox();
     const r = await s.spawnHook('pre-tool-use', { tool_name: 'Bash', tool_use_id: 'toolu_k', tool_input: { command: `echo 00 > ${s.key}` } });
     expect(r.denied).toBe(true);
-    expect(r.reason).toContain("goodboy's own session state");
+    expect(r.reason).toContain("This command changes goodboy's own state (goodboy-session-* or goodboy-project-*).");
   });
 });
 

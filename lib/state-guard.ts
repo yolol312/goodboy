@@ -603,10 +603,16 @@ export function restoreOrphanGateState(sessionId: string, open: readonly string[
 const READ_PROGS = new Set(['cat', 'ls', 'head', 'tail', 'grep', 'rg', 'wc', 'jq', 'stat', 'test', '[', 'file', 'tree', 'find', 'du', 'echo', 'cut', 'diff', 'cmp', 'od', 'nl', 'strings', 'readlink', 'realpath', 'shasum', 'md5', 'sha256sum']);
 
 /** A word that names a goodboy session dir (`goodboy-session-…`) or project state dir (`goodboy-project-…`, which
- *  holds the validation pass record, v0.37.1), or a glob that can match one (`goodboy-s*`, `goodboy-p*`, `goodboy*`).
- *  A separator is required before `session`: an identifier such as `inGoodboySessionDir` in a searched pattern is no
- *  path (it was taken for one). */
-const SESSION_DIR_WORD = /goodboy(?:[-_](?:session|sess\*|s\*|project|proj\*|p\*|\*)|\*)/i;
+ *  holds the validation pass record, v0.37.1), or a glob that can match one: any prefix of `session` or `project`
+ *  after `goodboy-` followed by `*`, `?` or `[` (`goodboy-s*`, `goodboy-pr*`), `goodboy*`, or `goodboy` with a `?` or
+ *  a class followed by `-`, `s`, `p` or another glob character (`goodboy?session-*`; a `goodboy?` ending a message or
+ *  `goodboy[0-9].ts` is none). Both dirs are `goodboy-<kind>-<id>` (v0.37.2): after the kind, anything but the end of
+ *  the word, `/`, `.` or `_` may supply the hyphen (`-`, `$E-x`, `{-x,}`, `$'\x2dx'`, `@(-x)`), so it counts; a user's
+ *  `goodboy_project`, `goodboy-project` or `goodboy-project/` dir is no state dir. A separator is required before
+ *  `session`: an identifier such as `inGoodboySessionDir` in a searched pattern is no path (it was taken for one).
+ *  The class is bounded (64 characters) so that a long word of repeated `goodboy[` stays linear. */
+const SESSION_DIR_WORD =
+  /goodboy(?:-(?:session|project)(?![/._]|$)|-(?:s(?:e(?:s(?:s(?:i(?:on?)?)?)?)?)?|p(?:r(?:o(?:j(?:e(?:ct?)?)?)?)?)?)?[*?[]|\*|(?:\?|\[[^\]]{0,64}\])[-sp*?[])/i;
 
 /** True when a shell command changes a goodboy session dir: a segment that names
  *  `goodboy-session` (or a glob that matches it) and runs anything but a read, or redirects. */

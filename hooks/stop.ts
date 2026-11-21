@@ -1523,8 +1523,8 @@ function staleDocsNow(sessionId: string, cwd: string): StaleDoc[] | null {
   return edits.length === 0 ? [] : staleDocs({ root, edits, docs: map.docs });
 }
 
-/** (#44) `stale` without the test catalog once it is rewritten, by the generator of `cli.ts test-catalog`, before the
- *  rule judges it. Every Stop does this, the stop_hook_active one too: the docs block usually comes on the Stop that
+/** (#44) Once the rule has judged the mapped test catalog stale, the catalog is rewritten by the generator of
+ *  `cli.ts test-catalog` and dropped from `stale` (the rule judges first, then the rewrite). Every Stop does this, the stop_hook_active one too: the docs block usually comes on the Stop that
  *  answers another gate's block (live verify of v0.37.1: a full-Stop-only rewrite left that block in place). The doc
  *  must be mapped and the rule must already name it (project mode, covered files changed); nothing is written during
  *  a rebase or a merge, through a link, or when git cannot list the test files. The write is goodboy's own: no edit
@@ -1549,9 +1549,11 @@ function refreshStaleCatalog(sessionId: string, cwd: string, stale: StaleDoc[] |
   return stale;
 }
 
-function docsGate(sessionId: string, cwd: string): HookOutput | null {
+/** `judged`: the stale docs this Stop already judged (and tried to regenerate the catalog for); the active Stop passes
+ *  them so the rule does not list and read the test files a second time. */
+function docsGate(sessionId: string, cwd: string, judged?: StaleDoc[] | null): HookOutput | null {
   try {
-    const stale = refreshStaleCatalog(sessionId, cwd, staleDocsNow(sessionId, cwd));
+    const stale = judged !== undefined ? judged : refreshStaleCatalog(sessionId, cwd, staleDocsNow(sessionId, cwd));
     if (stale === null) return null;
     if (stale.length === 0) {
       resetRetryCount(sessionId, DOCS_COUNT_FILE);
@@ -1998,8 +2000,9 @@ function main(): void {
         //   test accept does (P14 below).
         let docsFixed = false;
         let docsPending = false;
+        let docsNow: StaleDoc[] | null = null;
         try {
-          const docsNow = refreshStaleCatalog(sessionId, cwd, staleDocsNow(sessionId, cwd));
+          docsNow = refreshStaleCatalog(sessionId, cwd, staleDocsNow(sessionId, cwd));
           const blocked = readRetryCount(sessionId, DOCS_COUNT_FILE) > 0;
           if (docsNow !== null && docsNow.length > 0) {
             if (blocked) {
@@ -2019,7 +2022,7 @@ function main(): void {
           // The one docs block, given here and not by a full evaluation: an earlier gate that
           //   keeps failing would otherwise re-block every active Stop (H4 confirm review).
           //   It counts, so the next active Stop ends.
-          const docsBlock = docsGate(sessionId, cwd);
+          const docsBlock = docsGate(sessionId, cwd, docsNow);
           if (docsBlock) {
             emit(docsBlock);
             return;
@@ -2098,14 +2101,17 @@ function main(): void {
       //   앞서 읽은 파일 내용이 모델 컨텍스트에서 사라졌으므로 재-Read 차단의 전제가 깨진다
       //   → read 기록을 비워 "압축 이후"를 새 기준으로 삼는다. 이 리셋이 있어 재-Read
       //   윈도우를 길게(기본 30턴) 잡아도 압축 직후 오차단이 없다. fail-open.
+      //   v0.37.2: the drop is in tokens (more than dropPct % of the current limit), not in percent points. The
+      //   percent also falls when the limit estimate moves from 200k to 1M as the tokens pass 200k (96.7 % → 20.2 %
+      //   with no compaction), and that cleared the reads and re-armed the policy read gate and read-before-edit.
       try {
         if (usage) {
           const st = readHabitState(sessionId);
           const dropPct = envInt('GOODBOY_COMPACT_DETECT_DROP_PCT', 15);
-          if (typeof st.lastCtxPercent === 'number' && usage.percent < st.lastCtxPercent - dropPct) {
+          if (typeof st.lastCtxTokens === 'number' && usage.tokens < st.lastCtxTokens - (dropPct / 100) * usage.limit) {
             clearReadRecords(sessionId);
           }
-          st.lastCtxPercent = usage.percent;
+          st.lastCtxTokens = usage.tokens;
           writeHabitState(sessionId, st);
         }
       } catch {

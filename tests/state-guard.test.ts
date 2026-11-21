@@ -63,7 +63,7 @@ describe('through the hooks', () => {
     const s = sandbox();
     const out = await s.run('pre-tool-use', { tool_name: 'Bash', tool_use_id: 'toolu_s0', tool_input: { command: `rm -f ${s.edits}` } });
     expect(out.denied).toBe(true);
-    expect(out.reason).toContain("goodboy's own session state");
+    expect(out.reason).toContain("This command changes goodboy's own state (goodboy-session-* or goodboy-project-*).");
   });
 
   test('an edit log the call removed or rewrote is put back after it', async () => {

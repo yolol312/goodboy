@@ -184,7 +184,6 @@ describe('S16-AC-2: writesGateState reads the program past prefixes and rtk, and
     'find /tmp/goodboy-s* -delete',
     'rtk find /tmp/goodboy* -exec rm {} +',
     'truncate -s0 /tmp/GOODBOY-SESSION-a/edits.jsonl',
-    'rm -rf /tmp/goodboy_session_a',
     'rm -rf $TMPDIR/goodboy*',
     'timeout 5 sh -c "rm /tmp/goodboy-session-a/x"',
   ];
@@ -223,8 +222,16 @@ describe('S16-AC-2: writesGateState reads the program past prefixes and rtk, and
     for (const c of ["git grep -n inGoodboySessionDir lib/", "sed -n '/inGoodboySessionDir/p' lib/x.ts", "awk '/GoodboySession/' lib/x.ts", 'python3 -c "print(goodboysession)"']) {
       expect([c, writesGateState(c)]).toEqual([c, false]);
     }
-    for (const c of ['sed -i s/a/b/ /tmp/goodboy_session_a/x', 'sed -i s/a/b/ /tmp/goodboy-session-a/x', 'rm -rf /tmp/goodboy-*', 'rm -rf /tmp/goodboy_*', 'rm /tmp/goodboy-sess*', 'rm /tmp/goodboy*']) {
+    for (const c of ['sed -i s/a/b/ /tmp/goodboy-session-a/x', 'rm -rf /tmp/goodboy-*', 'rm /tmp/goodboy-sess*', 'rm /tmp/goodboy*']) {
       expect([c, writesGateState(c)]).toEqual([c, true]);
+    }
+  });
+
+  // v0.37.2: the state dirs are `goodboy-session-<id>` and `goodboy-project-<id>`, with hyphens only; an underscore name,
+  // or a glob after an underscore, cannot match one (these three were counted as state dirs before).
+  test('an underscore name or glob (goodboy_session_a, goodboy_*) cannot match a state dir and is no change', () => {
+    for (const c of ['sed -i s/a/b/ /tmp/goodboy_session_a/x', 'rm -rf /tmp/goodboy_*', 'rm -rf /tmp/goodboy_session_a']) {
+      expect([c, writesGateState(c)]).toEqual([c, false]);
     }
   });
 
@@ -301,11 +308,12 @@ describe('S16-AC-2: writesGateState reads the program past prefixes and rtk, and
 
   test('end to end: the hook lets `rtk proxy grep -n goodboy-session lib/x.ts` through and denies `rtk proxy rm -rf $TMPDIR/goodboy-session-x`', async () => {
     const read = await pre('rtk proxy grep -n goodboy-session lib/x.ts');
-    expect(read.reason).not.toContain("goodboy's own session state");
+    expect(read.reason).not.toContain("goodboy's own");
     expect(read.denied).toBe(false);
     const change = await pre('rtk proxy rm -rf $TMPDIR/goodboy-session-x');
     expect(change.denied).toBe(true);
-    expect(change.reason).toContain("goodboy's own session state");
+    // v0.37.2: the text names both state dirs
+    expect(change.reason).toContain("goodboy's own state (goodboy-session-* or goodboy-project-*)");
   });
 });
 

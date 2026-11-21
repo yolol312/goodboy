@@ -846,6 +846,30 @@ describe('item 5: the docs rule through the Stop', () => {
     expect(log.some((e) => e.gate === 'docs' && e.reason === 'continue-to-review-after-docs-fixed')).toBe(true);
   }, 90_000);
 
+  // v0.37.2: the active Stop hands the docs it already judged to the docs gate; the gate used to judge and try the
+  //   rewrite a second time (a second listing of the test files, a second `catalog-not-regenerated` line).
+  test('the stop_hook_active Stop judges the docs once: one listing of the test files, one not-regenerated line, one block', async () => {
+    const d = catalogProject();
+    const s = sid();
+    pinCoverageStart(s, d);
+    mkdirSync(join(d, '.git', 'rebase-merge')); // nothing is written during the rebase: the rule blocks
+    write(d, 'tests/b.test.ts', "test('two', () => {});\n");
+    recordEdit(s, join(d, 'tests', 'b.test.ts'), 0, undefined, Date.now());
+    const bin = tmp();
+    const log = join(bin, 'ls-files.log');
+    writeFileSync(log, '');
+    const real = Bun.which('git')!;
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\ncase " $* " in *" ls-files "*"--others"*) echo x >> '${log}';; esac\nexec '${real}' "$@"\n`);
+    chmodSync(join(bin, 'git'), 0o755);
+    const out = await stop(d, s, { stop_hook_active: true }, { ...ON, PATH: `${bin}:${process.env.PATH}` });
+    expect(out.decision).toBe('block');
+    expect(out.reason).toMatch(DOCS_RULE);
+    const entries = readGateLog(s);
+    expect(entries.filter((e) => e.gate === 'docs' && String(e.reason).startsWith('catalog-not-regenerated'))).toHaveLength(1);
+    expect(entries.filter((e) => e.gate === 'docs' && e.decision === 'deny')).toHaveLength(1);
+    expect(readFileSync(log, 'utf8').split('\n').filter(Boolean)).toHaveLength(1);
+  }, 90_000);
+
   test('off with GOODBOY_DOCS_GATE=off and in a non-project directory: nothing is written', async () => {
     const d = catalogProject();
     const s = sid();

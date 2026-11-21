@@ -590,7 +590,7 @@ describe('closing item 1: a group in a quoted word is read with the quotes out',
   const DENIED = ['cd ~/dumps && cat "dump.s"(ql|x)', 'cat "dl/"(dump|x).sql', 'cat "dl/"@(dump).sql', 'cat "../home/dumps/"(dump|x).sql', 'cat dl/dump.s"(ql|x)"', "cat 'dl/'(dump|x).sql", 'cat "dl/dump.s"(ql|x)', "cat $'dl/'(dump|x).sql", "cd ~/dumps && cat $'./'(dump|x).sql", 'cat $"dl/"(dump|x).sql'];
   for (const cmd of DENIED) test(`denied: ${cmd}`, () => expect(bash(cmd)).not.toBeNull());
   test('quoted words with parentheses elsewhere pass', () => {
-    for (const cmd of ['cat "src/"(a|b)', 'echo "a (b)"', 'git commit -m "fix (typo)"', 'cat "src/"@(a).txt']) expect([cmd, bash(cmd)]).toEqual([cmd, null]);
+    for (const cmd of ['cat "src/"(a|b)', "cat $'src/'(a|b)", 'echo "a (b)"', 'git commit -m "fix (typo)"', 'cat "src/"@(a).txt']) expect([cmd, bash(cmd)]).toEqual([cmd, null]);
   });
 });
 

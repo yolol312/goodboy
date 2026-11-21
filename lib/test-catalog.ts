@@ -97,7 +97,9 @@ function testCount(rel: string, text: string): number {
         : /(?<![.\w$])(?:test|it)(?:\.(?:only|skip|todo|each))*\s*\(/gm;
   // A JVM case is an annotation: one in a comment or a string is none.
   if (JVM_TEST.test(rel)) return [...stripLiteralsAndComments(text, true).matchAll(re)].length;
-  return [...text.matchAll(re)].length;
+  // Go and Python cases are anchored at a line start; a JS/TS call in a comment ("create it (`wx`)") is none (v0.37.2).
+  if (rel.endsWith('.go') || rel.endsWith('.py')) return [...text.matchAll(re)].length;
+  return [...stripLiteralsAndComments(text, false, true).matchAll(re)].length;
 }
 
 /** The catalog's rows, or null when git cannot list the test files. */

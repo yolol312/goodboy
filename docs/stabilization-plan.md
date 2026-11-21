@@ -54,6 +54,7 @@ so work is released in batches:
 | v0.36.5–v0.36.19 | gate fixes from field reports and reviews, one release each (§15.21–§15.35; #12, #25, #27 in part, #31–#42). Released 2026-10-26 to 2026-11-12. The 2026-10-26 proposal to ship N1–N8 (§20.3) as v0.36.5 did not happen: v0.36.5 shipped §15.21 instead |
 | v0.37.0 | track M (full tests in an isolated container sandbox: a real database copy, dummy external services, no egress; 100% line and branch coverage, every screen and action in e2e; M6 real-data protection; M7 release review), §19. Released 2026-11-19 |
 | v0.37.1 | #44 items 1 (in part), 3, 4, 5: Stop gates that block on evidence already there (records of unpushed work read for 30 days, deferral only for goodboy test and review agents capped at 45 minutes, a shell rerun of a failed validation command, the Stop regenerates a stale test catalog), §15.36; first planned as the v0.36.20 hotfix (user 2026-11-19: after v0.37.0, from main). Released 2026-11-20 |
+| v0.37.2 | the Stop's compaction check by a token drop, not a percent drop (a local field report of 2026-11-16: the policy read gate re-armed when the limit estimate moved from 200k to 1M), and the lows carried from the v0.37.1 reviews, §15.37. Released 2026-11-21 |
 | v0.38.0 | proposed: track N (fewer repeated runs, a project test inventory, task criteria, §20.4–§20.6), with a push judged by the test results gathered since the last push (§21, N24–N30, #43, #45); its order against v0.37.0 is the user's decision |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
 
@@ -818,8 +819,9 @@ file every session reads first, splits every check into `ai` (evidence decides) 
   docs.json, with no skew, so a time written ahead passes nothing. The test catalog is
   checked by regenerating it (its CLI write leaves no edit record), so it carries no date;
   when git cannot list the test files the CLI writes nothing and the rule fails open. Since
-  v0.37.1 every Stop regenerates a stale mapped catalog itself before judging the rule
-  (§15.36 item 4), so a test edit no longer blocks on the catalog alone. Test
+  v0.37.1, once the rule judges a mapped catalog stale, every Stop regenerates it and drops it
+  from the verdict (§15.36 item 4), so a test edit no longer blocks on the catalog alone unless
+  it cannot be written (a rebase or merge, a link, a write error: the rule blocks as before). Test
   types come from paths and imports (e2e, integration, ui, else unit). The /init suggestion
   is once per project per machine (`~/.claude/goodboy/logs/init-suggested.json`, startup
   only) and only when the session gets no CLAUDE.md at all (the cwd and its parents count);
@@ -3677,6 +3679,36 @@ user records for a named later point) goes to track N (§20.3 N8b). The user dec
    too (`refreshStaleCatalog` in `hooks/stop.ts`): the live verify found the docs block on the Stop that answers
    another gate's block, where a full-Stop-only rewrite left the model to run `cli.ts test-catalog` itself. After a
    docs block, a catalog regenerated on that Stop counts as the fix and the Stop goes on to the review.
+
+### 15.37 v0.37.2: the compaction check by tokens, and the v0.37.1 lows
+
+A local field report (2026-11-16, kept local by the user, triaged 2026-11-20): in a long main session the policy read
+gate denied calls after the policy file had been read in full and was unchanged. Cause, verified: for a model id with
+no 1M marker (the user's settings model `opus`), `resolveContextLimit` takes 200k until the tokens pass it, then 1M
+(step 4). The percent falls from 96.7 to 20.2 at that point (probe: 193,331 and 202,288 tokens), and the Stop's
+compaction check (H2-01, a drop of more than `GOODBOY_COMPACT_DETECT_DROP_PCT` = 15 percent points) cleared the read
+records, which re-armed the policy read gate and read-before-edit. In the session the tokens passed 200k at about 03:35
+and the deny came at 03:42, 50 minutes after a full read; the real compactions were at 02:29 and 05:27 (the
+session transcript's compact boundaries and usage lines, read on 2026-11-20). The user
+decided on 2026-11-20 to fix it first, with the carried lows, then start track N.
+1. **Compaction by tokens.** The Stop keeps the measured tokens (`lastCtxTokens` in the habit state) and clears the
+   reads only when the tokens fell by more than `dropPct` % of the current limit. With a steady limit this is the old
+   rule; a limit that grows no longer counts, and a compaction after which the estimate falls back to 200k is still
+   seen. Re-arming after a real compaction stays (the context lost the file; SessionStart asks for the read again).
+   A session with no `lastCtxTokens` yet skips the check on its first Stop (the SessionStart compact path still
+   clears). The D4 growth warning needs no change: it already lowers its baseline when the percent falls (v0.27.8).
+2. **Lows carried from the v0.37.1 reviews.** The shell pre-check word (`SESSION_DIR_WORD`) takes, after
+   `goodboy-session`/`goodboy-project`, anything but the end of the word, `/`, `.` or `_` (the hyphen, or what can
+   supply it: `$E-x`, `{-x,}`, ANSI-C `$'\x2dx'`, an extended glob `@(-x)`), so a user's `goodboy_project`,
+   `goodboy-project` or `goodboy-project/` is no state dir (two delta reviews, 2026-11-20 and 2026-11-21); it takes
+   any prefix of either kind followed by `*`, `?` or `[` (`goodboy-pr*`), and after a bare `goodboy` a `*`, or a `?`
+   or a class (at most 64 characters, so the match stays linear) followed by `-`, `s`, `p` or another glob character
+   (`goodboy?sure` counts; a `goodboy?` ending a message and `goodboy[0-9].ts` do not); its deny text names
+   `goodboy-project-*` too. The test catalog counts JS/TS cases outside comments (a regex literal holding `/*` can
+   hide later cases from the count: the count is a summary, never evidence). The active Stop passes the docs it
+   already judged to the docs gate (no second listing of the test files). README and §-text: the test deferral is
+   never for the start gate, the push check's 30-day window, and the catalog is rewritten after the rule judges it,
+   not before.
 
 ## 16. J — Field reports (v0.34.0)
 

@@ -831,7 +831,7 @@ function main(): void {
       // (A0.88) goodboy's gate state is not the model's to change (lib/state-guard.ts).
       if (toolName === 'Bash' && typeof toolInput.command === 'string' && writesGateState(toolInput.command)) {
         logGate(sessionId, 'state-guard', 'deny', toolInput.command.slice(0, 120));
-        emit(deny("This command changes goodboy's own session state (goodboy-session-*). The gates decide from it; leave it alone and satisfy the gate instead."));
+        emit(deny("This command changes goodboy's own state (goodboy-session-* or goodboy-project-*). The gates decide from it; leave it alone and satisfy the gate instead."));
         return;
       }
 

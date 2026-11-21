@@ -3,7 +3,7 @@
 //   (2) 위임 재독 주의 — 메인이 읽은 파일 경로가 위임 프롬프트에 있으면 비차단 경고.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -44,9 +44,18 @@ async function runHook(
   cwd: string,
   input: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
+  // The user's own env must not decide the context limit or the drop threshold of the run.
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    TMPDIR: tmp,
+    HOME: tmp,
+    GOODBOY_REGISTRY_DIR: join(tmp, 'registry'),
+  };
+  delete env.GOODBOY_CONTEXT_LIMIT;
+  delete env.GOODBOY_COMPACT_DETECT_DROP_PCT;
   const proc = Bun.spawn(['bun', hookPath], {
     cwd,
-    env: { ...process.env, TMPDIR: tmp, HOME: tmp },
+    env,
     stdin: new TextEncoder().encode(JSON.stringify(input)),
     stdout: 'pipe',
     stderr: 'pipe',
@@ -62,14 +71,29 @@ async function runHook(
 
 const STD_MODEL = 'claude-3-5-sonnet-20241022'; // 확정 200K
 
-function writeTranscript(cwd: string, tokens: number): string {
+function writeTranscript(cwd: string, tokens: number, model: string = STD_MODEL): string {
   const path = join(cwd, 't.jsonl');
   writeFileSync(
     path,
-    JSON.stringify({ message: { model: STD_MODEL, usage: { input_tokens: tokens } } }) + '\n',
+    JSON.stringify({ message: { model, usage: { input_tokens: tokens } } }) + '\n',
     'utf8',
   );
   return path;
+}
+
+// A model id with no 1M marker and not a known 200K one: the limit estimate is 200k until the tokens pass it, then 1M.
+const UNMARKED_MODEL = 'claude-opus-5-5';
+
+function seedReads(dir: string): void {
+  writeFileSync(
+    join(dir, 'reads.jsonl'),
+    JSON.stringify({ file: '/repo/a.ts', turn: 1, timestamp: new Date().toISOString() }) + '\n',
+    'utf8',
+  );
+}
+
+function stopInput(sessionId: string, cwd: string, transcript: string): Record<string, unknown> {
+  return { session_id: sessionId, cwd, hook_event_name: 'Stop', transcript_path: transcript };
 }
 
 describe('H2-01 epoch 리셋 — 압축 감지 시 read 기록 초기화', () => {
@@ -81,7 +105,7 @@ describe('H2-01 epoch 리셋 — 압축 감지 시 read 기록 초기화', () =>
       JSON.stringify({ file: '/repo/a.ts', turn: 1, timestamp: new Date().toISOString() }) + '\n',
       'utf8',
     );
-    writeFileSync(join(dir, 'habit-state.json'), JSON.stringify({ lastCtxPercent: 60 }), 'utf8');
+    writeFileSync(join(dir, 'habit-state.json'), JSON.stringify({ lastCtxTokens: 120_000 }), 'utf8'); // 60 % of 200k
     const t = writeTranscript(cwd, 60_000); // 30% — 직전 60%에서 급락 = 압축
     await runHook(STOP_HOOK, tmp, cwd, {
       session_id: sessionId,
@@ -100,7 +124,7 @@ describe('H2-01 epoch 리셋 — 압축 감지 시 read 기록 초기화', () =>
       JSON.stringify({ file: '/repo/a.ts', turn: 1, timestamp: new Date().toISOString() }) + '\n',
       'utf8',
     );
-    writeFileSync(join(dir, 'habit-state.json'), JSON.stringify({ lastCtxPercent: 30 }), 'utf8');
+    writeFileSync(join(dir, 'habit-state.json'), JSON.stringify({ lastCtxTokens: 60_000 }), 'utf8'); // 30 % of 200k
     const t = writeTranscript(cwd, 80_000); // 40%
     await runHook(STOP_HOOK, tmp, cwd, {
       session_id: sessionId,
@@ -126,7 +150,7 @@ describe('H2-01 epoch 리셋 — 압축 감지 시 read 기록 초기화', () =>
         '\n',
       'utf8',
     );
-    writeFileSync(join(dir, 'habit-state.json'), JSON.stringify({ lastCtxPercent: 60 }), 'utf8');
+    writeFileSync(join(dir, 'habit-state.json'), JSON.stringify({ lastCtxTokens: 120_000 }), 'utf8');
     const t = writeTranscript(cwd, 60_000);
     await runHook(STOP_HOOK, tmp, cwd, {
       session_id: sessionId,
@@ -136,6 +160,74 @@ describe('H2-01 epoch 리셋 — 압축 감지 시 read 기록 초기화', () =>
     });
     expect(existsSync(join(dir, 'reads.jsonl'))).toBe(false);
     expect(existsSync(join(dir, 'edits.jsonl'))).toBe(true);
+  });
+
+  // v0.37.2: the drop is judged in tokens. For a model id with no 1M marker the limit estimate is 200k until the tokens
+  // pass it and 1M after, so the percent fell from 96.7 to 20.2 with no compaction and cleared the reads.
+  // Both fields are seeded so the pre-change code (which reads lastCtxPercent) sees its own field.
+  test('the limit estimate moving from 200k to 1M (96.7% → 20.2%) is no compaction: reads kept', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    const dir = sessionDir(tmp, sessionId);
+    seedReads(dir);
+    writeFileSync(
+      join(dir, 'habit-state.json'),
+      JSON.stringify({ lastCtxTokens: 193_331, lastCtxPercent: 96.7 }),
+      'utf8',
+    );
+    const t = writeTranscript(cwd, 202_288, UNMARKED_MODEL);
+    await runHook(STOP_HOOK, tmp, cwd, stopInput(sessionId, cwd, t));
+    expect(existsSync(join(dir, 'reads.jsonl'))).toBe(true);
+    const st = JSON.parse(readFileSync(join(dir, 'habit-state.json'), 'utf8')) as Record<string, unknown>;
+    expect(st.lastCtxTokens).toBe(202_288);
+  });
+
+  test('a compaction after which the estimate falls back to 200k (250k → 40k tokens) clears the reads', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    const dir = sessionDir(tmp, sessionId);
+    seedReads(dir);
+    // old field: 250k tokens read as 25 % of a 1M limit; 40k tokens is 20 % of 200k, a drop of 5 points only
+    writeFileSync(
+      join(dir, 'habit-state.json'),
+      JSON.stringify({ lastCtxTokens: 250_000, lastCtxPercent: 25 }),
+      'utf8',
+    );
+    const t = writeTranscript(cwd, 40_000, UNMARKED_MODEL);
+    await runHook(STOP_HOOK, tmp, cwd, stopInput(sessionId, cwd, t));
+    expect(existsSync(join(dir, 'reads.jsonl'))).toBe(false);
+  });
+
+  test('the threshold is a share of the current limit: 100k fewer tokens on a 1M window (10%) keeps the reads, 160k (16%) clears them', async () => {
+    for (const [now, cleared] of [[400_000, false], [340_000, true]] as const) {
+      const { tmp, cwd, sessionId } = newSandbox();
+      const dir = sessionDir(tmp, sessionId);
+      seedReads(dir);
+      writeFileSync(join(dir, 'habit-state.json'), JSON.stringify({ lastCtxTokens: 500_000 }), 'utf8');
+      const t = writeTranscript(cwd, now, UNMARKED_MODEL); // above 200k: the estimate is 1M
+      await runHook(STOP_HOOK, tmp, cwd, stopInput(sessionId, cwd, t));
+      expect([now, existsSync(join(dir, 'reads.jsonl')) === false]).toEqual([now, cleared]);
+    }
+  });
+
+  test('the next habit state holds lastCtxTokens and no lastCtxPercent', async () => {
+    const { tmp, cwd, sessionId } = newSandbox();
+    const dir = sessionDir(tmp, sessionId);
+    const t = writeTranscript(cwd, 80_000);
+    await runHook(STOP_HOOK, tmp, cwd, stopInput(sessionId, cwd, t));
+    const st = JSON.parse(readFileSync(join(dir, 'habit-state.json'), 'utf8')) as Record<string, unknown>;
+    expect(st.lastCtxTokens).toBe(80_000);
+    expect('lastCtxPercent' in st).toBe(false);
+  });
+
+  test('a drop of exactly the threshold (15% of the limit) keeps the reads; one token more clears them', async () => {
+    for (const [seeded, cleared] of [[110_000, false], [110_001, true]] as const) {
+      const { tmp, cwd, sessionId } = newSandbox();
+      const dir = sessionDir(tmp, sessionId);
+      seedReads(dir);
+      writeFileSync(join(dir, 'habit-state.json'), JSON.stringify({ lastCtxTokens: seeded }), 'utf8');
+      const t = writeTranscript(cwd, 80_000); // 200k limit: threshold 30_000 tokens
+      await runHook(STOP_HOOK, tmp, cwd, stopInput(sessionId, cwd, t));
+      expect([seeded, existsSync(join(dir, 'reads.jsonl')) === false]).toEqual([seeded, cleared]);
+    }
   });
 });
 

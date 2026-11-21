@@ -425,10 +425,11 @@ describe('the state guard keeps the per-repository tips file', () => {
     const bash = await hook(p, p.proj, 'pre-tool-use.ts', { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: 'toolu_i3914b', tool_input: { command: `printf '{}' > ${target}` } });
     const rm = await hook(p, p.proj, 'pre-tool-use.ts', { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: 'toolu_i3914c', tool_input: { command: `rm -f ${target}` } });
     const wr = await hook(p, p.proj, 'pre-tool-use.ts', { hook_event_name: 'PreToolUse', tool_name: 'Write', tool_use_id: 'toolu_i3914d', tool_input: { file_path: target, content: '{}' } });
-    for (const o of [bash, rm, wr]) {
+    // the shell text (v0.37.2) names both state dirs; the Write text still says "session state"
+    for (const [o, text] of [[bash, "goodboy's own state (goodboy-session-* or goodboy-project-*)"], [rm, "goodboy's own state (goodboy-session-* or goodboy-project-*)"], [wr, "goodboy's own session state"]] as const) {
       const h = (o.hookSpecificOutput ?? {}) as Record<string, string>;
       expect(h.permissionDecision).toBe('deny');
-      expect(h.permissionDecisionReason).toContain("goodboy's own session state");
+      expect(h.permissionDecisionReason).toContain(text);
     }
     expect(JSON.parse(readFileSync(target, 'utf8')).common).toBe(commonOf(p.be)); // untouched
   });

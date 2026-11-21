@@ -488,4 +488,103 @@ describe('the shell pre-check names the project state dir like the session dir',
     expect(writesGateState('cat /tmp/goodboy-project-abc/validation-passed.json')).toBe(false);
     expect(writesGateState('rm src/goodboyProjectHelper.ts')).toBe(false);
   });
+
+  // v0.37.2: both state dirs are `goodboy-<kind>-<id>`: the hyphen after the kind is part of the name, and a glob counts
+  // when it can still match such a dir (any prefix of the kind word, or `goodboy` alone, then a glob character).
+  test('a user dir that only looks like a state dir is no gate-state write', () => {
+    for (const cmd of [
+      'rm -rf goodboy_project/build',
+      'rm -rf ~/work/goodboy-project/x',
+      'mkdir goodboy_session',
+      'rm -rf goodboy_session/x',
+      'rm -rf goodboy-session/x',
+    ]) {
+      expect([cmd, writesGateState(cmd)]).toEqual([cmd, false]);
+    }
+  });
+
+  test('a glob that can match a state dir is a gate-state write, whichever prefix of the kind word it keeps', () => {
+    for (const cmd of [
+      'rm -rf /tmp/goodboy-pr*',
+      'rm -rf /tmp/goodboy-se*',
+      'rm -rf /tmp/goodboy-?roject-x',
+      'rm /tmp/goodboy-proj[e]ct-a/x',
+      'rm -rf /tmp/goodboy-*',
+      'rm -rf /tmp/goodboy*',
+      'rm -rf /tmp/goodboy-sess?on-x',
+      'rm -rf /tmp/goodboy-session-abc',
+    ]) {
+      expect([cmd, writesGateState(cmd)]).toEqual([cmd, true]);
+    }
+  });
+
+  // The shell can supply the hyphen after the kind (an expansion, a brace list, a quote, a backslash): those words can
+  // still name a state dir, so they stay writes.
+  test('an expansion after the kind word can supply the hyphen: still a gate-state write', () => {
+    for (const cmd of [
+      'rm -rf /tmp/goodboy-session$E-abc',
+      'rm -rf /tmp/goodboy-session${E}-abc',
+      'rm -rf /tmp/goodboy-session$(echo -abc)',
+      'rm -rf /tmp/goodboy-session{-abc,}',
+      'rm -rf /tmp/goodboy-project$E-abc',
+      'rm -rf /tmp/goodboy-project`echo -x`',
+      'rm -rf /tmp/goodboy-session\\-abc',
+      "rm -rf /tmp/goodboy-session'-x'",
+    ]) {
+      expect([cmd, writesGateState(cmd)]).toEqual([cmd, true]);
+    }
+  });
+
+  // A bare `goodboy` needs `*`, or `?` / a `[...]` class that goes on toward a kind (`-`, `s`, `p` or a glob character).
+  test('a bare `goodboy?` or `goodboy[...]` counts only when it goes on toward a state dir', () => {
+    for (const cmd of [
+      'rm -rf /tmp/goodboy?session-x',
+      'rm -rf /tmp/goodboy[-]project-x',
+      'rm -rf /tmp/goodboy?pro*',
+      'rm -rf /tmp/goodboy?*',
+      'rm -rf /tmp/goodboy[-]s*',
+    ]) {
+      expect([cmd, writesGateState(cmd)]).toEqual([cmd, true]);
+    }
+    for (const cmd of [
+      'git commit -m "fix goodboy?"',
+      'bun test tests/goodboy[0-9].test.ts',
+      'rm tests/goodboy[0-9].test.ts',
+      'rm goodboy?x',
+      'rm -rf goodboy-project.bak',
+    ]) {
+      expect([cmd, writesGateState(cmd)]).toEqual([cmd, false]);
+    }
+  });
+
+  // After the kind word, anything but the end of the word, `/`, `.` or `_` can still go on to `-<id>` (an escape that
+  // spells the hyphen, an extglob), so it counts; the end, a path separator, a file extension and an underscore do not.
+  test('anything after the kind word but its end, `/`, `.` or `_` can complete a state dir name', () => {
+    for (const cmd of [
+      "rm -rf /tmp/goodboy-session$'\\x2dabc'",
+      "rm -rf /tmp/goodboy-session$'\\055abc'",
+      'rm -rf /tmp/goodboy-session@(-abc)',
+      'rm -rf /tmp/goodboy-session+(-)abc',
+      'rm -rf /tmp/goodboy-sessions-x',
+      'rm -rf /tmp/goodboy-session-x',
+    ]) {
+      expect([cmd, writesGateState(cmd)]).toEqual([cmd, true]);
+    }
+    for (const cmd of [
+      'rm -rf goodboy-project.md',
+      'rm goodboy_session',
+      'rm -rf /tmp/goodboy-session',
+      'rm -rf goodboy-project/x',
+      'rm -rf goodboy-session_x',
+    ]) {
+      expect([cmd, writesGateState(cmd)]).toEqual([cmd, false]);
+    }
+  });
+
+  test('a very long word of repeated `goodboy[` is judged in linear time (the bracket class is bounded)', () => {
+    const cmd = `rm -rf ${'goodboy['.repeat(100_000)}`; // 800 KB
+    const started = Date.now();
+    writesGateState(cmd);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
 });

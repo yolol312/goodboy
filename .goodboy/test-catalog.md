@@ -3,7 +3,7 @@
 Feature → test type, generated from the test files by goodboy (`cli.ts test-catalog`).
 Regenerate it instead of editing it; the docs rule compares it with a fresh copy.
 
-Totals: unit 266 files, 5049 tests; e2e 2 files, 54 tests.
+Totals: unit 267 files, 5046 tests; e2e 2 files, 53 tests.
 
 | Feature | Type | File | Tests |
 |---|---|---|---|
@@ -50,42 +50,42 @@ Totals: unit 266 files, 5049 tests; e2e 2 files, 54 tests.
 | the review size; delta reviews; the review skills | unit | tests/h7-light-review.test.ts | 8 |
 | hasBin | unit | tests/has-bin.test.ts | 4 |
 | merged rules; PreToolUse; after a Bash call | unit | tests/hosts-guard.test.ts | 10 |
-| diff coverage; the gaps; replace refs; exemptions; through test-write and the Stop hook | unit | tests/i1-changed-lines.test.ts | 53 |
+| diff coverage; the gaps; replace refs; exemptions; through test-write and the Stop hook | unit | tests/i1-changed-lines.test.ts | 50 |
 | projectDir; the Stop gates after a cd into a subdir; PreToolUse after a cd into a subdir; I10 review: worktrees, approval paths, the CLI | unit | tests/i10-project-dir.test.ts | 11 |
 | the document class; the pre-edit guidance (B2); the review gate, end to end | unit | tests/i1b-doc-guidance.test.ts | 12 |
-| requirements; the stage pinned at the session start (I11, #20); policy entries with a test line; the session criteria; a product criterion is never met by a document; end to end | unit | tests/i2-acceptance.test.ts | 52 |
-| net change: an edit restored to the start blob; content freshness: a record made on the content the file has now; all gaps at once; forbidden patterns on added lines; forbidden patterns: a test file git does not show as changed; subprocess evidence through the hook | unit | tests/i23-gate-scope-stop.test.ts | 23 |
+| requirements; the stage pinned at the session start (I11, #20); policy entries with a test line; the session criteria; a product criterion is never met by a document; end to end | unit | tests/i2-acceptance.test.ts | 51 |
+| net change: an edit restored to the start blob; content freshness: a record made on the content the file has now; all gaps at once; forbidden patterns on added lines; forbidden patterns: a test file git does not show as changed; subprocess evidence through the hook | unit | tests/i23-gate-scope-stop.test.ts | 22 |
 | net change: netChangedEdits; net change: files git cannot hash safely; changedLines: an added line that looks like a file header; changedLines limited to paths; net change: a file that vanished; content freshness: freshFor | unit | tests/i23-gate-scope.test.ts | 65 |
 | net change: an edit restored to the start blob needs no review; content freshness: a review made on the content the file has now; withSameContent: which list of files a record names (in-process) | unit | tests/i26-review-net-change.test.ts | 9 |
-| needsTests: the harness is a test means when its marker is a regular file; the Stop test gate: a session that edits only testkit/ files | unit | tests/i28-testkit-harness.test.ts | 12 |
+| needsTests: the harness is a test means when its marker is a regular file; the Stop test gate: a session that edits only testkit/ files | unit | tests/i28-testkit-harness.test.ts | 11 |
 | openedPath: the path the OS opens; the recorder stores the file the OS opens, and each such edit needs a test at the Stop gate; read-before-edit agrees on the file the OS opens; MultiEdit and the re-Read gate use the path the OS opens | unit | tests/i29-dotdot-links.test.ts | 15 |
 | the class of a path; a preview is static only when its content is; the content check cannot be talked around; round 2: fail closed where the browser reads differently; what needs a test; the hooks use the classifier | unit | tests/i3-verification-scope.test.ts | 33 |
 | needsTests: fixed housekeeping names need no test record; needsTests: an empty .gitkeep/.keep; needsTests: package.json and plugin.json with only a version change; blobAtCommit: a file at a commit, or null; needsTests: a test-named path is trusted only inside the repo; needsTests: a dangling test-named link is not trusted | unit | tests/i30-metadata-no-test.test.ts | 34 |
 | openedPath spells its result like the cwd; classifyBashWrite reads a target the way the OS opens it; bashChangedPaths takes file and option targets the way the OS opens them; Bash read tracking under an alias cwd; the realpath memo of one evaluation; the spelling walk stops at the first ancestor that is its own real path | unit | tests/i31-bash-opened-paths.test.ts | 39 |
-| relative record paths with the shell in a subdirectory; a test under docs/versions as product evidence; git-ignored build copies of a tested source file; build copies: batching, the cap and the budget; record paths in this process; test-write and review-write in this process | unit | tests/i32-stop-gate-repeats.test.ts | 67 |
+| relative record paths with the shell in a subdirectory; a test under docs/versions as product evidence; git-ignored build copies of a tested source file; build copies: batching, the cap and the budget; record paths in this process; test-write and review-write in this process | unit | tests/i32-stop-gate-repeats.test.ts | 65 |
 | the worktree list shared inside one SessionStart; nearestGitTop; writeOnce; the readers of the session files survive a session dir that cannot be named or read; a git dir that git names and the file system does not hold; a first sight whose changes cannot be recorded | unit | tests/i33-worktree-start-inprocess.test.ts | 27 |
 | the research repro: a linked worktree is judged against its own start (control: the session starts in it); rule 1: SessionStart freezes the tips and pins the worktrees that exist; rule 2: a checkout first seen mid-session; rule 3: what is already in a checkout when a hook first sees it counts as the session\; rule 4: an unknown start grants nothing and borrows nothing; rule 4: a pin with no HEAD is unknown, never "no base check" | unit | tests/i33-worktree-start.test.ts | 99 |
 | #35: a worktree made mid-session at A/.worktrees/b is a checkout of its own; #35: a Stop in A points to edits made this turn in a nested checkout; #35: a Stop in a nested checkout points to edits made this turn in the project dir; #35: a Stop in A/.claude/worktrees/x checks no other checkout; #35: getEditsSince leaves a nested checkout out of the enclosing dir\; #35: edits under a planted .git are judged by A\ | unit | tests/i35-nested-checkouts.test.ts | 15 |
-| R4: a record with a tree counts by the content of the file, never by its time; R4: a record with no tree uses its time only while its checkout is not known to have changed; R4: `tree: null` is a work-tree hash that failed, not a record from before the trees; R4: the cap on record trees read does not let one file starve another; R3: a passing record whose test files are gone is no evidence; R2: a coverage base other than the start counts per file, by the file\ | unit | tests/i36-gate-content.test.ts | 79 |
+| R4: a record with a tree counts by the content of the file, never by its time; R4: a record with no tree uses its time only while its checkout is not known to have changed; R4: `tree: null` is a work-tree hash that failed, not a record from before the trees; R4: the cap on record trees read does not let one file starve another; R3: a passing record whose test files are gone is no evidence; R2: a coverage base other than the start counts per file, by the file\ | unit | tests/i36-gate-content.test.ts | 78 |
 | every git a hook or library runs carries the safety settings; hostile filter, fsmonitor, replace and graft configuration; a command that diffs runs no external diff program and no textconv; the git binary the hooks run (macOS shim); the per-Stop memo of git answers; a Stop with changed files, a build copy, records and a review | unit | tests/i36-git-cost.test.ts | 51 |
 | push check: always-true patterns in the lines the push adds | unit | tests/i369-push-scan.test.ts | 15 |
-| currentFindings with trees (#38): "changed" is the content the review saw; currentFindings with trees (#38): what is asked, and when; treeContent (#38) on a real repo; currentFindings (#38) with the real lookup | unit | tests/i38-finding-supersession.test.ts | 29 |
+| currentFindings with trees (#38): "changed" is the content the review saw; currentFindings with trees (#38): what is asked, and when; treeContent (#38) on a real repo; currentFindings (#38) with the real lookup | unit | tests/i38-finding-supersession.test.ts | 28 |
 | #38 a cleared finding stays cleared when the files are rewritten with the same content; #38 a finding is still open where the content says it is; #38 files the trees cannot judge fall back to the time rule | unit | tests/i38-review-supersession-stop.test.ts | 10 |
 | repoTrees; repoTrees: names, and the cap on confirmed repos; treesOf; regressionTop; checkHandoff: a result with no `tree` and the pushed repo\; cmdTestWrite in a plain folder holding repos | unit | tests/i39-nested-repo-push.test.ts | 40 |
-| confirmations are bounded; an unconfirmed dir is a group with an unknown start, a repo with no tree; the Stop hook with a planted `.git`; the post hooks run on the clock too; the hook clock bounds the phases after the confirmations | unit | tests/i3914-bounded-confirm.test.ts | 23 |
+| confirmations are bounded; an unconfirmed dir is a group with an unknown start, a repo with no tree; the Stop hook with a planted `.git`; the post hooks run on the clock too; the hook clock bounds the phases after the confirmations | unit | tests/i3914-bounded-confirm.test.ts | 22 |
 | the stop-groups seams and the error paths; nestedRepos limits; scopeCoverageTops: the repo a coverage entry names must be a repo inside the project dir; the schema of coverage.changed and coverage.subprocess, in process; review-write for repos past the tree limit; a nested repo whose git dir is elsewhere is pinned at its own HEAD | unit | tests/i3914-branches.test.ts | 25 |
 | isNoRepoProject when the identity check itself fails | unit | tests/i3914-injected-faults.test.ts | 1 |
 | repoOfFile; nestedRepos; SessionStart in a project dir that is no repo; the session\; the state guard keeps the per-repository tips file; sessionStartRan | unit | tests/i3914-nested-starts.test.ts | 25 |
 | review-write records trees and per-repo extra blobs; diff-coverage output; diff-coverage in a nested repo, in a session: the base is the repo\; test-write takes coverage.changed as one object or a list; changedEntries; the readers see only the entries of their repo | unit | tests/i3914-records-cli.test.ts | 36 |
-| the Stop in a project dir that is no repo: each repo is judged under its own top; the stop_hook_active path judges the same groups as the full Stop; a record is judged by its tree for the repo; the shared deadline; shell-made changes in a repo below the project dir; the `auto` test gate counts a test runner in any repo below the project dir | unit | tests/i3914-stop-groups.test.ts | 62 |
+| the Stop in a project dir that is no repo: each repo is judged under its own top; the stop_hook_active path judges the same groups as the full Stop; a record is judged by its tree for the repo; the shared deadline; shell-made changes in a repo below the project dir; the `auto` test gate counts a test runner in any repo below the project dir | unit | tests/i3914-stop-groups.test.ts | 61 |
 | boundary code; the types a file needs; missing types; the user globs | unit | tests/i3b-test-types.test.ts | 20 |
 | the whole-suite command; cli.ts regression; records and the check; the push check | unit | tests/i4-regression.test.ts | 22 |
-| spawnGit stops at the hook clock; statusOf; nestedStatus names what git did not answer for; a Bash call whose writes git could not list is kept; retryUnswept; the record file | unit | tests/i40-git-clock.test.ts | 64 |
+| spawnGit stops at the hook clock; statusOf; nestedStatus names what git did not answer for; a Bash call whose writes git could not list is kept; retryUnswept; the record file | unit | tests/i40-git-clock.test.ts | 63 |
 | the tests that load a changed file; affected gaps; weakened tests; the Stop | unit | tests/i5-existing-tests.test.ts | 50 |
-| finding 1: the project knowledge notice; findings 2–4 and 6: the push test check; finding 5: the result guard; finding 8: a local database socket | unit | tests/i6-trial-fixes.test.ts | 10 |
+| finding 1: the project knowledge notice; findings 2–4 and 6: the push test check; finding 5: the result guard; finding 8: a local database socket | unit | tests/i6-trial-fixes.test.ts | 9 |
 | finding 1: layer 1 in JVM projects; finding 2: a full regression for Gradle and Maven; finding 3: results written from goodboy's own directory; finding 4: open Bash calls at Stop while agents run | unit | tests/i7-trial2-fixes.test.ts | 7 |
 | finding 1: code-free Java interfaces; finding 2: a commit and a push in one command | unit | tests/i8-trial3-fixes.test.ts | 5 |
-| I9: citations resolve from the repo root, whatever the shell cwd; I9 review: two readings, a symlinked cwd, bare names | unit | tests/i9-claim-root.test.ts | 13 |
+| I9: citations resolve from the repo root, whatever the shell cwd; I9 review: two readings, a symlinked cwd, bare names | unit | tests/i9-claim-root.test.ts | 12 |
 | J1: the template; J1: the public summary check; J1: the session's evidence; J1: the inbox; J1: cli.ts report-write; J1: cli.ts report-evidence and --session | unit | tests/j1-field-report.test.ts | 16 |
 | J2: the inbox list and the notice; J2: moving a triaged report to done/; J2: the issue form and the skill; J2: review round 1; J2: review round 2 | unit | tests/j2-field-triage.test.ts | 24 |
 | signals from recorded fixtures; once per session, and where it is on; hook errors are recorded; the Stop hook | unit | tests/j3-friction.test.ts | 23 |
@@ -93,7 +93,7 @@ Totals: unit 266 files, 5049 tests; e2e 2 files, 54 tests.
 | the inventory; agent checks; triage with inventory identifiers; the CLI; review round 1 fixes; review round 2 fixes | unit | tests/k1b-inventory.test.ts | 32 |
 | health parsers; checkHealth with a fake claude; decisions; goodboy's smoke cases; the user's smoke cases; the CLI | unit | tests/k1c-health-smoke.test.ts | 35 |
 | problems that were already there, kept apart from regressions; projects to suggest for the registry; the session probe; the model probes; the CLI; the comparison, check by check (layer-1 additions) | unit | tests/k1d-update-check.test.ts | 49 |
-| L2: Java and Kotlin test files; L1: the survey; L3: the backfill state | e2e | tests/l-test-backfill.test.ts | 29 |
+| L2: Java and Kotlin test files; L1: the survey; L3: the backfill state | e2e | tests/l-test-backfill.test.ts | 28 |
 | T5-1: an unknown repo matters only to a command that may commit; T5-3: chmod modes are no paths | unit | tests/l-trial5-fixes.test.ts | 3 |
 | inGoodboySessionDir | unit | tests/m-coverage-file-tracker.test.ts | 1 |
 | planSandbox hosts and stores; the scan, the local file and the ledger of a project that is not what goodboy wrote; sandboxCommand in this process; checkSandbox | unit | tests/m-coverage-sandbox-line.test.ts | 11 |
@@ -120,22 +120,22 @@ Totals: unit 266 files, 5049 tests; e2e 2 files, 54 tests.
 | M4: backfill evidence with a sandbox; M4: test-write and the sandbox object; M4: the run-sandbox skill | unit | tests/m4-backfill-sandbox.test.ts | 26 |
 | a tests-role agent removes test output; bashChangedPaths and isTestOutputPath; writeDenial with removal and expanded (in-process) | unit | tests/m5-role-removal.test.ts | 17 |
 | the sandbox dir and what a sandbox file is; sandboxGaps (in-process); sandboxGaps and sandboxGapReason say what is missing (in-process); sandboxUsers fails closed on too many changed files; Stop, end to end: a session that changed only sandbox files; only the files the sandbox commands write are exempt | unit | tests/m5-sandbox-gate.test.ts | 31 |
-| jsLoads: type-only imports do not load a module; result-guard log reason | unit | tests/m5-type-imports.test.ts | 4 |
+| jsLoads: type-only imports do not load a module; result-guard log reason | unit | tests/m5-type-imports.test.ts | 3 |
 | writeAtomic; clearRealData; the sweep of host raw files and of a broken context; a ui-check verdict that cannot be stored | unit | tests/m6a-gaps.test.ts | 5 |
 | the text policy (lib/sandbox-boundary.ts); the counts of a run (lib/sandbox-summary.ts); the volume scripts and what they print (lib/sandbox-volumes.ts); expiry (lib/sandbox-expiry.ts); the ui-check verdict without titles (lib/ui-check.ts); the real-data flag in local.json | unit | tests/m6a-parts.test.ts | 47 |
 | real data: a full run prints and records no canary; real data: every failure prints a code, never the words of what failed; without real data the old output stays; raw artifacts expire; raw files of runs before M6a and of non-real-data runs; real data found in the volumes when local.json is gone | unit | tests/m6a-run.test.ts | 30 |
-| sandbox-data through sandboxCommand; writeLocal; glob reader of the data guard; bounds of one call | unit | tests/m6b-coverage.test.ts | 10 |
-| schema; shape; count; pick; what a failure says; the client | unit | tests/m6b-data.test.ts | 35 |
+| sandbox-data through sandboxCommand; writeLocal; glob reader of the data guard; bounds of one call | unit | tests/m6b-coverage.test.ts | 9 |
+| schema; shape; count; pick; what a failure says; the client | unit | tests/m6b-data.test.ts | 34 |
 | the small module a hook can load (lib/sandbox-mode.ts); old runs with no local.json (rawMayRemain); a docker that does not answer; ui-check on a project that is real data only because of old files | unit | tests/m6b-gaps.test.ts | 13 |
 | the glob matcher agrees with bash on the forms of `**` | unit | tests/m6b-glob.test.ts | 4 |
 | the operations; the condition; the condition against the table | unit | tests/m6b-grammar.test.ts | 16 |
 | a plain project, with other projects in the registry, is not slowed or stopped; raw output a run left on the host, through the shell; a path held in a variable, and a reader that is fed names; find -exec, globs with braces, `**`, classes and extended forms; programs that run their arguments or their input; a Korean path in either Unicode form | unit | tests/m6b-guard-forms.test.ts | 25 |
 | cd into a dir spelled from $HOME; compose set by the environment; raw host output while some is left, below a parent dir; the $HOME needles on Linux; a protected path is held as text at a path boundary; the work of a call is bounded | unit | tests/m6b-guard-scope.test.ts | 17 |
-| docker, podman and compose; the docker socket and the database clients; the dump and the input logs; Read, Grep and Glob; any tool whose input is a shell command; projects the rule leaves alone, and those it holds | unit | tests/m6b-guard.test.ts | 39 |
+| docker, podman and compose; the docker socket and the database clients; the dump and the input logs; Read, Grep and Glob; any tool whose input is a shell command; projects the rule leaves alone, and those it holds | unit | tests/m6b-guard.test.ts | 37 |
 | the outward push rule judges the push in the dir a $HOME cd names; the commit issue rule judges the commit in the repo a $HOME cd (or -C) names; the role limits judge a change in the dir a $HOME cd names; the reader itself: the dir a `cd` with HOME leaves | unit | tests/m6b-home-cd.test.ts | 14 |
 | Bash; Read, Grep and Glob; projects the rule leaves alone; round 2: the two contexts, the raw output, wrappers, the registry file, through the spawned hook | unit | tests/m6b-hook.test.ts | 27 |
 | sandbox-local --input; inputs in the local file and in the mode | unit | tests/m6b-local.test.ts | 11 |
-| the registry file; an entry never loses a path; who writes it; the reason a sandbox command gives is the error\; the plain local.json the sandbox commands write | unit | tests/m6b-registry.test.ts | 34 |
+| the registry file; an entry never loses a path; who writes it; the reason a sandbox command gives is the error\; the plain local.json the sandbox commands write | unit | tests/m6b-registry.test.ts | 33 |
 | the role script of each engine; when the role is applied | unit | tests/m6b-role.test.ts | 12 |
 | the SQL of each operation, per engine; values are quoted by goodboy; what the answers are read as; column classes; handles | unit | tests/m6b-sql.test.ts | 25 |
 | the layout of the sandbox dir; a test that imports the data helper | unit | tests/m6c-gate.test.ts | 9 |
@@ -147,7 +147,7 @@ Totals: unit 266 files, 5049 tests; e2e 2 files, 54 tests.
 | the order of a run; a run that stops at the data; a canary row that was resolved never leaves the volume; the hex of a value reaches the helpers in lowercase on every engine | unit | tests/m6c-run.test.ts | 31 |
 | the SQL of the resolve step, per engine; the answers of phase 1 are read strictly; the write script run inside the database container; a statement that ran into its time limit is told by the engine's error code, and the text never comes out; the whole file is bounded in bytes, inside the container | unit | tests/m6c-sql.test.ts | 18 |
 | clear-data; finish, with the scratch volumes cleared | unit | tests/m6c-volumes.test.ts | 6 |
-| M6d detectors: positives; M6d detectors: negatives; M6d detectors: spans and context; M6d detectors: cost; M6d detectors compile nothing per call; M6d lib/secret-patterns.ts keeps its own behaviour for its other users | unit | tests/m6d-detectors.test.ts | 25 |
+| M6d detectors: positives; M6d detectors: negatives; M6d detectors: spans and context; M6d detectors: cost; M6d detectors compile nothing per call; M6d lib/secret-patterns.ts keeps its own behaviour for its other users | unit | tests/m6d-detectors.test.ts | 24 |
 | M6d test-write; M6d review-write; M6d regression; M6d real-data runs record only the M6a result; M6d an id or a path that holds personal data stops test-write and review-write; M6d stderr shows no caller text | unit | tests/m6d-records.test.ts | 41 |
 | M6d runCommands | unit | tests/m6d-run-commands.test.ts | 3 |
 | M6d sanitizeRecord; M6d sanitizeRecord: keys that redact to one text; M6d sandboxRunFlagsOnly: the run line a real-data record may keep; M6d checkRecordFields | unit | tests/m6d-sanitize.test.ts | 17 |
@@ -157,13 +157,13 @@ Totals: unit 266 files, 5049 tests; e2e 2 files, 54 tests.
 | install and uninstall; a commit through the hooks; a push through the hooks; by hand | unit | tests/m6f-git-hooks.test.ts | 27 |
 | the denial; the user\; the hook\; a check that fails; where the scan applies | unit | tests/m6f-hook.test.ts | 18 |
 | git-hooks install and uninstall, in process; commit-scan, in process; push-scan, in process; the command reader, in process | unit | tests/m6f-in-process.test.ts | 18 |
-| H1: a push excludes only what its own remote has; H2: what hides the program or the subcommand is not scanned; H3: options are read by their full names; push; M1: the git hooks\; M2: a "not scanned" reason of the command is bound to the command | unit | tests/m6f-review-fixes.test.ts | 64 |
+| H1: a push excludes only what its own remote has; H2: what hides the program or the subcommand is not scanned; H3: options are read by their full names; push; M1: the git hooks\; M2: a "not scanned" reason of the command is bound to the command | unit | tests/m6f-review-fixes.test.ts | 63 |
 | a commit: the index; a commit: -a, paths, --amend; a commit: the message and the paths; names that are special to a JavaScript object; not scanned; what runs before the commit in one command | unit | tests/m6f-scan.test.ts | 61 |
 | A: a file that is exactly goodboy’s render is not asked for; B: goodboy’s record files are no privacy file; nothing else of `.claude/` is excluded; C: the refusal tells "no review" from "a review that does not clear"; the two guards of renderedUnchanged that need a broken input | unit | tests/m6g-canary-fixes.test.ts | 25 |
 | isPrivacyPath: the sandbox files and the manifest, by path; usesDataHelper: the tests that use the helper; privacyFilesOf: the files of a change; privacySetupOf: the current setup of a project | unit | tests/m6g-files.test.ts | 34 |
 | every way a command sets the switch is denied; what is not a command that sets it passes; the denial is one fixed text, with no way around it offered; through the PreToolUse hook | unit | tests/m6g-gate-switch.test.ts | 14 |
 | the dimension and the axis; review-axes in a project; privacyOptionsFor: the Stop’s predicate is bounded by the shared deadline and the hook’s clock; the Stop in a project that holds real data | unit | tests/m6g-review-gate.test.ts | 25 |
-| a real-data run without a covering review is refused; a covering review lets it run; what does not count as a covering review; what the gate leaves alone, and what it cannot read; the newest review of a file decides, and an open high or medium finding is no pass; the reviews of the repository top and of the project dir both count | unit | tests/m6g-run-gate.test.ts | 33 |
+| a real-data run without a covering review is refused; a covering review lets it run; what does not count as a covering review; what the gate leaves alone, and what it cannot read; the newest review of a file decides, and an open high or medium finding is no pass; the reviews of the repository top and of the project dir both count | unit | tests/m6g-run-gate.test.ts | 32 |
 | one definition of the helper facts; the surface | unit | tests/m6g-shared.test.ts | 5 |
 | the reviewers and the skill; the README | unit | tests/m6g-texts.test.ts | 7 |
 | the data rule reads a glob the way a shell would; a link source glob too long to match as text within the work budget is denied, not let through; a lock that cannot be taken after two tries; a node:http handler whose call never closes is still read, to a bound | unit | tests/m7-cov-lines.test.ts | 9 |
@@ -193,20 +193,20 @@ Totals: unit 266 files, 5049 tests; e2e 2 files, 54 tests.
 | pre-tool-use risk gate (2-B) | unit | tests/pre-tool-use-risk-gate.test.ts | 10 |
 | isTaskNotification (G0 M10: completions arrive as prompts); parseSlashCommand (G0 M12: typed commands arrive verbatim); isGoodboyCommand | unit | tests/prompt-kind.test.ts | 9 |
 | handoffsOf; workTreeState and checkHandoff; the PreToolUse rule | unit | tests/push-test.test.ts | 30 |
-| an own edit as knowledge; whose read counts; after a compaction | unit | tests/read-before-edit-knowledge.test.ts | 10 |
+| an own edit as knowledge; whose read counts; after a compaction | unit | tests/read-before-edit-knowledge.test.ts | 9 |
 | re-Read gate and PDF page ranges (A7); partial reads elsewhere (A7) | unit | tests/read-record-chain-partial.test.ts | 6 |
 | read-record chain: PostToolUse record -> PreToolUse decision (A2); re-Read gate counts only full reads (A7) | unit | tests/read-record-chain.test.ts | 8 |
-| hasReasoningSection; parseReasoningSection; placeholder items | unit | tests/reasoning-parser.test.ts | 22 |
+| hasReasoningSection; parseReasoningSection; placeholder items | unit | tests/reasoning-parser.test.ts | 21 |
 | recursion-guard hashPrompt; recursion-guard 강화된 임계값 (동일5/총30); recursion-guard checkRecursionGuard; recursion-guard via pre-tool-use hook; recursion-guard prune (3-B: append-only + 원자적) | unit | tests/recursion-guard.test.ts | 15 |
 | detectMissingInputs; buildRequiredInputsChecklist | unit | tests/required-inputs.test.ts | 12 |
-| H2-01 epoch 리셋 — 압축 감지 시 read 기록 초기화; 위임 재독 주의 (비차단) | unit | tests/reread-epoch-and-delegation.test.ts | 7 |
+| H2-01 epoch 리셋 — 압축 감지 시 read 기록 초기화; 위임 재독 주의 (비차단) | unit | tests/reread-epoch-and-delegation.test.ts | 12 |
 | review-corpus deterministic guard | unit | tests/review-corpus-guard.test.ts | 3 |
 | getEditsSince; getLatestEditTimestampSince; wasFileEditedRecently (FRICTION #4); review cursor persistence; BUG #2 regression: per-feature scope | unit | tests/review-cursor.test.ts | 14 |
 | axesFor — 병렬 리뷰 축 결정; requiredDimensionsFor | unit | tests/review-dimensions.test.ts | 18 |
 | 리뷰 스코프 — 프로젝트 안으로 한정 (루프 방지); 리뷰 스코프 — 위임 우회 차단; 리뷰 스코프 — 커서 경계; 리뷰 스코프 — 데드락 대응 필터 (A/B/C) | unit | tests/review-scope.test.ts | 12 |
 | review timestamps that are not ISO date-times (round 3) | unit | tests/review-timestamp-trust.test.ts | 1 |
 | validateReview; validateReviewCoverage (v0.26.5, 리뷰 누적 인정); currentFindings (v0.26.6, finding 단위 대체 의미론); currentFindings: what supersedes a finding (round 3); fileModifiedAt (round 3); review timestamps on read (round 3) | unit | tests/review-validator.test.ts | 50 |
-| review-write CLI (#7); validateReviewResultInput (unit); review-write path traversal hardening (1-B) | unit | tests/review-write.test.ts | 23 |
+| review-write CLI (#7); validateReviewResultInput (unit); review-write path traversal hardening (1-B) | unit | tests/review-write.test.ts | 22 |
 | risk approval withdrawal deletes this session’s risk marker only (A3); the risk deny in a directory without .claude/ (A3) | unit | tests/risk-approval-scope.test.ts | 2 |
 | classifyRisk; isReadOnlyBash (risk-gate exemption, A4); detectRiskOverride | unit | tests/risk-classifier.test.ts | 18 |
 | risk gate — read-only Bash in a risky session | unit | tests/risk-gate-read-only-bash.test.ts | 2 |
@@ -218,7 +218,7 @@ Totals: unit 266 files, 5049 tests; e2e 2 files, 54 tests.
 | session state (A3) | unit | tests/session-state.test.ts | 10 |
 | isWorkflowSkill; validateSkillGapNote; the rule in the hooks | unit | tests/skill-rule.test.ts | 13 |
 | documents name the per-session approval marker (A3) | unit | tests/skills-approval-marker-name.test.ts | 1 |
-| S16-AC-1: checkHandoff scans the lines the push adds on the prose path; S16-AC-2: writesGateState reads the program past prefixes and rtk, and needs a separator in the name; S16-AC-2b: writesGateState on `tree` and `file`: -o and -C write, an attached argument is no option; S16-AC-3: test-write keeps `notes`, cut at 4000, and refuses one that is no string; S16-AC-4: statusOf redirects only into a `.git` dir that has a HEAD | unit | tests/small-fixes-0.36.16.test.ts | 36 |
+| S16-AC-1: checkHandoff scans the lines the push adds on the prose path; S16-AC-2: writesGateState reads the program past prefixes and rtk, and needs a separator in the name; S16-AC-2b: writesGateState on `tree` and `file`: -o and -C write, an attached argument is no option; S16-AC-3: test-write keeps `notes`, cut at 4000, and refuses one that is no string; S16-AC-4: statusOf redirects only into a `.git` dir that has a HEAD | unit | tests/small-fixes-0.36.16.test.ts | 37 |
 | who may start agents; running agents and completions; the same agent on the same prompt; caps and gate modes through the hook; runaway and the fuse through the hook (#21); headless Claude runs | unit | tests/spawn-guard-hooks.test.ts | 15 |
 | depth: only leads start agents, and only their members; main-session caps; duplicates need evidence; policy rewrite; spawnsClaudeCli (headless runs bypass the Agent guard); namedFiles | unit | tests/spawn-guard.test.ts | 39 |
 | writesGateState; through the hooks | unit | tests/state-guard.test.ts | 8 |
@@ -233,11 +233,11 @@ Totals: unit 266 files, 5049 tests; e2e 2 files, 54 tests.
 | Stop hook — 층0 인용 검증 게이트 | unit | tests/stop-claim-gate.test.ts | 16 |
 | Stop hook — compaction notice latch (A7, track G) | unit | tests/stop-compact-latch.test.ts | 2 |
 | Stop hook — H1-03 compaction notice (>=50%, track G) | unit | tests/stop-compact-warning.test.ts | 11 |
-| cursors per project directory — accepts in a subdirectory (A3) | unit | tests/stop-cursor-per-directory.test.ts | 6 |
+| cursors per project directory — accepts in a subdirectory (A3) | unit | tests/stop-cursor-per-directory.test.ts | 5 |
 | Stop hook — dimension coverage enforcement | unit | tests/stop-dimensions.test.ts | 6 |
 | foreign high findings on the user overrides (A3, round 3; track G) | unit | tests/stop-escape-foreign-note.test.ts | 4 |
 | foreign high findings and the session's first edit (A3); supersession across every review (A3, rule from round 3); foreign high findings at the stop_hook_active accept (A3) | unit | tests/stop-foreign-findings-window.test.ts | 7 |
-| gates wait for running agents; review required, no review at all; round-1 review fixes; effort advice | unit | tests/stop-g1.test.ts | 18 |
+| gates wait for running agents; review required, no review at all; round-1 review fixes; effort advice | unit | tests/stop-g1.test.ts | 17 |
 | Stop hook — H1-03 compaction notice (>=50%); Stop hook — H1-01 long-session warning; Stop hook — H1-01 한도 비례 임계 + 래치 해제 (v0.27.8) | unit | tests/stop-habit-warnings.test.ts | 9 |
 | the assumption-review link with English and described labels (F3) | unit | tests/stop-rationale-assumptions.test.ts | 6 |
 | Stop hook — per-session block counts (A3) and the user override (track G) | unit | tests/stop-retry-isolation.test.ts | 2 |
@@ -267,9 +267,10 @@ Totals: unit 266 files, 5049 tests; e2e 2 files, 54 tests.
 | V18-AC-1 readStateText; V18-AC-1 callers neither hang nor crash on a FIFO or a directory at their file; V18-AC-2 turn.txt is guarded: it never goes down; V18-AC-3 a guarded name a call created as no regular file is removed; V18-AC-4 the snapshot index is sealed; V18-AC-4 the key file and the notes are under the session dir name write gates | unit | tests/v0.36.18-state-guard.test.ts | 102 |
 | V19-AC-1: outsideRepo gives the copy target only when every condition holds; V19-AC-2: test-write from the sibling repo keeps its record there and copies it to the project dir; V19-AC-2b: a copy that cannot be written warns and the command still succeeds; V19-AC-3: regression from the sibling repo keeps its record there and copies it to the project dir; V19-AC-4: test-write --worktree from the sibling repo copies too; V19-AC-5: findRecentTestFiles leaves repo records out unless asked | unit | tests/v0.36.19-sibling-repo.test.ts | 43 |
 | peekBashStart (the post hook reads the start note without taking it); shellValidationPass (the pass a finished Bash call proves); failureMarkerRoot; the state guard and an unusable pass record copy; resnapshotAgentCalls; treeRecordWindow | unit | tests/v0.37.1-44-cov.test.ts | 22 |
-| deferralOpen when another Stop starts the clock first | unit | tests/v0.37.1-44-race.test.ts | 4 |
-| a passing shell run clears the failed marker (#44 item 4); exactMarkerCommand; the state guard keeps the pass record (#44); the agent-deferral clock is state-guarded (#44 item 3, lib/agent-deferral.ts); file-tool writes to goodboy-project-* are denied (#44 security review); exactMarkerCommand reads only ASCII spaces and tabs as blanks | unit | tests/v0.37.1-44-validation.test.ts | 36 |
-| item 1: tree-bound records are read longer while a commit is unpushed; item 1: the review gate through the Stop; item 3: agent kinds, the summary and the 45-minute cap; item 3: the review gate through the Stop; item 3: the test gate through the Stop; item 3: the deferral clock and the state guard | unit | tests/v0.37.1-44.test.ts | 58 |
+| deferralOpen when another Stop starts the clock first | unit | tests/v0.37.1-44-race.test.ts | 3 |
+| a passing shell run clears the failed marker (#44 item 4); exactMarkerCommand; the state guard keeps the pass record (#44); the agent-deferral clock is state-guarded (#44 item 3, lib/agent-deferral.ts); file-tool writes to goodboy-project-* are denied (#44 security review); exactMarkerCommand reads only ASCII spaces and tabs as blanks | unit | tests/v0.37.1-44-validation.test.ts | 41 |
+| item 1: tree-bound records are read longer while a commit is unpushed; item 1: the review gate through the Stop; item 3: agent kinds, the summary and the 45-minute cap; item 3: the review gate through the Stop; item 3: the test gate through the Stop; item 3: the deferral clock and the state guard | unit | tests/v0.37.1-44.test.ts | 60 |
+| the test count of the catalog; race; sums | unit | tests/v0.37.2-test-catalog-count.test.ts | 14 |
 | the start time a pass record keeps (A3); a pass that starts after now or after its record was written is not read (A3, #44) | unit | tests/validation-pass-record.test.ts | 8 |
 | a pass lifts an older failure only in the same project (A3) | unit | tests/validation-pass-scope.test.ts | 4 |
 | validation failure marker (A3) | unit | tests/validation-state.test.ts | 15 |
