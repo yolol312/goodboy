@@ -55,7 +55,7 @@ so work is released in batches:
 | v0.37.0 | track M (full tests in an isolated container sandbox: a real database copy, dummy external services, no egress; 100% line and branch coverage, every screen and action in e2e; M6 real-data protection; M7 release review), §19. Released 2026-11-19 |
 | v0.37.1 | #44 items 1 (in part), 3, 4, 5: Stop gates that block on evidence already there (records of unpushed work read for 30 days, deferral only for goodboy test and review agents capped at 45 minutes, a shell rerun of a failed validation command, the Stop regenerates a stale test catalog), §15.36; first planned as the v0.36.20 hotfix (user 2026-11-19: after v0.37.0, from main). Released 2026-11-20 |
 | v0.37.2 | the Stop's compaction check by a token drop, not a percent drop (a local field report of 2026-11-16: the policy read gate re-armed when the limit estimate moved from 200k to 1M), and the lows carried from the v0.37.1 reviews, §15.37. Released 2026-11-21 |
-| v0.37.3 | the I5 existing-tests check takes the suite command as the evidence (no `test_files` listing), and coverage reports go to a temp dir with a `test-write` warning on untracked files in the recorded tree, §15.38 |
+| v0.37.3 | the I5 existing-tests check takes the suite command as the evidence (no `test_files` listing), and coverage reports go to a temp dir with a `test-write` warning on untracked files in the recorded tree, §15.38 (#46). Released 2026-11-23 |
 | v0.38.0 | proposed: track N (fewer repeated runs, a project test inventory, task criteria, §20.4–§20.6), with a push judged by the test results gathered since the last push (§21, N24–N30, #43, #45); its order against v0.37.0 is the user's decision |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
 
@@ -3735,6 +3735,10 @@ gates were bound to what the tester writes by hand or leaves behind, not to the 
    no repo (nested clones) gets no such warning.
    - Not changed: the push check still compares the whole tree, untracked files included (an untracked file a
      test reads is part of what was tested).
+3. Carried lows of the delta review (2026-11-23): no test covers the new scan in a project dir that is no repo
+   (nested groups; a record path spelled through `..` or a link could be scanned twice, cosmetic), and none checks
+   that a real-data run prints `[withheld]` in the untracked-files warning (the code passes the names through
+   `shown`). Issue #46.
 
 ## 16. J — Field reports (v0.34.0)
 
