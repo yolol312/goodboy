@@ -208,6 +208,24 @@ export function workTreeState(
   }
 }
 
+/** (v0.37.3) The untracked, not ignored files `workTreeState` puts into the tree, goodboy's artifacts
+ *  left out (repo-relative, at most `max`). A test run's own output (bun's `coverage/`) lands here
+ *  and makes the recorded tree one that no commit holds, so the push check never matches it.
+ *  Empty outside a git repo or when git fails. */
+export function untrackedInTree(cwd: string, max = 5): string[] {
+  const top = topOf(cwd);
+  if (top === null) return [];
+  const out = git(top, ['ls-files', '--others', '--exclude-standard', '-z']);
+  if (out === null) return [];
+  return out
+    .split('\0')
+    .filter((p) => p !== '' && !isArtifactPath(p) && !NESTED_ARTIFACT.test(p))
+    .slice(0, max);
+}
+
+/** goodboy's result dirs and markers of a project dir below the repo top (`sub/.claude/tests/…`). */
+const NESTED_ARTIFACT = /(?:^|\/)\.claude\/(?:(?:tests|reviews|pending)\/|\.goodboy-)/;
+
 /** Most repos `repoTrees` hashes (each one a work-tree hash). */
 const MAX_TREE_REPOS = 8;
 

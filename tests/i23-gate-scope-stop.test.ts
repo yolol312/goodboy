@@ -219,17 +219,30 @@ describe('forbidden patterns on added lines', () => {
     expect(out.reason ?? '').not.toContain('테스트 게이트');
   }, 60_000);
 
-  test('the existing-tests rule still asks for that test when the record does not list it', async () => {
+  test('the existing-tests rule still asks for that test when no suite of the record ran it (v0.37.3: the command decides, not the list)', async () => {
     const { d, s } = project({ 'tests/a.test.ts': OLD_TODO });
     const a = join(d, 'src', 'calc.ts');
     writeFileSync(a, V2);
     edited(s, a);
     const other = write(d, 'tests/new.test.ts', 'test("n", () => { expect(2).toBe(2); });\n');
-    putRecord(d, record(d, { test_files: [other] }));
+    const suites = [{ name: 'unit', command: 'bun test tests/new.test.ts', passed: 1, failed: 0, output: '1 pass', type: 'unit', duration_ms: 10 }];
+    putRecord(d, record(d, { test_files: [other], suites }));
     const out = await stop(d, s, env);
     expect(out.decision).toBe('block');
     expect(out.reason).toContain('Existing tests that cover the change did not run with it');
     expect(out.reason).not.toContain('skip/todo');
+  }, 60_000);
+
+  test('a whole-suite record that does not list that test needs no second run of it (v0.37.3), and its old todo is not this change\'s', async () => {
+    const { d, s } = project({ 'tests/a.test.ts': OLD_TODO });
+    const a = join(d, 'src', 'calc.ts');
+    writeFileSync(a, V2);
+    edited(s, a);
+    const other = write(d, 'tests/new.test.ts', 'test("n", () => { expect(2).toBe(2); });\n');
+    putRecord(d, record(d, { test_files: [other] })); // the suite is `bun test`, the whole suite
+    const out = await stop(d, s, env);
+    expect(out.reason ?? '').not.toContain('Existing tests that cover the change');
+    expect(out.reason ?? '').not.toContain('skip/todo');
   }, 60_000);
 
   test('a todo added in the session is caught, with its line', async () => {

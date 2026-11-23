@@ -804,7 +804,7 @@ export function stripLiteralsAndComments(source: string, javaTextBlocks = false,
 /** 테스트 파일들에서 가짜 테스트 패턴을 찾는다. 읽기 실패한 파일은 건너뛴다(fail-open).
  *  (#23) With `linesOf`, a match counts only when it touches a line it returns for the file (the
  *  lines added since the session's start): a pattern that was there before the session is not
- *  this change's, and the existing-tests rule may need that file listed. `null` from it means
+ *  this change's (the Stop also scans the existing tests that load a changed file, v0.37.3). `null` from it means
  *  every line counts. */
 export function scanForbiddenPatterns(testFiles: string[], linesOf?: (file: string) => ReadonlySet<number> | null): ForbiddenHit[] {
   const hits: ForbiddenHit[] = [];

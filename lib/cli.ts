@@ -21,7 +21,7 @@ import type {
   TestVerdict,
   Verdict,
 } from './types';
-import { outsideRepoTop, regressionTop, repoTrees, topOf, treeDiff, treesOf, workTreeState } from './push-test';
+import { outsideRepoTop, regressionTop, repoTrees, topOf, treeDiff, treesOf, untrackedInTree, workTreeState } from './push-test';
 import { cleanWorktreeFor, type CleanWorktree, worktreeArg } from './clean-worktree';
 import { cliProjectDir, knownProjectDir } from './project-dir';
 import { getEditHistory, openedPath } from './file-tracker';
@@ -955,6 +955,9 @@ export async function cmdTestWrite(cwd: string, args: string[], shell: string = 
   const state = wt !== null ? { commit: wt.commit, tree: wt.tree } : workTreeState(cwd);
   result.commit = state.commit;
   result.tree = state.tree;
+  // (v0.37.3) Taken with the tree, before this record is written (a project dir below the repo top keeps its
+  //   records in an untracked dir of its own).
+  const untracked = wt === null && state.tree !== null ? untrackedInTree(cwd) : [];
   // (#39) And the trees of the other repos the tested files belong to (nested clones, or every repo
   //   when the project dir is none): a push from one hands off that repo's tree. The validator
   //   already keeps no `trees` of the agent's; the delete keeps it so if that ever changes.
@@ -995,6 +998,13 @@ export async function cmdTestWrite(cwd: string, args: string[], shell: string = 
   if (treesOf(result).length === 0) {
     process.stderr.write(
       'warning: no tested tree recorded (no tested file is in a git repository inside the project dir, or git could not hash it), so no push can match this result.\n',
+    );
+  }
+  // (v0.37.3) Untracked files are part of the recorded tree: a test run's own output (coverage/) left in the repo
+  //   makes a tree no commit holds, so the push check never matches it.
+  if (untracked.length > 0) {
+    process.stderr.write(
+      `warning: the recorded tree holds untracked files (${untracked.map((p) => shown(p, withhold)).join(', ')}); a push matches it only if they are committed. Commit new files that belong to the change, remove test output (coverage reports, logs) from the repo, or list files kept on purpose in .git/info/exclude, then record again.\n`,
     );
   }
 }

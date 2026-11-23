@@ -55,6 +55,7 @@ so work is released in batches:
 | v0.37.0 | track M (full tests in an isolated container sandbox: a real database copy, dummy external services, no egress; 100% line and branch coverage, every screen and action in e2e; M6 real-data protection; M7 release review), §19. Released 2026-11-19 |
 | v0.37.1 | #44 items 1 (in part), 3, 4, 5: Stop gates that block on evidence already there (records of unpushed work read for 30 days, deferral only for goodboy test and review agents capped at 45 minutes, a shell rerun of a failed validation command, the Stop regenerates a stale test catalog), §15.36; first planned as the v0.36.20 hotfix (user 2026-11-19: after v0.37.0, from main). Released 2026-11-20 |
 | v0.37.2 | the Stop's compaction check by a token drop, not a percent drop (a local field report of 2026-11-16: the policy read gate re-armed when the limit estimate moved from 200k to 1M), and the lows carried from the v0.37.1 reviews, §15.37. Released 2026-11-21 |
+| v0.37.3 | the I5 existing-tests check takes the suite command as the evidence (no `test_files` listing), and coverage reports go to a temp dir with a `test-write` warning on untracked files in the recorded tree, §15.38 |
 | v0.38.0 | proposed: track N (fewer repeated runs, a project test inventory, task criteria, §20.4–§20.6), with a push judged by the test results gathered since the last push (§21, N24–N30, #43, #45); its order against v0.37.0 is the user's decision |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
 
@@ -1433,7 +1434,8 @@ Two rules (`lib/existing-tests.ts`), both against the session's start HEAD (pinn
     `mv`, each copy taken once); a deleted one is not required here, it is a weakened test
     (below).
   - Each needs a passing record with a trusted timestamp after the code file's last edit that
-    lists it in `test_files` and has a passing suite that ran it. `suiteRan` reads only the
+    has a passing suite that ran it (until v0.37.3 it also had to list it in `test_files`,
+    §15.38). `suiteRan` reads only the
     test runs of the command (`bun test`, `npm test`/`run test:*`, `jest`, `vitest`, `pytest`,
     `go test`, `cargo test`, `node --test`, a test script by name…); setup steps before them
     (`node scripts/setup.js &&`, `bun build … &&`) name no tests, and a command with no test
@@ -3709,6 +3711,30 @@ decided on 2026-11-20 to fix it first, with the carried lows, then start track N
    already judged to the docs gate (no second listing of the test files). README and §-text: the test deferral is
    never for the start gate, the push check's 30-day window, and the catalog is rewritten after the rule judges it,
    not before.
+
+### 15.38 v0.37.3: evidence the command already shows, and test output kept out of the tree
+
+Both came up while releasing v0.37.2 (the user asked on 2026-11-23 whether the pattern is structural; it is: the
+gates were bound to what the tester writes by hand or leaves behind, not to the run).
+
+1. **I5 needs no `test_files` listing.** The v0.37.2 record's full suite (`bun test`, 5867 pass, 0 fail) ran every
+   affected test, and `suiteRan` says so, but the record listed 9 files in `test_files`, so the Stop blocked on 11
+   files that loaded `lib/state-guard.ts` and asked for them to run again. `affectedGaps` now takes a record with a
+   passing suite that ran the test (the same freshness, trust and acceptance as before); the hand-written list
+   added nothing the command does not show (both are the tester's). The block text no longer asks to list them.
+   - The listing had a side effect (review of v0.37.3): `test_files` feeds the forbidden-pattern scan, so every
+     affected test was scanned. The Stop now scans the affected tests' lines added in the session itself, like a
+     record's test files (an affected test whose added lines git cannot tell is not scanned whole: an old pattern
+     in it is not this change's).
+2. **Test output stays out of the recorded tree.** `measure-coverage` wrote bun's report to `coverage/` in the
+   repo; `workTreeState` puts untracked, not ignored files into the tested tree, so the record named a tree no
+   commit holds and the push check blocked (the user approved the v0.37.2 push once). The skill now writes every
+   coverage report to a temp dir, and `test-write` warns when the recorded tree holds untracked files
+   (`untrackedInTree`, lib/push-test.ts, taken before the record is written; goodboy's artifacts left out, also
+   those of a project dir below the repo top; at most 5 named, withheld on a real-data run). A project dir that is
+   no repo (nested clones) gets no such warning.
+   - Not changed: the push check still compares the whole tree, untracked files included (an untracked file a
+     test reads is part of what was tested).
 
 ## 16. J — Field reports (v0.34.0)
 

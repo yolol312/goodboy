@@ -18,7 +18,8 @@ catch it breaking again.
 - Start what the tests need (a container, a local server) and stop it when done.
 - `tested_files` is every changed code file in scope.
 - Run the existing tests that load the changed files with yours (a Stop block lists them), or
-  the whole suite, and list them in `test_files`. An existing test that now fails is updated to
+  the whole suite (the suite's command is the evidence; `test_files` lists the tests you wrote or
+  changed). An existing test that now fails is updated to
   the new behavior with the main session's reason; never drop its checks or skip it.
 - Label each suite by what its tests really run (the Stop's test-type rule trusts the label):
   `integration` only when the tests drive the real boundary (files, a process, a database, the

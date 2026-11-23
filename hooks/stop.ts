@@ -41,6 +41,7 @@ import { absentRecordWarnings, withoutAbsentTests } from '../lib/test-validator'
 import {
   affectedGaps,
   affectedReason,
+  affectedTests,
   existingTestsMode,
   judgedWeakened,
   pinJudgedWeakened,
@@ -946,17 +947,13 @@ function runTestRules(
   const top = projectTop(cwd);
   // (#39) One `linesOf` for every test file of the records: it asks the repo the file is in.
   const linesOf = testLinesOf(sessionId, cwd, results.flatMap((r) => r.test_files ?? []));
-  const forbidden = scanForbiddenPatterns(ran.flatMap((r) => r.test_files ?? []), linesOf);
-  if (forbidden.length > 0) {
-    const list = forbidden
+  const forbiddenReason = (hits: ReturnType<typeof scanForbiddenPatterns>): string =>
+    `통과하지만 아무것도 검증하지 않는 테스트 패턴이 있습니다: ${hits
       .slice(0, 3)
       .map((h) => `${h.file}${h.line ? `:${h.line}` : ''}: ${h.message}`)
-      .join(' / ');
-    block(
-      `통과하지만 아무것도 검증하지 않는 테스트 패턴이 있습니다: ${list}` +
-        `${forbidden.length > 3 ? ` 외 ${forbidden.length - 3}건` : ''}`,
-    );
-  }
+      .join(' / ')}` + `${hits.length > 3 ? ` 외 ${hits.length - 3}건` : ''}`;
+  const forbidden = scanForbiddenPatterns(ran.flatMap((r) => r.test_files ?? []), linesOf);
+  if (forbidden.length > 0) block(forbiddenReason(forbidden));
   // (I2) A product criterion's evidence is a test of the product, never a document check.
   const productIssues = productEvidenceProblems(ran, resolvePath(cwd));
   if (productIssues.length > 0) {
@@ -1043,6 +1040,7 @@ function runTestRules(
   const nogit = judged.some((j) => j.g.kind !== 'repo');
   const typeGaps: TypeGap[] = [];
   const affected: AffectedGap[] = [];
+  const affectedFiles: string[] = [];
   const lineParts: { g: Group; out: ReturnType<typeof changedLineGaps> }[] = [];
   const timedOut: Group[] = [];
   const effectiveSet = new Set(effective);
@@ -1074,8 +1072,12 @@ function runTestRules(
     //   An error here is logged and skips this rule only, not the checks after it.
     if (existingMode !== 'off') {
       try {
+        const loads = affectedTests(g.top, g.head, j.edits.map((e) => e.file));
+        // (v0.37.3) A whole-suite run no longer lists these in test_files, which fed the pattern scan above; they
+        //   are scanned below instead.
+        for (const tests of loads.values()) affectedFiles.push(...tests.map((t) => join(g.top, t)));
         affected.push(
-          ...affectedGaps({ results: j.views, accepted: new Set(gran), edits: j.edits, top: g.top, head: g.head, standsAlone }).map((a) =>
+          ...affectedGaps({ results: j.views, accepted: new Set(gran), edits: j.edits, top: g.top, head: g.head, standsAlone, affected: loads }).map((a) =>
             g.kind === 'nested' ? { rel: nameIn(g, a.rel), tests: a.tests.map((t) => nameIn(g, t)) } : a,
           ),
         );
@@ -1112,6 +1114,16 @@ function runTestRules(
       logGate(sessionId, 'test', 'warn', `test-types: ${typeGaps.map((g) => g.rel).join(', ')}`);
       habitWarnings.push(typeGapWarning(typeGaps));
     }
+  }
+  // (v0.37.3, §15.38) The affected tests' lines added in this session are scanned like a record's test files: a
+  //   whole-suite run credits them without listing them. Only added lines: an affected test whose added lines are
+  //   unknown is not scanned whole (an old pattern in it is not this change's).
+  const listed = new Set(ran.flatMap((r) => r.test_files ?? []));
+  const extra = [...new Set(affectedFiles)].filter((f) => !listed.has(f));
+  const addedOf = extra.length > 0 ? testLinesOf(sessionId, cwd, extra) : undefined;
+  if (addedOf !== undefined) {
+    const hits = scanForbiddenPatterns(extra, (f) => addedOf(f) ?? new Set<number>());
+    if (hits.length > 0) block(forbiddenReason(hits));
   }
   if (affected.length > 0) {
     if (existingMode === 'on') block(affectedReason(affected, agentName(ROUTE.test)));

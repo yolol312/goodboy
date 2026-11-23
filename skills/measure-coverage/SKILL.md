@@ -15,12 +15,14 @@ every changed code line runs in a test, or the user exempted its file.
 - The project's test runner and the files in scope; `$GB`, the plugin root.
 
 ## Steps
-1. Find the tool the project already has; install nothing:
-   - bun: `bun test --coverage --coverage-reporter=lcov` (writes `coverage/lcov.info`)
-   - vitest or jest: `--coverage` with the lcov reporter
-   - pytest: `pytest --cov --cov-report=xml` (Cobertura `coverage.xml`)
-   - JaCoCo: the build's `jacocoTestReport` (XML)
-   - Go: `go test -coverprofile=cover.out ./...`
+1. Find the tool the project already has; install nothing. Write the report to a temp dir
+   (`R=$(mktemp -d)`), never into the repo: an untracked report becomes part of the recorded
+   tree, and then no commit matches the record at push (`test-write` warns about it).
+   - bun: `bun test --coverage --coverage-reporter=lcov --coverage-dir="$R"` (writes `$R/lcov.info`)
+   - vitest or jest: `--coverage` with the lcov reporter and `--coverage.reportsDirectory="$R"` (vitest) or `--coverageDirectory="$R"` (jest)
+   - pytest: `pytest --cov --cov-report=xml:"$R/coverage.xml"` (Cobertura)
+   - JaCoCo: the build's `jacocoTestReport` (XML, under the build dir; check `git status` shows it as ignored)
+   - Go: `go test -coverprofile="$R/cover.out" ./...`
 2. With no tool, record `coverage: {status: "unavailable", reason: "<what is missing>"}`, and
    the result as `blocked` with the evidence (the gate needs changed lines; a tool is the
    user's decision). Stop here.

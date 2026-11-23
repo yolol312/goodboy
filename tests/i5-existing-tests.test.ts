@@ -218,13 +218,20 @@ describe('affected gaps', () => {
     } as TestResult;
   }
 
-  test('AC-3: the existing test must be listed and run by a passing, fresh record', () => {
+  test('AC-3: the existing test must be run by a passing, fresh record; its command decides, the test_files list does not', () => {
     const s = setup();
     const edits = [{ file: s.code, lastEditTimestamp: at(5_000) }];
     const gaps = (results: TestResult[]) => affectedGaps({ results, accepted: new Set(results), edits, top: s.top, head: s.head }).map((g) => `${g.rel}:${g.tests.join(',')}`);
     expect(gaps([record([s.newTest], 'bun test tests/calc-new.test.ts')])).toEqual(['src/calc.ts:tests/calc.test.ts']);
     expect(gaps([record([s.newTest, s.old], 'bun test')])).toEqual([]);
     expect(gaps([record([s.newTest, s.old], 'bun test tests/calc-new.test.ts tests/calc.test.ts')])).toEqual([]);
+    // (v0.37.3) A whole-suite run counts without the record listing the test in test_files; a command that names
+    //   the test counts too. A list never counts for a test the command did not run.
+    expect(gaps([record([s.newTest], 'bun test')])).toEqual([]);
+    expect(gaps([record([], 'bun test')])).toEqual([]);
+    expect(gaps([record([s.newTest], 'bun test tests/calc.test.ts')])).toEqual([]);
+    expect(gaps([record([s.newTest, s.old], 'bun test tests/calc-new.test.ts')])).toEqual(['src/calc.ts:tests/calc.test.ts']);
+    expect(gaps([record([s.newTest], 'bun test -t neg')])).toHaveLength(1);
     // Listed but not run (a name filter), stale, failing, or a failed verdict: not run.
     expect(gaps([record([s.old], 'bun test -t neg')])).toHaveLength(1);
     expect(gaps([record([s.old], 'bun test', { timestamp: at(10_000) })])).toHaveLength(1);
@@ -409,12 +416,12 @@ describe('the Stop', () => {
   const ACCEPTANCE = [
     { id: 'AC-1', description: 'add adds', test: 'tests/calc-new.test.ts', red: { command: 'bun test', output: '1 fail', exit_code: 1 }, green: { command: 'bun test', output: '1 pass', exit_code: 0 } },
   ];
-  async function session(edit: (top: string) => string) {
+  async function session(edit: (top: string) => string, calcTest = `${T}import { add } from "../src/calc";\ntest("add", () => { expect(add(1, 2)).toBe(3); expect(add(0, 0)).toBe(0); });\n`) {
     const base = tmp();
     const { top } = repo({
       'package.json': '{"scripts":{"test":"bun test"}}',
       'src/calc.ts': 'export const add = (a: number, b: number) => a + b;\n',
-      'tests/calc.test.ts': `${T}import { add } from "../src/calc";\ntest("add", () => { expect(add(1, 2)).toBe(3); expect(add(0, 0)).toBe(0); });\n`,
+      'tests/calc.test.ts': calcTest,
     });
     const sid = `i5-${Math.random().toString(36).slice(2)}`;
     await hook(top, base, sid, 'session-start.ts', { hook_event_name: 'SessionStart', source: 'startup' });
@@ -472,6 +479,12 @@ describe('the Stop', () => {
     };
     expect(await run(['tests/calc-new.test.ts'], 'bun test tests/calc-new.test.ts')).toContain('Existing tests that cover the change did not run with it: src/calc.ts is loaded by tests/calc.test.ts');
     expect(await run(['tests/calc-new.test.ts', 'tests/calc.test.ts'], 'bun test')).not.toContain('Existing tests that cover');
+    // (v0.37.3) The whole-suite command is the evidence: no test_files listing of the existing test is asked for.
+    expect(await run(['tests/calc-new.test.ts'], 'bun test')).not.toContain('Existing tests that cover');
+    const asked = await run(['tests/calc-new.test.ts', 'tests/calc.test.ts'], 'bun test -t neg');
+    expect(asked).toContain('Existing tests that cover the change did not run with it');
+    expect(asked).toContain('with no test-name filter');
+    expect(asked).not.toContain('list them in test_files');
     const warn = await run(['tests/calc-new.test.ts'], 'bun test tests/calc-new.test.ts', { GOODBOY_EXISTING_TESTS: 'warn' });
     expect(warn).not.toContain('Existing tests that cover');
     expect(warn).toContain('기존 테스트(경고 모드)');
@@ -493,6 +506,36 @@ describe('the Stop', () => {
     expect(out).toContain('(changed-line coverage)');
     expect(readFileSync(join(s.base, `goodboy-session-${s.sid}`, 'gate-log.jsonl'), 'utf8')).toContain('existing-tests error: Error: i5 boom');
   }, 120_000);
+
+  test('AC-3: an existing test edited to a no-op check is scanned though a whole-suite record does not list it; an old pattern is not this change\'s', async () => {
+    const PATTERN = 'tests/calc.test.ts';
+    const BLOCK = '통과하지만 아무것도 검증하지 않는 테스트 패턴이 있습니다';
+    const NOOP = `${T}import { add } from "../src/calc";\ntest("add", () => { expect(true).toBe(true); expect(add(0, 0)).toBe(0); });\n`;
+    const SAME = `${T}import { add } from "../src/calc";\ntest("add", () => { expect(add(1, 2)).toBe(3); expect(add(0, 0)).toBe(0); });\n`;
+    const run = async (start: string, edited: string | null, testFiles: string[], command = 'bun test') => {
+      const s = await session((top) => {
+        write(top, 'tests/calc-new.test.ts', `${T}import { add } from "../src/calc";\ntest("neg", () => expect(add(-1, 1)).toBe(0));\n`);
+        return write(top, 'src/calc.ts', 'export const add = (a: number, b: number): number => a + b;\n');
+      }, start);
+      if (edited !== null) await s.record(write(s.top, 'tests/calc.test.ts', edited));
+      testRecord(s.top, testFiles, command);
+      return s.stop();
+    };
+    // The whole-suite record lists only the new test: the edited existing test is scanned all the same.
+    const hit = await run(SAME, NOOP, ['tests/calc-new.test.ts']);
+    expect(hit).toContain(BLOCK);
+    expect(hit).toContain(PATTERN);
+    expect(hit).not.toContain('Existing tests that cover');
+    // The same edit with the file listed was caught before (the control).
+    expect(await run(SAME, NOOP, ['tests/calc-new.test.ts', PATTERN])).toContain(BLOCK);
+    // A no-op check that was in the test at the start is not an added line: no block, and the existing test ran.
+    const old = await run(NOOP, null, ['tests/calc-new.test.ts']);
+    expect(old).not.toContain(BLOCK);
+    expect(old).not.toContain('Existing tests that cover');
+    // An edit that adds nothing of the kind is no block.
+    const clean = await run(SAME, SAME.replace('(1, 2)', '(2, 2)').replace('toBe(3)', 'toBe(4)'), ['tests/calc-new.test.ts']);
+    expect(clean).not.toContain(BLOCK);
+  }, 240_000);
 
   test('AC-7: the review gate needs a finding on a weakened existing test', async () => {
     const run = async (findingFile: string | null) => {

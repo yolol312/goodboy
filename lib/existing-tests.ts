@@ -429,9 +429,10 @@ export interface AffectedGap {
 }
 
 /** Per changed code file, the affected start tests no record ran: a passing record with a
- *  trusted timestamp, fresh for the file (`freshFor`), that lists the test in `test_files` and has a
- *  passing suite that ran it; the record is one the other checks accepted, or one that stands
- *  alone. */
+ *  trusted timestamp, fresh for the file (`freshFor`), with a passing suite that ran the test;
+ *  the record is one the other checks accepted, or one that stands alone. The suite's command
+ *  decides (v0.37.3): a whole-suite run counts for every test without the record listing each in
+ *  `test_files`, a list the tester writes by hand and adds nothing the command does not show. */
 export function affectedGaps(args: {
   results: readonly TestResult[];
   accepted: ReadonlySet<TestResult>;
@@ -439,8 +440,10 @@ export function affectedGaps(args: {
   top: string;
   head: string | null | undefined;
   standsAlone?: (r: TestResult) => boolean;
+  /** `affectedTests` of the edits, when the caller already has it. */
+  affected?: Map<string, string[]>;
 }): AffectedGap[] {
-  const affected = affectedTests(args.top, args.head, args.edits.map((e) => e.file));
+  const affected = args.affected ?? affectedTests(args.top, args.head, args.edits.map((e) => e.file));
   if (affected.size === 0) return [];
   const nowMs = Date.now();
   const alone = new Map<TestResult, boolean>();
@@ -460,7 +463,6 @@ export function affectedGaps(args: {
       (t) =>
         !fresh.some(
           (r) =>
-            (Array.isArray(r.test_files) ? r.test_files : []).some((f) => typeof f === 'string' && toRel(args.top, resolvePath(args.top, f)) === t) &&
             (Array.isArray(r.suites) ? r.suites : []).some(
               (s) => !!s && s.passed > 0 && s.failed === 0 && suiteRan(typeof s.command === 'string' ? s.command : '', t, args.top),
             ) &&
@@ -480,7 +482,7 @@ export function affectedReason(gaps: readonly AffectedGap[], tester: string): st
     .join('; ');
   return (
     `Existing tests that cover the change did not run with it: ${list}${gaps.length > 5 ? ` (${gaps.length - 5} more files)` : ''}. ` +
-    `Have ${tester} run them (or the whole suite) after the last edit and list them in test_files. A test that now fails ` +
+    `Have ${tester} run them (or the whole suite) after the last edit, with no test-name filter. A test that now fails ` +
     'is updated to the new behavior, never weakened or skipped. (existing tests, I5)'
   );
 }
