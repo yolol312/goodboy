@@ -6483,8 +6483,11 @@ in this order.
      (hallucination review).
    - The test catalog's counter (`lib/test-catalog.ts`) keeps string and template literals, so
      `test(`, `it(`, `test.todo(` or `test.skip(` text inside one counts as a test:
-     `tests/n-quick-fixes.test.ts` shows 34 tests for its 25. The other counts that
-     drop in this release's catalog were stale at HEAD, not lost tests (hallucination review).
+     `tests/n-quick-fixes.test.ts` shows 40 at the release, more than bun runs. Its `describe`
+     title pattern ends a title at the first quote, escaped or not (`\'`), so two titles in that
+     file's row (N7 and the PreToolUse write guard one) end at `a file tool\`. The other counts that
+     drop in this release's catalog were stale at HEAD, not lost tests (hallucination and delta
+     reviews).
    - `results show` cuts key names at 200 characters, so two long keys with one prefix merge into
      one entry; `results` lists a linked record by name and refuses it only when read ("not a
      readable JSON object"), though `namesOf`'s comment says it is skipped (security re-review,
@@ -6493,6 +6496,16 @@ in this order.
      `showResult` repeat checks; `isTestkitRunPath` repeats `isTestkitHarness`'s marker check
      (`lib/verification-scope.ts`) with a different link test (refactoring review).
    - `capped` stays unset when exactly 1,000 records exist and all were read (performance review).
+   - Tests: `runHook` (`tests/hook-run.ts`) pipes the hook's stderr without reading it and has no
+     kill on a timeout, so a hook that fills the pipe would hang until the test timeout;
+     `tests/i29-dotdot-links.test.ts`'s `sh()` runs git in scratch repos with the user's global
+     config (`tests/n-quick-fixes.test.ts` sets `GIT_CONFIG_GLOBAL=/dev/null`); `run` and
+     `recorded` in `tests/n-quick-fixes.test.ts` are aliases, and `write()`/`sh()` are still in
+     both files (delta review of the tests).
+7. **Live check before the commit** (verify skill, a headless haiku session on the dev plugin): a
+   Read and an Edit of `docs/lnk/../../notes/note.txt`, with `docs/lnk` a link outside the project,
+   read and changed the project's `notes/note.txt` (the file beside the link target was not
+   touched), the edit was recorded there, and the Stop's review gate asked for it.
 
 ## 21. Push by the test results gathered since the last push (proposed, 2026-11-12, #43)
 
