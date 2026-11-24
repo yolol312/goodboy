@@ -103,11 +103,23 @@ export function axesOfDimensions(dims: readonly string[]): string[] {
   return [...out];
 }
 
+/** (N5) The page templates of server-side rendering, without the dot: JSP and its fragments and tag files, JSF
+ *  facelets, FreeMarker, Velocity, Mustache and Handlebars, EJS, Pug, ERB, Twig, Nunjucks. One list for the UI file
+ *  rule here and the backfill survey's template targets (lib/test-survey.ts). Jinja's `.j2` and `.jinja` are left
+ *  out: they are as often config templates (Ansible) as pages. The UI inventory (lib/ui-templates.ts) and the
+ *  sandbox scan (lib/sandbox-scan.ts) keep their own lists: the formats they can parse for URLs. */
+export const SERVER_TEMPLATE_EXTS: readonly string[] = [
+  'jsp', 'jspx', 'jspf', 'tag', 'xhtml', 'ftl', 'ftlh', 'vm', 'mustache', 'hbs', 'handlebars', 'ejs', 'pug', 'erb', 'twig', 'njk',
+];
+
+/** UI file extensions: markup, styles, components, and the server-side templates. */
+export const UI_FILE_EXT = new RegExp(`\\.(?:html?|css|scss|sass|less|jsx|tsx|vue|svelte|${SERVER_TEMPLATE_EXTS.join('|')})$`);
+
 /** 프론트엔드/클라이언트 표면을 건드리는 파일.
- *  HTML/CSS/JSX/TSX/Vue/Svelte, 또는 클라이언트 JS(파일명에 client 포함).
+ *  A UI_FILE_EXT file, 또는 클라이언트 JS(파일명에 client 포함).
  *  Also the UI files of the test-type rule (lib/test-types.ts, I3b). */
 export function isFrontendFile(lower: string): boolean {
-  if (/\.(html?|css|scss|sass|less|jsx|tsx|vue|svelte)$/.test(lower)) return true;
+  if (UI_FILE_EXT.test(lower)) return true;
   // client-side JS: <name>.client.ts/js, /client/ 경로 등
   if (/(^|[\/.])client[\/.]/.test(lower)) return true;
   if (/\.client\.(t|j)sx?$/.test(lower)) return true;

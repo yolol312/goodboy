@@ -14,7 +14,7 @@ import { testTypesMode } from '../lib/test-types';
 import { classifyPath } from '../lib/verification-scope';
 import {
   appendDispatchLog,
-  openedPath,
+  fileToolPath,
   approvalMarkerPath,
   approvalMarkerShown,
   assistantEntriesAfterLastText,
@@ -818,7 +818,8 @@ function main(): void {
           ? resultWriterDenial(kind, input.agent_type, roleOf(input.agent_type))
           : intoResults
             ? `Results come only from the goodboy CLI (test-write / review-write); this command would write ${intoResults} directly. ` +
-              'To read a result, use the Read tool, `cat` or `jq`: interpreter code that names a result dir counts as a write (#13).'
+              'To read a result, use the Read tool, `cat`, `jq`, or `bun <goodboy>/lib/cli.ts results query|show <name>` (by record name, bounded output): ' +
+              'interpreter code that names a result dir counts as a write (#13).'
             : null;
         if (denial) {
           // `kind` is null when the result-dir rule fired: the path then says what was written.
@@ -1364,7 +1365,7 @@ function main(): void {
             '(pages for PDFs) — partial reads are allowed. (re-Read gate, H2-01)';
           const blockReread = (() => {
             try {
-              const absPath = openedPath(cwd, filePath);
+              const absPath = fileToolPath(cwd, filePath);
               const turn = getCurrentTurn(sessionId);
               // 윈도우 기본 30턴(D2 개정): "읽은 내용이 아직 컨텍스트에 살아있는가"의 근사치.
               //   mtime 비교가 파일 변경 오탐을 막고, 압축(/compact) 감지 시 Stop hook이
@@ -1507,7 +1508,7 @@ function main(): void {
       if (isEditTool) {
         const filePath = (toolInput.file_path as string | undefined) ?? '';
         if (filePath) {
-          const absPath = openedPath(cwd, filePath);
+          const absPath = fileToolPath(cwd, filePath);
           const fileExists = (() => {
             try {
               return existsSync(absPath);

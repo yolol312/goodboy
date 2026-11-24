@@ -8,6 +8,7 @@ import { existsSync, lstatSync, readdirSync } from 'node:fs';
 import { extname, join, posix } from 'node:path';
 import { policyGlobs } from './changed-coverage';
 import { gitOut } from './git-run';
+import { SERVER_TEMPLATE_EXTS } from './review-dimensions';
 import { readRegular } from './safe-read';
 import { TEST_FILE, testTypeOf } from './test-catalog';
 import { type ExtraType, JS_SPECIFIER, SATISFIED_BY, typeNeedOf } from './test-types';
@@ -52,8 +53,8 @@ const CODE_EXT = new Set([
   '.rs', '.rb', '.php', '.cs', '.scala', '.swift', '.dart',
 ]);
 const JS_EXT = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.mts', '.cts', '.vue', '.svelte']);
-/** Server-side and static page templates: UI targets of their own (I3b's UI files have no JSP). */
-const TEMPLATE_EXT = new Set(['.html', '.htm', '.jsp', '.ftl', '.mustache', '.hbs', '.ejs', '.pug', '.erb', '.twig']);
+/** Server-side and static page templates: UI targets of their own, from the one list the UI file rule uses (N5). */
+const TEMPLATE_EXT = new Set(['.html', '.htm', ...SERVER_TEMPLATE_EXTS.map((e) => `.${e}`)]);
 /** Dirs whose files are not the project's own wherever they sit: dependencies, tool state and
  *  generated code. Neither code targets nor tests nor tool evidence. A name here is no package
  *  name of any real project (a leading dot, a dependency manager's dir, a virtualenv). */

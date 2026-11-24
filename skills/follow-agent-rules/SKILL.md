@@ -28,7 +28,9 @@ Work as a leaf executor inside goodboy's rules and hand back one checkable resul
 5. Write results the gates read only through the CLI: `bun "$GB/lib/cli.ts" review-write` or
    `test-write` (JSON on stdin; see record-review and record-tests). Never write files under
    `.claude/reviews/` or `.claude/tests/` yourself. Run the CLI from the project's directory,
-   never after `cd "$GB"`: it writes to the current directory's `.claude/`.
+   never after `cd "$GB"`: it writes to the current directory's `.claude/`. Read them with Read,
+   `cat`, `jq`, or `bun "$GB/lib/cli.ts" results query` and `results show <name> [--fields a,b.c]`
+   (by record name, bounded output); a script that names those dirs counts as a write.
 6. Use only the tool skills your definition lists, with the Skill tool.
 7. A lead summarizes its members' results in its own words; it never pastes them verbatim.
 

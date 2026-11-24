@@ -55,6 +55,18 @@ export function isTestOutputPath(rel: string, projectRoot: string): boolean {
   return BUILD_FILES.some((f) => existsSync(join(projectRoot, module, f)));
 }
 
+/** (N3) Whether a project-relative path is the testkit harness's run output `.testkit-run/` (or in it) at the
+ *  project top, in a project whose `testkit/testkit.config.json` is a regular file reached through no link: the
+ *  marker of plan §15.19, read the way `isTestkitHarness` reads it. */
+export function isTestkitRunPath(rel: string, projectRoot: string): boolean {
+  if (!/^\.testkit-run(?:\/|$)/.test(rel) || rel.split('/').includes('..')) return false;
+  try {
+    return lstatSync(join(projectRoot, 'testkit', 'testkit.config.json')).isFile() && noLinkOnPath(projectRoot, 'testkit/testkit.config.json');
+  } catch {
+    return false;
+  }
+}
+
 /** Whether no component of `rel` below `projectRoot` is a symlink (a missing tail is fine): the
  *  path names what it says, so a lexical check of it is a check of the target. */
 function noLinkOnPath(projectRoot: string, rel: string): boolean {
@@ -91,7 +103,7 @@ function followedLike(base: string, prefix: string): string {
 
 /** Why the role may not write this file, or null when it may. With `removal` (the path is only
  *  being deleted by a parsed `rm`, `rmdir` or `unlink`) a test role may clear the test output
- *  dirs before a re-run: the path must be one of those dirs or inside one, with no symlink on
+ *  dirs (and the testkit harness's `.testkit-run/`, N3) before a re-run: the path must be one of those dirs or inside one, with no symlink on
  *  the way from the project root. Writing, copying or moving into them stays denied. With
  *  `expanded` the path stands for an operand the shell expands or that climbs with `..`, so what
  *  it deletes is not what it names: a test role may not, whatever the path is. */
@@ -104,7 +116,7 @@ export function writeDenial(role: RoleSpec, absPath: string, projectRoot: string
       return null;
     case 'tests':
       if (opts.expanded === true) return `${role.name} may not remove by a pattern, variable or \`..\` path (what it deletes is not what the command names): ${rel}. Name each path.`;
-      if (opts.removal === true && isTestOutputPath(rel, projectRoot) && noLinkOnPath(projectRoot, rel)) return null;
+      if (opts.removal === true && (isTestOutputPath(rel, projectRoot) || isTestkitRunPath(rel, projectRoot)) && noLinkOnPath(projectRoot, rel)) return null;
       // The tester records the sandbox's data use there (agents/test-unit.md); a link on the way
       //   would write somewhere else, and nothing else under .goodboy/ is a test file.
       if (SANDBOX_DATA_FILE.test(rel) && noLinkOnPath(projectRoot, rel)) return null;
@@ -345,6 +357,8 @@ export function resultCliWrite(command: string): 'test' | 'review' | 'unknown' |
     }
     if (at < 0) continue;
     const rest = words.slice(at + 1);
+    // (N4) The CLI runs its first word: `results` only reads, whatever follows (`--kind regression`).
+    if (rest[0] === 'results') continue;
     // `regression` (I4) records the full regression run, a test result too.
     if (rest.includes('test-write') || rest.includes('regression')) return 'test';
     if (rest.includes('review-write')) return 'review';

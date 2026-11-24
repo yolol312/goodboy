@@ -712,7 +712,7 @@ export function treeDiff(cwd: string, a: string, b: string): string[] | null {
 /** Why a result is not a passing one with the evidence the Stop test gate asks for (the same
  *  checks, so the two cannot drift), or null when it is: verdict pass, a well-formed tree, at
  *  least one suite that ran, no failing suite, test files that exist, red-green evidence, no
- *  always-true test patterns. A hand-made JSON with only `verdict` and `tree` is not one. */
+ *  test patterns that pass without checking anything. A hand-made JSON with only `verdict` and `tree` is not one. */
 function notPassing(r: TestResult, linesOf?: (file: string, root?: string) => ReadonlySet<number> | null): string | null {
   if (r.verdict !== 'pass') return `its verdict is ${String(r.verdict)}`;
   if (treesOf(r).length === 0) return 'it records no tested tree';
@@ -731,7 +731,13 @@ function notPassing(r: TestResult, linesOf?: (file: string, root?: string) => Re
   //   nested one is not passed over as unchanged and an outside one is not read whole.
   const wt = typeof r.worktree === 'string' && isAbsolute(r.worktree) ? r.worktree : undefined;
   const lines = linesOf && wt !== undefined ? (f: string) => linesOf(f, wt) : linesOf;
-  if (scanForbiddenPatterns(files, lines).length > 0) return 'a test file has an always-true pattern';
+  // (N2) The hits by place and pattern key (the Stop names them by place and its Korean message): a `test.todo`
+  //   is no always-true assertion.
+  const hits = scanForbiddenPatterns(files, lines);
+  if (hits.length > 0) {
+    const named = hits.slice(0, 3).map((h) => `${h.file}${h.line ? `:${h.line}` : ''} (${h.key})`);
+    return `a test file holds a pattern that passes without checking anything: ${named.join(', ')}${hits.length > 3 ? ` and ${hits.length - 3} more` : ''}`;
+  }
   return null;
 }
 

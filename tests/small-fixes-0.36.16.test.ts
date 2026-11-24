@@ -119,7 +119,12 @@ describe('S16-AC-1: checkHandoff scans the lines the push adds on the prose path
     commit(w.d, 'adds a todo');
     const tested = w.treeOfHead();
     const exact = checkHandoff(w.handoff, [w.record(tested)]);
-    expect(exact).toMatchObject({ ok: false, why: 'no-result', rejected: 'a test file has an always-true pattern' });
+    // (N2) The place and the pattern, as the Stop names them: the line the push added, and its key.
+    expect(exact).toMatchObject({
+      ok: false,
+      why: 'no-result',
+      rejected: `a test file holds a pattern that passes without checking anything: ${w.testFile}:3 (skipped-test)`,
+    });
     write(w.d, 'README.md', '# repo\n\n| v1 | released |\n');
     commit(w.d, 'readme');
     expect(checkHandoff(w.handoff, [w.record(tested)])).toMatchObject({ ok: false, why: 'no-result' });

@@ -8,7 +8,7 @@
 import { existsSync, statSync } from 'node:fs';
 import { extname, isAbsolute, relative, resolve as resolvePath, sep } from 'node:path';
 import { recordPath } from './record-paths';
-import { isFrontendFile } from './review-dimensions';
+import { isFrontendFile, UI_FILE_EXT } from './review-dimensions';
 import type { ChangedFileEdit } from './review-validator';
 import { readRegular } from './safe-read';
 import { failingSuites, freshFor, missingTestFiles, scanForbiddenPatterns, stripLiteralsAndComments, validateEvidence } from './test-validator';
@@ -39,7 +39,6 @@ const BOUNDARY_WORDS = new Set([
   'database', 'databases', 'db', 'sql', 'migration', 'migrations', 'migrate', 'shell', 'exec',
   'spawn', 'cli', 'http', 'socket', 'sockets',
 ]);
-const UI_EXT = /\.(?:html?|css|scss|sass|less|jsx|tsx|vue|svelte)$/;
 const SHELL_EXT = new Set(['.sh', '.bash', '.zsh', '.ps1', '.bat', '.cmd']);
 const JS_EXT = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.mts', '.cts', '.vue', '.svelte']);
 
@@ -248,7 +247,7 @@ export function typeNeedOf(file: string, top: string, exempt: readonly string[],
   }
   // A `client` path is UI unless it is boundary code (`src/db/client.ts`); a UI extension is.
   const lower = rel.toLowerCase();
-  if (isFrontendFile(lower) && (!boundary || UI_EXT.test(lower))) {
+  if (isFrontendFile(lower) && (!boundary || UI_FILE_EXT.test(lower))) {
     need.types.push('ui');
     need.why.ui = 'a UI file';
   }

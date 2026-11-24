@@ -152,13 +152,22 @@ export function ensureSessionDir(sessionId: string): string {
   return dir;
 }
 
-/** The path the OS opens for a tool's file path, spelled without any `..` (issue #29).
+/** The file Claude Code's file tools (Read, Edit, Write, MultiEdit, NotebookEdit) open for a `file_path`: they
+ *  collapse `..` by name before opening, so `w/lnk/../x` is `w/x` whatever `lnk` points to (measured 2026-11-23,
+ *  plan §20.9: a Write there created `w/x`, a Read and an Edit read and changed `w/x`, while `cat w/lnk/../x`
+ *  read `<target of lnk>/../x`). Every record and lookup of a file tool's path uses this; a shell command's
+ *  paths use `openedPath`, the way the OS opens them. */
+export function fileToolPath(cwd: string, filePath: string): string {
+  return resolve(cwd, filePath);
+}
+
+/** The path the OS opens for a shell command's file path, spelled without any `..` (issue #29).
  *  `path.resolve` collapses `a/lnk/../b` to `a/b` before a link is followed, while the OS goes
  *  through `lnk` first: the real file is `<target of lnk>/../b`. A path with a `..` segment is
  *  therefore walked segment by segment, and at each `..` the prefix so far is made real (when it
  *  exists) before going up. Without a `..` this is plain `resolve(cwd, filePath)`, with no file
- *  system call. One helper for every place that records or looks up a tool's file path, so
- *  reads and edits agree and a recorded path never hides a link behind a collapsed `..`.
+ *  system call. Used for Bash reads and writes and for paths named in result records (read by
+ *  the OS); not for the file tools' own paths, which they collapse by name (`fileToolPath`).
  *  The walk yields real spellings (`/private/var` for macOS `/var`) even where no link was
  *  crossed, so the result is spelled back through the nearest ancestor of the cwd that holds it
  *  (#31): a caller comparing it with `resolve(cwd)` sees an inside path as inside.

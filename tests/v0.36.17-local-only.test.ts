@@ -767,7 +767,9 @@ describe("V17-AC-8: a worktree record's test files are scanned at their path in 
     test(`${where} worktree: a todo the push adds is refused`, () => {
       const w = pushed(true);
       const out = verdictOf(w, w.worktree(at(w)));
-      expect(out).toMatchObject({ ok: false, why: 'no-result', rejected: 'a test file has an always-true pattern' });
+      // (N2) Named by the file (at its path in the worktree), the line the push added and the pattern.
+      expect(out).toMatchObject({ ok: false, why: 'no-result' });
+      expect((out as { rejected: string }).rejected).toMatch(/^a test file holds a pattern that passes without checking anything: .*\/a\.test\.ts:3 \(skipped-test\)$/);
     });
 
     test(`${where} worktree: an old todo the push does not add passes`, () => {

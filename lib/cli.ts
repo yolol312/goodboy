@@ -40,6 +40,7 @@ import { agentName, ROUTE } from './routing-policy';
 import { findDevCycleArtifacts, prototypeContractWarnings, readAcceptance, VERIFY_STAGE } from './acceptance';
 import { privacyFilesOf } from './privacy-files';
 import { realDataHeld } from './real-data-held';
+import { runResults } from './results-read';
 import { AXIS_DIMENSIONS, axesFor, requiredDimensionsFor } from './review-dimensions';
 import { MAX_DOC_BYTES, readRegular } from './safe-read';
 import { appendSkillGapLog, recordSkillEvidence, validateSkillGapNote } from './skill-rule';
@@ -1651,7 +1652,7 @@ async function cmdCheckup(command: string, args: string[]): Promise<void> {
 
 const USAGE =
   '사용법: bun lib/cli.ts <command> [args...]\n' +
-  '명령: review-write | test-write | regression | acceptance-list | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | test-survey [--all | --dir <dir>] [--max N] | backfill-plan | backfill-next [--size N] [--pick a,b] | backfill-mark <file> --status done|skipped|suspect [--tests a,b] [--note text] | backfill-status | sandbox-scan | sandbox-init [--force] | sandbox-local --dump <abs path> [--format sql|custom] [--input <abs path>]... | sandbox-check | sandbox-prepare [--timeout-ms N] | sandbox-up [--wait-seconds N] [--app-logs] | sandbox-run [--suite unit|e2e|all] [--timeout-ms N] [-- cmd...] | sandbox-down [--volumes] | git-hooks install [--force] | git-hooks uninstall | commit-scan [--hook pre-commit|commit-msg <file>] | push-scan [<remote> [<refspec>...]] | push-scan --hook pre-push <remote> <url> | sandbox-data schema | sandbox-data shape <table>.<col> | sandbox-data count <table> [--where <json>] | sandbox-data pick <table> --where <json> [--n N] | coverage-check <report...> [--root-map from=to] | ui-inventory [--summary] | ui-check [--run <ts>] [--log f]... [--report f]... [--inventory f] | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text> | checkup-state | checkup-begin [--cli <v>] [--replace] | checkup-changelog [--from <v>|none] [--to <v>] [--ids a,b] [--changelog <path>] [--max-matched N] [--max-unmapped N] [--run <id>] | checkup-write --run <id> --name <file> | checkup-complete --run <id> | checkup-abort --run <id> | checkup-projects [--add <dir>|--remove <dir>] [--suggest] | checkup-inventory [--run <id>] (checkup-changelog --inventory adds its identifiers) | checkup-health [--run <id>] [--timeout-ms N] | checkup-smoke [--run <id>] | checkup-compare --run <id> | checkup-probe --run <id> (--estimate | --estimate-id <id>)';
+  '명령: review-write | test-write | regression | acceptance-list | results query [--kind k[,k]] [--verdict v] [--since <time>] [--limit N] | results show <name> [--kind k] [--fields a,b.c] [--max-bytes N] | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | test-survey [--all | --dir <dir>] [--max N] | backfill-plan | backfill-next [--size N] [--pick a,b] | backfill-mark <file> --status done|skipped|suspect [--tests a,b] [--note text] | backfill-status | sandbox-scan | sandbox-init [--force] | sandbox-local --dump <abs path> [--format sql|custom] [--input <abs path>]... | sandbox-check | sandbox-prepare [--timeout-ms N] | sandbox-up [--wait-seconds N] [--app-logs] | sandbox-run [--suite unit|e2e|all] [--timeout-ms N] [-- cmd...] | sandbox-down [--volumes] | git-hooks install [--force] | git-hooks uninstall | commit-scan [--hook pre-commit|commit-msg <file>] | push-scan [<remote> [<refspec>...]] | push-scan --hook pre-push <remote> <url> | sandbox-data schema | sandbox-data shape <table>.<col> | sandbox-data count <table> [--where <json>] | sandbox-data pick <table> --where <json> [--n N] | coverage-check <report...> [--root-map from=to] | ui-inventory [--summary] | ui-check [--run <ts>] [--log f]... [--report f]... [--inventory f] | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text> | checkup-state | checkup-begin [--cli <v>] [--replace] | checkup-changelog [--from <v>|none] [--to <v>] [--ids a,b] [--changelog <path>] [--max-matched N] [--max-unmapped N] [--run <id>] | checkup-write --run <id> --name <file> | checkup-complete --run <id> | checkup-abort --run <id> | checkup-projects [--add <dir>|--remove <dir>] [--suggest] | checkup-inventory [--run <id>] (checkup-changelog --inventory adds its identifiers) | checkup-health [--run <id>] [--timeout-ms N] | checkup-smoke [--run <id>] | checkup-compare --run <id> | checkup-probe --run <id> (--estimate | --estimate-id <id>)';
 
 async function main(): Promise<void> {
   // The session's project dir, not the shell's dir after a `cd`: the records written here are
@@ -1680,6 +1681,13 @@ async function main(): Promise<void> {
       case 'acceptance-list':
         cmdAcceptanceList(cwd);
         break;
+      case 'results': {
+        // (N4) Read-only: the project dir's result records by name, never by path (lib/results-read.ts).
+        const out = runResults(cwd, args);
+        if (!out.ok) fail(out.error);
+        process.stdout.write(JSON.stringify(out) + '\n');
+        break;
+      }
       case 'review-axes':
         cmdReviewAxes(shell, args);
         break;

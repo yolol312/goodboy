@@ -296,7 +296,9 @@ describe('finding 5: the result guard', () => {
     const out = JSON.parse((await new Response(proc.stdout).text()) || '{}') as { hookSpecificOutput?: Record<string, string> };
     await proc.exited;
     expect(out.hookSpecificOutput?.permissionDecision).toBe('deny');
-    expect(out.hookSpecificOutput?.permissionDecisionReason).toContain('To read a result, use the Read tool, `cat` or `jq`');
+    expect(out.hookSpecificOutput?.permissionDecisionReason).toContain('To read a result, use the Read tool, `cat`, `jq`, or `bun <goodboy>/lib/cli.ts results query|show <name>`');
+    // (N4) the denial now also names the CLI's read-only view; it still says that interpreter code counts as a write
+    expect(out.hookSpecificOutput?.permissionDecisionReason).toContain('interpreter code that names a result dir counts as a write');
   }, 30_000);
 });
 

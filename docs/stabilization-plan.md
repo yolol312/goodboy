@@ -25,7 +25,8 @@ core gates can switch off silently, false positives can deadlock a session, and
 1. **Feature freeze** — no new gates until v1.0. Exceptions: track G (§10) and track H
    (§14, project knowledge, v0.32.0), both approved by the user on 2026-10-14; track I (§15,
    v0.33.0), track J (§16, v0.34.0) and track K (§17, v0.35.0), approved on 2026-10-16;
-   track L (§18, v0.36.0), requested by the user on 2026-10-21.
+   track L (§18, v0.36.0), requested by the user on 2026-10-21; track N (§20, §21), which the user
+   chose on 2026-11-21 and 2026-11-23 to start once v0.37.2 and v0.37.3 shipped.
 2. **Test first** — every fix lands with a regression test that fails before the fix.
 3. **Measure before trading cost against detection.**
 4. **Proportional cost** — guardrail overhead scales with change size and risk.
@@ -56,7 +57,8 @@ so work is released in batches:
 | v0.37.1 | #44 items 1 (in part), 3, 4, 5: Stop gates that block on evidence already there (records of unpushed work read for 30 days, deferral only for goodboy test and review agents capped at 45 minutes, a shell rerun of a failed validation command, the Stop regenerates a stale test catalog), §15.36; first planned as the v0.36.20 hotfix (user 2026-11-19: after v0.37.0, from main). Released 2026-11-20 |
 | v0.37.2 | the Stop's compaction check by a token drop, not a percent drop (a local field report of 2026-11-16: the policy read gate re-armed when the limit estimate moved from 200k to 1M), and the lows carried from the v0.37.1 reviews, §15.37. Released 2026-11-21 |
 | v0.37.3 | the I5 existing-tests check takes the suite command as the evidence (no `test_files` listing), and coverage reports go to a temp dir with a `test-write` warning on untracked files in the recorded tree, §15.38 (#46). Released 2026-11-23 |
-| v0.38.0 | proposed: track N (fewer repeated runs, a project test inventory, task criteria, §20.4–§20.6), with a push judged by the test results gathered since the last push (§21, N24–N30, #43, #45); its order against v0.37.0 is the user's decision |
+| v0.38.0 | the first track N release: the quick fixes N2–N5, and N7 (#31) settled by a measurement (file tools open the path collapsed by name: their guards keep `resolve`, and their recorders, on the OS-opened path since #29, return to it), §20.9; N1 needed no change (§20.3 status) |
+| v0.38.x | proposed: the rest of track N in the §20.8 order (N6, N8, N8b; the eval set N18; tests, criteria and structure, §20.4–§20.6), with a push judged by the test results gathered since the last push (§21, N24–N30, #43, #45) |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
 
 ## 4. A — Fix silent failures and deadlocks
@@ -2078,6 +2080,10 @@ never hides a link behind a collapsed `..`. Test names, the testkit harness and 
 then judge the real path with no change of their own. Gate rules that look at a tool path for
 other reasons (write denials, the hosts and policy-file checks, the reasoning gate's document
 exemption) still use `resolve`; they are not tracking and were left as they are.
+Correction (v0.38.0, §20.9 item 5): Claude Code's file tools collapse `..` by name before they
+open a path, so for Read, Edit, Write and MultiEdit the collapsed path was the right one; the
+file-tool recorders and lookups went back to `resolve` (`fileToolPath`). The OS-opened path stays
+for Bash and for paths named in records.
 
 Still needing tests, as the issue settled: message bundles, CSS, server templates, SQL and mapper
 XML, app settings, and tool configs (`.gitattributes`, `.dockerignore`, `.npmignore`, CODEOWNERS,
@@ -6144,13 +6150,11 @@ As built (M5 session 3 and M7, the release review, 2026-11-19):
 
 ## 20. N — Fewer repeated runs, a project test inventory, task criteria (proposed, 2026-10-26)
 
-Status: proposed. The user asked for these to be planned (2026-10-26). What ships first and
-whether track N comes before or after track M (v0.37.0) is still the user's decision; the §3
-rows only reserve version numbers. N1, N2, N5, N7 and N11 repair existing rules or close
-detection gaps, and N18 (an eval set) and N21 (an audit) change no behavior by themselves.
-Every other item adds or changes gate, role or CLI behavior, so under the feature freeze (§2,
-principle 1) it needs the user's exception, as tracks G–L had; §2 does not list one for M or N
-yet.
+Status: started 2026-11-23 (v0.38.0, §20.9). The user asked for these to be planned (2026-10-26)
+and chose on 2026-11-21 and 2026-11-23 to start track N after track M (v0.37.0) and v0.37.2–v0.37.3
+(§2, principle 1, now lists N). N1, N2, N5, N7 and N11 repair existing rules or close detection
+gaps, and N18 (an eval set) and N21 (an audit) change no behavior by themselves. Every other item
+adds or changes gate, role or CLI behavior, as tracks G–L did under their exceptions.
 
 ### 20.1 Sources
 - **Field report, 2026-10-26.** A Java/JSP/MyBatis web app ran goodboy 0.36.3. One requirement
@@ -6233,6 +6237,15 @@ Note (2026-11-13): v0.36.5 shipped §15.21 instead; these items did not ship und
 Parts were covered later: N2's line scoping by v0.36.9 (§15.25) and v0.36.16 (§15.32), but its
 message still says "always-true pattern" (`lib/push-test.ts`); N7 for Bash paths by v0.36.13
 (§15.29). Each item is checked against the code when track N is scheduled.
+
+Status (2026-11-23, checked against the code at 6496a5c): v0.38.0 ships N2's message, N3, N4 and
+N5, and settles N7 the other way (§20.9: the file tools open the path collapsed by name, so their
+guards keep `resolve` and their recorders return to it). N1 needs no change: the skill passes the model whenever `GOODBOY_CODEX_MODEL` is set
+(M13) and records a failed run as skipped with its reason; a preflight would only save that one
+failed call. N6, N8 and N8b remain, each larger: N6 has only the 200-line cut today (no substantive
+count, no three-way split, no session-start base, no slot scheduling), N8 has one collecting gate
+(the test gate) and 15 single-reason Stop blocks, and N8b has nothing yet. They follow as their own
+releases.
 
 - **N1, Codex second opinion.** The review run must pass `GOODBOY_CODEX_MODEL` every time,
   preflight the model once per session and record a skip with its reason. Passing the model is
@@ -6402,11 +6415,84 @@ These come from the gaps the field report lists, with Codex's split.
 
 ### 20.8 Order (proposed)
 The user decides this order. The quick fixes were proposed to ship first, from `main`, since they
-fix blocks seen in real use; where track N proper goes against M (v0.37.0) is open.
+fix blocks seen in real use; track N comes after M (v0.37.0), as the note below records.
 1. N1–N8, the parts not yet shipped (§20.3 note).
 2. N18 (the eval set), so that N19–N23 are measured.
 3. N9–N14 (tests), then N15–N17 (criteria).
 4. N19–N23 (structure), each judged by N18.
+
+Started 2026-11-23: the user chose to finish v0.37.2 and v0.37.3 first and then go on to track N,
+in this order.
+
+### 20.9 v0.38.0: the first track N release (N2–N5, N7 settled)
+
+1. **N2.** `notPassing` (`lib/push-test.ts`) names up to three hits as `file:line (key)`, with the
+   count of the rest, in place of "a test file has an always-true pattern"; the key is the
+   pattern's (`skipped-test` for a `test.todo`).
+2. **N3.** `isTestkitRunPath` (`lib/role-limits.ts`): a test role may remove `.testkit-run/` or
+   anything in it, at the project top, when `testkit/testkit.config.json` is a regular file with no
+   link on its path (the §15.19 marker), and no link is on the removed path. Removal only, as for
+   the build tools' report dirs; a pattern, variable or `..` operand is still denied.
+3. **N4.** `cli.ts results query [--kind tests|reviews|regression[,…]] [--verdict v] [--since t]
+   [--limit N]` lists the newest records, summarized (verdict, category, tree, file count, suite
+   totals, findings per known severity, regression runs; text fields cut at 200 characters).
+   `results show <name> [--kind k] [--fields a,b.c] [--max-bytes N]` prints one record or the named
+   fields (dotted paths, array items by index, own keys only). The command takes record names,
+   never paths, so it names no result dir and the result-dir guard needs no change. It reads only
+   through dirs that are no links and regular files that are no links, at most 1,000 records a
+   query, ordered by time across kinds (regression names spell the milliseconds after a `-`);
+   output over the byte cap (default 20,000, at most 200,000) comes back as up to 200 keys and their
+   sizes. `resultCliWrite` (`lib/role-limits.ts`) skips a `results` call, so `--kind regression` is
+   not read as a regression record write (security review). The command is `lib/results-read.ts`;
+   the result-dir deny text (`hooks/pre-tool-use.ts`) and `skills/follow-agent-rules/SKILL.md`
+   name it.
+4. **N5.** `SERVER_TEMPLATE_EXTS` (`lib/review-dimensions.ts`): `.jsp`, `.jspx`, `.jspf`, `.tag`,
+   `.xhtml`, `.ftl`, `.ftlh`, `.vm`, `.mustache`, `.hbs`, `.handlebars`, `.ejs`, `.pug`, `.erb`, `.twig`,
+   `.njk`. `UI_FILE_EXT` (for `isFrontendFile` and the test-type rule) and the backfill survey's
+   `TEMPLATE_EXT` (`lib/test-survey.ts`) both take it, so they cannot drift (refactoring review).
+   Such a file now needs a `ui` or `e2e` test (before: any test type) and its review the UI
+   dimensions. Thymeleaf templates are `.html` and were UI already. Left out: Jinja's `.j2` and
+   `.jinja`, as often config templates (Ansible) as pages. The UI inventory (`lib/ui-templates.ts`)
+   and the sandbox scan (`lib/sandbox-scan.ts`) keep their own lists, of the formats they parse.
+5. **N7 (#31), reversed by a measurement.** §20.3 asked for `openedPath` at the guards that judge a
+   tool path. Measured on 2026-11-23 in this session: Claude Code's file tools collapse `..` by name
+   before opening. A Write of `w/lnk/../written.txt` (with `w/lnk` a link to `ext/a/b`) created
+   `w/written.txt`, a Read of `w/lnk/../probe.txt` showed `w/probe.txt` and an Edit changed it, while
+   `cat w/lnk/../probe.txt` read `ext/a/probe.txt`. So the PreToolUse guards that use
+   `resolve(cwd, path)` judge the file the tool writes, and stay. The first draft of this release
+   switched them and the security review found the hole: a test role could create
+   `tests/lnk -> <outside>/a/b` and edit `tests/lnk/../../src/a.ts`, judged outside the project but
+   written to `src/a.ts`.
+
+   The same wrong premise sat in #29's fix (v0.36.4, §15.20): the file-tool recorders (PostToolUse
+   Read, Edit, Write, MultiEdit and the dirs it pins, the PreToolUse re-Read and read-before-edit
+   lookups) stored the OS-opened path. An Edit of `docs/lnk/../../src/app.ts` was then recorded at
+   the link side, possibly outside the project, while the tool changed `src/app.ts`, so the Stop's
+   gates could miss it. They now use `fileToolPath` (`lib/file-tracker.ts`, `resolve`). Bash paths
+   keep `openedPath` (v0.36.13, §15.29), and so do paths named in result records, which the gates
+   read through the OS.
+6. **Carried lows** (the reviews of this release; none hides an edit or opens a write, so they wait
+   for a later track N release):
+   - `recordPath`'s doc comment (`lib/record-paths.ts`) still calls `openedPath` the edit log's
+     spelling; since item 5 that is true for Bash only. `reviewed_files` and `tested_files` keep
+     `openedPath`, so a record that names `lnk/../x` counts the file the OS opens: at worst the gate
+     asks for one more review (security re-review).
+   - `fileToolPath` rests on a measurement, not a contract: re-measure the item 5 probe after a
+     Claude Code update (the CLI update checkup) (security re-review). The probe ran Write, Read
+     and Edit; MultiEdit and NotebookEdit are taken to collapse `..` the same way, unmeasured
+     (hallucination review).
+   - The test catalog's counter (`lib/test-catalog.ts`) keeps string and template literals, so
+     `test(`, `it(`, `test.todo(` or `test.skip(` text inside one counts as a test:
+     `tests/n-quick-fixes.test.ts` shows 34 tests for its 25. The other counts that
+     drop in this release's catalog were stale at HEAD, not lost tests (hallucination review).
+   - `results show` cuts key names at 200 characters, so two long keys with one prefix merge into
+     one entry; `results` lists a linked record by name and refuses it only when read ("not a
+     readable JSON object"), though `namesOf`'s comment says it is skipped (security re-review,
+     test-unit).
+   - `opt()` in `lib/results-read.ts` copies `cli.ts`'s private `optValue`; `rowOf` and
+     `showResult` repeat checks; `isTestkitRunPath` repeats `isTestkitHarness`'s marker check
+     (`lib/verification-scope.ts`) with a different link test (refactoring review).
+   - `capped` stays unset when exactly 1,000 records exist and all were read (performance review).
 
 ## 21. Push by the test results gathered since the last push (proposed, 2026-11-12, #43)
 

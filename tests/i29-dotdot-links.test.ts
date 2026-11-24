@@ -1,17 +1,19 @@
 // #29: a tool's file path with a `..` after a symlinked dir. `path.resolve` collapses it before
 //   the link is followed, so the recorded path was not the file the OS opened, and every
 //   name-based rule (test names, the testkit harness, repository metadata) judged the wrong path.
-//   One helper (lib/file-tracker.ts openedPath) now turns a tool's path into the path the OS
-//   opens; the recorder, the read-before-edit lookup and the Bash read classification use it.
+//   (Plan §20.9, measured 2026-11-23: Claude Code's file tools collapse `..` by name before they open, so a file tool's
+//   path is `fileToolPath` = resolve; only a shell command goes through the link first.) One helper
+//   (lib/file-tracker.ts openedPath) turns a Bash path into the path the OS opens: the Bash read classification
+//   uses it; the recorder and the read-before-edit and re-Read lookups use fileToolPath.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
 import { classifyBashRead } from '../lib/bash-read';
 import { openedPath } from '../lib/file-tracker';
+import { newSession, recordedFiles, runHook, spell } from './hook-run';
 
-const ROOT = resolve(import.meta.dir, '..');
 const dirs: string[] = [];
 afterEach(() => {
   while (dirs.length) rmSync(dirs.pop()!, { recursive: true, force: true });
@@ -23,11 +25,7 @@ function write(root: string, rel: string, text: string): string {
   writeFileSync(abs, text);
   return abs;
 }
-function sid(): string {
-  const s = `i29${Math.random().toString(36).slice(2, 10)}`;
-  dirs.push(join(tmpdir(), `goodboy-session-${s}`));
-  return s;
-}
+const sid = (): string => newSession('i29', dirs);
 const CODE = 'export const a = 1;\n';
 
 /** A committed scratch repo with real files (its path is real: no alias in $TMPDIR). */
@@ -43,37 +41,13 @@ function repo(files: Record<string, string> = {}, links: Record<string, string> 
   sh(d, "git add -A && git commit -q -m 'ABC-1 init'");
   return d;
 }
-/** `<root>/<raw>` with the `..` kept (join would collapse it). */
-const spell = (d: string, raw: string) => `${d}/${raw}`;
-
-async function runHook(hook: string, cwd: string, session: string, payload: Record<string, unknown>, env: Record<string, string> = {}) {
-  const p = Bun.spawn(['bun', join(ROOT, 'hooks', `${hook}.ts`)], {
-    cwd,
-    stdin: new TextEncoder().encode(JSON.stringify({ session_id: session, cwd, ...payload })),
-    stdout: 'pipe',
-    stderr: 'pipe',
-    env: { ...process.env, GOODBOY_DISABLE_DELEGATION: '1', GOODBOY_CLAIM_FLUSH_WAIT_MS: '0', ...env },
-  });
-  const out = await new Response(p.stdout).text();
-  await p.exited;
-  return JSON.parse(out || '{}') as { decision?: string; reason?: string; hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string } };
-}
 const editEvent = (file: string) => ({
   hook_event_name: 'PostToolUse',
   tool_name: 'Edit',
   tool_input: { file_path: file, old_string: 'a', new_string: 'b' },
   tool_response: {},
 });
-function recordedEdits(session: string): string[] {
-  try {
-    return readFileSync(join(tmpdir(), `goodboy-session-${session}`, 'edits.jsonl'), 'utf8')
-      .split('\n')
-      .filter((l) => l.trim() !== '')
-      .map((l) => (JSON.parse(l) as { file: string }).file);
-  } catch {
-    return [];
-  }
-}
+const recordedEdits = (session: string): string[] => recordedFiles('edits', session);
 
 describe('openedPath: the path the OS opens', () => {
   test('a path without `..` is plain resolve', () => {
@@ -106,18 +80,19 @@ describe('openedPath: the path the OS opens', () => {
   });
 });
 
-describe('the recorder stores the file the OS opens, and each such edit needs a test at the Stop gate', () => {
+describe('the recorder stores the path a file tool opens (`..` collapsed by name), and each such edit needs a test at the Stop gate', () => {
   const NO_RESULT = /No test result covers the changed code/;
 
-  /** Edit `raw` (with a `..` after a link) in a scratch repo; `target` is the repo-relative file the OS opens. */
+  /** Edit `raw` (with a `..` after a link) in a scratch repo; `target` is the repo-relative file the tool opens
+   *  (Claude Code's file tools collapse `..` before they open: plan §20.9, measured 2026-11-23). */
   async function editThroughLink(d: string, raw: string, target: string, content: string) {
     write(d, target, content); // the edit's effect: the real file changes
     const s = sid();
-    const post = await runHook('post-tool-use', d, s, editEvent(spell(d, raw)));
+    const post = await runHook('hooks/post-tool-use.ts', d, s, editEvent(spell(d, raw)));
     expect(post.decision).toBeUndefined();
     const recorded = recordedEdits(s);
     const stop = await runHook(
-      'stop',
+      'hooks/stop.ts',
       d,
       s,
       { hook_event_name: 'Stop', stop_hook_active: false },
@@ -126,114 +101,114 @@ describe('the recorder stores the file the OS opens, and each such edit needs a 
     return { recorded, stop };
   }
 
-  test('tests/self -> . : `tests/self/../src/a.ts` is src/a.ts', async () => {
-    const d = repo({ 'tests/ok.test.ts': CODE }, { 'tests/self': '.' });
-    const { recorded, stop } = await editThroughLink(d, 'tests/self/../src/a.ts', 'src/a.ts', 'export const a = 2;\n');
+  test('tests/lnk -> sub/deep/x : `tests/lnk/../../src/a.ts` is src/a.ts (the opened file would be sub/src/a.ts)', async () => {
+    const d = repo({ 'tests/ok.test.ts': CODE, 'sub/deep/x/keep.txt': 'k\n' }, { 'tests/lnk': '../sub/deep/x' });
+    const { recorded, stop } = await editThroughLink(d, 'tests/lnk/../../src/a.ts', 'src/a.ts', 'export const a = 2;\n');
     expect(recorded).toEqual([join(d, 'src', 'a.ts')]);
     expect(stop.decision).toBe('block');
     expect(stop.reason).toMatch(NO_RESULT);
     expect(stop.reason).toContain('src/a.ts');
   }, 60_000);
 
-  test('testkit/self -> . with the testkit marker: `testkit/self/../src/a.ts` is src/a.ts', async () => {
-    const d = repo({ 'testkit/testkit.config.json': '{}\n' }, { 'testkit/self': '.' });
-    const { recorded, stop } = await editThroughLink(d, 'testkit/self/../src/a.ts', 'src/a.ts', 'export const a = 2;\n');
+  test('testkit/lnk -> sub/deep/x with the testkit marker: `testkit/lnk/../../src/a.ts` is src/a.ts', async () => {
+    const d = repo({ 'testkit/testkit.config.json': '{}\n', 'sub/deep/x/keep.txt': 'k\n' }, { 'testkit/lnk': '../sub/deep/x' });
+    const { recorded, stop } = await editThroughLink(d, 'testkit/lnk/../../src/a.ts', 'src/a.ts', 'export const a = 2;\n');
     expect(recorded).toEqual([join(d, 'src', 'a.ts')]);
     expect(stop.decision).toBe('block');
     expect(stop.reason).toMatch(NO_RESULT);
     expect(stop.reason).toContain('src/a.ts');
   }, 60_000);
 
-  test('a CI workflow behind .github/ISSUE_TEMPLATE/lnk -> ../foo is the workflow', async () => {
+  test('a CI workflow behind .github/ISSUE_TEMPLATE/lnk -> ../foo is the workflow by name', async () => {
     const d = repo({ '.github/workflows/ci.yml': 'on: push\n', '.github/foo/keep.txt': 'k\n' }, { '.github/ISSUE_TEMPLATE/lnk': '../foo' });
-    const { recorded, stop } = await editThroughLink(d, '.github/ISSUE_TEMPLATE/lnk/../workflows/ci.yml', '.github/workflows/ci.yml', 'on: push\njobs: {}\n');
+    const { recorded, stop } = await editThroughLink(d, '.github/ISSUE_TEMPLATE/lnk/../../workflows/ci.yml', '.github/workflows/ci.yml', 'on: push\njobs: {}\n');
     expect(recorded).toEqual([join(d, '.github', 'workflows', 'ci.yml')]);
     expect(stop.decision).toBe('block');
     expect(stop.reason).toMatch(NO_RESULT);
     expect(stop.reason).toContain('.github/workflows/ci.yml');
   }, 60_000);
 
-  test('lnk/../.gitignore reaches real/.gitignore, a link to code, not the exempt root .gitignore', async () => {
-    const d = repo({ 'real/sub/x.txt': 'x\n' }, { lnk: 'real/sub', 'real/.gitignore': '../src/a.ts' });
-    // The edit writes through the link to src/a.ts.
-    const { recorded, stop } = await editThroughLink(d, 'lnk/../.gitignore', 'src/a.ts', 'export const a = 2;\n');
-    expect(recorded).toEqual([join(d, 'real', '.gitignore')]);
-    expect(stop.decision).toBe('block');
-    expect(stop.reason).toMatch(NO_RESULT);
+  test('lnk/../.gitignore is the root .gitignore by name, exempt; the file beside the link target is not what is recorded', async () => {
+    const d = repo({ 'real/sub/x.txt': 'x\n' }, { lnk: 'real/sub' });
+    const { recorded, stop } = await editThroughLink(d, 'lnk/../.gitignore', '.gitignore', 'node_modules\ndist\n');
+    expect(recorded).toEqual([join(d, '.gitignore')]);
+    expect(stop.reason ?? '').not.toMatch(NO_RESULT);
   }, 60_000);
 
   test('a plain path is recorded as before, and a `..` through a plain dir as resolve', async () => {
     const d = repo({ 'src/b.ts': CODE });
     const s = sid();
-    await runHook('post-tool-use', d, s, editEvent(join(d, 'src', 'a.ts')));
-    await runHook('post-tool-use', d, s, editEvent('src/b.ts'));
-    await runHook('post-tool-use', d, s, editEvent(spell(d, 'src/../notes.md')));
+    await runHook('hooks/post-tool-use.ts', d, s, editEvent(join(d, 'src', 'a.ts')));
+    await runHook('hooks/post-tool-use.ts', d, s, editEvent('src/b.ts'));
+    await runHook('hooks/post-tool-use.ts', d, s, editEvent(spell(d, 'src/../notes.md')));
     expect(recordedEdits(s)).toEqual([join(d, 'src', 'a.ts'), join(d, 'src', 'b.ts'), join(d, 'notes.md')]);
   }, 60_000);
 });
 
-describe('read-before-edit agrees on the file the OS opens', () => {
+describe('read-before-edit: a file tool by name, a Bash read by the file the OS opens', () => {
   const readEvent = (file: string) => ({ hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: { file_path: file }, tool_response: {} });
   const tryEdit = async (d: string, s: string, file: string) => {
-    const out = await runHook('pre-tool-use', d, s, {
+    const out = await runHook('hooks/pre-tool-use.ts', d, s, {
       hook_event_name: 'PreToolUse',
       tool_name: 'Edit',
       tool_input: { file_path: file, old_string: 'hello', new_string: 'world' },
     });
     return { denied: out.hookSpecificOutput?.permissionDecision === 'deny', reason: out.hookSpecificOutput?.permissionDecisionReason ?? '' };
   };
-  // notes.md is a document: only read-before-edit decides. docs/self -> . so `docs/self/../notes.md` is notes.md.
-  const sandbox = () => repo({ 'docs/x.md': 'x\n' }, { 'docs/self': '.' });
+  // Both notes.md files are documents: only read-before-edit decides. docs/self -> . (docs itself), so by name
+  // `docs/self/../notes.md` is docs/notes.md, while the OS opens notes.md at the root (the file the link's parent holds).
+  const sandbox = () => repo({ 'docs/x.md': 'x\n', 'docs/notes.md': 'hello\n' }, { 'docs/self': '.' });
 
-  test('without a read, an edit through `..` is denied and names the real file', async () => {
+  test('without a read, an edit through `..` is denied and names the file the tool opens', async () => {
     const d = sandbox();
     const r = await tryEdit(d, sid(), spell(d, 'docs/self/../notes.md'));
     expect(r.denied).toBe(true);
-    expect(r.reason).toContain(join(d, 'notes.md'));
+    expect(r.reason).toContain(join(d, 'docs', 'notes.md'));
   }, 60_000);
 
   test('a read through the same `..` path allows the edit', async () => {
     const d = sandbox();
     const s = sid();
     const raw = spell(d, 'docs/self/../notes.md');
-    await runHook('post-tool-use', d, s, readEvent(raw));
+    await runHook('hooks/post-tool-use.ts', d, s, readEvent(raw));
     expect((await tryEdit(d, s, raw)).denied).toBe(false);
   }, 60_000);
 
-  test('a read through the plain path allows an edit through `..`, and the reverse', async () => {
+  test('a read through the plain path of the same file allows an edit through `..`, and the reverse; the other file is still unread', async () => {
     const d = sandbox();
     const s = sid();
-    await runHook('post-tool-use', d, s, readEvent(join(d, 'notes.md')));
+    await runHook('hooks/post-tool-use.ts', d, s, readEvent(join(d, 'docs', 'notes.md')));
     expect((await tryEdit(d, s, spell(d, 'docs/self/../notes.md'))).denied).toBe(false);
+    expect((await tryEdit(d, s, join(d, 'notes.md'))).denied).toBe(true); // the root notes.md was never read
     const d2 = sandbox();
     const s2 = sid();
-    await runHook('post-tool-use', d2, s2, readEvent(spell(d2, 'docs/self/../notes.md')));
-    expect((await tryEdit(d2, s2, join(d2, 'notes.md'))).denied).toBe(false);
+    await runHook('hooks/post-tool-use.ts', d2, s2, readEvent(spell(d2, 'docs/self/../notes.md')));
+    expect((await tryEdit(d2, s2, join(d2, 'docs', 'notes.md'))).denied).toBe(false);
   }, 60_000);
 
-  test('a Bash cat through `..` counts as a read of the real file', async () => {
+  test('a Bash cat through `..` counts as a read of the file the OS opens (notes.md at the root), not of docs/notes.md', async () => {
     const d = sandbox();
     const s = sid();
-    await runHook('post-tool-use', d, s, {
+    await runHook('hooks/post-tool-use.ts', d, s, {
       hook_event_name: 'PostToolUse',
       tool_name: 'Bash',
       tool_input: { command: 'cat docs/self/../notes.md' },
       tool_response: { stdout: 'hello\n' },
     });
     expect((await tryEdit(d, s, join(d, 'notes.md'))).denied).toBe(false);
+    expect((await tryEdit(d, s, join(d, 'docs', 'notes.md'))).denied).toBe(true);
   }, 60_000);
 });
 
-// Coverage closers (test-unit): the MultiEdit recorder lines and the re-Read lookup also use the
-//   path the OS opens.
-describe('MultiEdit and the re-Read gate use the path the OS opens', () => {
-  // docs/self -> . so `docs/self/../notes.md` is notes.md and `docs/self/../src/a.ts` is src/a.ts.
-  const sandbox = () => repo({ 'docs/x.md': 'x\n' }, { 'docs/self': '.' });
+// Coverage closers (test-unit): the MultiEdit recorder lines and the re-Read lookup use the file tool's path.
+describe('MultiEdit and the re-Read gate use the path a file tool opens', () => {
+  // docs/self -> . so by name `docs/self/../notes.md` is docs/notes.md and `docs/self/../src/a.ts` is docs/src/a.ts.
+  const sandbox = () => repo({ 'docs/x.md': 'x\n', 'docs/notes.md': 'hello\n' }, { 'docs/self': '.' });
 
-  test('MultiEdit records the real file for its file_path and for each edit file_path', async () => {
+  test('MultiEdit records the named file for its file_path and for each edit file_path', async () => {
     const d = sandbox();
     const s = sid();
-    const post = await runHook('post-tool-use', d, s, {
+    const post = await runHook('hooks/post-tool-use.ts', d, s, {
       hook_event_name: 'PostToolUse',
       tool_name: 'MultiEdit',
       tool_input: {
@@ -243,21 +218,23 @@ describe('MultiEdit and the re-Read gate use the path the OS opens', () => {
       tool_response: {},
     });
     expect(post.decision).toBeUndefined();
-    expect(recordedEdits(s)).toEqual([join(d, 'notes.md'), join(d, 'src', 'a.ts')]);
+    expect(recordedEdits(s)).toEqual([join(d, 'docs', 'notes.md'), join(d, 'docs', 'src', 'a.ts')]);
   }, 60_000);
 
-  test('a second full Read through `..` of an unchanged file is the redundant re-Read of the real file', async () => {
+  test('a second full Read through `..` of an unchanged file is the redundant re-Read of the named file', async () => {
     const d = sandbox();
     const s = sid();
     const raw = spell(d, 'docs/self/../notes.md');
     const read = { hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: { file_path: raw }, tool_response: {} };
-    await runHook('post-tool-use', d, s, read);
-    const again = (file: string) => runHook('pre-tool-use', d, s, { hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: file } });
-    for (const file of [raw, join(d, 'notes.md')]) {
+    await runHook('hooks/post-tool-use.ts', d, s, read);
+    const again = (file: string) => runHook('hooks/pre-tool-use.ts', d, s, { hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: file } });
+    for (const file of [raw, join(d, 'docs', 'notes.md')]) {
       const out = await again(file);
       expect(out.hookSpecificOutput?.permissionDecision).toBe('deny');
       expect(out.hookSpecificOutput?.permissionDecisionReason).toContain('H2-01');
     }
+    // The file the OS would open for a shell command (notes.md at the root) is another file: no re-Read.
+    expect((await again(join(d, 'notes.md'))).hookSpecificOutput?.permissionDecision).not.toBe('deny');
     // A file never read is no re-Read.
     expect((await again(spell(d, 'docs/self/../src/a.ts'))).hookSpecificOutput?.permissionDecision).not.toBe('deny');
   }, 60_000);
