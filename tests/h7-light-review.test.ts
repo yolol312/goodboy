@@ -6,7 +6,8 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { changedLineCount, reviewPlan, SMALL_DIFF_LINES } from '../lib/review-scope';
+import { changedLineCount, reviewAssignments, SMALL_DIFF_LINES } from '../lib/review-scope';
+import type { ReviewAxis } from '../lib/review-dimensions';
 import { validateReviewCoverage } from '../lib/review-validator';
 import type { ReviewResult } from '../lib/types';
 
@@ -64,17 +65,23 @@ describe('the review size', () => {
     expect(changedLineCount(link, [join(link, 'a.ts')])).toBe(2);
   });
 
-  test('one review-all for a small diff or a single axis; one per axis otherwise, and when unknown', () => {
-    expect(reviewPlan(SMALL_DIFF_LINES, 4)).toBe('single');
-    expect(reviewPlan(SMALL_DIFF_LINES + 1, 4)).toBe('per-axis');
-    expect(reviewPlan(5000, 1)).toBe('single');
-    expect(reviewPlan(null, 3)).toBe('per-axis');
+  test('one review-all for a small diff or a single axis; at most three runs otherwise, and when unknown (N6)', () => {
+    const axes: ReviewAxis[] = ['hallucination', 'refactoring', 'security', 'ui'];
+    const runs = (lines: number | null, n: number = axes.length) => reviewAssignments(axes.slice(0, n), [], lines).assignments.length;
+    expect(runs(SMALL_DIFF_LINES)).toBe(1);
+    expect(runs(SMALL_DIFF_LINES + 1)).toBe(3);
+    expect(runs(5000, 1)).toBe(1);
+    expect(runs(null, 3)).toBe(2);
   });
 
   test('review-axes reports the changed lines and the plan', () => {
     const d = repo();
     writeFileSync(join(d, 'a.ts'), 'export const a = 10;\nexport const b = 2;\n');
-    const r = Bun.spawnSync(['bun', CLI, 'review-axes', join(d, 'a.ts')], { cwd: d, stdout: 'pipe', stderr: 'pipe' });
+    // No live session: its state and dispatch log are not read (an empty id, a temp TMPDIR).
+    const tmp = realpathSync(mkdtempSync(join(tmpdir(), 'goodboy-h7-tmp-')));
+    dirs.push(tmp);
+    const env = { ...process.env, CLAUDE_CODE_SESSION_ID: '', TMPDIR: tmp, GIT_CONFIG_GLOBAL: '/dev/null' };
+    const r = Bun.spawnSync(['bun', CLI, 'review-axes', join(d, 'a.ts')], { cwd: d, env, stdout: 'pipe', stderr: 'pipe' });
     const out = JSON.parse(r.stdout.toString()) as { changed_lines: number | null; plan: string; plan_note: string };
     expect(out.changed_lines).toBe(2);
     expect(out.plan).toBe('single');
@@ -125,7 +132,9 @@ describe('delta reviews', () => {
     expect(out.decision).toBe('block');
     expect(out.reason).toMatch(/mode: delta/);
     expect(out.reason).toContain(join(d, 'a.ts'));
-    expect(out.reason).toMatch(/every dimension .*review-axes/); // not just the last review's
+    // (N6) The runs come from `review-axes --delta` (sized by the delta, a security run when sensitive).
+    expect(out.reason).toMatch(/review-axes[^`]* --delta <files>/);
+    expect(out.reason).toMatch(/second for security/);
   }, 30_000);
 });
 
@@ -133,15 +142,15 @@ describe('the review skills', () => {
   test('review-all knows the delta mode; request-review sizes the review and re-rounds only on a high', () => {
     const agent = readFileSync(join(ROOT, 'agents', 'review-all.md'), 'utf8');
     expect(agent).toMatch(/mode: delta/);
-    expect(agent).toMatch(/every dimension `review-axes` lists/);
-    // The workflow skills most sessions follow size the review by the plan too.
+    expect(agent).toMatch(/every dimension `review-axes --delta` lists/);
+    // The workflow skills most sessions follow size the review by its assignments (N6), not one per axis.
     for (const s of ['fix-bug', 'add-feature', 'refactor-code', 'prepare-migration']) {
       const body = readFileSync(join(ROOT, 'skills', s, 'SKILL.md'), 'utf8');
-      expect([s, /`plan`/.test(body), /one `goodboy:review-all` per axis[,;]/.test(body)]).toEqual([s, true, false]);
+      expect([s, /`assignments`/.test(body), /one `goodboy:review-all` per axis[,;]/.test(body)]).toEqual([s, true, false]);
     }
     const skill = readFileSync(join(ROOT, 'skills', 'request-review', 'SKILL.md'), 'utf8');
-    expect(skill).toMatch(/plan/);
+    expect(skill).toMatch(/`assignments`/);
     expect(skill).toMatch(/only when .*high/i);
-    expect(skill).toMatch(/mode: delta/);
+    expect(skill).toMatch(/review-axes --delta/);
   });
 });

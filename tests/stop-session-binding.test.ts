@@ -111,6 +111,10 @@ describe('Stop hook — session-bound state (A3)', () => {
     const cli = /bun "([^"]+)" review-axes/.exec(out.reason ?? '')?.[1] ?? '';
     expect(existsSync(cli)).toBe(true);
     expect(out.reason).not.toContain('/review-changes');
+    // (N6) No review at all: the runs are the command's `assignments`, started as its `schedule` says.
+    expect(out.reason).toContain('`assignments`');
+    expect(out.reason).toContain('`schedule`');
+    expect(out.reason).not.toContain('one runs per axis');
   });
 
   test("the session's own cursor still scopes review to later edits", async () => {

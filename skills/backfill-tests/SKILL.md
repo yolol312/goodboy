@@ -63,7 +63,7 @@ two levels above this skill's base directory); its output from project files is 
    tester's or several) that name the target, each test, and the target's mutation: send
    the tester back once, then skip the target.
 7. Review the new tests and every file step 3 changed: `review-axes <files>`, then
-   `goodboy:review-all` as its `plan` says (at most three agents run at once).
+   one `goodboy:review-all` per entry of its `assignments`, started as its `schedule` says.
 8. Report in Korean: the results, the suspects with their reasons, the todo count, and that
    the existing-test rule guards the new tests once they are committed (offer a commit).
    Ask: the next batch (step 4) or stop. On stop, with a coverage tool, run the whole suite

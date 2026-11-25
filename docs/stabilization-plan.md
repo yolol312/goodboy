@@ -58,7 +58,8 @@ so work is released in batches:
 | v0.37.2 | the Stop's compaction check by a token drop, not a percent drop (a local field report of 2026-11-16: the policy read gate re-armed when the limit estimate moved from 200k to 1M), and the lows carried from the v0.37.1 reviews, §15.37. Released 2026-11-21 |
 | v0.37.3 | the I5 existing-tests check takes the suite command as the evidence (no `test_files` listing), and coverage reports go to a temp dir with a `test-write` warning on untracked files in the recorded tree, §15.38 (#46). Released 2026-11-23 |
 | v0.38.0 | the first track N release: the quick fixes N2–N5, and N7 (#31) settled by a measurement (file tools open the path collapsed by name: their guards keep `resolve`, and their recorders, on the OS-opened path since #29, return to it), §20.9; N1 needed no change (§20.3 status) |
-| v0.38.x | proposed: the rest of track N in the §20.8 order (N6, N8, N8b; the eval set N18; tests, criteria and structure, §20.4–§20.6), with a push judged by the test results gathered since the last push (§21, N24–N30, #43, #45) |
+| v0.38.1 | N6, the review plan: at most three review runs, sized by substantive lines from the session's start commit, a delta plan sized from the last review with a security run when security-sensitive, and a schedule from the free agent slots, §20.10 |
+| v0.38.x | proposed: the rest of track N in the §20.8 order (N8, N8b; the eval set N18; tests, criteria and structure, §20.4–§20.6), with a push judged by the test results gathered since the last push (§21, N24–N30, #43, #45) |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
 
 ## 4. A — Fix silent failures and deadlocks
@@ -6245,7 +6246,7 @@ guards keep `resolve` and their recorders return to it). N1 needs no change: the
 failed call. N6, N8 and N8b remain, each larger: N6 has only the 200-line cut today (no substantive
 count, no three-way split, no session-start base, no slot scheduling), N8 has one collecting gate
 (the test gate) and 15 single-reason Stop blocks, and N8b has nothing yet. They follow as their own
-releases.
+releases. N6 ships in v0.38.1 (§20.10).
 
 - **N1, Codex second opinion.** The review run must pass `GOODBOY_CODEX_MODEL` every time,
   preflight the model once per session and record a skip with its reason. Passing the model is
@@ -6506,6 +6507,77 @@ in this order.
    Read and an Edit of `docs/lnk/../../notes/note.txt`, with `docs/lnk` a link outside the project,
    read and changed the project's `notes/note.txt` (the file beside the link target was not
    touched), the edit was recorded there, and the Stop's review gate asked for it.
+
+### 20.10 v0.38.1: the review plan (N6)
+
+`review-axes [--delta] [--session <id>] <files>` (`lib/cli.ts` cmdReviewAxes, `lib/review-scope.ts`) now prints the
+review runs, not only a plan name. Checked against the code at 8808b5b: the plan was `single` (at most 200 lines of
+`git diff --numstat HEAD`, blank and prose lines included) or `per-axis` (one run per axis, up to six with
+`data-privacy`), and a commit made in the session made the size unknown, so per-axis.
+
+1. **Substantive size.** `changedLineCount` counts the non-blank added and removed lines of a `--unified=0` patch
+   (`substantivePatchLines`, reading headers only outside the body lines a hunk announced, context lines that
+   `diff.interHunkContext` merges in included; the call also passes `--inter-hunk-context=0`) and the non-blank lines of
+   untracked files, in every file but a document (`classifyPath` `document`: prose and the docs dir's assets). Tests,
+   SQL, templates, styles and config count (Codex). Numstat still names the files: a binary, renamed, ignored or
+   unchanged file makes the size unknown. An untracked file is read only when it is a regular file of at most 1 MiB,
+   opened without following a link and without blocking (`readRegular`, `lib/safe-read.ts`): an untracked link to
+   `/dev/zero` under a directory argument hung the count (security delta review). An untracked link that git lists
+   under a directory argument makes the size unknown; a link named as a file counts as its target (`realish`).
+2. **Session-start base.** The size is taken against the session's start commit for the checkout
+   (`readCoverageStartHead`, `lib/changed-coverage.ts`: the session's coverage pin for its first checkout, the start
+   pin of `lib/start-pins.ts` for another; null when it had no commit, which `startBase` in `lib/cli.ts` turns into
+   the empty tree), so a commit made in the session keeps its files counted (`size_base: "session start"`). The
+   start is read, not pinned: `sessionCoverageStart` pins a checkout it sees first and records its dirty files as the
+   session's edits, which a command that only measures must not do (delta review). The one write left is the empty
+   session dir that `readPin`'s `ensureSessionDir` makes for a session that has none; no gate reads an empty
+   dir. Without a session (no `--session` naming a session with a transcript, no
+   `CLAUDE_CODE_SESSION_ID`), with an unknown start or a checkout no hook has seen: HEAD, as before. Never the newest
+   transcript of the dir, which may be another terminal's. The start is used only when it is an object id: it goes
+   before `--` in `git diff` (security review: a pin holding `--output=<path>` made git write that file).
+3. **At most three runs.** `assignments` lists the runs, each with its axes, their required dimensions and the `brief`
+   for the reviewer's prompt. One axis, or at most 200 substantive lines: one run for every axis. Larger or unknown:
+   evidence with refactoring and performance; security with data privacy (added by M6g after N6 was written; it stays
+   with security to keep three runs); UI, which holds `plan-completeness` (the requirements). `plan` is `single` or
+   `grouped`. review-all takes `axes: <a>, <b>`, and a run that covers the hallucination axis with others lists the
+   `hallucination` marker (record-review), so the Stop's union of reviews still covers every axis. An axis added to
+   `ReviewAxis` and left out of the groups fails the type check, so it cannot drop out of a grouped plan (delta
+   review).
+4. **Delta plan.** `--delta` sizes each file against the `tree` of the newest review that lists it
+   (`deltaLineCount`: the tree, which review-write keeps in the repo's objects, is read into a scratch index and the
+   work tree is compared with it; `size_base: "last review"`). A small delta gets one run in `mode: delta`; one that
+   needs `security-injection`, `security-authz`, `web-hardening`, `dependency-risk`, `proto-pollution` or
+   `data-privacy` gets a second run for security and data privacy (not for `security-secrets`, which every code and
+   config file needs; `error-path` comes only with one of those six: servers, input parsers and shell scripts). A
+   large or unknown delta gets the three runs, each in `mode: delta`. The Stop's stale-review and high-finding messages
+   point to `review-axes --delta`. The reviews are read from the session's project dir (`cliProjectDir`), as
+   review-write and the Stop read them, while the file names resolve from the shell's dir.
+5. **Slots.** `slots` is the concurrency cap (`GOODBOY_SPAWN_CONCURRENCY`, 3) less the main session's agents still
+   running (the spawn guard's dispatch log); `schedule` says how many runs to start now and how many as agents finish.
+   Unknown without a session.
+6. The review window (`reviewWindowMinutes`) moved from `hooks/stop.ts` to `lib/review-validator.ts`, so review-axes
+   reads the reviews the Stop reads. The workflow skills (fix-bug, add-feature, refactor-code, request-review,
+   prepare-migration, backfill-tests) start one review-all per assignment as `schedule` says.
+7. **Live check (2026-11-25, haiku, dev plugin, repos with no commit).** A new 18-line file: `size_base: "session
+   start"`, `single`, one review-all. A new 364-line file: `grouped`, two runs (`axes: hallucination, refactoring,
+   performance` and `axes: security`) started in one message; after the fixes, `review-axes --delta` gave 25 lines
+   since the last review and one run in `mode: delta`, which the model started as given.
+8. **Carried (lows).**
+   - `--delta` prints `size_base: "last review"` even when no review lists a file and the size is unknown (it names
+     the base tried).
+   - A file whose content equals its newest review's tree (edited after the review and back, or reviewed again since)
+     makes a delta's size unknown, so it gets the grouped runs although it needs no review. This errs toward more
+     review, and the Stop lists only files changed after their review.
+   - Tests: the FIFO test is a regression guard only (git does not list a FIFO), and the "no pin" test's title says no
+     session dir is made, while `readPin` makes an empty one.
+   - In this release's own run, `test-write` accepted a measured `coverage.changed` without `diff_lines`, which the
+     Stop's changed-line gate skips (`changedLineGaps`), so the block named the files as unmeasured instead of naming
+     the missing field. Checking the entry's shape at `test-write` belongs with N8's collecting gate.
+   - Also seen in this run: the agent deferral's 45-minute clock (v0.37.1, #44) runs from the session's first
+     deferral (00:40:49Z here), so in a longer session later agent runs no longer defer the Stop. It blocked three
+     times while agents ran: the gate log's `background_tasks` line listed two `goodboy:review-all` runs the first
+     time, and the next two also listed the running `goodboy:test-unit`. A clock per wait (from the first deferral
+     since the last pass) belongs with N8 too.
 
 ## 21. Push by the test results gathered since the last push (proposed, 2026-11-12, #43)
 

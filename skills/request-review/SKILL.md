@@ -21,17 +21,17 @@ Run the review goodboy requires for a change, on demand, and report what it foun
    "확인 필요" option); without a location, review the working tree against `HEAD`.
 2. List the changed files (`git diff --name-only HEAD`, plus untracked files).
 3. Axes and size: `bun "<plugin root>/lib/cli.ts" review-axes <files>` (the plugin root is two
-   levels above this skill's base directory); its `plan` says how many runs.
-4. `plan: single` (a small diff): one `goodboy:review-all` for every axis. `plan: per-axis`: one
-   per axis, all in one message:
-   `axis: <axis> / files: … / category: request-review / criteria: <review_criteria>`.
+   levels above this skill's base directory); its `assignments` are the runs: one for a small
+   diff (at most 200 substantive changed lines), at most three otherwise.
+4. One `goodboy:review-all` per assignment, started as its `schedule` says (free agent slots):
+   `<brief> / files: … / category: request-review / criteria: <review_criteria>`.
    When the Stop gate gave a `Document change (class: document; …)` note, put it in the
    prompt: the reviewer does not see the gate's message.
    A large or risky change can go to `goodboy:review-lead` instead.
 5. Summarize: each axis's verdict and result file, and the high and medium findings in your own
    words.
 6. Rounds: run a new full review only when the last one found a high. Fix mediums and prove each
-   with a test, then one `goodboy:review-all` with `mode: delta` and the fixed files. Record
+   with a test, then the delta runs `review-axes --delta <fixed files>` gives. Record
    lows as deferred; they start no round. A document change (the gate says
    `Document change (class: document; …)`): one combined review within its budget; its
    mediums and lows go to the user and wait for the next planned edit.

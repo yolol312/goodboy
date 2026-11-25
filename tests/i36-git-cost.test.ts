@@ -16,12 +16,12 @@ import { recordEdit } from '../lib/file-tracker';
 import { projectDir } from '../lib/project-dir';
 import { revisionTree, topOf, workTreeState } from '../lib/push-test';
 import { requiredDimensionsFor } from '../lib/review-dimensions';
-import { changedLineCount } from '../lib/review-scope';
+import { changedLineCount, deltaLineCount } from '../lib/review-scope';
 import { productEvidenceProblems } from '../lib/session-criteria';
 import { catalogRows } from '../lib/test-catalog';
 import { surveyProject } from '../lib/test-survey';
 import { statusFiles } from '../lib/write-sweep';
-import type { TestResult } from '../lib/types';
+import type { ReviewResult, TestResult } from '../lib/types';
 
 const ROOT = resolve(import.meta.dir, '..');
 const STOP = join(ROOT, 'hooks', 'stop.ts');
@@ -221,14 +221,39 @@ describe('every git a hook or library runs carries the safety settings', () => {
     });
   }
 
-  test('review-scope: the diff names no external diff and no textconv', () => {
+  test('review-scope: the diffs (the file list and the patch) name no external diff and no textconv', () => {
     const r = repo();
-    write(r.d, 'a.txt', 'changed\n');
+    write(r.d, 'src/app.js', V2); // a counted file: numstat names it, then the patch counts its lines
     const f = fakeGit();
-    changedLineCount(r.d, [join(r.d, 'a.txt')]);
-    const diff = only(f, 'diff')[0]!;
-    expect(diff.args).toContain('--no-ext-diff');
-    expect(diff.args).toContain('--no-textconv');
+    expect(changedLineCount(r.d, [join(r.d, 'src/app.js')])).toBe(2);
+    const diffs = only(f, 'diff');
+    expect(diffs.length).toBe(2); // --numstat, then --unified=0
+    for (const diff of diffs) {
+      expect(diff.args).toContain('--no-ext-diff');
+      expect(diff.args).toContain('--no-textconv');
+    }
+    // The patch is read as --unified=0 whatever diff.interHunkContext the user's config holds.
+    const patch = diffs.find((c) => c.args.includes('--unified=0'))!;
+    expect(patch.args).toContain('--inter-hunk-context=0');
+  });
+
+  // (N6) The delta reads a review's tree into a scratch index: every call it makes is as safe as the others.
+  test('review-scope deltaLineCount: every git call carries the safety settings, the scratch index goes along', () => {
+    const r = repo();
+    const tree = sh(r.d, 'git rev-parse HEAD^{tree}');
+    write(r.d, 'src/app.js', V2);
+    const review = { timestamp: new Date().toISOString(), reviewed_files: [join(r.d, 'src/app.js')], tree } as unknown as ReviewResult;
+    const f = fakeGit();
+    expect(deltaLineCount(r.d, [join(r.d, 'src/app.js')], [review])).toBe(2);
+    expectSafe(f, 'review-scope deltaLineCount');
+    const read = only(f, 'read-tree');
+    expect(read.length).toBe(1);
+    expect(read[0]!.env.INDEX).toMatch(/goodboy-delta-.*\/index$/);
+    for (const diff of only(f, 'diff')) {
+      expect(diff.args).toContain('--no-ext-diff');
+      expect(diff.args).toContain('--no-textconv');
+      expect(diff.env.INDEX).toBe(read[0]!.env.INDEX);
+    }
   });
 
   // (#35) The worktree check reads the files git keeps (lib/git-dirs.ts): no git call to protect.

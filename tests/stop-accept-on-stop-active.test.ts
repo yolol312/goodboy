@@ -185,6 +185,8 @@ describe('Stop hook — stop_hook_active 경로의 비차단 리뷰 수락 (v0.2
     const next = await runStop(tmp, cwd, sessionId, false);
     expect(next.decision).toBe('block');
     expect(next.reason).toContain('high severity');
+    // (N6) The clearing review is the delta's runs, which `review-axes --delta` sizes.
+    expect(next.reason).toMatch(/review-axes --delta <files>/);
   });
 
   test('커버 리뷰가 없으면 stop_hook_active 경로는 아무 것도 하지 않는다(기존 동작 유지)', async () => {

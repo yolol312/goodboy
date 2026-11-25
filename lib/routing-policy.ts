@@ -61,7 +61,7 @@ export const ROLES: readonly RoleSpec[] = [
 /** The agents goodboy's gates send work to, by job. Every hook message takes its agent names
  *  from here, so a rename is one change (§10.3). */
 export const ROUTE = {
-  /** A review of the changed files (one all-axes run, or one run per axis). */
+  /** A review of the changed files (one all-axes run, or at most three runs, lib/review-scope.ts). */
   review: 'review-all',
   /** Layer-1 tests of the changed code. */
   test: 'test-unit',

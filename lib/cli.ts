@@ -35,8 +35,12 @@ import { knowledgeRoot, validateKnowledge } from './project-knowledge';
 import { decisionItems } from './decision-authority';
 import { TEST_CATALOG_FILE, writeCatalog } from './test-catalog';
 import { recordTestProfile } from './test-profile';
-import { changedLineCount, realish, reviewPlan, reviewPlanNote } from './review-scope';
-import { agentName, ROUTE } from './routing-policy';
+import { changedLineCount, deltaLineCount, realish, reviewAssignments, reviewPlanNote, reviewSchedule } from './review-scope';
+import { agentName, ROUTE, spawnCaps } from './routing-policy';
+import { findRecentReviewFiles, reviewWindowMinutes } from './review-validator';
+import { readDispatchLog, runningDispatches } from './spawn-guard';
+import { OBJECT_ID } from './git-run';
+import { treeRecordWindow } from './unpushed-work';
 import { findDevCycleArtifacts, prototypeContractWarnings, readAcceptance, VERIFY_STAGE } from './acceptance';
 import { privacyFilesOf } from './privacy-files';
 import { realDataHeld } from './real-data-held';
@@ -74,7 +78,7 @@ import { fitProbes, probeEstimate, probesSummary, runProbes } from './probes';
 import { GOODBOY_CASES, readUserCases, runSmoke, smokeSummary } from './smoke';
 import { surveyProject } from './test-survey';
 import { BACKFILL_FILE, backfillSummary, DEFAULT_BATCH, lineKind, markTarget, MAX_TARGETS, mergeSurvey, nextBatch, readBackfill, repoRel, sandboxRunFlagsOnly, type TargetStatus, withBackfillLock, writeBackfill } from './test-backfill';
-import { extraBlobsFor, repoTop } from './changed-coverage';
+import { emptyTree, extraBlobsFor, readCoverageStartHead, repoTop } from './changed-coverage';
 import { changedEntries, MAX_CHANGED_ENTRIES, scopeCoverageTops } from './coverage-entries';
 import { repoOfFile, type RepoWalkMemo } from './nested-repos';
 import { isUnder, realDeep } from './private-files';
@@ -1185,27 +1189,80 @@ function privacyFilesByRepo(cwd: string, files: readonly string[]): Set<string> 
   return own;
 }
 
-/** 변경 파일 목록으로부터 띄워야 할 리뷰 축과 각 축이 채워야 할 차원을 출력한다.
- *  스킬이 "어떤 축을 병렬로 띄울지"를 눈대중이 아니라 결정적으로 정하게 한다. */
-function cmdReviewAxes(cwd: string, args: string[]): void {
-  const files = args.filter((a) => typeof a === 'string' && a.trim() !== '');
+const FULL_SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** (N6) The session review-axes plans for: `--session` (an id or its tag), else the one this command runs in
+ *  (CLAUDE_CODE_SESSION_ID). Never the newest transcript of the dir, which may be another terminal's session. */
+function reviewSession(cwd: string, want: string | undefined): string | null {
+  if (want !== undefined) {
+    // Only a session with a transcript: a made-up id would create a state dir and size against HEAD (security review).
+    const hit = findSession(cwd, want);
+    return hit !== null && hit.transcript !== null && FULL_SESSION_ID.test(hit.id) ? hit.id : null;
+  }
+  const own = (process.env.CLAUDE_CODE_SESSION_ID ?? '').trim();
+  return FULL_SESSION_ID.test(own) ? own : null;
+}
+
+/** (N6) The session's start commit for this checkout (the empty tree when it had no commit then), or null when it
+ *  is not known (no pin, an unknown start, a checkout no hook has seen, a failure): the size is then taken against
+ *  HEAD, as before. Read only: measuring writes no start pin (delta review). */
+function startBase(sessionId: string, cwd: string): string | null {
+  try {
+    const top = repoTop(cwd);
+    const head = readCoverageStartHead(sessionId, top);
+    // An object id only: the base goes before `--` in git diff, so a pin holding `--output=…` would be an option
+    //   (security review; readPin checks only that the head is a string).
+    const base = typeof head === 'string' ? head : head === null ? emptyTree(top) : null;
+    return base !== null && OBJECT_ID.test(base) ? base : null;
+  } catch {
+    return null;
+  }
+}
+
+/** `review-axes`: the review axes and dimensions the changed files need, and the plan of review runs for them
+ *  (assignments, slots, schedule), so a skill does not pick the runs by eye. `cwd` is the shell's dir, which the
+ *  file names resolve from; `projectDir` the session's (cliProjectDir), where the reviews are, as for review-write
+ *  and the Stop (review). */
+function cmdReviewAxes(cwd: string, args: string[], projectDir: string = cwd): void {
+  const { session, rest } = sessionOpt(args);
+  const delta = rest.includes('--delta');
+  const files = rest.filter((a) => typeof a === 'string' && a.trim() !== '' && a !== '--delta');
   // (M6g) In a project that may hold real data, the sandbox's files, data.json and the source files that use the data
   //   helper also need `data-privacy`: the same answer the Stop gives (stop-groups privacyOptionsFor), group by group.
   const own = privacyFilesByRepo(cwd, files);
   const opts = { privacy: (f: string) => own.has(f) };
   const dims = requiredDimensionsFor(files, opts);
   const axes = axesFor(files, opts);
-  // (H7) How many review runs: one for every axis when the diff is small.
-  const changedLines = changedLineCount(cwd, files);
-  const plan = reviewPlan(changedLines, axes.length);
+  // (H7, N6) How many review runs, from the substantive size: of a delta since the newest review that lists each
+  //   file, else since the session's start commit (a commit made in the session keeps its files counted), else HEAD.
+  const sid = reviewSession(projectDir, session);
+  let changedLines: number | null;
+  let sizeBase: 'last review' | 'session start' | 'HEAD';
+  if (delta) {
+    const reviews = findRecentReviewFiles(resolve(projectDir, '.claude', 'reviews'), reviewWindowMinutes(), treeRecordWindow(projectDir));
+    changedLines = deltaLineCount(cwd, files, reviews);
+    sizeBase = 'last review';
+  } else {
+    const start = sid === null ? null : startBase(sid, cwd);
+    changedLines = changedLineCount(cwd, files, start ?? 'HEAD');
+    sizeBase = start === null ? 'HEAD' : 'session start';
+  }
+  const { reason, assignments } = reviewAssignments(axes, dims, changedLines, { delta });
+  // (N6) When to start them: the free agent slots, the main session's running agents counted.
+  const cap = spawnCaps().concurrent;
+  const running = sid === null ? null : runningDispatches(readDispatchLog(sid), Date.now()).filter((d) => d.caller === null).length;
   process.stdout.write(
     JSON.stringify(
       {
         ok: true,
         files,
         changed_lines: changedLines,
-        plan,
-        plan_note: reviewPlanNote(plan, agentName(ROUTE.review)),
+        size_base: sizeBase,
+        plan: assignments.length === 1 ? 'single' : 'grouped',
+        plan_note: reviewPlanNote(reason, assignments.length, agentName(ROUTE.review), delta),
+        assignments,
+        slots: { cap, running, free: running === null ? null : Math.max(0, cap - running) },
+        schedule: reviewSchedule(assignments.length, cap, running),
         required_dimensions: dims,
         // 축별로 "이번 변경에서 실제 요구되는 차원"만 남긴다 — 에이전트가 트리거되지 않은
         // 차원을 dimensions_checked에 적지 않도록.
@@ -1652,7 +1709,7 @@ async function cmdCheckup(command: string, args: string[]): Promise<void> {
 
 const USAGE =
   '사용법: bun lib/cli.ts <command> [args...]\n' +
-  '명령: review-write | test-write | regression | acceptance-list | results query [--kind k[,k]] [--verdict v] [--since <time>] [--limit N] | results show <name> [--kind k] [--fields a,b.c] [--max-bytes N] | review-axes <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | test-survey [--all | --dir <dir>] [--max N] | backfill-plan | backfill-next [--size N] [--pick a,b] | backfill-mark <file> --status done|skipped|suspect [--tests a,b] [--note text] | backfill-status | sandbox-scan | sandbox-init [--force] | sandbox-local --dump <abs path> [--format sql|custom] [--input <abs path>]... | sandbox-check | sandbox-prepare [--timeout-ms N] | sandbox-up [--wait-seconds N] [--app-logs] | sandbox-run [--suite unit|e2e|all] [--timeout-ms N] [-- cmd...] | sandbox-down [--volumes] | git-hooks install [--force] | git-hooks uninstall | commit-scan [--hook pre-commit|commit-msg <file>] | push-scan [<remote> [<refspec>...]] | push-scan --hook pre-push <remote> <url> | sandbox-data schema | sandbox-data shape <table>.<col> | sandbox-data count <table> [--where <json>] | sandbox-data pick <table> --where <json> [--n N] | coverage-check <report...> [--root-map from=to] | ui-inventory [--summary] | ui-check [--run <ts>] [--log f]... [--report f]... [--inventory f] | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text> | checkup-state | checkup-begin [--cli <v>] [--replace] | checkup-changelog [--from <v>|none] [--to <v>] [--ids a,b] [--changelog <path>] [--max-matched N] [--max-unmapped N] [--run <id>] | checkup-write --run <id> --name <file> | checkup-complete --run <id> | checkup-abort --run <id> | checkup-projects [--add <dir>|--remove <dir>] [--suggest] | checkup-inventory [--run <id>] (checkup-changelog --inventory adds its identifiers) | checkup-health [--run <id>] [--timeout-ms N] | checkup-smoke [--run <id>] | checkup-compare --run <id> | checkup-probe --run <id> (--estimate | --estimate-id <id>)';
+  '명령: review-write | test-write | regression | acceptance-list | results query [--kind k[,k]] [--verdict v] [--since <time>] [--limit N] | results show <name> [--kind k] [--fields a,b.c] [--max-bytes N] | review-axes [--delta] [--session <id>] <파일...> | skill-gap --session <id> | diff-coverage <report> [--base <rev>|empty] | knowledge-check | decisions | test-catalog | test-survey [--all | --dir <dir>] [--max N] | backfill-plan | backfill-next [--size N] [--pick a,b] | backfill-mark <file> --status done|skipped|suspect [--tests a,b] [--note text] | backfill-status | sandbox-scan | sandbox-init [--force] | sandbox-local --dump <abs path> [--format sql|custom] [--input <abs path>]... | sandbox-check | sandbox-prepare [--timeout-ms N] | sandbox-up [--wait-seconds N] [--app-logs] | sandbox-run [--suite unit|e2e|all] [--timeout-ms N] [-- cmd...] | sandbox-down [--volumes] | git-hooks install [--force] | git-hooks uninstall | commit-scan [--hook pre-commit|commit-msg <file>] | push-scan [<remote> [<refspec>...]] | push-scan --hook pre-push <remote> <url> | sandbox-data schema | sandbox-data shape <table>.<col> | sandbox-data count <table> [--where <json>] | sandbox-data pick <table> --where <json> [--n N] | coverage-check <report...> [--root-map from=to] | ui-inventory [--summary] | ui-check [--run <ts>] [--log f]... [--report f]... [--inventory f] | report-evidence [--session <id>] | report-write [--session <id>] [file] | report-list | report-filed <file> (--issue <url>|--local) | report-done <file> --decision <text> | checkup-state | checkup-begin [--cli <v>] [--replace] | checkup-changelog [--from <v>|none] [--to <v>] [--ids a,b] [--changelog <path>] [--max-matched N] [--max-unmapped N] [--run <id>] | checkup-write --run <id> --name <file> | checkup-complete --run <id> | checkup-abort --run <id> | checkup-projects [--add <dir>|--remove <dir>] [--suggest] | checkup-inventory [--run <id>] (checkup-changelog --inventory adds its identifiers) | checkup-health [--run <id>] [--timeout-ms N] | checkup-smoke [--run <id>] | checkup-compare --run <id> | checkup-probe --run <id> (--estimate | --estimate-id <id>)';
 
 async function main(): Promise<void> {
   // The session's project dir, not the shell's dir after a `cd`: the records written here are
@@ -1689,7 +1746,7 @@ async function main(): Promise<void> {
         break;
       }
       case 'review-axes':
-        cmdReviewAxes(shell, args);
+        cmdReviewAxes(shell, args, cwd);
         break;
       case 'skill-gap':
         await cmdSkillGap(cwd, args);

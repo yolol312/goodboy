@@ -30,7 +30,8 @@ Record one review result the Stop gate can read.
 3. `dimensions_checked`: only the dimensions you really assessed (`bun "$GB/lib/cli.ts"
    review-axes <files>` lists the required ones per axis), never empty: an empty list reads as
    a hallucination review and could clear its findings. Markers: `hallucination` for the
-   evidence check (and in a one-pass all-axes run), `infra-config` for an infra review,
+   evidence check (also when one run covers it with other axes: one pass, or `axes: hallucination, …`),
+   `infra-config` for an infra review,
    `spec-coverage` for a spec review, `codex` for a Codex-only record. `data-privacy` is a
    dimension of its own: list it only after check-data-privacy, with every sandbox file and
    data-helper file you were asked about in `reviewed_files` (a real-data `sandbox-run` needs

@@ -6,6 +6,7 @@ import { OBJECT_ID as TREE_ID } from './git-run';
 import { recordPath } from './record-paths';
 import { axesOfDimensions } from './review-dimensions';
 import { freshness, isTreeBoundFile, listsFile, NULL_TREE_NOTE, readRecordJson, type TreeWindow, treeWindowCheck } from './test-validator';
+import { envInt } from './token-habits';
 import { canonicalTimestamp, isTrustedTimestamp, MAX_CLOCK_SKEW_MS } from './trusted-time';
 import type { ReviewFinding, ReviewResult, Verdict } from './types';
 
@@ -67,6 +68,14 @@ export function findRecentReviewFile(reviewsDir: string, withinMinutes: number):
   } catch {
     return null;
   }
+}
+
+/** 리뷰 유효창(분). v0.26.7: 기본 30분 → 24시간(env GOODBOY_REVIEW_WINDOW_MIN).
+ *  staleness가 파일별 편집 시각 기준(v0.26.5)이라 벽시계 창은 정합성 담보가 아니라
+ *  위생 상한일 뿐인데, 30분은 "수락 전에 만료 → 같은 파일 재차단" 루프를 실측 유발했다.
+ *  (N6) Here, not in hooks/stop.ts, so that review-axes reads the reviews the Stop reads. */
+export function reviewWindowMinutes(): number {
+  return envInt('GOODBOY_REVIEW_WINDOW_MIN', 1440);
 }
 
 /** reviewsDir 안의 모든 유효 리뷰 파일을 최신순으로 반환 (withinMinutes 이내만).

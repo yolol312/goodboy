@@ -34,7 +34,7 @@ import { hasSpelling, sameFileSpelling } from './path-spelling';
 import { realDeep } from './private-files';
 import { recordPath } from './record-paths';
 import { readRegular, readStateText } from './safe-read';
-import { commonDirOf, hasStartPin, nearestGitTop, sessionStartRan, takeStartSnapshot, topIdentity, topStart } from './start-pins';
+import { commonDirOf, hasStartPin, nearestGitTop, readTopStart, sessionStartRan, takeStartSnapshot, topIdentity, topStart } from './start-pins';
 import { freshFor, stripLiteralsAndComments } from './test-validator';
 import type { ChangedFileEdit } from './review-validator';
 import { isTrustedTimestamp } from './trusted-time';
@@ -299,6 +299,18 @@ export function sessionCoverageStart(sessionId: string, cwd: string, top: string
   }
   if (sessionStartRan(sessionId)) return { exempt, unknown: 'the session\'s coverage pin is missing or unreadable although its SessionStart ran, so what it started from is not known' };
   return { exempt };
+}
+
+/** (N6) The session's start of `top`, read and nothing written: `sessionCoverageStart` pins a checkout other than
+ *  the first that it sees first and records the changes already in it, which a command that only measures
+ *  (`review-axes`) must not do (delta review). A commit, null when the checkout had no commit then, undefined when
+ *  it is not known (no pin, an unknown start, a checkout no hook has seen). */
+export function readCoverageStartHead(sessionId: string, top: string): string | null | undefined {
+  const pin = readPin(sessionId);
+  if (!pin) return undefined;
+  if (isPinTop(pin, top)) return pin.head;
+  const s = readTopStart(sessionId, top);
+  return s.kind === 'commit' ? s.head : s.kind === 'empty' ? null : undefined;
 }
 
 /** Why `top` is a checkout whose changes before its first sight are not known (its start is unknown

@@ -116,6 +116,7 @@ import {
   isEvidencedBlocked,
   fileModifiedAt,
   findRecentReviewFiles,
+  reviewWindowMinutes,
   findRecentTestFiles,
   missingTestFiles,
   pruneOldReviewFiles,
@@ -528,14 +529,8 @@ function emit(out: HookOutput): void {
 }
 
 // Retry counters (readRetryCount/writeRetryCount/resetRetryCount) live in lib/retry-counter.ts
-// and are stored per session (stabilization plan A3).
-
-/** 리뷰 유효창(분). v0.26.7: 기본 30분 → 24시간(env GOODBOY_REVIEW_WINDOW_MIN).
- *  staleness가 파일별 편집 시각 기준(v0.26.5)이라 벽시계 창은 정합성 담보가 아니라
- *  위생 상한일 뿐인데, 30분은 "수락 전에 만료 → 같은 파일 재차단" 루프를 실측 유발했다. */
-function reviewWindowMinutes(): number {
-  return envInt('GOODBOY_REVIEW_WINDOW_MIN', 1440);
-}
+// and are stored per session (stabilization plan A3). The review window is lib/review-validator.ts
+// reviewWindowMinutes (N6: review-axes reads the same reviews).
 
 /**
  * (층0) 인용 검증 게이트 — **편집이 있든 없든** 매 턴 동작한다.
@@ -2431,8 +2426,9 @@ function main(): void {
             cwd,
             // A9: point to steps that exist; the agent name comes from the policy table.
             `Review is required for the changed files: ${preview}${more}. ` +
-              `Run \`bun "${CLI_PATH}" review-axes <files>\`: its plan says whether one ` +
-              `${agentName(ROUTE.review)} covers every axis (a small diff) or one runs per axis (or use /request-review).` +
+              `Run \`bun "${CLI_PATH}" review-axes <files>\`: its \`assignments\` are the ${agentName(ROUTE.review)} runs ` +
+              `(one for a small diff, at most three otherwise), each with its \`brief\` in the prompt, and its \`schedule\` says ` +
+              `how many to start now (or use /request-review).` +
               // (I1b) A document change: its class, budget and guidance.
               withDocNote(recentEdits, cwd, sessionId),
             'review',
@@ -2469,10 +2465,11 @@ function main(): void {
               `Review validation failed: ${v.reason ?? 'unknown reason'}. ` +
                 ((v.stale?.length ?? 0) > 0 && (v.missing?.length ?? 0) === 0
                   ? // (H7) Only files changed after their review: no full round is needed.
-                    `These files changed after their review: ${v.stale!.slice(0, 5).join(', ')}. A delta review is enough: one ` +
-                    `${agentName(ROUTE.review)} with \`mode: delta\` and these files; it reads the newest review that lists them ` +
-                    `and checks only what changed since, on every dimension \`bun "${CLI_PATH}" review-axes <files>\` lists for them.`
-                  : `Run the review again (\`bun "${CLI_PATH}" review-axes <files>\` gives the plan, or /request-review).`) +
+                    `These files changed after their review: ${v.stale!.slice(0, 5).join(', ')}. A delta review is enough: ` +
+                    `\`bun "${CLI_PATH}" review-axes --delta <files>\` gives the ${agentName(ROUTE.review)} runs with \`mode: delta\` ` +
+                    `(one for a small delta, a second for security when it touches a security-sensitive file); each reads the newest ` +
+                    `review that lists the files and checks only what changed since.`
+                  : `Run the review again (\`bun "${CLI_PATH}" review-axes <files>\` gives the runs, or /request-review).`) +
                 withDocNote(recentEdits, cwd, sessionId),
               'review',
               '',
@@ -2535,7 +2532,7 @@ function main(): void {
               `high severity 발견사항을 수정하세요: ${issues}. A finding clears when, after the fix, ` +
                 `the review axes that raised it (${axes || 'unknown'}) review the flagged file as it is now (a review ` +
                 `of content changed since does not count; a checkout that keeps a tracked file's content changes nothing): a delta review ` +
-                `(one ${agentName(ROUTE.review)} with \`mode: delta\` and the fixed files) does it.`,
+                `of the fixed files does it (\`bun "${CLI_PATH}" review-axes --delta <files>\` gives the ${agentName(ROUTE.review)} runs).`,
               'review',
               '',
               count,
