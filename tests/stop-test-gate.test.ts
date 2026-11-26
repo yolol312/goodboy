@@ -139,6 +139,9 @@ interface StopOut {
   systemMessage?: string;
 }
 
+/** (N8) The text of the block's `[test]` item: what the test gate itself named, without the other items of the block. */
+const testItem = (o: StopOut): string => /\[test\] (.*?) \(block \d+\)/s.exec(o.reason ?? '')?.[1] ?? '';
+
 async function runStop(
   tmp: string,
   cwd: string,
@@ -202,7 +205,9 @@ describe('Stop hook — 층1 테스트 게이트', () => {
     expect(out.decision).toBe('block');
     expect(out.reason).toContain('No test result covers the changed code');
     expect(out.reason).toContain('a.ts');
-    expect(out.reason).not.toContain('a.test.ts'); // the repo's own test file is still exempt
+    // (N8) The `[test]` item: the review item of the same block lists every changed file, the test file too.
+    expect(testItem(out)).toContain('a.ts');
+    expect(testItem(out)).not.toContain('a.test.ts'); // the repo's own test file is still exempt
   });
 
   // 라이브 실측: 문서만 고친 턴에 README.md·agents/*.md·skills/*.md 5개를 두고
@@ -224,7 +229,9 @@ describe('Stop hook — 층1 테스트 게이트', () => {
     expect(out.decision).toBe('block');
     expect(out.reason).toContain('No test result covers the changed code');
     expect(out.reason).toContain(CODE_FILE);
-    expect(out.reason).not.toContain('README.md');
+    // (N8) The `[test]` item names the code only; the review item of the same block lists every changed file.
+    expect(testItem(out)).toContain(CODE_FILE);
+    expect(testItem(out)).not.toContain('README.md');
   });
 
   test('편집이 없으면 게이트가 발동하지 않는다', async () => {

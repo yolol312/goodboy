@@ -3,7 +3,7 @@
 Feature → test type, generated from the test files by goodboy (`cli.ts test-catalog`).
 Regenerate it instead of editing it; the docs rule compares it with a fresh copy.
 
-Totals: unit 271 files, 5201 tests; e2e 2 files, 53 tests.
+Totals: unit 272 files, 5268 tests; e2e 2 files, 53 tests.
 
 | Feature | Type | File | Tests |
 |---|---|---|---|
@@ -177,6 +177,7 @@ Totals: unit 271 files, 5201 tests; e2e 2 files, 53 tests.
 | N2: the push check names the pattern that passes without checking anything; N3: a tests-role agent may remove the testkit run output; N5: server templates are UI files; N7: a file tool\; the PreToolUse write guard judges a file tool\; the PreToolUse result guard: `results` reads, `regression` records | unit | tests/n-quick-fixes.test.ts | 40 |
 | results query; results show; results: the command word; the CLI process; the result guard lets `results` through and still flags a result dir named in the arguments; resultCliWrite: `results` only reads, whatever follows | unit | tests/n4-results-read.test.ts | 28 |
 | substantivePatchLines: the non-blank added and removed lines of a --unified=0 patch; changedLineCount: substantive lines against a base; deltaLineCount: lines changed since the newest review that lists each file; reviewAssignments: the runs of a review; reviewPlanNote and reviewSchedule; reviewWindowMinutes (moved to lib/review-validator.ts so review-axes reads the reviews the Stop reads) | unit | tests/n6-review-plan.test.ts | 66 |
+| plannedObligations; obligationsReason; noticeGates; N8-1: several unmet obligations are one block; N8-2: a review that passes next to another obligation is not accepted; N8-3: the review checks are each an item | unit | tests/n8-one-block.test.ts | 67 |
 | redirections; shellSegments; hostOf; curl, wget, httpie; ssh family; git push | unit | tests/outward-command.test.ts | 22 |
 | unlisted external hosts; production hosts; gate modes | unit | tests/outward-gate-hooks.test.ts | 12 |
 | ports in command targets; entries with a port; the production guard covers host:port entries; through the PreToolUse hook; connection target reading: value flags, URI parameters, host spelling, env; value flags are per tool | unit | tests/outward-host-port.test.ts | 48 |

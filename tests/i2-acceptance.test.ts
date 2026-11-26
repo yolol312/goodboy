@@ -414,6 +414,8 @@ describe('end to end', () => {
     const blocked = await r.stop();
     expect(blocked.decision).toBe('block');
     expect(blocked.reason).toContain('REQ-1');
+    // (N8) One block names every unmet obligation: the review is asked for in this very block.
+    expect(blocked.reason).toContain('[review.missing]');
     r.record(['REQ-1']);
     const next = await r.stop();
     expect(next.reason ?? '').not.toContain('REQ-1');

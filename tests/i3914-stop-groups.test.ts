@@ -140,6 +140,10 @@ function world(opts: { policy?: string; link?: boolean; start?: boolean; pkg?: b
 const policy = (globs: Record<string, string>): string =>
   ['## P1 User exemptions', '- decide: human', '- source: user 2026-11-04', ...Object.entries(globs).map(([k, v]) => `- ${k}: ${v}`), ''].join('\n');
 
+/** (N8) The text of the block's `[test]` item: what the test gate itself named. The review item of the same block lists
+ *  every changed file of both repos, so a check of which repo the test gate names reads this part only. */
+const testItem = (o: { reason?: string }): string => /\[test\] (.*?) \(block \d+\)/s.exec(o.reason ?? '')?.[1] ?? '';
+
 /** The Stop hook, as Claude Code runs it. */
 interface Out {
   decision?: string;
@@ -317,7 +321,7 @@ describe('the Stop in a project dir that is no repo: each repo is judged under i
     const out = await stop(w);
     expect(out.decision).toBe('block');
     expect(out.reason).toContain('Changed lines that no test ran: fe/src/x.ts (1 of 1 lines ran)'.replace('1 of 1', '0 of 1'));
-    expect(out.reason).not.toContain('be/src/x.ts');
+    expect(testItem(out)).not.toContain('be/src/x.ts');
     expect(out.reason).not.toContain(EMPTY_TREE_PREFIX);
   });
 
@@ -416,8 +420,8 @@ describe('a record is judged by its tree for the repo', () => {
     const out = await stop(w);
     expect(out.decision).toBe('block');
     expect(out.reason).toContain('Could not verify what the test records ran for 1 file(s)');
-    expect(out.reason).toContain(fe);
-    expect(out.reason).not.toContain(be);
+    expect(testItem(out)).toContain(fe);
+    expect(testItem(out)).not.toContain(be);
     expect(out.reason).not.toContain('마지막 편집보다 오래된');
   });
 
@@ -457,8 +461,8 @@ describe('a record is judged by its tree for the repo', () => {
     edit(w, 'fe');
     const out = await stop(w);
     expect(out.decision).toBe('block');
-    expect(out.reason).toContain(fe);
-    expect(out.reason).not.toContain(be);
+    expect(testItem(out)).toContain(fe);
+    expect(testItem(out)).not.toContain(be);
   });
 });
 

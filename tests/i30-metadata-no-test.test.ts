@@ -457,8 +457,12 @@ describe('the Stop test gate: metadata-only sessions', () => {
     });
     expect(out.decision).toBe('block');
     expect(out.reason).toMatch(NO_RESULT);
-    expect(out.reason).toContain('package.json');
-    expect(out.reason).not.toContain('.gitignore');
+    // (N8) The `[test]` item is the part before the review item that follows it in the same block (the review lists
+    //   every changed file, `.gitignore` too): the test gate names only package.json.
+    const testItem = (out.reason ?? '').split(' (2/2) [')[0]!;
+    expect(testItem).toContain('[test] ');
+    expect(testItem).toContain('package.json');
+    expect(testItem).not.toContain('.gitignore');
   }, 60_000);
 
   test('a version-only package.json needs a test when the session start HEAD is unknown', async () => {

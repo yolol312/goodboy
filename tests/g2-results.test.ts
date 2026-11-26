@@ -67,7 +67,9 @@ describe('test results: suites per type', () => {
 
 describe('test results: coverage, recorded not gated', () => {
   test('measured with changed lines, or unavailable with a reason', () => {
-    const measured = { status: 'measured', tool: 'bun test --coverage', line_pct: 80.5, branch_pct: 60, changed: { covered: 3, total: 4, files_without_executed_changes: [] } };
+    // (N8) The whole `diff-coverage` output: test-write refuses an entry without files, in_report, diff_lines or base.
+    const whole = { covered: 3, total: 4, files_without_executed_changes: [], files: { 'src/a.ts': { covered: 3, total: 4 } }, in_report: ['src/a.ts'], diff_lines: { 'src/a.ts': 4 }, base: 'a'.repeat(40), top: '/r' };
+    const measured = { status: 'measured', tool: 'bun test --coverage', line_pct: 80.5, branch_pct: 60, changed: whole };
     expect(validateTestResultInput(result({ coverage: measured })).value!.coverage).toEqual(measured as never);
     expect(validateTestResultInput(result({ coverage: { status: 'unavailable', reason: 'no coverage tool' } })).ok).toBe(true);
     const bad = (c: unknown) => validateTestResultInput(result({ coverage: c })).errors.join('\n');
@@ -127,7 +129,11 @@ describe('changed-line coverage', () => {
     const input = result({
       tested_files: [file],
       test_files: [join(r, 'tests', 'a.test.ts')],
-      coverage: { status: 'measured', changed: { covered: 0, total: 2, files_without_executed_changes: [file] } },
+      // (N8) The whole `diff-coverage` output shape.
+      coverage: {
+        status: 'measured',
+        changed: { covered: 0, total: 2, files_without_executed_changes: [file], files: { [file]: { covered: 0, total: 2 } }, in_report: [file], diff_lines: { [file]: 2 }, base: 'a'.repeat(40), top: r },
+      },
     });
     const p = Bun.spawnSync(['bun', CLI, 'test-write'], { cwd: r, stdin: new TextEncoder().encode(JSON.stringify(input)), stdout: 'pipe', stderr: 'pipe' });
     expect(p.exitCode).toBe(0);

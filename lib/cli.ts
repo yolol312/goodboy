@@ -705,6 +705,15 @@ function validateChangedEntry(raw: unknown, label: string, errors: string[]): bo
     errors.push(`${label} must be the whole \`cli.ts diff-coverage\` output: {covered, total, files_without_executed_changes, files, in_report, diff_lines, base, top}.`);
     return false;
   }
+  // (N8, plan §20.11) The four fields the Stop's changed-line check reads (`changedLineGaps`): an entry without one is
+  //   skipped there, so the Stop named the files as unmeasured instead of the missing field (v0.38.1's own run).
+  const absent = (['files', 'in_report', 'diff_lines', 'base'] as const).filter((k) => ch[k] === undefined);
+  if (absent.length > 0) {
+    errors.push(
+      `${label} lacks ${absent.join(', ')}: record the whole \`cli.ts diff-coverage\` output, since the Stop skips an entry ` +
+        'without files, in_report, diff_lines and base.',
+    );
+  }
   // (I1) The per-file part the test gate reads.
   if (ch.files !== undefined) {
     const files = ch.files as Record<string, unknown> | null;

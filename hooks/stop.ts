@@ -29,7 +29,8 @@ import {
 import { beginGitSnapshot } from '../lib/git-run';
 import { treeRecordWindow } from '../lib/unpushed-work';
 import { refreshCatalog, takeJudgedRows, TEST_CATALOG_FILE } from '../lib/test-catalog';
-import { deferralOpen, runningAgents, type RunningAgents, tasksSummary } from '../lib/agent-deferral';
+import { deferralOpen, endDeferralWait, runningAgents, type RunningAgents, tasksSummary } from '../lib/agent-deferral';
+import { noticeGates, obligationsReason, type Obligation, type ObligationId } from '../lib/stop-obligations';
 import { resnapshotAgentCalls } from '../lib/write-sweep';
 import { FLUSH_PAST_CLOCK_MS, HOOK_CLOCK_MS, hookLeft, startHookClock } from '../lib/hook-clock';
 import { projectDir, projectRoot } from '../lib/project-dir';
@@ -207,9 +208,17 @@ interface HookOutput {
 // in a row the user is told how, in Korean.
 const NOTICE_AFTER_BLOCKS = 2;
 
+/** (N8) The hook's clock left below which, with an obligation already found, the docs and review gates wait for the
+ *  next Stop. */
+const LATER_GATES_MIN_MS = 2_000;
+
 /** True once the user's one-use Stop marker was used in this Stop run; every later gate in
  *  the same run passes too, so one approval ends one Stop. */
 let userPassUsed = false;
+
+/** (N8) This Stop's collected obligations, for the fatal handler: a throw after a gate found one still blocks. Set in
+ *  main. */
+let stopPending: { sessionId: string; cwd: string; list: Obligation[] } | null = null;
 
 /** The shell's current dir of this Stop (the hook's `cwd`), where the user's `! touch` runs; the
  *  gates' `cwd` is the project dir (I10). Set in main. */
@@ -219,7 +228,7 @@ let stopShellCwd: string | undefined;
 let stopTasks: unknown;
 let stopAgents: RunningAgents = { types: [], test: [], review: [] };
 
-/** Whether a gate may wait for running agents now (lib/agent-deferral.ts: 45 minutes from the session's first deferral,
+/** Whether a gate may wait for running agents now (lib/agent-deferral.ts: 45 minutes from the wait's first deferral,
  *  closed when the clock cannot be read). The Stop writes the clock after `finishOpenBashCalls` re-snapshotted the open
  *  agent calls, so when the clock is new those calls are snapshotted again with it in: otherwise a call's post hook would
  *  remove it as a hook-only file the call created, and the 45 minutes would start over. */
@@ -249,26 +258,40 @@ function acceptReview(sessionId: string, cwd: string): void {
   if (existingTestsMode() !== 'off') pinJudgedWeakened(sessionId, weakenedNow(sessionId, cwd).flatMap((w) => w.list));
 }
 
-/** A blocking gate's output: the model is told that only the user can let it pass; after
- *  NOTICE_AFTER_BLOCKS blocks in a row the user sees how (marker or env switch). */
-function blockOutput(sessionId: string, cwd: string, reason: string, gate: string, envSwitch: string, count: number, ownText = false): HookOutput {
-  const out: HookOutput = {
-    decision: 'block',
-    // `ownText`: the reason already says what can end the block (the start gates: no evidence can).
-    reason: ownText
-      ? `${reason} (block ${count})`
-      : `${reason} (block ${count}) This gate passes only on its evidence. If you cannot provide it, ` +
-        'tell the user what is missing and why; only the user can let this Stop pass.',
-  };
-  if (count >= NOTICE_AFTER_BLOCKS) {
+/** (N8) A gate's unmet obligation. `ownText`: the reason already says what can end the block (the start gates: no
+ *  evidence can). */
+function obligation(id: ObligationId, reason: string, gate: string, envSwitch: string, count: number, ownText = false): Obligation {
+  return { id, gate, reason, count, envSwitch, ...(ownText ? { userOnly: true } : {}) };
+}
+
+/** (N8) The one block for every unmet obligation of this Stop (lib/stop-obligations.ts): the model is told that only
+ *  the user can let it pass; once a gate has blocked NOTICE_AFTER_BLOCKS times in a row the user sees how (marker or
+ *  env switch). */
+function blockFor(sessionId: string, cwd: string, obs: readonly Obligation[]): HookOutput {
+  const out: HookOutput = { decision: 'block', reason: obligationsReason(obs) };
+  const notice = noticeGates(obs, NOTICE_AFTER_BLOCKS);
+  if (notice.length > 0) {
     ensureApprovalDir(cwd);
+    const switches = [...new Set(notice.map((n) => n.envSwitch).filter((s) => s !== ''))];
     out.systemMessage =
-      `[goodboy] ${gate} 게이트가 ${count}번 연속 막았어요. 근거 없이 넘어가려면 ` +
+      `[goodboy] ${notice.map((n) => `${n.gate} 게이트가 ${n.count}번`).join(', ')} 연속 막았어요. 근거 없이 넘어가려면 ` +
       `\`! touch ${approvalMarkerShown(cwd, 'stop', sessionId, stopShellCwd)}\`(이번 한 번)을 실행하세요` +
-      (envSwitch !== '' ? `. 계속 끄려면 ${envSwitch}로 설정하세요.` : '.');
+      (switches.length > 0 ? `. 계속 끄려면 ${switches.join(', ')}로 설정하세요.` : '.');
   }
   return out;
 }
+
+/** (N8) One unmet review rule of this Stop: its obligation's id and reason, the gate log's text, the block counter it
+ *  counts on (`validate`: the coverage counter, else the findings counter) and the user's notice when the marker
+ *  passes it ('' for none). */
+interface ReviewItem {
+  id: ObligationId;
+  reason: string;
+  log: string;
+  validate: boolean;
+  passMsg: string;
+}
+
 
 
 /** $HOME/.claude/settings.json 경로. HOME 미설정/오류 시 null(설정 폴백을 건너뜀).
@@ -628,7 +651,7 @@ function checkCitations(
   }
 }
 
-function claimGate(sessionId: string, cwd: string, citationCheck: () => CitationProblem[]): HookOutput | null {
+function claimGate(sessionId: string, cwd: string, citationCheck: () => CitationProblem[]): Obligation | null {
   try {
     const problems = citationCheck();
     if (problems.length === 0) {
@@ -648,10 +671,10 @@ function claimGate(sessionId: string, cwd: string, citationCheck: () => Citation
 
     if (hallucinated.length > 0) {
       logGate(sessionId, 'claim', 'deny', `hallucinated(${hallucinated.length})`);
-      return blockOutput(sessionId, cwd, citationBlockMessage(hallucinated), 'claim', 'GOODBOY_CLAIM_GATE=off', count);
+      return obligation('claim', citationBlockMessage(hallucinated), 'claim', 'GOODBOY_CLAIM_GATE=off', count);
     }
     logGate(sessionId, 'claim', 'deny', `unread(${unread.length})`);
-    return blockOutput(sessionId, cwd, unreadBlockMessage(unread, count >= 2), 'claim', 'GOODBOY_CLAIM_GATE=off', count);
+    return obligation('claim', unreadBlockMessage(unread, count >= 2), 'claim', 'GOODBOY_CLAIM_GATE=off', count);
   } catch (err) {
     // fail-open — 게이트 자체의 오류가 턴을 막지 않는다.
     hookError(sessionId, 'stop', 'claim gate error', err);
@@ -765,16 +788,19 @@ function warnAcceptanceProblem(sessionId: string, cwd: string, problem: Acceptan
  *  security review) would otherwise leave them unjudged. The review cursor stands for both
  *  layers (a test still pending after a review is the push check's, as with F1). An unknown start
  *  there counts every edit since its cursor. A Stop inside Claude Code's agent worktrees
- *  (`.claude/worktrees`) checks nothing: those stay in the project dir's scope, as before. */
-function otherCheckouts(sessionId: string, cwd: string): { dir: string; files: string[]; thisTurn: boolean }[] {
+ *  (`.claude/worktrees`) checks nothing: those stay in the project dir's scope, as before. `moveMark` as the test
+ *  gate's (N8): the mark stays while an earlier gate holds an obligation. */
+function otherCheckouts(sessionId: string, cwd: string, moveMark: boolean): { dir: string; files: string[]; thisTurn: boolean }[] {
   const root = resolvePath(projectRoot(cwd));
   if (resolvePath(cwd).startsWith(join(root, '.claude', 'worktrees') + sep)) return [];
   const habit = readHabitState(sessionId);
   const marks = { ...(habit.checkoutGateTurns ?? {}) };
   const mark = marks[cwd] ?? 0;
-  marks[cwd] = getCurrentTurn(sessionId);
-  habit.checkoutGateTurns = marks;
-  writeHabitState(sessionId, habit);
+  if (moveMark) {
+    marks[cwd] = getCurrentTurn(sessionId);
+    habit.checkoutGateTurns = marks;
+    writeHabitState(sessionId, habit);
+  }
   const me = realDeep(resolvePath(cwd));
   const owners = new Set<string>();
   for (const f of getEditHistory(sessionId).files) {
@@ -1367,7 +1393,10 @@ function tryAcceptPendingTest(sessionId: string, cwd: string): boolean {
  *
  * @returns block 출력(차단) 또는 null(통과/게이트 비활성)
  */
-function testGate(sessionId: string, cwd: string): HookOutput | null {
+/** The test gate's obligation, null when it has none, or `deferred` when a running test agent holds the block (the
+ *  Stop then ends with what the gates before found). `moveMark`: false while an earlier gate holds an obligation
+ *  (N8): the turn mark stays, as when that gate blocked alone and this one did not judge. */
+function testGate(sessionId: string, cwd: string, moveMark: boolean): Obligation | 'deferred' | null {
   try {
     const cursor = readTestCursor(cwd, sessionId);
     const cursorTurn = cursor ? cursor.turn : 0;
@@ -1418,13 +1447,15 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
     const marks = { ...(habit.testGateTurns ?? {}) };
     const changedThisTurn = testEditsSince(sessionId, cwd, marks[cwd] ?? 0).length > 0 || sandboxEditsSince(sessionId, cwd, marks[cwd] ?? 0).length > 0;
     const previousMark = marks[cwd]; // (#44) put back when a running test agent defers this Stop's block
-    marks[cwd] = getCurrentTurn(sessionId);
-    habit.testGateTurns = marks;
-    writeHabitState(sessionId, habit);
+    if (moveMark) {
+      marks[cwd] = getCurrentTurn(sessionId);
+      habit.testGateTurns = marks;
+      writeHabitState(sessionId, habit);
+    }
 
     // `start`: the start gate's block (#33). It counts, so the user's marker notice appears, but it
     //   carries no "record a blocked result" advice: no record, blocked or not, is accepted there.
-    const block = (reason: string, start = false): HookOutput | null => {
+    const block = (reason: string, start = false): Obligation | 'deferred' | null => {
       // The user's override (track G) passes as the old escape did: cursor moves, counter resets.
       if (userPass(sessionId, cwd, 'test')) {
         acceptTests(sessionId, cwd);
@@ -1440,7 +1471,7 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
         return null;
       }
       // (#44) A running `goodboy:test-*` agent is the test result this gate asks for: the block waits (a warning, the
-      //   Stop ends), for 45 minutes from the session's first deferral. Not for the start gate, which no record can
+      //   Stop ends), for 45 minutes from the wait's first deferral. Not for the start gate, which no record can
       //   end, and never as evidence: the record must still exist and match on a later Stop. The turn mark is put back,
       //   so the next Stop still sees this turn's code as changed.
       if (!start && stopAgents.test.length > 0 && deferring(sessionId)) {
@@ -1455,7 +1486,7 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
           `[goodboy] 테스트 에이전트(${stopAgents.test.join(', ')})가 아직 실행 중이라 테스트 게이트의 차단을 보류했어요. ` +
             '결과가 기록되면 다음 턴 종료 때 그 기록으로 판정해요(보류는 근거가 아니에요; 최대 45분).',
         );
-        return {};
+        return 'deferred';
       }
       const count = readRetryCount(sessionId, TEST_COUNT_FILE) + 1;
       writeRetryCount(sessionId, count, TEST_COUNT_FILE);
@@ -1464,10 +1495,9 @@ function testGate(sessionId: string, cwd: string): HookOutput | null {
       logGate(sessionId, 'test', 'deny', reason);
       // (#44) What the payload said about background work at this deny, one line (a deny while an agent ran needs it).
       logGate(sessionId, 'test', 'warn', tasksSummary(stopTasks));
-      if (start) return blockOutput(sessionId, cwd, reason, 'test', 'GOODBOY_TEST_GATE=off', count, true);
-      return blockOutput(
-        sessionId,
-        cwd,
+      if (start) return obligation('start.unknown', reason, 'test', 'GOODBOY_TEST_GATE=off', count, true);
+      return obligation(
+        'test',
         `${reason} (테스트 게이트) If the tests cannot run here (no runner, no environment), record a ` +
           '`blocked` result with the commands and output that show it; that ends the turn as unverified.',
         'test',
@@ -1558,7 +1588,7 @@ function refreshStaleCatalog(sessionId: string, cwd: string, stale: StaleDoc[] |
 
 /** `judged`: the stale docs this Stop already judged (and tried to regenerate the catalog for); the active Stop passes
  *  them so the rule does not list and read the test files a second time. */
-function docsGate(sessionId: string, cwd: string, judged?: StaleDoc[] | null): HookOutput | null {
+function docsGate(sessionId: string, cwd: string, judged?: StaleDoc[] | null): Obligation | null {
   try {
     const stale = judged !== undefined ? judged : refreshStaleCatalog(sessionId, cwd, staleDocsNow(sessionId, cwd));
     if (stale === null) return null;
@@ -1573,7 +1603,7 @@ function docsGate(sessionId: string, cwd: string, judged?: StaleDoc[] | null): H
     const count = readRetryCount(sessionId, DOCS_COUNT_FILE) + 1;
     writeRetryCount(sessionId, count, DOCS_COUNT_FILE);
     logGate(sessionId, 'docs', 'deny', stale.map((s) => s.doc).join(', '));
-    return blockOutput(sessionId, cwd, staleDocsReason(stale, resolvePath(import.meta.dir, '..', 'lib', 'cli.ts')), 'docs', 'GOODBOY_DOCS_GATE=off', count);
+    return obligation('docs', staleDocsReason(stale, resolvePath(import.meta.dir, '..', 'lib', 'cli.ts')), 'docs', 'GOODBOY_DOCS_GATE=off', count);
   } catch (err) {
     hookError(sessionId, 'stop', 'docs rule error', err);
     return null;
@@ -1858,6 +1888,12 @@ function main(): void {
       } catch {
         // best-effort
       }
+      // (N8) No test or review agent running: the wait is over, and the next deferral starts a new 45-minute clock.
+      //   After the state guard's restore above (an orphaned call's snapshot would put the clock back), and only when
+      //   the payload lists the tasks (an older Claude Code sends none, and a hung agent there must not renew it).
+      if (Array.isArray(input.background_tasks) && endDeferralWait(sessionId, stopAgents, () => resnapshotAgentCalls(sessionId))) {
+        logGate(sessionId, 'stop', 'warn', 'deferral-wait-ended');
+      }
       // (#40) Bash calls whose writes git could not list are swept again (within UNSWEPT_RETRY_MS), before any gate
       //   reads the edit log; what is still unlisted blocks the full Stop below (B5.95).
       try {
@@ -2031,7 +2067,7 @@ function main(): void {
           //   It counts, so the next active Stop ends.
           const docsBlock = docsGate(sessionId, cwd, docsNow);
           if (docsBlock) {
-            emit(docsBlock);
+            emit(blockFor(sessionId, cwd, [docsBlock]));
             return;
           }
         }
@@ -2159,6 +2195,13 @@ function main(): void {
       //   - No count-based escape (track G): only the user's marker passes it (userPass).
       // GOODBOY_AUTOVALIDATE=off lifts this gate too: with no validation runs, nothing could
       //   ever clear the marker (the switch the block notice names).
+      // (N8, plan §20.11) Every gate below adds its unmet obligation to `pending` instead of blocking alone, so one
+      //   block names them all with the rerun plan (lib/stop-obligations.ts); `finish` ends the Stop with that block,
+      //   or with `pass` when nothing is pending. A gate that waits for running agents still ends the judging there,
+      //   as before, with what the gates before it found.
+      const pending: Obligation[] = [];
+      stopPending = { sessionId, cwd, list: pending };
+      const finish =(pass: HookOutput = {}): void => emit(pending.length > 0 ? blockFor(sessionId, cwd, pending) : pass);
       const autoValidateOff = envStr('GOODBOY_AUTOVALIDATE', 'typecheck') === 'off';
       if (autoValidateOff) clearValidationFailure(sessionId);
       const vf = autoValidateOff ? null : readValidationFailure(sessionId); // this session's marker only
@@ -2170,7 +2213,7 @@ function main(): void {
           clearValidationFailure(sessionId);
         } else if (stopAgents.test.length > 0 && deferring(sessionId)) {
           // (#44) A running `goodboy:test-*` agent may be running the failed command itself: only this block waits
-          //   (a warning), for 45 minutes from the session's first deferral; the claim gate and every later gate
+          //   (a warning), for 45 minutes from the wait's first deferral; the claim gate and every later gate
           //   still judge this Stop. The marker stays, so the next Stop judges it again; a deferral clears nothing.
           logGate(sessionId, 'validation', 'warn', `deferred-for-agents(${stopAgents.test.join(', ')})`);
           habitWarnings.push(
@@ -2181,10 +2224,9 @@ function main(): void {
           const count = readRetryCount(sessionId, VALIDATION_COUNT_FILE) + 1;
           writeRetryCount(sessionId, count, VALIDATION_COUNT_FILE);
           logGate(sessionId, 'validation', 'deny', cmds);
-          emit(
-            blockOutput(
-              sessionId,
-              cwd,
+          pending.push(
+            obligation(
+              'validation',
               `자동 검증이 실패한 상태입니다: ${cmds}. 원인을 수정하세요 — ` +
                 `파일을 편집하면 검증이 자동 재실행되고, 통과하면 이 차단이 해제됩니다. (검증 게이트)`,
               'validation',
@@ -2192,7 +2234,6 @@ function main(): void {
               count,
             ),
           );
-          return;
         }
       } else {
         // No marker, another session's, or a stale one (a later pass) → the block count restarts.
@@ -2202,10 +2243,7 @@ function main(): void {
       // (B5.5) 층0 — 인용 검증. **편집 유무와 무관하게** 매 턴 동작하는 유일한 게이트다.
       //   답변만 하는 턴(코드베이스 설명 등)은 이 게이트가 없으면 통째로 무검증이다.
       const claimBlock = claimGate(sessionId, cwd, citationCheck);
-      if (claimBlock) {
-        emit(claimBlock);
-        return;
-      }
+      if (claimBlock) pending.push(claimBlock);
 
       // (B5.8) Running agents (track G, G0 M10): the review and test gates wait while a
       //   background agent runs, since its result (often the review or test the gate asks
@@ -2214,6 +2252,12 @@ function main(): void {
       //   (#44) Only `goodboy:review-*` agents defer here, for 45 minutes from the session's first
       //   deferral; the test and validation gates wait for `goodboy:test-*` agents on their own
       //   (stopAgents, computed once above). Any other agent defers nothing.
+      //   (N8) With an obligation already found (validation, claim), the Stop blocks on it as it did before the
+      //   deferral was reached, and no clock starts; the later gates wait for the review agents.
+      if (stopAgents.review.length > 0 && pending.length > 0) {
+        finish();
+        return;
+      }
       if (stopAgents.review.length > 0 && deferring(sessionId)) {
         logGate(sessionId, 'stop', 'warn', `deferred-for-agents(${stopAgents.review.join(', ')})`);
         emit({});
@@ -2231,8 +2275,7 @@ function main(): void {
           const count = readRetryCount(sessionId, START_COUNT_FILE) + 1;
           writeRetryCount(sessionId, count, START_COUNT_FILE);
           logGate(sessionId, 'start', 'deny', 'start-incomplete');
-          emit(blockOutput(sessionId, cwd, incompleteReason, 'start', '', count, true));
-          return;
+          pending.push(obligation('start.incomplete', incompleteReason, 'start', '', count, true));
         }
       } else {
         resetRetryCount(sessionId, START_COUNT_FILE);
@@ -2246,13 +2289,15 @@ function main(): void {
           const count = readRetryCount(sessionId, SWEEP_COUNT_FILE) + 1;
           writeRetryCount(sessionId, count, SWEEP_COUNT_FILE);
           logGate(sessionId, 'sweep', 'deny', `unswept(${unswept.length}) ${[...new Set(unswept.flatMap((c) => c.stalled))].slice(0, 3).join(', ')}`);
-          emit(blockOutput(sessionId, cwd, unsweptReason(unswept, cwd), 'sweep', '', count, true));
-          return;
+          pending.push(obligation('sweep', unsweptReason(unswept, cwd), 'sweep', '', count, true));
+        } else {
+          // Only the calls the user passed: one a hook appended since this Stop's retry is the next Stop's (delta review).
+          replaceUnswept(sessionId, unswept, []);
+          resetRetryCount(sessionId, SWEEP_COUNT_FILE);
         }
-        // Only the calls the user passed: one a hook appended since this Stop's retry is the next Stop's (delta review).
-        replaceUnswept(sessionId, unswept, []);
+      } else {
+        resetRetryCount(sessionId, SWEEP_COUNT_FILE);
       }
-      resetRetryCount(sessionId, SWEEP_COUNT_FILE);
 
       // (B5.96) (v0.36.18 delta review) An append-only gate log past the state cap is larger than any real session: a
       //   Bash call padded it, to push real records out of the part the gates read or to make every Stop read it until
@@ -2263,19 +2308,28 @@ function main(): void {
           const count = readRetryCount(sessionId, STATE_COUNT_FILE) + 1;
           writeRetryCount(sessionId, count, STATE_COUNT_FILE);
           logGate(sessionId, 'state', 'deny', `oversized ${padded.join(', ')}`);
-          emit(blockOutput(sessionId, cwd, oversizedLogsReason(padded), 'state', '', count, true));
-          return;
+          pending.push(obligation('state', oversizedLogsReason(padded), 'state', '', count, true));
+        } else {
+          clearOversizedLogs(sessionId);
+          resetRetryCount(sessionId, STATE_COUNT_FILE);
         }
-        clearOversizedLogs(sessionId);
+      } else {
+        resetRetryCount(sessionId, STATE_COUNT_FILE);
       }
-      resetRetryCount(sessionId, STATE_COUNT_FILE);
+      // (N8) An incomplete start, unlisted writes or a padded gate log leave the gates below without a trustworthy
+      //   edit list or log, and only the user can pass them: the Stop blocks on them (with any fix found above), and
+      //   the later gates judge, and accept, nothing until then, as when each of these blocked alone.
+      if (pending.some((o) => o.userOnly)) {
+        finish();
+        return;
+      }
 
       // (#35) Another checkout of the project (the project dir, or a linked worktree nested in it)
       //   holds edits this Stop does not judge. Blocks when this turn changed a file anywhere in the
       //   project; on a turn that changed none, a one-line warning (as F1).
       const others = (() => {
         try {
-          return otherCheckouts(sessionId, cwd);
+          return otherCheckouts(sessionId, cwd, pending.length === 0);
         } catch (err) {
           hookError(sessionId, 'stop', 'other-checkouts', err);
           return [];
@@ -2289,10 +2343,9 @@ function main(): void {
         const list = due
           .map((o) => `${o.dir}: ${o.files.slice(0, 3).map((f) => relative(o.dir, f)).join(', ')}${o.files.length > 3 ? ` and ${o.files.length - 3} more` : ''}`)
           .join('; ');
-        emit(
-          blockOutput(
-            sessionId,
-            cwd,
+        pending.push(
+          obligation(
+            'checkout',
             `Unverified edits are in another checkout of the project, which this Stop (in ${cwd}) does not judge: ${list}. ` +
               'Each checkout is verified by a Stop run inside it, against its own start and with its own records: `cd` into it, ' +
               'run the tests and the review from there (their records land in its .claude/), and end the turn there.',
@@ -2301,7 +2354,6 @@ function main(): void {
             count,
           ),
         );
-        return;
       }
       if (due.length === 0) resetRetryCount(sessionId, CHECKOUT_COUNT_FILE);
       if (others.length > 0 && due.length === 0) {
@@ -2315,18 +2367,28 @@ function main(): void {
       // (B6) 층1 — 테스트 게이트. 리뷰보다 **먼저** 동작을 검증한다.
       //   리뷰(리팩토링·성능·보안)는 "동작은 맞다"를 전제로 하는 검토라, 테스트가
       //   통과하지 않은 코드를 리뷰하는 것은 순서가 뒤집힌 것이다.
-      const testBlock = testGate(sessionId, cwd);
-      if (testBlock) {
-        emit(testBlock);
+      // (N8) Each gate's turn mark (the carry: no change since the gate last judged) moves only when nothing earlier is
+      //   pending: a gate that judges beside another's obligation did not judge alone, as it never ran before N8, and a
+      //   turn that met only that other obligation must not carry this one.
+      const testBlock = testGate(sessionId, cwd, pending.length === 0);
+      if (testBlock === 'deferred') {
+        finish();
+        return;
+      }
+      if (testBlock) pending.push(testBlock);
+
+      // (N8) With an obligation found and under two seconds of the hook's clock left, the docs and review gates wait
+      //   for the next Stop: a Stop the hook timeout kills passes, and a review judged out of time only adds a
+      //   ran-out-of-time item.
+      if (pending.length > 0 && hookLeft() < LATER_GATES_MIN_MS) {
+        logGate(sessionId, 'stop', 'warn', `later-gates-skipped(${hookLeft()}ms left)`);
+        finish();
         return;
       }
 
       // (track H) The docs rule, before the review so the doc update is reviewed too.
       const docsBlock = docsGate(sessionId, cwd);
-      if (docsBlock) {
-        emit(docsBlock);
-        return;
-      }
+      if (docsBlock) pending.push(docsBlock);
 
       // (C) 변경 검사 — 마지막으로 수락된 리뷰(커서) 이후 편집된 파일만 본다.
       //   커서 부재(첫 리뷰) → turn 0 = 세션 시작 이후 모든 편집.
@@ -2348,21 +2410,24 @@ function main(): void {
       const recentEdits = netEdits.map((e) => e.file);
       // (as layer 1's F1, #32 #37) A turn that changed no reviewable file since the last Stop whose
       //   review gate judged this dir adds nothing to review: the earlier edits stay pending (the
-      //   cursor holds) and block the next turn that changes one. One mark per project dir.
+      //   cursor holds) and block the next turn that changes one. One mark per project dir. (N8) The mark moves only
+      //   with nothing else pending, as the test gate's.
       const reviewChangedThisTurn = (() => {
         try {
           const habit = readHabitState(sessionId);
           const marks = { ...(habit.reviewGateTurns ?? {}) };
           const since = new Set(getEditsWithLastTimestampSince(sessionId, marks[cwd] ?? 0, cwd).map((e) => e.file));
-          marks[cwd] = getCurrentTurn(sessionId);
-          habit.reviewGateTurns = marks;
-          writeHabitState(sessionId, habit);
+          if (pending.length === 0) {
+            marks[cwd] = getCurrentTurn(sessionId);
+            habit.reviewGateTurns = marks;
+            writeHabitState(sessionId, habit);
+          }
           return recentEdits.some((f) => since.has(f));
         } catch {
           return true; // fail closed: judged as a change
         }
       })();
-      /** True (and the Stop ends with a one-line warning) when this turn changed nothing to review. */
+      /** True (with a one-line warning) when this turn changed nothing to review: the review adds no obligation. */
       const carryReview = (why: string): boolean => {
         if (reviewChangedThisTurn) return false;
         logGate(sessionId, 'review', 'warn', `carried (no change this turn): ${why}`);
@@ -2370,29 +2435,32 @@ function main(): void {
           `[goodboy] 이번 턴에는 파일 변경이 없어 리뷰 게이트가 막지 않았어요. 앞서 바뀐 파일 ` +
             `${recentEdits.length}개는 아직 리뷰가 끝나지 않았고, 다음에 파일을 바꾸는 턴에 다시 확인해요.`,
         );
-        emit({});
         return true;
       };
       if (recentEdits.length === 0) {
         statusSnapshot.reviewPending = false;
-        emit({});
+        finish();
         return;
       }
       statusSnapshot.reviewPending = true;
 
       // (#33) A review of changes judged against an unknown or an ambiguous start is no acceptance.
+      //   (N8) Every accept below needs nothing else pending. The gate that found an obligation already asked for the
+      //   user's marker, but a marker made between two gates of one Stop would be spent here while the Stop still
+      //   blocks (security review), so the review asks for it only with nothing pending.
       const startIssue = startProblem(sessionId, cwd, recentEdits);
       if (startIssue !== null) {
-        if (userPass(sessionId, cwd, 'review')) {
+        if (pending.length === 0 && userPass(sessionId, cwd, 'review')) {
           acceptReview(sessionId, cwd);
           statusSnapshot.reviewPending = false;
-          emit({});
+          finish();
           return;
         }
         const count = readRetryCount(sessionId, REVIEW_VALIDATE_COUNT_FILE) + 1;
         writeRetryCount(sessionId, count, REVIEW_VALIDATE_COUNT_FILE);
         logGate(sessionId, 'review', 'deny', 'start-unknown');
-        emit(blockOutput(sessionId, cwd, startIssue, 'review', '', count, true));
+        pending.push(obligation('start.unknown', startIssue, 'review', '', count, true));
+        finish();
         return;
       }
 
@@ -2406,37 +2474,27 @@ function main(): void {
           return [] as ReturnType<typeof findRecentReviewFiles>;
         }
       })();
+      // (N8) Every review rule runs and adds its item: the missing or invalid coverage, the open high findings, the
+      //   unchecked assumptions, the missing dimensions and the unjudged weakened tests are one review plan's work,
+      //   named in one block. Before, each blocked alone, so a re-review that fixed one met the next.
+      const reviewItems: ReviewItem[] = [];
       if (reviews.length === 0) {
-        // The user's override, as on the other review gates: the cursor moves.
-        if (userPass(sessionId, cwd, 'review')) {
-          acceptReview(sessionId, cwd);
-          statusSnapshot.reviewPending = false;
-          emit({});
-          return;
-        }
-        if (carryReview('no-review-file')) return;
         const preview = recentEdits.slice(0, 5).join(', ');
         const more = recentEdits.length > 5 ? ` 외 ${recentEdits.length - 5}개` : '';
-        const count = readRetryCount(sessionId, REVIEW_VALIDATE_COUNT_FILE) + 1;
-        writeRetryCount(sessionId, count, REVIEW_VALIDATE_COUNT_FILE);
-        logGate(sessionId, 'review', 'deny', 'no-review-file');
-        emit(
-          blockOutput(
-            sessionId,
-            cwd,
-            // A9: point to steps that exist; the agent name comes from the policy table.
+        reviewItems.push({
+          id: 'review.missing',
+          log: 'no-review-file',
+          validate: true,
+          passMsg: '',
+          // A9: point to steps that exist; the agent name comes from the policy table.
+          reason:
             `Review is required for the changed files: ${preview}${more}. ` +
-              `Run \`bun "${CLI_PATH}" review-axes <files>\`: its \`assignments\` are the ${agentName(ROUTE.review)} runs ` +
-              `(one for a small diff, at most three otherwise), each with its \`brief\` in the prompt, and its \`schedule\` says ` +
-              `how many to start now (or use /request-review).` +
-              // (I1b) A document change: its class, budget and guidance.
-              withDocNote(recentEdits, cwd, sessionId),
-            'review',
-            '',
-            count,
-          ),
-        );
-        return;
+            `Run \`bun "${CLI_PATH}" review-axes <files>\`: its \`assignments\` are the ${agentName(ROUTE.review)} runs ` +
+            `(one for a small diff, at most three otherwise), each with its \`brief\` in the prompt, and its \`schedule\` says ` +
+            `how many to start now (or use /request-review).` +
+            // (I1b) A document change: its class, budget and guidance.
+            withDocNote(recentEdits, cwd, sessionId),
+        });
       }
 
       // (E) 파일별 커버리지 + staleness(v0.26.5) — 각 변경 파일은 "그 파일의 마지막
@@ -2445,60 +2503,44 @@ function main(): void {
       //   The same files as recentEdits, with (#26) the review trees that hold their content.
       //   (#39) Per repo, within one deadline for the whole review evaluation.
       const reviewDeadline = newDeadline();
-      const v = (() => {
-        try {
-          return reviewCoverage(sessionId, cwd, netEdits, reviews, reviewDeadline);
-        } catch (err) {
-          return { ok: false, reason: `validateReview 에러: ${String(err)}`, effective: [] };
-        }
-      })();
-      if (!v.ok) {
-        if (!userPass(sessionId, cwd, 'review')) {
-          if (carryReview(v.reason ?? 'invalid')) return;
-          const count = readRetryCount(sessionId, REVIEW_VALIDATE_COUNT_FILE) + 1;
-          writeRetryCount(sessionId, count, REVIEW_VALIDATE_COUNT_FILE);
-          logGate(sessionId, 'review', 'deny', v.reason ?? 'invalid');
-          emit(
-            blockOutput(
-              sessionId,
-              cwd,
-              `Review validation failed: ${v.reason ?? 'unknown reason'}. ` +
-                ((v.stale?.length ?? 0) > 0 && (v.missing?.length ?? 0) === 0
-                  ? // (H7) Only files changed after their review: no full round is needed.
-                    `These files changed after their review: ${v.stale!.slice(0, 5).join(', ')}. A delta review is enough: ` +
-                    `\`bun "${CLI_PATH}" review-axes --delta <files>\` gives the ${agentName(ROUTE.review)} runs with \`mode: delta\` ` +
-                    `(one for a small delta, a second for security when it touches a security-sensitive file); each reads the newest ` +
-                    `review that lists the files and checks only what changed since.`
-                  : `Run the review again (\`bun "${CLI_PATH}" review-axes <files>\` gives the runs, or /request-review).`) +
-                withDocNote(recentEdits, cwd, sessionId),
-              'review',
-              '',
-              count,
-            ),
-          );
-          return;
-        }
-        // The user's override: the cursor must move — without it the next turn blocks on the
-        //   same ghost files again (the structural cause of the v0.25.0 permanent deadlock).
-        const passedForeign = (() => {
-          try {
-            return splitFindings(reviews, sessionId, cwd, cursor ? cursor.timestamp : null, reviewDeadline).foreign;
-          } catch {
-            return [] as ReviewFinding[];
-          }
-        })();
-        acceptReview(sessionId, cwd);
-        statusSnapshot.reviewPending = false;
-        emit({ systemMessage: withForeignNote(`리뷰 검증 실패: ${v.reason ?? '알 수 없음'}`, passedForeign) });
-        return;
+      const v =
+        reviews.length === 0
+          ? null
+          : (() => {
+              try {
+                return reviewCoverage(sessionId, cwd, netEdits, reviews, reviewDeadline);
+              } catch (err) {
+                return { ok: false, reason: `validateReview 에러: ${String(err)}`, effective: [] };
+              }
+            })();
+      if (v !== null && !v.ok) {
+        reviewItems.push({
+          id: 'review.invalid',
+          log: v.reason ?? 'invalid',
+          validate: true,
+          // The user's override: the cursor must move — without it the next turn blocks on the
+          //   same ghost files again (the structural cause of the v0.25.0 permanent deadlock).
+          passMsg: `리뷰 검증 실패: ${v.reason ?? '알 수 없음'}`,
+          reason:
+            `Review validation failed: ${v.reason ?? 'unknown reason'}. ` +
+            ((v.stale?.length ?? 0) > 0 && (v.missing?.length ?? 0) === 0
+              ? // (H7) Only files changed after their review: no full round is needed.
+                `These files changed after their review: ${v.stale!.slice(0, 5).join(', ')}. A delta review is enough: ` +
+                `\`bun "${CLI_PATH}" review-axes --delta <files>\` gives the ${agentName(ROUTE.review)} runs with \`mode: delta\` ` +
+                `(one for a small delta, a second for security when it touches a security-sensitive file); each reads the newest ` +
+                `review that lists the files and checks only what changed since.`
+              : `Run the review again (\`bun "${CLI_PATH}" review-axes <files>\` gives the runs, or /request-review).`) +
+            withDocNote(recentEdits, cwd, sessionId),
+        });
+      } else if (v !== null) {
+        // Validation passed → this gate's block count restarts.
+        resetRetryCount(sessionId, REVIEW_VALIDATE_COUNT_FILE);
       }
-      // Validation passed → this gate's block count restarts.
-      resetRetryCount(sessionId, REVIEW_VALIDATE_COUNT_FILE);
 
       // 가정 검증(F1.5)/차원(F2)은 커버리지를 실제 구성한 리뷰들(effective) 기준으로
       //   평가한다 — 파일별 최신 리뷰가 이전 리뷰를 대체하는 의미론. 빈 경우(변경
       //   파일 없음 등)는 최신 리뷰 1개로 폴백.
-      const effectiveReviews = v.effective.length > 0 ? v.effective : reviews.slice(0, 1);
+      const effectiveReviews = v !== null && v.effective.length > 0 ? v.effective : reviews.slice(0, 1);
       // finding 평가(F/G)는 effective만으로는 부족(리뷰 지적 — 변경 집합 밖 파일만
       //   커버한 최신 리뷰의 high finding이 조용히 소실된다). 커서 이후의 모든 신뢰
       //   리뷰에서, 더 새로운 리뷰로 대체되지 않은 finding을 모아 평가한다(v0.26.6).
@@ -2519,32 +2561,18 @@ function main(): void {
       const highSev = activeFindings.filter((f) => f && f.severity === 'high');
       if (highSev.length > 0) {
         const issues = findingsSummary(highSev, false);
-        if (!userPass(sessionId, cwd, 'review')) {
-          if (carryReview('high-severity')) return;
-          const count = readRetryCount(sessionId) + 1;
-          writeRetryCount(sessionId, count);
-          logGate(sessionId, 'review', 'deny', 'high-severity');
-          const axes = axesToReReview(highSev, findingSource);
-          emit(
-            blockOutput(
-              sessionId,
-              cwd,
-              `high severity 발견사항을 수정하세요: ${issues}. A finding clears when, after the fix, ` +
-                `the review axes that raised it (${axes || 'unknown'}) review the flagged file as it is now (a review ` +
-                `of content changed since does not count; a checkout that keeps a tracked file's content changes nothing): a delta review ` +
-                `of the fixed files does it (\`bun "${CLI_PATH}" review-axes --delta <files>\` gives the ${agentName(ROUTE.review)} runs).`,
-              'review',
-              '',
-              count,
-            ),
-          );
-          return;
-        }
-        // The user's override: review accepted → cursor moves.
-        acceptReview(sessionId, cwd);
-        statusSnapshot.reviewPending = false;
-        emit({ systemMessage: withForeignNote(`해소되지 않은 high severity: ${issues}`, foreignFindings) });
-        return;
+        const axes = axesToReReview(highSev, findingSource);
+        reviewItems.push({
+          id: 'review.high',
+          log: 'high-severity',
+          validate: false,
+          passMsg: `해소되지 않은 high severity: ${issues}`,
+          reason:
+            `high severity 발견사항을 수정하세요: ${issues}. A finding clears when, after the fix, ` +
+            `the review axes that raised it (${axes || 'unknown'}) review the flagged file as it is now (a review ` +
+            `of content changed since does not count; a checkout that keeps a tracked file's content changes nothing): a delta review ` +
+            `of the fixed files does it (\`bun "${CLI_PATH}" review-axes --delta <files>\` gives the ${agentName(ROUTE.review)} runs).`,
+        });
       }
 
       // (F1.5) A2 — 추측/가정 리뷰 연동. 메인 에이전트가 최근 '## 추론' 섹션에서
@@ -2560,33 +2588,18 @@ function main(): void {
           sum + (Array.isArray(r.unknown_assumptions_checked) ? r.unknown_assumptions_checked.length : 0),
         0,
       );
+      //   (N8) Also with no review yet: the review the Stop asks for must check them, said now.
       if (declaredUnknowns > 0 && checkedAssumptions === 0) {
-        if (!userPass(sessionId, cwd, 'review')) {
-          if (carryReview('assumptions-unchecked')) return;
-          const count = readRetryCount(sessionId) + 1;
-          writeRetryCount(sessionId, count);
-          logGate(sessionId, 'review', 'deny', 'assumptions-unchecked');
-          emit(
-            blockOutput(
-              sessionId,
-              cwd,
-              `The main session declared ${declaredUnknowns} guesses or assumptions in its rationale ` +
-                `(## 근거 / ## Rationale), but the review did not check them (unknown_assumptions_checked is empty). ` +
-                `Run ${agentName(ROUTE.review)} to check each one, record it, and review again. (guess-review link)`,
-              'review',
-              '',
-              count,
-            ),
-          );
-          return;
-        }
-        // The user's override: review accepted → cursor moves.
-        acceptReview(sessionId, cwd);
-        statusSnapshot.reviewPending = false;
-        emit({
-          systemMessage: withForeignNote(`추측/가정 ${declaredUnknowns}건이 리뷰에서 검증되지 않았어요.`, foreignFindings),
+        reviewItems.push({
+          id: 'review.assumptions',
+          log: 'assumptions-unchecked',
+          validate: false,
+          passMsg: `추측/가정 ${declaredUnknowns}건이 리뷰에서 검증되지 않았어요.`,
+          reason:
+            `The main session declared ${declaredUnknowns} guesses or assumptions in its rationale ` +
+            `(## 근거 / ## Rationale), but the review did not check them (unknown_assumptions_checked is empty). ` +
+            `Run ${agentName(ROUTE.review)} to check each one, record it, and review again. (guess-review link)`,
         });
-        return;
       }
 
       // (F2) 차원 커버리지 검사 — 변경 파일이 요구하는 품질 차원을 리뷰가 실제로 평가했는지.
@@ -2595,53 +2608,41 @@ function main(): void {
       //   (#27) Per file: each changed file's required dimensions must be checked by a fresh review
       //   that covers that file (v.byFile), not by the union of all reviews. When the computation
       //   throws, the gate fails closed.
-      const dimCheck = (() => {
-        try {
-          return { missing: missingDimensionsByFile(recentEdits, (f) => v.byFile?.get(f), privacyOptionsFor(sessionId, cwd, recentEdits)), error: null };
-        } catch (err) {
-          hookError(sessionId, 'stop', 'review dimensions per file', err);
-          return { missing: [], error: String(err) };
-        }
-      })();
+      //   (N8) Only when the coverage holds: without a fresh review of a file every dimension would be listed, and the
+      //   review the coverage item asks for (review-axes lists each run's dimensions) covers them.
+      const byFile = v !== null && v.ok ? v.byFile : undefined;
+      const dimCheck =
+        v === null || !v.ok
+          ? { missing: [] as ReturnType<typeof missingDimensionsByFile>, error: null }
+          : (() => {
+              try {
+                return { missing: missingDimensionsByFile(recentEdits, (f) => byFile?.get(f), privacyOptionsFor(sessionId, cwd, recentEdits)), error: null };
+              } catch (err) {
+                hookError(sessionId, 'stop', 'review dimensions per file', err);
+                return { missing: [] as ReturnType<typeof missingDimensionsByFile>, error: String(err) };
+              }
+            })();
       const dimList =
         dimCheck.error !== null ? `(could not be worked out: ${dimCheck.error})` : describeMissingDimensions(dimCheck.missing);
       if (dimCheck.error !== null || dimCheck.missing.length > 0) {
-        if (!userPass(sessionId, cwd, 'review')) {
-          if (carryReview(`missing-dimensions: ${dimList}`)) return;
-          const count = readRetryCount(sessionId) + 1;
-          writeRetryCount(sessionId, count);
-          logGate(sessionId, 'review', 'deny', `missing-dimensions: ${dimList}`);
-          emit(
-            blockOutput(
-              sessionId,
-              cwd,
-              (dimCheck.error !== null
-                ? `The quality dimensions this change needs could not be worked out, so the review cannot be judged: ${dimCheck.error}. ` +
-                  `Run ${agentName(ROUTE.review)} again; if this keeps happening, report it.`
-                : `The review did not assess the quality dimensions this change needs, per file ` +
-                  `(each file needs its own review to cover its dimensions; another file's review does not count). ` +
-                  `Missing: ${dimList}. ` +
-                  `Run ${agentName(ROUTE.review)} for them (with runtime or observation probes), ` +
-                  `add them to dimensions_checked, and review again.`),
-              'review',
-              '',
-              count,
-            ),
-          );
-          return;
-        }
-        // The user's override: review accepted → cursor moves.
-        acceptReview(sessionId, cwd);
-        statusSnapshot.reviewPending = false;
-        emit({
-          systemMessage: withForeignNote(
+        reviewItems.push({
+          id: 'review.dimensions',
+          log: `missing-dimensions: ${dimList}`,
+          validate: false,
+          passMsg:
             dimCheck.error !== null
               ? `리뷰가 요구하는 품질 차원을 계산하지 못했어요: ${dimCheck.error}`
               : `리뷰가 다음 품질 차원을 평가하지 않았어요: ${dimList}`,
-            foreignFindings,
-          ),
+          reason:
+            dimCheck.error !== null
+              ? `The quality dimensions this change needs could not be worked out, so the review cannot be judged: ${dimCheck.error}. ` +
+                `Run ${agentName(ROUTE.review)} again; if this keeps happening, report it.`
+              : `The review did not assess the quality dimensions this change needs, per file ` +
+                `(each file needs its own review to cover its dimensions; another file's review does not count). ` +
+                `Missing: ${dimList}. ` +
+                `Run ${agentName(ROUTE.review)} for them (with runtime or observation probes), ` +
+                `add them to dimensions_checked, and review again.`,
         });
-        return;
       }
 
       // (I5, plan §15.8) Weakening an existing test is a review finding: each weakened test needs
@@ -2651,20 +2652,53 @@ function main(): void {
       //   finding must be newer than the test's last change (lib/existing-tests.ts).
       const unjudged = weakMode === 'off' ? [] : unjudgedWeakenedNow(sessionId, cwd, reviews);
       if (unjudged.length > 0 && weakMode === 'on') {
-        if (!userPass(sessionId, cwd, 'review')) {
-          if (carryReview(`weakened-tests: ${unjudged.map((w) => w.rel).join(', ')}`)) return;
-          const count = readRetryCount(sessionId) + 1;
-          writeRetryCount(sessionId, count);
-          logGate(sessionId, 'review', 'deny', `weakened-tests: ${unjudged.map((w) => w.rel).join(', ')}`);
-          emit(blockOutput(sessionId, cwd, weakenedReason(unjudged, agentName(ROUTE.review)), 'review', '', count));
+        reviewItems.push({
+          id: 'review.weakened',
+          log: `weakened-tests: ${unjudged.map((w) => w.rel).join(', ')}`,
+          validate: false,
+          passMsg: weakenedWarning(unjudged),
+          reason: weakenedReason(unjudged, agentName(ROUTE.review)),
+        });
+      }
+      if (unjudged.length > 0 && weakMode !== 'on') logGate(sessionId, 'review', 'warn', `weakened-tests: ${unjudged.map((w) => w.rel).join(', ')}`);
+
+      if (reviewItems.length > 0) {
+        // The user's override: review accepted → cursor moves (only with nothing else pending, see above).
+        if (pending.length === 0 && userPass(sessionId, cwd, 'review')) {
+          acceptReview(sessionId, cwd);
+          statusSnapshot.reviewPending = false;
+          const passed = reviewItems.map((r) => r.passMsg).filter((m) => m !== '').join('\n');
+          finish(passed !== '' || foreignFindings.length > 0 ? { systemMessage: withForeignNote(passed, foreignFindings) } : {});
           return;
         }
-        acceptReview(sessionId, cwd);
-        statusSnapshot.reviewPending = false;
-        emit({ systemMessage: withForeignNote(weakenedWarning(unjudged), foreignFindings) });
+        if (carryReview(reviewItems.map((r) => r.log).join('; '))) {
+          finish();
+          return;
+        }
+        // One count per counter and Stop: the coverage counter for a missing or invalid review, the findings counter
+        //   for the rest (each restarts as before: on an accept, and the coverage counter when the coverage holds).
+        const counts = new Map<boolean, number>();
+        for (const validate of new Set(reviewItems.map((r) => r.validate))) {
+          const file = validate ? REVIEW_VALIDATE_COUNT_FILE : undefined;
+          const count = readRetryCount(sessionId, file) + 1;
+          writeRetryCount(sessionId, count, file);
+          counts.set(validate, count);
+        }
+        for (const r of reviewItems) {
+          logGate(sessionId, 'review', 'deny', r.log);
+          pending.push(obligation(r.id, r.reason, 'review', '', counts.get(r.validate)!));
+        }
+        finish();
         return;
       }
-      if (unjudged.length > 0) logGate(sessionId, 'review', 'warn', `weakened-tests: ${unjudged.map((w) => w.rel).join(', ')}`);
+
+      // (N8) Every review rule passed, but another gate's obligation is pending: the review is not accepted (the
+      //   cursor stays), since the docs rule reads its changes from the review cursor, and an edit that meets the
+      //   other obligation would need its own review anyway. The next Stop accepts it.
+      if (pending.length > 0) {
+        finish();
+        return;
+      }
 
       // (G) medium/low only — 통과 + 알림 (plus findings about files this session did not edit, A3)
       const systemMessage =
@@ -2681,6 +2715,17 @@ function main(): void {
     })
     .catch((err) => {
       hookError(snapshotSessionId, 'stop', 'fatal', err);
+      // (N8, security review) A gate that throws after others found an obligation must not let the Stop pass: before
+      //   N8 the earlier gate's block had ended the Stop before the throwing code ran.
+      const held = stopPending;
+      if (held !== null && held.list.length > 0) {
+        try {
+          emit(blockFor(held.sessionId, held.cwd, held.list));
+        } catch {
+          emit({ decision: 'block', reason: obligationsReason(held.list) });
+        }
+        return;
+      }
       emit({});
     });
 }

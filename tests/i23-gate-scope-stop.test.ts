@@ -156,6 +156,9 @@ describe('content freshness: a record made on the content the file has now', () 
 });
 
 describe('all gaps at once', () => {
+  /** (N8) The text of the block's `[test]` item: what the test gate itself said, without the id, the block count and
+   *  the other items of the same block. */
+  const testItem = (reason: string | undefined): string => /\[test\] (.*?) \(block \d+\)/s.exec(reason ?? '')?.[1] ?? '';
   const server = "import { readFileSync } from 'node:fs';\nexport const r = readFileSync;\n";
   const server2 = `${server}export const q = 2;\n`;
   async function twoGaps(env: Record<string, string>) {
@@ -190,15 +193,17 @@ describe('all gaps at once', () => {
     const out = await stop(d, s);
     expect(out.decision).toBe('block');
     expect(out.reason).toContain('테스트 검증 실패');
-    expect(out.reason).not.toContain('(1/');
+    // (N8) The numbering of rules is the test gate's own, inside its `[test]` item: the block's own "(1/2)" numbers
+    //   its items (the review is asked for too), so the item's text is what is judged.
+    expect(testItem(out.reason)).not.toContain('(1/');
     expect(out.reason).not.toContain('실패한 테스트 스위트');
   }, 60_000);
 
   test('one failing rule is reported plainly, with no numbering', async () => {
     const out = await twoGaps({ GOODBOY_TEST_TYPES: 'off' });
     expect(out.decision).toBe('block');
-    expect(out.reason).toMatch(/changed-line coverage/);
-    expect(out.reason).not.toContain('(1/');
+    expect(testItem(out.reason)).toMatch(/changed-line coverage/);
+    expect(testItem(out.reason)).not.toContain('(1/'); // (N8) the `[test]` item's own text: one rule, no numbering
     expect(out.reason).not.toContain('Test types missing');
   }, 60_000);
 });

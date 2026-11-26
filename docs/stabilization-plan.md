@@ -59,7 +59,8 @@ so work is released in batches:
 | v0.37.3 | the I5 existing-tests check takes the suite command as the evidence (no `test_files` listing), and coverage reports go to a temp dir with a `test-write` warning on untracked files in the recorded tree, §15.38 (#46). Released 2026-11-23 |
 | v0.38.0 | the first track N release: the quick fixes N2–N5, and N7 (#31) settled by a measurement (file tools open the path collapsed by name: their guards keep `resolve`, and their recorders, on the OS-opened path since #29, return to it), §20.9; N1 needed no change (§20.3 status) |
 | v0.38.1 | N6, the review plan: at most three review runs, sized by substantive lines from the session's start commit, a delta plan sized from the last review with a security run when security-sensitive, and a schedule from the free agent slots, §20.10 (#47). Released 2026-11-25 |
-| v0.38.x | proposed: the rest of track N in the §20.8 order (N8, N8b; the eval set N18; tests, criteria and structure, §20.4–§20.6), with a push judged by the test results gathered since the last push (§21, N24–N30, #43, #45) |
+| v0.38.2 | N8, one Stop block for every unmet obligation, with stable ids and the smallest rerun plan; the agent-deferral clock per wait and `test-write`'s check of a `coverage.changed` entry (both carried from §20.10 item 8), §20.11 |
+| v0.38.x | proposed: the rest of track N in the §20.8 order (N8b; the eval set N18; tests, criteria and structure, §20.4–§20.6), with a push judged by the test results gathered since the last push (§21, N24–N30, #43, #45) |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
 
 ## 4. A — Fix silent failures and deadlocks
@@ -6246,7 +6247,7 @@ guards keep `resolve` and their recorders return to it). N1 needs no change: the
 failed call. N6, N8 and N8b remain, each larger: N6 has only the 200-line cut today (no substantive
 count, no three-way split, no session-start base, no slot scheduling), N8 has one collecting gate
 (the test gate) and 15 single-reason Stop blocks, and N8b has nothing yet. They follow as their own
-releases. N6 ships in v0.38.1 (§20.10).
+releases. N6 ships in v0.38.1 (§20.10), N8 in v0.38.2 (§20.11).
 
 - **N1, Codex second opinion.** The review run must pass `GOODBOY_CODEX_MODEL` every time,
   preflight the model once per session and record a skip with its reason. Passing the model is
@@ -6577,7 +6578,88 @@ review runs, not only a plan name. Checked against the code at 8808b5b: the plan
      deferral (00:40:49Z here), so in a longer session later agent runs no longer defer the Stop. It blocked three
      times while agents ran: the gate log's `background_tasks` line listed two `goodboy:review-all` runs the first
      time, and the next two also listed the running `goodboy:test-unit`. A clock per wait (from the first deferral
-     since the last pass) belongs with N8 too.
+     since the last pass) belongs with N8 too. (§20.11 item 6 ends a wait at a Stop with no such agent running, not
+     at a pass, so a hung agent's clock is never renewed.)
+
+### 20.11 v0.38.2: one block for every unmet obligation (N8)
+
+Checked against the code at 4941cce: the full Stop (`hooks/stop.ts` main) ran its gates in order and the first one
+that blocked ended it, so the validation, claim, start, sweep, state, checkout, test and docs gates and seven review
+checks each blocked alone; only the test gate collected its rules (`evaluateTestResults`, #23). Meeting one obligation
+uncovered the next, one Stop each.
+
+1. **One block.** Every gate of the full Stop adds its unmet obligation to one list (`pending`), and the Stop ends with
+   one block for all of them (`blockFor`; `lib/stop-obligations.ts` builds the text). Each obligation has a stable id,
+   kept across Stops until it is met: `validation`, `claim`, `start.incomplete`, `sweep`, `state`, `start.unknown`,
+   `checkout`, `test`, `docs`, and for the review `review.missing`, `review.invalid`, `review.high`,
+   `review.assumptions`, `review.dimensions`, `review.weakened`. The items are listed in plan order with their gate's own
+   text and `(block N)`, the same id or the same text once (the test and the review gate find the same start problem).
+   One obligation reads as its gate's block did, with `[id] ` in front.
+2. **The smallest rerun plan.** After the items, the plan names the phases present, in order: the fixes (validation,
+   citations), the user's part (start, sweep, state: no evidence ends them), the other checkout, one test run for every
+   test item, the docs, and last one `review-axes` plan for every review item (fix the high findings first), since an
+   edit after a review makes it stale. A type check keeps every id in one phase.
+3. **The review checks all run.** No review, an invalid coverage, open high findings, unchecked assumptions, missing
+   dimensions and unjudged weakened tests are each an item. The high findings and the assumptions are listed also when
+   the coverage fails (the re-review must fix and check them anyway; the assumptions also with no review yet). The
+   dimensions only when the coverage holds: without a fresh review of a file every dimension would be listed, and the
+   review-axes runs carry them. One count per counter and Stop (the coverage counter for a missing or invalid review,
+   the findings counter for the rest); the user's marker passes them all, with each item's notice.
+4. **What still ends the judging.** A running review agent ends the Stop after the claim gate as before, blocking on a
+   validation or claim item found before it (no deferral clock starts then); a test agent's deferral ends it after the
+   checkout gate. An incomplete start, unlisted Bash writes or a padded gate log leave the later gates without a
+   trustworthy edit list or log: the Stop blocks on them and any fix found before, and judges and accepts nothing after.
+   With an item found and under two seconds of the hook's clock left (`LATER_GATES_MIN_MS`), the docs and review gates
+   wait for the next Stop, since a Stop the timeout kills passes.
+5. **The review is accepted only with nothing else pending.** The docs rule reads its changes from the review cursor
+   (`staleDocsNow`), so a review accepted next to a docs item would move the cursor past the change and drop the item.
+   A review that passes while another item is pending is left for the next Stop. The test gate still accepts on its
+   own evidence (the test cursor; a later fix is a new edit). The stop_hook_active path is unchanged (its one docs
+   block takes the new format).
+6. **The deferral clock per wait** (§20.10 item 8). A Stop whose payload lists the background tasks and none of them
+   is a running `goodboy:test-*` or `goodboy:review-*` agent ends the wait (`endDeferralWait`, `lib/agent-deferral.ts`):
+   the clock file is removed (after the state guard's restore, and the open agent calls are snapshotted again), and the
+   next deferral starts a new 45 minutes. A pass does not end a wait: an agent that hangs stays listed as running, so its
+   clock is never renewed.
+7. **`test-write` checks a `coverage.changed` entry** (§20.10 item 8). An entry without `files`, `in_report`,
+   `diff_lines` or `base` is refused with the missing names (`validateChangedEntry`, `lib/cli.ts`): the Stop's
+   changed-line check skips such an entry, so its block named the files as unmeasured.
+8. **Review fixes.** The security review: the fatal handler blocks on the obligations collected before a throw
+   (`stopPending`), since before N8 the earlier block had ended the Stop before the throwing code ran; the review asks
+   for the user's marker only with nothing pending (a marker made between two gates of one Stop would be spent on the
+   review while the Stop still blocks). The quality review: the old one-gate `blockOutput` went (the stop_hook_active
+   docs block uses `blockFor`), and four existing tests that recorded partial `coverage.changed` entries took the whole
+   diff-coverage shape. The test run: the carry marks (a gate whose dir saw no change since that gate last judged
+   only warns, #32 #37) moved at every Stop that reached the gate, and before N8 a gate behind a blocking one was not
+   reached. A model that met only `[test]` of a `[test]` + `[review.missing]` block, with no edit, had the review
+   carried. The test, checkout and review gates now move their mark only with nothing pending when they judge, as when
+   the earlier gate blocked alone; the next Stop blocks on the item left, and the carry starts after that block.
+9. **Carried (lows).**
+   - A Stop that sees no test or review agent ends the wait, so a session that starts and ends agents in turn gets a new
+     45 minutes each time. This is the intended trade (a hung agent is still bounded); a minimum interval between waits
+     would bound it further (security review).
+   - A `start.unknown` found by the test gate does not end the judging: the docs gate still runs next to it (the review
+     gate then finds the same problem and ends it). Only the three user-only inputs end it (quality review).
+   - An agent resumed (`SendMessage`) in the turn its completion arrived keeps the wait open: no Stop saw it done, so
+     the clock still counts from its first run (seen 2026-11-26 in this release's own session, on 0.38.1: a clock from
+     00:29:58Z blocked a Stop at 02:03Z while the resumed `goodboy:test-unit` ran). The gates read only a task's
+     `type`, `status` and `agent_type` (G0 M10); telling a resumed agent from a hung one needs a per-task id or start
+     time, if the payload carries one (not checked).
+   - The fatal handler's block on `stopPending` has no test (delta reviews, a medium and a low): no gate throws after
+     an obligation is found through any input the tests reach (the helpers catch their own errors), and the repo's
+     write guard refuses a patched copy of the hook. A test needs a seam that throws on demand.
+   - `testItem()` in four test files (`i23-gate-scope-stop`, `i32-stop-gate-repeats`, `i3914-stop-groups`,
+     `stop-test-gate`) returns an empty string when its pattern misses, so a `not.toContain` beside it passes
+     vacuously; it should fail on a miss (delta review).
+   - The carry-mark read, copy and write is repeated in the test, checkout and review gates, and `const finish =(`
+     lacks a space (delta review).
+10. **Live check (2026-11-26, haiku, dev plugin, repos with no commit).** A model told to edit `src/math.ts` and end the
+    turn at once got one block with two items, `[test]` and `[review.missing]`, each `(block 1)`, and the plan "1) one
+    test run …; 2) review last and once …". It ran one `goodboy:test-unit`, then one `goodboy:review-all` after it
+    ("the review runs after the tests so it sees the final state"); the Stop while the review agent ran deferred, and
+    the next Stop, with no agent running, logged `deferral-wait-ended`. In a second session the model reviewed before
+    its first Stop: that Stop blocked on `[test]` alone (the one-item format), left the passing review unaccepted, and
+    the Stop after the test record accepted both.
 
 ## 21. Push by the test results gathered since the last push (proposed, 2026-11-12, #43)
 

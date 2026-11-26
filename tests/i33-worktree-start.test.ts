@@ -251,6 +251,8 @@ describe('the research repro: a linked worktree is judged against its own start 
     expect(inB.decision).toBe('block');
     expect(inB.reason).toContain('No test result covers the changed code');
     expect(inB.reason).not.toContain('start is unknown');
+    // (N8) One block names every unmet obligation: the review is asked for in the same block, from B's own start.
+    expect(inB.reason).toContain('Review is required');
     const reviewB = await stop(w, B, { GOODBOY_TEST_GATE: 'off' });
     expect(reviewB.reason).toContain('Review is required');
     const inA = await stop(w, w.A, { GOODBOY_TEST_GATE: 'on' });
@@ -688,6 +690,8 @@ describe('rule 9: acceptance cursors are per checkout', () => {
     const inB = await stop(w, B, env);
     expect(inB.decision).toBe('block');
     expect(inB.reason).toContain('No test result covers the changed code');
+    // (N8) The review is asked for in the same block.
+    expect(inB.reason).toContain('Review is required');
     const reviewB = await stop(w, B, { ...env, GOODBOY_TEST_GATE: 'off' });
     expect(reviewB.decision).toBe('block');
     expect(reviewB.reason).toContain('Review is required');
@@ -1363,6 +1367,8 @@ describe('round 9, rule 9: acceptance cursors, the other direction', () => {
     const inA = await stop(w, w.A, env);
     expect(inA.decision).toBe('block');
     expect(inA.reason).toContain('No test result covers the changed code');
+    // (N8) The review is asked for in the same block.
+    expect(inA.reason).toContain('Review is required');
     const reviewA = await stop(w, w.A, { ...env, GOODBOY_TEST_GATE: 'off' });
     expect(reviewA.decision).toBe('block');
     expect(reviewA.reason).toContain('Review is required');

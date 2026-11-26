@@ -4,9 +4,13 @@
 // whose result it asks for: the test and validation gates for a `goodboy:test-*` agent, the review gate for a
 // `goodboy:review-*` agent. Any other agent (research, a plain subagent) and a background shell defer nothing.
 // A deferral is a pause, never evidence: the record must still exist and match when the agent is done. It ends 45
-// minutes after the session's first deferral, so an agent that hangs cannot keep a gate open for good.
+// minutes after the first deferral of the wait, so an agent that hangs cannot keep a gate open for good. (N8, plan
+// §20.11) A wait ends at a Stop that sees no `goodboy:test-*` or `goodboy:review-*` agent running (`endDeferralWait`);
+// the next deferral starts a new clock. Before, the clock ran from the session's first deferral, so in a long session
+// a later agent run deferred nothing (the v0.38.1 run blocked three times while its agents ran). A pass does not end
+// the wait: an agent that hangs stays listed as running, so its clock is never renewed.
 
-import { writeFileSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ensureSessionDir } from './file-tracker';
 import { readRegular } from './safe-read';
@@ -17,7 +21,7 @@ export const DEFERRAL_FILE = 'agent-deferral.json';
 
 export type BackgroundTask = { type?: string; status?: string; agent_type?: string };
 
-/** How long, from the first deferral of a session, the gates keep waiting for agents. */
+/** How long, from the first deferral of a wait, the gates keep waiting for agents. */
 export const AGENT_DEFERRAL_CAP_MS = 45 * 60 * 1000;
 
 const TEST_AGENT = /^goodboy:test-/;
@@ -62,7 +66,28 @@ export function tasksSummary(tasks: unknown): string {
   return `background_tasks ${tasks.length}${parts.length > 0 ? `: ${parts.join(', ')}` : ''}${more}`;
 }
 
-/** Whether a gate may wait for agents now. The first call of a session starts the 45-minute clock (the session's
+/** (N8) Ends the wait: removes the session's deferral clock, when there is one, and then calls `onEnded` (the Stop
+ *  snapshots the open agent calls again, so a call's post hook does not put the removed clock back). Does nothing
+ *  while `agents` lists a running test or review agent. Never throws; a clock it cannot remove stays (closed later by
+ *  its own age). */
+export function endDeferralWait(sessionId: string, agents: RunningAgents, onEnded?: () => void): boolean {
+  if (agents.test.length > 0 || agents.review.length > 0) return false;
+  try {
+    const path = join(ensureSessionDir(sessionId), DEFERRAL_FILE);
+    if (readRegular(path, 4096, true) === 'absent') return false;
+    rmSync(path, { force: true });
+    try {
+      onEnded?.();
+    } catch {
+      // best-effort
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Whether a gate may wait for agents now. The first call of a wait starts the 45-minute clock (the session's
  *  `agent-deferral.json`, created exclusively); a later call is true until the clock runs out. It fails CLOSED: a clock
  *  that cannot be read (not a plain file, too large, malformed, dated in the future) or started (the write failed) means
  *  no deferral, so the gate blocks as it would without an agent. */

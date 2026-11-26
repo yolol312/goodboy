@@ -166,6 +166,9 @@ async function stop(p: Proj, opts: { shellCwd?: string; active?: boolean; env?: 
   return JSON.parse(text) as Out;
 }
 const testBlock = (o: Out) => o.decision === 'block' && (o.reason ?? '').includes('(테스트 게이트)');
+/** (N8) The text of the block's `[test]` item: what the test gate itself named. The review item of the same block lists
+ *  every changed file (a build copy too), so a check of what the test gate names reads this part only. */
+const testItem = (o: Out): string => /\[test\] (.*?) \(block \d+\)/s.exec(o.reason ?? '')?.[1] ?? '';
 const reviewBlock = (o: Out) => o.decision === 'block' && /Review is required|Review validation failed/.test(o.reason ?? '');
 const gateLog = (s: string): string[] => {
   try {
@@ -646,8 +649,8 @@ describe('git-ignored build copies of a tested source file', () => {
     putTestRecord(p, [join(p.d, 'src', 'elsewhere.js')]);
     const out = await stop(p);
     expect(testBlock(out)).toBe(true);
-    expect(out.reason).toContain('src/app.js');
-    expect(out.reason).not.toContain('target/app.js');
+    expect(testItem(out)).toContain('src/app.js');
+    expect(testItem(out)).not.toContain('target/app.js');
   }, 60_000);
 
   test('through the Stop: a source edited after the copy brings the copy back (decided each Stop)', async () => {
@@ -657,8 +660,8 @@ describe('git-ignored build copies of a tested source file', () => {
     putTestRecord(p, [join(p.d, 'src', 'elsewhere.js')]); // names neither: every Stop blocks
     const first = await stop(p);
     expect(testBlock(first)).toBe(true);
-    expect(first.reason).toContain('src/app.js');
-    expect(first.reason).not.toContain('target/app.js');
+    expect(testItem(first)).toContain('src/app.js');
+    expect(testItem(first)).not.toContain('target/app.js');
     write(p.d, 'src/app.js', V2 + '// later\n'); // the copy no longer equals the source
     recordEdit(p.s, p.src, 0, undefined, Date.now());
     const second = await stop(p);

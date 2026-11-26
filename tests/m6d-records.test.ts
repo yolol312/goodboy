@@ -563,7 +563,8 @@ describe('M6d an id or a path that holds personal data stops test-write and revi
 
   test('test-write: a coverage.changed key and list item, and a subprocess pair, that hold personal data are refused', () => {
     const w = world();
-    const changed = (over: Record<string, unknown>) => ({ covered: 1, total: 1, files_without_executed_changes: [] as string[], files: { [SRC]: { covered: 1, total: 1 } }, ...over });
+    // (N8) With the fields test-write requires of every entry (files, in_report, diff_lines, base).
+    const changed = (over: Record<string, unknown>) => ({ covered: 1, total: 1, files_without_executed_changes: [] as string[], files: { [SRC]: { covered: 1, total: 1 } }, in_report: [SRC], diff_lines: { [SRC]: 1 }, base: 'a'.repeat(40), ...over });
     refused(w, 'test-write', testBody(w.A, { coverage: { status: 'measured', changed: changed({ files: { [`src/${PHONE}.ts`]: { covered: 1, total: 1 } } }) } }), 'coverage.changed.files.{a key} holds a phone');
     refused(w, 'test-write', testBody(w.A, { coverage: { status: 'measured', changed: changed({ files_without_executed_changes: [`leak ${MAIL}`] }) } }), 'coverage.changed.files_without_executed_changes[0] holds a email');
     refused(w, 'test-write', testBody(w.A, { coverage: { status: 'measured', changed: [changed({ diff_lines: { [`${RRN}.ts`]: 1 } })] } }), 'coverage.changed[0].diff_lines.{a key} holds a resident-number');
@@ -574,7 +575,8 @@ describe('M6d an id or a path that holds personal data stops test-write and revi
     const w = world();
     const cov = {
       status: 'measured',
-      changed: { covered: 1, total: 1, files_without_executed_changes: [], files: { [SRC]: { covered: 1, total: 1 } }, note: ALL, [`k ${MAIL}`]: ALL },
+      // (N8) With the fields test-write requires of every entry (files, in_report, diff_lines, base).
+      changed: { covered: 1, total: 1, files_without_executed_changes: [], files: { [SRC]: { covered: 1, total: 1 } }, in_report: [SRC], diff_lines: { [SRC]: 1 }, base: 'a'.repeat(40), note: ALL, [`k ${MAIL}`]: ALL },
       subprocess: [{ file: SRC, test: TST, extra: ALL }],
     };
     const r = w.cli(w.A, ['test-write'], JSON.stringify(testBody(w.A, { coverage: cov })));

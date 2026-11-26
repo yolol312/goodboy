@@ -133,8 +133,13 @@ describe('layer 1 for a repo that lives under a test-like directory', () => {
       const out = await stop(box);
       expect(out.decision).toBe('block');
       expect(out.reason).toContain('테스트 검증 실패');
-      expect(out.reason).toContain(join(box.cwd, 'src', 'a.ts'));
-      expect(out.reason ?? '').not.toContain('a.test.ts');
+      // (N8) One block names every unmet obligation: the `[test]` item is the part before the review item, which
+      //   lists every changed file (the repo's own test file too). The test gate's own text is what is judged here.
+      const testItem = (out.reason ?? '').split(' (2/2) [')[0]!;
+      expect(testItem).toContain('[test] ');
+      expect(testItem).toContain(join(box.cwd, 'src', 'a.ts'));
+      expect(testItem).not.toContain('a.test.ts');
+      expect(out.reason).toContain('[review.missing]');
     }, 30_000);
   }
 
