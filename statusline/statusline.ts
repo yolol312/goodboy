@@ -92,6 +92,11 @@ async function main(): Promise<void> {
       if (snapshot.category) parts.push(`${badge ?? ''}${snapshot.category}`);
       if (snapshot.validationFailed) parts.push('🔧 검증실패');
       if (snapshot.reviewPending) parts.push('📋 리뷰대기');
+      // (N8b) Files the user deferred to the next push that are still pending.
+      const d = snapshot.deferred;
+      if (d && (d.review > 0 || d.test > 0)) {
+        parts.push(`⏸ push 때 ${[d.review > 0 ? `리뷰 ${d.review}` : '', d.test > 0 ? `테스트 ${d.test}` : ''].filter(Boolean).join('·')}`);
+      }
       if (typeof snapshot.gateDenies === 'number' && snapshot.gateDenies > 0) {
         parts.push(`🚧 ${snapshot.gateDenies}`);
       }

@@ -4,6 +4,7 @@
 import { existsSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import { noteProjectDir, projectDir } from '../lib/project-dir';
+import { notePolicySeen } from '../lib/deferral';
 import {
   appendDispatchLog,
   ASK_WHEN_UNCLEAR_INSTRUCTION,
@@ -149,6 +150,9 @@ function main(): void {
       // (G1) A real user prompt starts a new delegation budget and is evidence that the same
       //   agent may run again (lib/spawn-guard.ts).
       appendDispatchLog(sessionId, { k: 'prompt', t: Date.now() });
+      // (N8b, lib/deferral.ts) The user's turn: the policy file as it is now is the user's, so a deferral glob they added
+      //   counts from this turn's Stop.
+      if (sessionId !== 'unknown') notePolicySeen(sessionId, cwd);
       // (H1) The user typed the non-project marker: the model may write it (lib/project-mode.ts).
       if (promptHasMarker(prompt)) recordMarkerEvidence(sessionId, 'typed');
 

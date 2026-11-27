@@ -3,7 +3,7 @@
 Feature → test type, generated from the test files by goodboy (`cli.ts test-catalog`).
 Regenerate it instead of editing it; the docs rule compares it with a fresh copy.
 
-Totals: unit 272 files, 5268 tests; e2e 2 files, 53 tests.
+Totals: unit 279 files, 5474 tests; e2e 2 files, 53 tests.
 
 | Feature | Type | File | Tests |
 |---|---|---|---|
@@ -178,6 +178,13 @@ Totals: unit 272 files, 5268 tests; e2e 2 files, 53 tests.
 | results query; results show; results: the command word; the CLI process; the result guard lets `results` through and still flags a result dir named in the arguments; resultCliWrite: `results` only reads, whatever follows | unit | tests/n4-results-read.test.ts | 28 |
 | substantivePatchLines: the non-blank added and removed lines of a --unified=0 patch; changedLineCount: substantive lines against a base; deltaLineCount: lines changed since the newest review that lists each file; reviewAssignments: the runs of a review; reviewPlanNote and reviewSchedule; reviewWindowMinutes (moved to lib/review-validator.ts so review-axes reads the reviews the Stop reads) | unit | tests/n6-review-plan.test.ts | 66 |
 | plannedObligations; obligationsReason; noticeGates; N8-1: several unmet obligations are one block; N8-2: a review that passes next to another obligation is not accepted; N8-3: the review checks are each an item | unit | tests/n8-one-block.test.ts | 67 |
+| AC-12a: a session record that cannot be read fails closed, never throws; AC-12b: a system config file git lists that cannot be resolved is not trusted | unit | tests/n8b-deferral-defensive.test.ts | 5 |
+| AC-1: the deferral keys are user globs; AC-4d: the notice flags are kept in the habit state; AC-9: the status line shows the deferred files | unit | tests/n8b-deferral-keys.test.ts | 6 |
+| AC-7: the push, with a deferred test; AC-7: the push, with a deferred review; AC-7: a nested repo under a plain project folder; AC-7c: the push check holds against what the pushed refs and files can spell (reviews 2026-11-26); AC-8: only the user adds a deferral glob | unit | tests/n8b-deferral-push.test.ts | 40 |
+| AC-11a: the remote\; AC-11b: pushUrlsOf; AC-11c: the remote of the hand-off; AC-11e: no program of the user\; AC-11f: the URL a push goes to, as git rewrites it; AC-11d: spawnGit remoteRead | unit | tests/n8b-deferral-remote.test.ts | 45 |
+| AC-4a: defer-test leaves the matched file out of layer 1; AC-4b: defer-review leaves the matched file out of the review gate; AC-4c: only deferred files pending, the review is not accepted; AC-4d: the status, the gate log and the notice; AC-4e: the docs rule still sees a deferred file; AC-4f: a glob added during the session | unit | tests/n8b-deferral-stop.test.ts | 28 |
+| AC-10a: the policy watch; AC-10a2: a push owes the globs the user had, whatever a tool did to the line; AC-10b: the hooks run the watch (spawned); AC-10c: the state guard and the watch\; AC-10d: a Bash call that removed its snapshot and its note (security delta review) | unit | tests/n8b-deferral-watch.test.ts | 30 |
+| AC-2: deferGlobs; AC-3: deferMatcher; stop-groups: layer 1 and the review gate leave the deferred files out; AC-6: deferredDueAtPush, tests; AC-6: deferredDueAtPush, reviews; AC-6: git failures, caps and the message | unit | tests/n8b-deferral.test.ts | 52 |
 | redirections; shellSegments; hostOf; curl, wget, httpie; ssh family; git push | unit | tests/outward-command.test.ts | 22 |
 | unlisted external hosts; production hosts; gate modes | unit | tests/outward-gate-hooks.test.ts | 12 |
 | ports in command targets; entries with a port; the production guard covers host:port entries; through the PreToolUse hook; connection target reading: value flags, URI parameters, host spelling, env; value flags are per tool | unit | tests/outward-host-port.test.ts | 48 |

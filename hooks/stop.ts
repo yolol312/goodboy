@@ -30,6 +30,7 @@ import { beginGitSnapshot } from '../lib/git-run';
 import { treeRecordWindow } from '../lib/unpushed-work';
 import { refreshCatalog, takeJudgedRows, TEST_CATALOG_FILE } from '../lib/test-catalog';
 import { deferralOpen, endDeferralWait, runningAgents, type RunningAgents, tasksSummary } from '../lib/agent-deferral';
+import { watchPolicy } from '../lib/deferral';
 import { noticeGates, obligationsReason, type Obligation, type ObligationId } from '../lib/stop-obligations';
 import { resnapshotAgentCalls } from '../lib/write-sweep';
 import { FLUSH_PAST_CLOCK_MS, HOOK_CLOCK_MS, hookLeft, startHookClock } from '../lib/hook-clock';
@@ -71,6 +72,9 @@ import {
   repoOfFileFor,
   privacyOptionsFor,
   reviewEditsSince,
+  reviewGateEdits,
+  deferMatchOf,
+  deferredTestEdits,
   sandboxUsersOf,
   scopeFor,
   startProblem,
@@ -358,6 +362,43 @@ let snapshotSessionId: string | null = null;
 // (J3) The session's cwd for the friction notice in emit(); null until main() parsed the input.
 let frictionCwd: string | null = null;
 const statusSnapshot: Partial<Omit<StatusSnapshot, 'updatedAt'>> = {};
+
+/** (N8b, lib/deferral.ts) Notes the files a gate left to the next push by the user's deferral: the status line's count,
+ *  the gate log, and one notice per session and kind (and one for globs that count only from the next session). */
+function noteDeferred(sessionId: string, cwd: string, kind: 'review' | 'test', files: readonly string[]): void {
+  try {
+    const waiting = deferMatchOf(sessionId, cwd, kind === 'review' ? 'defer-review' : 'defer-test').waiting;
+    if (files.length === 0 && waiting.length === 0) return;
+    if (files.length > 0) {
+      statusSnapshot.deferred = { review: 0, test: 0, ...statusSnapshot.deferred, [kind]: files.length };
+      logGate(sessionId, kind, 'warn', `deferred-to-push(${files.length})`);
+    }
+    const habit = readHabitState(sessionId);
+    const shown = { ...(habit.deferNoticeShown ?? {}) };
+    const waitKey = kind === 'review' ? 'waitingReview' : 'waitingTest';
+    const notices: string[] = [];
+    if (files.length > 0 && shown[kind] !== true) {
+      shown[kind] = true;
+      notices.push(
+        `[goodboy] 정책의 미룸(defer-${kind})에 따라 파일 ${files.length}개의 ${kind === 'review' ? '리뷰' : '테스트'}를 ` +
+          '다음 push 때 확인해요. push 전에 그 근거가 있어야 해요.',
+      );
+    }
+    if (waiting.length > 0 && shown[waitKey] !== true) {
+      shown[waitKey] = true;
+      notices.push(
+        `[goodboy] 이번 세션에 작업 중 정책 파일이 바뀌어서, 새로 추가된 defer-${kind} glob(${waiting.slice(0, 3).join(', ')})은 다음 세션부터 적용돼요.`,
+      );
+    }
+    // The habit state is written only when a notice is new (once per session and kind).
+    if (notices.length === 0) return;
+    habit.deferNoticeShown = shown;
+    writeHabitState(sessionId, habit);
+    habitWarnings.push(...notices);
+  } catch {
+    // best-effort: the gates judge as they do without it
+  }
+}
 
 async function readStdin(): Promise<string> {
   let data = '';
@@ -835,7 +876,7 @@ function unresolvedBaseline(sessionId: string, cwd: string): string | null {
   try {
     pending = [
       ...testEditsSince(sessionId, cwd, readTestCursor(cwd, sessionId)?.turn ?? 0),
-      ...reviewEditsSince(sessionId, cwd, readReviewCursor(cwd, sessionId)?.turn ?? 0).map((e) => e.file),
+      ...reviewGateEdits(sessionId, cwd, readReviewCursor(cwd, sessionId)?.turn ?? 0).edits.map((e) => e.file),
     ];
   } catch {
     return null; // the accepts below judge it, and they refuse an unknown start
@@ -1402,6 +1443,8 @@ function testGate(sessionId: string, cwd: string, moveMark: boolean): Obligation
     const cursorTurn = cursor ? cursor.turn : 0;
     // 문서·테스트 파일만 바뀐 턴은 층1의 관심사가 아니다 — 요구해도 해소할 방법이 없다.
     const recentEdits = testEditsSince(sessionId, cwd, cursorTurn);
+    // (N8b) The files the user's `defer-test` leaves to the next push are not in recentEdits.
+    noteDeferred(sessionId, cwd, 'test', deferredTestEdits(sessionId, cwd, cursorTurn));
     // Sandbox files are not in recentEdits: a sandbox run tests them (sandboxRule below).
     if (recentEdits.length === 0 && sandboxEditsSince(sessionId, cwd, cursorTurn).length === 0) {
       statusSnapshot.testPending = false;
@@ -1773,7 +1816,8 @@ function tryAcceptPendingReview(
   try {
     const cursor = readReviewCursor(cwd, sessionId);
     const cursorTurn = cursor ? cursor.turn : 0;
-    const netEdits = reviewEditsSince(sessionId, cwd, cursorTurn);
+    // (N8b) The files the user deferred to the next push are neither judged nor accepted here.
+    const netEdits = reviewGateEdits(sessionId, cwd, cursorTurn).edits;
     const recentEdits = netEdits.map((e) => e.file);
     if (recentEdits.length === 0) return null;
     if (startProblem(sessionId, cwd, recentEdits) !== null) return null; // (#33)
@@ -1894,6 +1938,10 @@ function main(): void {
       if (Array.isArray(input.background_tasks) && endDeferralWait(sessionId, stopAgents, () => resnapshotAgentCalls(sessionId))) {
         logGate(sessionId, 'stop', 'warn', 'deferral-wait-ended');
       }
+      // (N8b, lib/deferral.ts) The policy watch, after the state guard's restore and before any gate reads the deferral
+      //   globs: a change since the last tool call (one that ended with no post hook, or a write while the model's turn
+      //   ran) counts as a tool's.
+      watchPolicy(sessionId, cwd);
       // (#40) Bash calls whose writes git could not list are swept again (within UNSWEPT_RETRY_MS), before any gate
       //   reads the edit log; what is still unlisted blocks the full Stop below (B5.95).
       try {
@@ -2399,10 +2447,13 @@ function main(): void {
       // withinDir=cwd: 프로젝트 안의 파일만 리뷰 대상. 리뷰 에이전트의 프로브 파일은
       //   `mktemp -d`(프로젝트 밖)에 만들도록 강제하므로 자기참조 루프가 끊긴다.
       //   에이전트로는 거르지 않는다 — 서브에이전트 편집도 리뷰 대상(위임 우회 차단).
-      //   (#26) Only files with a net change since the session start.
+      //   (#26) Only files with a net change since the session start. (N8b) Less the files the user deferred to the
+      //   next push: they are neither judged nor accepted here (the cursor does not move for them alone).
       const netEdits = (() => {
         try {
-          return reviewEditsSince(sessionId, cwd, cursorTurn);
+          const split = reviewGateEdits(sessionId, cwd, cursorTurn);
+          noteDeferred(sessionId, cwd, 'review', split.deferred);
+          return split.edits;
         } catch {
           return [];
         }

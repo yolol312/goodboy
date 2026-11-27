@@ -30,6 +30,7 @@ import {
   type UserGlobKey,
 } from './changed-coverage';
 import { buildCopies } from './build-copies';
+import { deferGlobs, deferMatcher, type DeferKey, type DeferMatch } from './deferral';
 import { changedLines } from './diff-coverage';
 import { weakenedTests, type Weakened } from './existing-tests';
 import { getEditHistory, getEditsSince, getEditsWithLastTimestampSince } from './file-tracker';
@@ -113,6 +114,8 @@ export function resetStopGroups(): void {
   walkDownMemo.clear();
   sandboxUsersMemo.clear();
   testEditsMemo.clear();
+  deferredTestMemo.clear();
+  deferMemo.clear();
   weakenedMemo.clear();
   walkMemo = new Map();
   resetConfirmations();
@@ -265,6 +268,27 @@ export function projectGlobs(sessionId: string, cwd: string, key: UserGlobKey): 
   return g;
 }
 
+const deferMemo = new Map<string, { match: DeferMatch; waiting: string[] }>();
+
+/** (N8b, lib/deferral.ts) The user's deferral of `key` to the next push as this Stop uses it, read once per Stop: the
+ *  matcher (globs from the project dir, or from a nested repo's top) and the globs that count from the next session. */
+export function deferMatchOf(sessionId: string, cwd: string, key: DeferKey): { match: DeferMatch; waiting: string[] } {
+  const k = `${sessionId}\0${cwd}\0${key}`;
+  let d = deferMemo.get(k);
+  if (d === undefined) {
+    const top = projectTop(cwd);
+    let g: { globs: string[]; waiting: string[] };
+    try {
+      g = deferGlobs(sessionId, cwd, top, key);
+    } catch {
+      g = { globs: [], waiting: [] }; // nothing deferred: the gates judge every file, as before
+    }
+    d = { match: deferMatcher(g.globs, top), waiting: g.waiting };
+    deferMemo.set(k, d);
+  }
+  return d;
+}
+
 /** The static-preview globs for files named relative to the project dir: each glob as written and, for a
  *  nested repo, with the repo dir in front of it, so a glob written for the repo (`docs/**`) matches `be/docs/x.html`
  *  as one written for the project dir does. */
@@ -346,18 +370,29 @@ export function privacyOptionsFor(sessionId: string, cwd: string, files: readonl
 }
 
 const testEditsMemo = new Map<string, { g: Group; files: string[] }[]>();
+const deferredTestMemo = new Map<string, string[]>();
+
+/** (N8b) The files layer 1 would ask about since the cursor that the user's `defer-test` leaves to the next push (a
+ *  net change of this session, as `testEditsByGroup` judges it). */
+export function deferredTestEdits(sessionId: string, cwd: string, cursorTurn: number): string[] {
+  testEditsByGroup(sessionId, cwd, cursorTurn);
+  return deferredTestMemo.get(`${sessionId}\0${cwd}\0${cursorTurn}`) ?? [];
+}
 
 /** (#23) The code files edited since the cursor that layer 1 asks about, per group: a file whose content is
  *  its blob at the group's start HEAD is no change of this session (an edit undone, or brought back by a
  *  branch switch). Once per Stop: the edit log and the tree do not change while the hook runs, and both layer-1
- *  paths ask. */
+ *  paths ask. (N8b) A file the user's `defer-test` matches is left out (`deferredTestEdits` lists it). */
 export function testEditsByGroup(sessionId: string, cwd: string, cursorTurn: number): { g: Group; files: string[] }[] {
   const key = `${sessionId}\0${cwd}\0${cursorTurn}`;
   const known = testEditsMemo.get(key);
   if (known) return known;
   const scope = scopeFor(sessionId, cwd);
+  const deferred = deferMatchOf(sessionId, cwd, 'defer-test').match;
+  const deferredNet: string[] = [];
   // (Track M) A sandbox layout file no changed file uses is tested by a sandbox run, not by layer 1.
-  const layer1 = (f: string, g: Group): boolean => !sandboxOwnFile(sessionId, cwd, f, scope.top) && needsTestCoverageIn(f, g, scope);
+  const asked = (f: string, g: Group): boolean => !sandboxOwnFile(sessionId, cwd, f, scope.top) && needsTestCoverageIn(f, g, scope);
+  const layer1 = (f: string, g: Group): boolean => asked(f, g) && !deferred.test(f, g.top);
   // (v0.36.6) One evaluation: the net-change check, the build copies' `.gitignore` check and the
   //   change set's own net-change check hash the same files; each is hashed once (a hash batch).
   const out = withHashBatch(() => {
@@ -367,6 +402,10 @@ export function testEditsByGroup(sessionId: string, cwd: string, cursorTurn: num
     for (const g of groups) {
       const files = g.edits.filter((f) => layer1(f, g));
       const net = netChangedEdits(files.map((file) => ({ file })), g.top, g.head).map((e) => e.file);
+      if (deferred.any) {
+        const later = g.edits.filter((f) => deferred.test(f, g.top) && asked(f, g));
+        if (later.length > 0) deferredNet.push(...netChangedEdits(later.map((file) => ({ file })), g.top, g.head).map((e) => e.file));
+      }
       // (#32) A git-ignored build copy of a tested source file is no change of its own (the review
       //   edit set keeps it). Decided again each Stop; the pair is in the gate log.
       const copies = buildCopies(net, g.top, g.head, () => {
@@ -385,7 +424,30 @@ export function testEditsByGroup(sessionId: string, cwd: string, cursorTurn: num
     return res;
   });
   testEditsMemo.set(key, out);
+  deferredTestMemo.set(key, deferredNet);
   return out;
+}
+
+/** (N8b) The review edits since the cursor split by the user's `defer-review`: those the review gate judges, and the
+ *  files it leaves to the next push. The docs rule keeps reading `reviewEditsSince` whole. */
+export function reviewGateEdits(
+  sessionId: string,
+  cwd: string,
+  cursorTurn: number,
+): { edits: { file: string; lastEditTimestamp: string }[]; deferred: string[] } {
+  const all = reviewEditsSince(sessionId, cwd, cursorTurn);
+  const deferred = deferMatchOf(sessionId, cwd, 'defer-review').match;
+  if (!deferred.any || all.length === 0) return { edits: all, deferred: [] };
+  const topOf = new Map<string, string>();
+  try {
+    for (const g of groupsOf(sessionId, cwd, all.map((e) => e.file))) for (const f of g.edits) topOf.set(f, g.top);
+  } catch {
+    // the project dir's names only: a glob written for a nested repo does not match then (the file is judged)
+  }
+  const later = all.filter((e) => deferred.test(e.file, topOf.get(e.file)));
+  if (later.length === 0) return { edits: all, deferred: [] };
+  const out = new Set(later.map((e) => e.file));
+  return { edits: all.filter((e) => !out.has(e.file)), deferred: [...out] };
 }
 
 /** (#26) The files edited since the review cursor that are a change of this session, per group, judged as layer 1

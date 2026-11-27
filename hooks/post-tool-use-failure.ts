@@ -8,7 +8,9 @@
 // Never blocks; any error is swallowed.
 
 import { afterBash, appendDispatchLog, hookError } from '../lib';
+import { watchPolicy } from '../lib/deferral';
 import { HOOK_CLOCK_MS, startHookClock } from '../lib/hook-clock';
+import { projectDir } from '../lib/project-dir';
 
 // (v0.36.14, plan §15.30 item 12) One clock for the hook: the shell-write sweep's nested-repo walk and git calls
 //   end before the 15 s hook timeout (lib/hook-clock.ts); a hook killed there records no write.
@@ -36,15 +38,23 @@ readStdin()
     try {
       const input = (raw.trim() === '' ? {} : JSON.parse(raw)) as PostToolUseFailureInput;
       sid = input?.session_id ?? null;
+      // (N8b, lib/deferral.ts watchPolicy) Every failed call this hook gets (hooks.json: Agent, Task and Bash; a failing
+      //   Bash write may still have changed the policy file), after a Bash call's state-guard restore. A failed call of
+      //   another tool is seen by the next tool's watch or the Stop's.
+      const watch = (): void => {
+        if (input && typeof input.tool_name === 'string') watchPolicy(input.session_id ?? 'unknown', projectDir(input.cwd ?? process.cwd(), process.env));
+      };
       if (input && input.tool_name === 'Bash') {
         const agentId = typeof input.agent_id === 'string' && input.agent_id !== '' ? input.agent_id : undefined;
         const after = afterBash(input.session_id ?? 'unknown', input.tool_use_id, input.cwd ?? process.cwd(), input.tool_input?.command, agentId);
+        watch();
         const out: Record<string, unknown> = {};
         if (after.context) out.hookSpecificOutput = { hookEventName: 'PostToolUseFailure', additionalContext: after.context };
         if (after.notice) out.systemMessage = after.notice;
         process.stdout.write(JSON.stringify(out));
         return;
       }
+      watch();
       if (
         (input.tool_name === 'Agent' || input.tool_name === 'Task') &&
         typeof input.tool_use_id === 'string' &&

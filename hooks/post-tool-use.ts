@@ -42,6 +42,8 @@ import {
   recordMarkerEvidence,
 } from '../lib';
 import { noteSessionTop } from '../lib/changed-coverage';
+import { watchPolicy } from '../lib/deferral';
+import { projectDir } from '../lib/project-dir';
 import { HOOK_CLOCK_MS, startHookClock } from '../lib/hook-clock';
 import { shellValidationPass } from '../lib/shell-validation-pass';
 import { START_PIN_BUDGET_MS, startPinDeadline } from '../lib/start-pins';
@@ -555,6 +557,11 @@ function main(): void {
           }
         }
       }
+
+      // (N8b, lib/deferral.ts) Every tool call, after the state guard's restore above: a change to the policy file
+      //   since the hooks last saw it is a tool's, whatever path wrote it, so a deferral glob it added waits for the next
+      //   session.
+      watchPolicy(sessionId, projectDir(cwd, process.env));
 
       // (#33) A checkout the session did not start in is pinned the first time a hook sees it, so the
       //   changes already in it count from here (lib/start-pins.ts). After the state guard's restore

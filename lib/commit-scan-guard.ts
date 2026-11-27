@@ -29,9 +29,8 @@
 import { basename, resolve } from 'node:path';
 import { COMMIT_ATTACHED_ONLY, COMMIT_VALUE_OPTS, gitCallsOf, heredocMessages, type GitCall, type GitMover } from './commit-issue';
 import { Acc, type CommitInput, type PushInput, type ScanLimits, type ScanReport, realDataRootOf, registryHoldsProjects, scanCommit, scanPush, unclear } from './commit-scan';
-import { spawnGit } from './git-run';
 import { gitSubcommandAt, mentionsGit } from './outward-command';
-import { changesCommits, PUSH_VALUE_OPTS, pushConfigSendsMore } from './push-test';
+import { changesCommits, PUSH_VALUE_OPTS, pushConfigSendsMore, pushRemoteOf } from './push-test';
 
 /** git commands that change the index or the work tree and that `changesCommits` counts as reads. */
 const INDEX_GIT: ReadonlySet<string> = new Set([
@@ -246,21 +245,6 @@ function commitInputOf(call: GitCall, command: string, tie?: MessageTie): { inpu
   return { input: { ...input, unclear: [...new Set(input.unclear)] }, skip: dry && !odd, stdin: readsStdin };
 }
 
-/** The remote `git push` uses when none is named: the push remote, then `remote.pushDefault`, the branch's remote, `origin`. */
-function defaultRemote(dir: string): string | null {
-  const one = (args: string[]): string | null => {
-    const r = spawnGit(dir, args, { timeoutMs: 5_000, noMemo: true });
-    return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : null;
-  };
-  const branch = one(['symbolic-ref', '--short', '-q', 'HEAD']);
-  return (
-    (branch !== null ? one(['config', '--get', `branch.${branch}.pushRemote`]) : null) ??
-    one(['config', '--get', 'remote.pushDefault']) ??
-    (branch !== null ? one(['config', '--get', `branch.${branch}.remote`]) : null) ??
-    'origin'
-  );
-}
-
 /** A `git push` call as what it sends; `skip` when it sends nothing (`--dry-run`). */
 export function pushInputOf(call: GitCall): { input: PushInput; skip: boolean } {
   const input: PushInput = { dir: call.dir, globals: call.globals, remote: null, revs: [], flags: [], excluding: [], unclear: [] };
@@ -327,7 +311,7 @@ export function pushInputOf(call: GitCall): { input: PushInput; skip: boolean } 
   const named = pos[0];
   // `--delete`: every refspec names a ref to remove, and nothing is sent
   const refspecs = del ? [] : pos.slice(1);
-  input.remote = named ?? repoOpt ?? defaultRemote(call.dir);
+  input.remote = named ?? repoOpt ?? pushRemoteOf(call.dir);
   for (let n = 0; n < refspecs.length; n++) {
     const r = refspecs[n]!;
     if (r === 'tag' && refspecs[n + 1] !== undefined) {

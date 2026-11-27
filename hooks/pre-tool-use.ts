@@ -3,7 +3,10 @@
 
 import { existsSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve as resolvePath, sep } from 'node:path';
-import { addedUserGlobs, diffCoverageMode, isPolicyFile, type UserGlobKey } from '../lib/changed-coverage';
+import { addedUserGlobs, diffCoverageMode, isPolicyFile, repoTop, sessionUserGlobs, type UserGlobKey } from '../lib/changed-coverage';
+import { deferMatcher, deferredDueAtPush, deferredDueMessage, MAX_DEFER_GLOBS, pushDeferGlobs, remoteTips, type DeferMatch, type DeferredDue } from '../lib/deferral';
+import { passingForTree, pushRemoteOf, realRepoTop, topOf as pushedRepoTop } from '../lib/push-test';
+import { findRecentReviewFiles, reviewWindowMinutes } from '../lib/review-validator';
 import { HOOK_CLOCK_MS, startHookClock } from '../lib/hook-clock';
 import { readStateText } from '../lib/safe-read';
 import { checkRegression, readRegressionRecords, type RegressionOutcome, regressionMessage, regressionMode } from '../lib/regression';
@@ -11,7 +14,7 @@ import { projectDir, projectRoot } from '../lib/project-dir';
 import { realDataRootOf, registryHoldsProjects } from '../lib/real-data-held';
 import { agentName, ROUTE } from '../lib/routing-policy';
 import { testTypesMode } from '../lib/test-types';
-import { classifyPath } from '../lib/verification-scope';
+import { classifyPath, needsTests } from '../lib/verification-scope';
 import {
   appendDispatchLog,
   fileToolPath,
@@ -768,13 +771,20 @@ function main(): void {
         }
       }
 
-      // (I1, I3a, I3b) The user globs are the user's (lib/changed-coverage.ts): an Edit/Write that
-      //   adds a `coverage-exempt`, `static-preview` or `test-type-exempt` glob to a human policy
-      //   entry is denied, an exemption only while its rule is on. The gates would ignore it
-      //   anyway (they use the globs pinned at the session start); this explains it early.
+      // (I1, I3a, I3b, N8b) The user globs are the user's (lib/changed-coverage.ts USER_GLOB_KEYS): an Edit/Write that
+      //   adds a `coverage-exempt`, `static-preview`, `test-type-exempt`, `defer-review` or `defer-test` glob to a human
+      //   policy entry is denied, an exemption only while its rule is on. The gates would ignore it anyway (they use the
+      //   globs pinned at the session start, and a deferral added by a tool waits for the next session, lib/deferral.ts);
+      //   this explains it early. A link to the policy file is the policy file.
       if (toolName === 'Write' || toolName === 'Edit' || toolName === 'MultiEdit') {
         const fp = typeof toolInput.file_path === 'string' ? resolvePath(cwd, toolInput.file_path) : '';
-        if (fp && isPolicyFile(fp)) {
+        let realFp = fp;
+        try {
+          realFp = fp ? realpathSync(fp) : fp;
+        } catch {
+          // a new file: its own name
+        }
+        if (fp && (isPolicyFile(fp) || isPolicyFile(realFp))) {
           let before = '';
           try {
             before = readFileSync(fp, 'utf8');
@@ -794,12 +804,19 @@ function main(): void {
               'coverage-exempt': 'Only the user exempts files from the changed-line coverage rule (decision G-exception)',
               'static-preview': 'Only the user declares static previews, which need no test',
               'test-type-exempt': 'Only the user exempts files from the test-type rule',
+              'defer-review': 'Only the user defers a review to the next push (N8b)',
+              'defer-test': 'Only the user defers tests to the next push (N8b)',
             };
             const why = keys.map((k) => WHY[k]).join('; ');
+            const deferOnly = keys.every((k) => k === 'defer-review' || k === 'defer-test');
             emit(
               deny(
-                `${why}; this edit adds ${list}. Write tests that run the code, or ask the user: they add the line ` +
-                  'themselves, and it counts from the next session.',
+                deferOnly
+                  ? `${why}; this edit adds ${list}. Run the tests and the review the Stop asks for, or ask the user: they ` +
+                      'add the line themselves, and it counts from their next message (from the next session when a ' +
+                      'tool changed the policy file in this session).'
+                  : `${why}; this edit adds ${list}. Write tests that run the code, or ask the user: they add the line ` +
+                      'themselves, and it counts from the next session.',
               ),
             );
             return;
@@ -965,6 +982,76 @@ function main(): void {
               if (!trees.has(k)) trees.set(k, revisionTree(c, rev));
               return trees.get(k)!;
             };
+            // (N8b, lib/deferral.ts) The files the user deferred to the push: a push is where their tests and review are
+            //   due, for the content it sends. Every deferral glob the policy file has now counts (also one that waits for
+            //   the next session at the Stop), and the session's pinned and user-seen ones even after a tool removed them
+            //   (lib/deferral.ts pushDeferGlobs). The globs and the review records are read once for all hand-offs, and only
+            //   when a hand-off reaches this check. Fails closed: an error is a push whose files cannot be judged.
+            let deferSetup: { top: string; test: DeferMatch; review: DeferMatch; previews: string[] } | undefined;
+            let reviewRecords: ReturnType<typeof findRecentReviewFiles> | undefined;
+            // One `ls-remote` per push URL of each repo and remote for the whole command, whatever the revs and hand-offs.
+            const tipsMemo = new Map<string, string[][] | null>();
+            const tipsOf = (c: string, r: string | undefined, d: (cwd: string) => string): string[][] | null => {
+              const k = `${c}\0${r ?? ''}`;
+              if (!tipsMemo.has(k)) tipsMemo.set(k, remoteTips(c, r, d));
+              return tipsMemo.get(k)!;
+            };
+            const deferredFor = (h: (typeof handoffs)[number]): DeferredDue | null => {
+              try {
+                if (deferSetup === undefined) {
+                  const top = repoTop(projectCwd);
+                  const testGlobs = pushDeferGlobs(sessionId, projectCwd, top, 'defer-test');
+                  const reviewGlobs = pushDeferGlobs(sessionId, projectCwd, top, 'defer-review');
+                  // More globs than any policy needs (a planted record can hold thousands) would run the matcher past
+                  //   the hook's clock: not judged (security delta review).
+                  if (testGlobs.length + reviewGlobs.length > MAX_DEFER_GLOBS) {
+                    return { test: [], review: [], unknown: `there are more than ${MAX_DEFER_GLOBS} deferral globs` };
+                  }
+                  deferSetup = {
+                    top,
+                    test: deferMatcher(testGlobs, top),
+                    review: deferMatcher(reviewGlobs, top),
+                    // The preview globs the Stop uses (pinned at the session start): a file the Stop asks no test of.
+                    previews: sessionUserGlobs(sessionId, projectCwd, top, 'static-preview'),
+                  };
+                }
+                const d = deferSetup;
+                if (!d.test.any && !d.review.any) return null;
+                const pushedTop = pushedRepoTop(h.cwd);
+                const realTop = pushedTop === null ? null : realRepoTop(h.cwd);
+                if (pushedTop === null || realTop === null) return { test: [], review: [], unknown: `${h.cwd} is in no repo git can read` };
+                reviewRecords ??= findRecentReviewFiles(resolvePath(projectCwd, '.claude', 'reviews'), reviewWindowMinutes(), TREE_RECORD_WINDOW_MIN);
+                for (const rev of h.revs) {
+                  const tree = treeOf(h.cwd, rev);
+                  const due: DeferredDue | null =
+                    tree === null
+                      ? { test: [], review: [], unknown: `git could not resolve ${rev}` }
+                      : deferredDueAtPush({
+                          cwd: h.cwd,
+                          top: pushedTop,
+                          realTop,
+                          // A finding's relative `file` resolves against the project dir, as the Stop resolves it.
+                          projectDir: projectCwd,
+                          rev,
+                          // The remote's own answer, not the local remote-tracking refs (lib/deferral.ts remoteTips).
+                          ...(h.remote !== undefined ? { remote: h.remote } : {}),
+                          defaultRemote: pushRemoteOf,
+                          tips: tipsOf,
+                          testMatch: d.test,
+                          reviewMatch: d.review,
+                          // Only a file layer 1 asks a test of owes one (no doc, image or test file); with no start blob
+                          //   to compare, a version-only manifest change counts as code (the stricter side).
+                          asked: (abs) => needsTests(abs, d.top, d.previews, undefined, pushedTop),
+                          passing: passingForTree(h.cwd, rev, tree, results),
+                          reviews: reviewRecords,
+                        });
+                  if (due !== null) return due;
+                }
+                return null;
+              } catch (err) {
+                return { test: [], review: [], unknown: `the check failed (${String(err).slice(0, 200)})` };
+              }
+            };
             for (const h of handoffs) {
               const o = checkHandoff(h, results, treeOf);
               // (#42) The repo handed off when it is outside the project dir (its real top, as test-write and
@@ -990,12 +1077,18 @@ function main(): void {
                 }
                 if (relaxed && reg === null) preWarnings.push(RELAXED_NOTE);
               }
-              if (o.ok && reg === null) continue;
-              // Warn mode never uses the user's one-use marker, and lets the other hand-offs be checked.
-              if (reg !== null && regMode === 'warn') {
+              // (N8b) Then the files the user deferred to the push (deferredFor above). The regression switch's warn
+              //   mode warns about the regression only: the deferred files still owe their evidence (quality delta
+              //   review: a warned regression skipped this check).
+              const regWarned = reg !== null && regMode === 'warn';
+              const due = o.ok && (reg === null || regWarned) && h.kind === 'push' ? deferredFor(h) : null;
+              if (o.ok && reg === null && due === null) continue;
+              // A warned regression alone never uses the user's one-use marker and lets the other hand-offs be checked.
+              if (reg !== null && regWarned) {
                 logGate(sessionId, 'push-test', 'warn', `regression-${reg.why} ${h.what}`);
                 preWarnings.push(`${regressionMessage(h.what, reg, CLI_PATH, agentName(ROUTE.test))} (push regression check, warn mode)`);
-                continue;
+                if (due === null) continue;
+                reg = null;
               }
               const marker = approvalMarkerPath(projectCwd,'push-test', sessionId);
               if (!inSubagent && userMarkerPresent(sessionId, marker, input.tool_use_id)) {
@@ -1008,8 +1101,10 @@ function main(): void {
               const msg =
                 reg !== null
                   ? regressionMessage(h.what, reg, CLI_PATH, agentName(ROUTE.test)) + (markerRel ? handoffApprovalAsk(markerRel) : '')
-                  : pushTestMessage(h.what, failed!, markerRel, { dir: resultsDir, outside: outsideTop !== null });
-              const why = reg !== null ? `regression-${reg.why}` : failed!.why;
+                  : due !== null
+                    ? deferredDueMessage(h.what, due, agentName(ROUTE.test)) + (markerRel ? handoffApprovalAsk(markerRel) : '')
+                    : pushTestMessage(h.what, failed!, markerRel, { dir: resultsDir, outside: outsideTop !== null });
+              const why = reg !== null ? `regression-${reg.why}` : due !== null ? 'deferred-due' : failed!.why;
               if (warnOnly) {
                 logGate(sessionId, 'push-test', 'warn', `${why} ${h.what}`);
                 preWarnings.push(`${msg} (${reg !== null ? 'push regression check' : 'push test check'}, warn mode)`);
@@ -1025,7 +1120,7 @@ function main(): void {
                       systemMessage:
                         (failed?.runFirst
                           ? `[goodboy] 한 명령 안에서 \`${failed.runFirst}\` 뒤에 ${h.what}을(를) 하려는 걸 막았어요(push는 명령 실행 전에 검사해서 나눠서 해야 해요)`
-                          : `[goodboy] ${reg !== null ? '통과한 전체 회귀 기록' : '통과한 테스트 결과'} 없이 ${h.what}을(를) 하려는 걸 막았어요`) +
+                          : `[goodboy] ${reg !== null ? '통과한 전체 회귀 기록' : due !== null ? 'push 때로 미룬 리뷰·테스트의 근거' : '통과한 테스트 결과'} 없이 ${h.what}을(를) 하려는 걸 막았어요`) +
                         (failed?.why === 'blocked' ? `(테스트를 실행하지 못함: ${failed.blocked?.blocked?.reason ?? ''})` : '') +
                         `. 테스트 없이 보내려면 \`! touch ${approvalMarkerShown(projectCwd, 'push-test', sessionId, cwd)}\`(이번 한 번)을 실행하거나 ${reg !== null ? 'GOODBOY_PUSH_REGRESSION' : 'GOODBOY_PUSH_TEST_GATE'}=off로 끄세요.`,
                     }),

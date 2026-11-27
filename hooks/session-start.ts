@@ -19,6 +19,7 @@ import { tierAdvice } from '../lib/test-profile';
 import { decisionAuthorityContext } from '../lib/decision-authority';
 import { clearReadRecords } from '../lib/file-tracker';
 import { pinCoverageStart } from '../lib/changed-coverage';
+import { notePolicySeen } from '../lib/deferral';
 import { pinSessionCriteria } from '../lib/session-criteria';
 import { HOOK_CLOCK_MS, startHookClock } from '../lib/hook-clock';
 import { START_PIN_BUDGET_MS, startPinDeadline, withSharedWorktreeList } from '../lib/start-pins';
@@ -107,6 +108,9 @@ if (import.meta.main) {
           walkCapped = pinCoverageStart(sessionId, projectDir(input.cwd ?? process.cwd(), process.env));
           // …and the requirement rows and policy `test:` lines it starts from (I2).
           pinSessionCriteria(sessionId, projectDir(input.cwd ?? process.cwd(), process.env));
+          // …and the policy file as the policy watch's start (N8b, lib/deferral.ts; not on compact, which can come in
+          //   the middle of the model's turn).
+          notePolicySeen(sessionId, projectDir(input.cwd ?? process.cwd(), process.env));
         });
       }
       const warnings = source === 'startup' || source === 'resume' ? configWarnings(process.env) : [];

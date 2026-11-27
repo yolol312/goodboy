@@ -60,7 +60,8 @@ so work is released in batches:
 | v0.38.0 | the first track N release: the quick fixes N2–N5, and N7 (#31) settled by a measurement (file tools open the path collapsed by name: their guards keep `resolve`, and their recorders, on the OS-opened path since #29, return to it), §20.9; N1 needed no change (§20.3 status) |
 | v0.38.1 | N6, the review plan: at most three review runs, sized by substantive lines from the session's start commit, a delta plan sized from the last review with a security run when security-sensitive, and a schedule from the free agent slots, §20.10 (#47). Released 2026-11-25 |
 | v0.38.2 | N8, one Stop block for every unmet obligation, with stable ids and the smallest rerun plan; the agent-deferral clock per wait and `test-write`'s check of a `coverage.changed` entry (both carried from §20.10 item 8), §20.11 (#49). Released 2026-11-26 |
-| v0.38.x | proposed: the rest of track N in the §20.8 order (N8b; the eval set N18; tests, criteria and structure, §20.4–§20.6), with a push judged by the test results gathered since the last push (§21, N24–N30, #43, #45) |
+| v0.38.3 | N8b, a review or test the user defers to the next push (`defer-review`/`defer-test` in the policy), §20.12 |
+| v0.38.x | proposed: the rest of track N in the §20.8 order (the eval set N18; tests, criteria and structure, §20.4–§20.6), with a push judged by the test results gathered since the last push (§21, N24–N30, #43, #45) |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
 
 ## 4. A — Fix silent failures and deadlocks
@@ -6247,7 +6248,7 @@ guards keep `resolve` and their recorders return to it). N1 needs no change: the
 failed call. N6, N8 and N8b remain, each larger: N6 has only the 200-line cut today (no substantive
 count, no three-way split, no session-start base, no slot scheduling), N8 has one collecting gate
 (the test gate) and 15 single-reason Stop blocks, and N8b has nothing yet. They follow as their own
-releases. N6 ships in v0.38.1 (§20.10), N8 in v0.38.2 (§20.11).
+releases. N6 ships in v0.38.1 (§20.10), N8 in v0.38.2 (§20.11), N8b in v0.38.3 (§20.12).
 
 - **N1, Codex second opinion.** The review run must pass `GOODBOY_CODEX_MODEL` every time,
   preflight the model once per session and record a skip with its reason. Passing the model is
@@ -6660,6 +6661,105 @@ uncovered the next, one Stop each.
     the next Stop, with no agent running, logged `deferral-wait-ended`. In a second session the model reviewed before
     its first Stop: that Stop blocked on `[test]` alone (the one-item format), left the passing review unaccepted, and
     the Stop after the test record accepted both.
+
+### 20.12 v0.38.3: a deferral the user records until the next push (N8b, #44 item 2)
+
+Checked against the code at 2bf62f1: the only way past a review or test block is the one-use Stop marker
+(`.claude/.goodboy-stop-approved-<tag>.txt`), spent on one Stop, so a user who wants some files reviewed or tested only
+at release is asked again on every later Stop. The user decided the design on 2026-11-26:
+
+1. **Recorded in the policy.** `defer-review: <globs>` and `defer-test: <globs>` in a `decide: human` entry of
+   `.goodboy/policy.md`, like `coverage-exempt`: only the user adds them (an Edit or Write that adds one is denied, as
+   for the other user globs), and they are committed, so they hold across sessions. The globs name files from the
+   project dir, as `static-preview` does (a nested repo's file matches with or without its repo dir in front).
+2. **From the next Stop.** The globs pinned at the session start count while the file keeps them, as for the other
+   user globs. A glob the user adds between turns counts from that message's Stop; a glob added while the model's turn
+   ran counts from the next session, and the Stop says so once per kind. "While the turn ran" is seen two ways: the
+   edit log names a policy file (Edit, Write, a Bash write announced or swept, a subagent's), or the policy watch saw
+   the file change (`watchPolicy` after every tool call, failed ones too, and at the Stop; `notePolicySeen` takes the
+   file as the user's at each prompt and at the session start). The watch compares content, so it catches what the edit
+   log misses (a write through a link, a script run by `bash x.sh`, a call that ended with no post hook); its record is
+   state-guarded, and an untrusted restore always leaves it written, also when the call removed its snapshot or the
+   snapshot's copy of the record (security delta review). Once set, `written` holds for the rest of the session: a glob
+   the user adds after a tool wrote the policy file also waits for the next session. PostToolUseFailure runs only for
+   Agent, Task and Bash (hooks.json); another tool's failed call is seen by the next watch or the Stop's. A subagent in a
+   linked worktree watches that worktree's copy of the policy file, so the record turns written and no glob added in
+   that session counts (fails closed). The Edit guard also denies a deferral glob written through a link to the policy
+   file. Known limits: a glob a model's Bash write put into the file counts from the next session's pin, as for the
+   other user globs (denying Bash writes to the policy file would need git's subcommands told apart; `git add` of it is
+   fine); a program the model started in an earlier turn that writes a glob after the Stop and before the user's
+   next message is taken as the user's change (decided 2026-11-26: stated, not blocked; its files still owe their
+   evidence at the push, item 4); and a program the model leaves running that rewrites the policy file and the
+   watch's record together after its call's post hook (the same class: the state guard brackets calls, and hooks and
+   the model run as one OS user, lib/state-guard.ts header). A Bash call that removes both its snapshot dir and its note
+   in `.seal-notes` (security delta review: a `bash x.sh` script) leaves the record written: PreToolUse snapshots every
+   Bash call it lets run, so a post hook that finds neither marks the record (`restoreGateState`); a false mark (a
+   PreToolUse that failed, a second post hook) only makes such a glob wait for the next session. The other guarded
+   files keep the state guard's stated limit for that case (an untrusted restore there would remove every cursor);
+   hardening it is its own work, proposed after v0.38.3.
+3. **The Stop.** Layer 1 leaves the files matching `defer-test` out of the files it judges (the test gate, its
+   stop_hook_active accept and the start check); the review gate and its stop_hook_active accept leave out the files
+   matching `defer-review`. A deferred file pending neither blocks nor is accepted: the cursors do not move for it,
+   and a later accept of other files moves past it as for any file. The docs rule is unchanged. The status line shows
+   the deferred files still pending, and the Stop warns once per session.
+4. **Due at the next push.** A `git push` checks the files changed in the commits it sends, those the remote's real
+   branches and tags do not reach (read from the remote, item 5; never the local remote-tracking refs, which a command
+   can set to anything: `git update-ref refs/remotes/origin/x HEAD` emptied `--not --remotes`, decided 2026-11-26 to
+   fix in v0.38.3), and that match a deferral glob: a `defer-test` file needs a passing layer-1 record
+   for the pushed tree that lists it in `tested_files`; a `defer-review` file needs a review that lists it, whose tree
+   holds the pushed content of the file, with no high finding on it. A file that misses its evidence denies the push
+   with the list and what to run; the user's push marker passes it, as for the push test check. The deferral stays in
+   the policy for the next changes until the user removes it: each push is the release point. A glob the user removes
+   during a session still counts at that session's pushes (the push keeps every glob the session saw, item 5); it is
+   gone from the next session.
+5. **As built.** `lib/deferral.ts` reads the globs (`deferGlobs`: the pin, or the file when no tool wrote a policy file
+   this session; a push, `pushDeferGlobs`, uses the union of the file's globs now, the session pin's and those the
+   policy file had at the user's prompts this session, kept in the watch record, so a tool that removes or narrows the
+   line owes no less) and judges a push (`deferredDueAtPush`: the rev resolved to a commit id first, `rev-parse
+   --end-of-options`, so a ref named like an option never reaches `git log` as one; the remote's tips from `remoteTips`:
+   the push's remote as the command names it, else the one git uses (`pushRemoteOf`), every URL the push goes to
+   (`pushUrlsOf`: `remote get-url --push --all` for a configured remote, since git pushes to each `pushurl`, or each
+   `url` when there is none, so a mirror listed first cannot stand in for the real remote; for a URL or a path on the
+   command line, git's own rewrite, `pushRewrite`: the longest `pushInsteadOf` prefix, else the longest `insteadOf`, an
+   empty value matching every URL as in git; a relative path made absolute from the work tree's top, where git resolves
+   it; a local path starting with `~` is unknown, since git expands it from $HOME, which the push's command can set),
+   then for each URL, within one 20 s budget, `git ls-remote --refs <url> 'refs/heads/*'
+   'refs/tags/*'` run from `/` with no repo, user or ssh config (a git older than 2.32 ignores GIT_CONFIG_GLOBAL and
+   would read `~/.gitconfig`: the remote is not read, `gitHonorsConfigGlobal`, and the push is unknown) (lib/git-run.ts `remoteRead`, the one call with a
+   transport: a model can write those files, and a program set there, such as `core.sshCommand`, `credential.helper`
+   or ssh's `ProxyCommand`, would run inside the hook, where it could make the user's approval marker the same check
+   reads); git's system config is kept only when every file of it and its dir are root's (`systemConfigTrusted`:
+   macOS's own git sets the keychain credential helper there); ssh runs with `-F /dev/null -o BatchMode=yes` (the
+   default keys and the agent in `SSH_AUTH_SOCK`), only the transports git deems safe, with no prompt, and without the
+   hook's own `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_SSH`, `GIT_PROXY_COMMAND`, `GIT_EXEC_PATH` and environment config
+   (`GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n`); the tips
+   this clone holds exclude their history, and a tip it lacks excludes nothing, as git push itself sends those commits
+   (a `git fetch` first narrows it); a remote that cannot be read makes the push unknown and denied; the files from
+   `git log -z --name-only --no-renames --cc --stdin` with the commit and `^<tip>` lines, once per URL's tips and
+   joined (the push sends what any one URL lacks) (`--cc`: a merge commit lists
+   what the merge itself changed against every parent); more than 5000 files, or a file matching a deferral glob whose
+   name has a line break (`cat-file --batch-check` cannot be asked about it), make the push unknown and denied; the
+   pushed blobs from `git cat-file --batch-check` (the tips this clone holds, once per push URL; the pushed blobs;
+   the reviewed trees); one `ls-remote` per push URL of each repo and remote for the whole command; a file the push deletes owes nothing;
+   a `defer-test` file owes a test only when layer 1 would ask one (`needsTests` with the pinned preview globs; with no
+   start blob a version-only manifest change counts as code); a review counts when its tree, or its `trees` entry for a
+   nested repo, holds the pushed blob, and any such review with a high finding on the file, or a newest one with
+   verdict `fail`, leaves it owed; a finding's relative path resolves against the project dir). The Stop
+   reads the matchers once (`deferMatchOf`, lib/stop-groups.ts): layer 1 through `testEditsByGroup` (and
+   `deferredTestEdits` lists what it left out), the review through `reviewGateEdits`. The push side runs after the push
+   regression check, for `git push` and the hand-off skills (a `push` hand-off), with the policy of the project dir;
+   when git cannot list or read the files, or the check itself fails, the push is denied with that reason (fail
+   closed, also in the main session; the marker passes it). More than 1000 deferral globs are not judged either. A
+   push whose own `-c` sets a URL rewrite, a remote's URL or push URL, or a branch's remote (`-c url.*`,
+   `-c remote.<name>.url`/`pushurl`, `-c branch.<b>.remote`; a remote or branch name may hold dots) is "unclear" for
+   the push test check (lib/push-test.ts PUSH_URL_CONFIG). `GOODBOY_PUSH_REGRESSION=warn` warns about the regression
+   only: the deferred files still owe their evidence at that push (§21.3's warn advice does not lift it). Costs and limits: a
+   remote that needs the user's own config to be read (a credential helper outside a root-owned system config, an ssh
+   host alias or identity from `~/.ssh/config`, a proxy) cannot be read, so such a push is denied while a deferral
+   glob is set (the push marker passes it); a push from a script the model runs (`bash push.sh`) is not seen by the
+   PreToolUse check at all (as for the push test check); the always-true scan of the push test check still bounds its
+   lines with `--not --remotes` (§21 N24).
+   `GOODBOY_PUSH_TEST_GATE=warn|off` covers it as it covers the push test check.
 
 ## 21. Push by the test results gathered since the last push (proposed, 2026-11-12, #43)
 

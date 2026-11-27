@@ -120,8 +120,9 @@ function splitGlobs(text: string): string[] {
 
 /** Policy keys whose globs only the user sets: the changed-line exemptions (I1), the static
  *  previews (I3a, lib/verification-scope.ts), the test-type exemptions (I3b,
- *  lib/test-types.ts). All are pinned at session start together. */
-export const USER_GLOB_KEYS = ['coverage-exempt', 'static-preview', 'test-type-exempt'] as const;
+ *  lib/test-types.ts), and the review and test deferrals to the next push (N8b, lib/deferral.ts).
+ *  All are pinned at session start together; a deferral added later can count at once (lib/deferral.ts). */
+export const USER_GLOB_KEYS = ['coverage-exempt', 'static-preview', 'test-type-exempt', 'defer-review', 'defer-test'] as const;
 export type UserGlobKey = (typeof USER_GLOB_KEYS)[number];
 
 /** `<key>: <glob>, <glob>` of the `decide: human` entries in a policy text. An `ai` entry
@@ -357,6 +358,14 @@ export function noteSessionTop(sessionId: string, cwd: string): void {
   }
   const top = repoTop(cwd);
   if (!isPinTop(pin, top)) topStart(sessionId, top);
+}
+
+/** (N8b) The globs of `key` pinned at the session's start for `top`, whether or not the policy file still has them
+ *  (a push owes what the session started with, also after a tool removed the line). */
+export function pinnedUserGlobs(sessionId: string, top: string, key: UserGlobKey): string[] {
+  const pin = readPin(sessionId);
+  if (!pin || !isPinTop(pin, top)) return [];
+  return [...(key === 'coverage-exempt' ? pin.exemptions : (pin.globs?.[key] ?? []))];
 }
 
 /** A user glob key's globs this session may use: those pinned at its start that the policy

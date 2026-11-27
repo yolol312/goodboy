@@ -117,6 +117,8 @@ export interface StatusSnapshot {
   testPending?: boolean;
   /** 이번 세션의 게이트 deny 누계(참고용). */
   gateDenies?: number;
+  /** (N8b) Files whose review or tests the user deferred to the next push that are still pending. */
+  deferred?: { review: number; test: number };
 }
 
 /** status.json 절대경로. 상태바 스크립트가 session_id로 이 경로를 찾는다. */

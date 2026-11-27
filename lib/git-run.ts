@@ -3,7 +3,8 @@
 // lib/hook-git.ts (some had none), and a Stop repeated byte-identical calls. Every call here
 // has, whoever the caller is:
 //   - `--no-replace-objects` (a replace ref shows another commit's tree) and no grafts;
-//   - no fsmonitor, no signature check, no transport, no lazy fetch (lib/hook-git.ts);
+//   - no fsmonitor, no signature check, no transport, no lazy fetch (lib/hook-git.ts); the one exception is a
+//     `remoteRead` call (lib/deferral.ts remoteTips: `ls-remote` of a URL from outside any repo);
 //   - no external diff program and no textconv for a command that diffs (`diff`, `show`, `log`:
 //     `--no-ext-diff --no-textconv`; `blame`, `grep`: `--no-textconv`), whatever the repo's config sets;
 //   - every filter driver of the repo's config emptied for a command that can run one
@@ -71,7 +72,34 @@ export interface GitOptions {
   /** git's messages in English (`LC_ALL=C`, `LANGUAGE` unset): a caller that tells a failure by its
    *  text ("not a git repository", lib/start-pins.ts) must not read a translation (#33). */
   cLocale?: boolean;
+  /** (N8b) The one call that talks to a remote: `ls-remote` of a URL, run by lib/deferral.ts from a dir outside any repo
+   *  with `REMOTE_READ_ENV`; `'system'` keeps git's system config (only when lib/deferral.ts systemConfigTrusted found
+   *  it root's: macOS's own git sets the keychain credential helper there). */
+  remoteRead?: true | 'system';
 }
+
+/** Environment a `remoteRead` call drops from the hook's own: names that run a program or add config (security delta
+ *  review: `GIT_ASKPASS` and `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n` still did). */
+const REMOTE_READ_UNSET =
+  /^(?:GIT_ASKPASS|SSH_ASKPASS|SSH_ASKPASS_REQUIRE|GIT_SSH|GIT_PROXY_COMMAND|GIT_EXEC_PATH|GIT_CONFIG_PARAMETERS|GIT_CONFIG_COUNT|GIT_CONFIG_KEY_\d+|GIT_CONFIG_VALUE_\d+)$/;
+/** The environment of a `remoteRead` call. No config file is read (but a root-owned system config with `'system'`),
+ *  and the call runs outside any repo:
+ *  a model can write a repo's, the user's (`~/.gitconfig`) and ssh's (`~/.ssh/config`) config, and a program set there
+ *  (`core.sshCommand`, `credential.helper`, `core.askPass`, an upload-pack, ssh's `ProxyCommand`) would run inside the
+ *  hook, where it could make a user approval marker the same check then reads (security delta review). So: no global
+ *  or system git config (GIT_CONFIG_GLOBAL needs git 2.32: lib/deferral.ts gitHonorsConfigGlobal refuses an older
+ *  one), ssh with no config file and no prompt (`BatchMode`; the default keys and the agent in `SSH_AUTH_SOCK` still
+ *  work), the transports git deems safe (never `ext` or `fd`), no credential prompt. A remote that needs the user's
+ *  config (a credential helper, an ssh host alias, a proxy) cannot be read: the push is denied, and the user's push
+ *  marker passes it. */
+const REMOTE_READ_ENV: Readonly<Record<string, string>> = {
+  GIT_ALLOW_PROTOCOL: 'file:git:http:https:ssh',
+  GIT_TERMINAL_PROMPT: '0',
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_SSH_COMMAND: 'ssh -F /dev/null -o BatchMode=yes',
+  GIT_SSH_VARIANT: 'ssh',
+};
 
 /** Environment a caller may set for git: where the index and the objects are, and which user
  *  config counts. Nothing else passes (the safety names are never the caller's). The callers:
@@ -272,6 +300,11 @@ export function spawnGit(cwd: string, args: readonly string[], opts: GitOptions 
   const env: Record<string, string> = { ...(process.env as Record<string, string>) };
   for (const [k, v] of Object.entries(opts.env ?? {})) if (OPERATIONAL_ENV.has(k)) env[k] = v;
   Object.assign(env, HOOK_GIT_ENV, NO_GRAFTS);
+  if (opts.remoteRead !== undefined) {
+    Object.assign(env, REMOTE_READ_ENV);
+    if (opts.remoteRead === 'system') delete env.GIT_CONFIG_NOSYSTEM;
+    for (const k of Object.keys(env)) if (REMOTE_READ_UNSET.test(k)) delete env[k];
+  }
   if (opts.unsetEnv !== undefined) for (const k of Object.keys(env)) if (opts.unsetEnv.test(k)) delete env[k];
   if (opts.cLocale) {
     env.LC_ALL = 'C';
@@ -279,7 +312,14 @@ export function spawnGit(cwd: string, args: readonly string[], opts: GitOptions 
   }
 
   const bin = resolveGitBinary(env, cwd);
-  const overridden = opts.unsetEnv !== undefined || Object.keys(opts.env ?? {}).length > 0 || opts.cLocale === true || opts.maxBuffer !== undefined || opts.honorReplace === true || opts.noMemo === true;
+  const overridden =
+    opts.unsetEnv !== undefined ||
+    Object.keys(opts.env ?? {}).length > 0 ||
+    opts.cLocale === true ||
+    opts.maxBuffer !== undefined ||
+    opts.honorReplace === true ||
+    opts.noMemo === true ||
+    opts.remoteRead !== undefined;
   // The kind is the subcommand's; the caller's global options (`-c core.quotePath=false`, `-C`) are
   //   part of the key below, so the same question asked with other options is another entry.
   const kept = snapshot !== null && !overridden ? memoCodes(args.slice(at), opts.input) : null;

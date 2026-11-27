@@ -48,6 +48,9 @@ export interface Handoff {
   revs: string[];
   /** Set when goodboy cannot tell what is handed off (a push of every branch or tag). */
   unclear?: string;
+  /** (N8b) A `git push`'s remote as the command names it (a remote's name or a URL); absent: the one git uses
+   *  (`pushRemoteOf`). */
+  remote?: string;
   /** (#15) The command that may change commits before the push in the same command (`git
    *  commit`, `npm version`): the check runs before the command, so it would judge the commits
    *  as they were. */
@@ -367,19 +370,24 @@ function aliasOf(sub: string, inline: Map<string, string>, cwd: string): string[
   return v.startsWith('!') ? [v] : splitAliasValue(v);
 }
 
+/** The remote a `git push` that names none uses: branch.<b>.pushRemote, remote.pushDefault, branch.<b>.remote, then
+ *  origin; an empty value is skipped. The one copy (also lib/commit-scan-guard.ts, lib/deferral.ts). */
+export function pushRemoteOf(cwd: string): string {
+  const one = (args: string[]): string | null => git(cwd, args) || null;
+  const branch = one(['symbolic-ref', '--short', '-q', 'HEAD']);
+  return (
+    (branch ? one(['config', '--get', `branch.${branch}.pushRemote`]) : null) ??
+    one(['config', '--get', 'remote.pushDefault']) ??
+    (branch ? one(['config', '--get', `branch.${branch}.remote`]) : null) ??
+    'origin'
+  );
+}
+
 /** True when the repo's config makes a refspec-less push send more than the current branch.
  *  With no remote named, the one git uses: branch.<b>.pushRemote, remote.pushDefault,
  *  branch.<b>.remote, then origin (layer-1 round). */
 export function pushConfigSendsMore(cwd: string, named: string | undefined): boolean {
-  let remote = named;
-  if (remote === undefined) {
-    const branch = git(cwd, ['symbolic-ref', '--short', '-q', 'HEAD']);
-    remote =
-      (branch ? git(cwd, ['config', '--get', `branch.${branch}.pushRemote`]) : null) ??
-      git(cwd, ['config', '--get', 'remote.pushDefault']) ??
-      (branch ? git(cwd, ['config', '--get', `branch.${branch}.remote`]) : null) ??
-      'origin';
-  }
+  const remote = named ?? pushRemoteOf(cwd);
   if (/^[\w.-]+$/.test(remote)) {
     if (git(cwd, ['config', '--get-all', `remote.${remote}.push`])) return true;
     if (git(cwd, ['config', '--get', `remote.${remote}.mirror`]) === 'true') return true;
@@ -393,14 +401,22 @@ interface ReadBudget {
   aliasLookups: number;
 }
 const MAX_ALIAS_LOOKUPS = 8;
-/** Inline config that decides what a plain `git push` sends. */
-const PUSH_CONFIG = /^(?:remote\.[^.]+\.(?:push|mirror)|remote\.pushdefault|branch\.[^.]+\.pushremote|push\.default|include(?:if)?\.)/i;
+/** Inline config that decides what a plain `git push` sends. A remote or branch name may hold dots (git splits a key at
+ *  its first and last dot), so a name is anything up to the `=` (quality delta review: `[^.]+` missed
+ *  `remote.origin.backup.*`). */
+const PUSH_CONFIG = /^(?:remote\.[^=]+\.(?:push|mirror)|remote\.pushdefault|branch\.[^=]+\.pushremote|push\.default|include(?:if)?\.)/i;
+/** (N8b) Inline config that decides where a push goes: a URL rewrite (`url.<base>.insteadOf`/`pushInsteadOf`), a
+ *  remote's URL or push URL, or a branch's remote (the default remote of a push that names none). The deferral check
+ *  reads the remote the repo's config names (lib/deferral.ts pushUrlsOf, push-test pushRemoteOf), so a push sent
+ *  elsewhere by the command's own `-c` cannot be judged (security and quality delta reviews). */
+const PUSH_URL_CONFIG = /^(?:url\.|remote\.[^=]+\.(?:url|pushurl)(?==|$)|branch\.[^=]+\.remote(?==|$))/i;
 
 /** `envConfig`: the segment runs with env that moves git's config or repository (GIT_ENV). */
 function gitHandoff(words: string[], cwd: string, depth: number, budget: ReadBudget, envConfig = false): Handoff[] {
   let dir = cwd;
   const inline = new Map<string, string>();
   let configDecides = false;
+  let urlDecides = false;
   // Config or repository from elsewhere: env, `--git-dir`/`--work-tree` or `--config-env`
   //   before the subcommand (after it, `rev-parse --git-dir` is a query), `-c include.*`.
   let elsewhere = envConfig;
@@ -413,6 +429,7 @@ function gitHandoff(words: string[], cwd: string, depth: number, budget: ReadBud
       const m = words[i + 1]!.match(/^alias\.([^=]+)=(.*)$/i);
       if (m) inline.set(m[1]!.toLowerCase(), m[2]!);
       if (PUSH_CONFIG.test(words[i + 1]!)) configDecides = true;
+      if (PUSH_URL_CONFIG.test(words[i + 1]!)) urlDecides = true;
       if (/^include(?:if)?\./i.test(words[i + 1]!)) elsewhere = true;
     }
     if (/^--(?:config-env|git-dir|work-tree)(?:=|$)/.test(w)) elsewhere = true;
@@ -475,6 +492,7 @@ function gitHandoff(words: string[], cwd: string, depth: number, budget: ReadBud
     return [{ kind: 'push', what, cwd: dir, revs: [], unclear: 'it pushes every branch or tag' }];
   }
   const decided: Handoff[] = [{ kind: 'push', what, cwd: dir, revs: [], unclear: 'git config decides which refs it pushes' }];
+  if (urlDecides) return [{ kind: 'push', what, cwd: dir, revs: [], unclear: 'its inline config (`-c url.*`, `-c remote.*.url`/`pushurl` or `-c branch.*.remote`) decides where it pushes' }];
   if (configDecides || repoOpt) return decided;
   // The repo's config is not the one git will read, so it is not looked up.
   if (elsewhere) return fromElsewhere(what);
@@ -488,7 +506,7 @@ function gitHandoff(words: string[], cwd: string, depth: number, budget: ReadBud
   }
   if (pos.length <= 1) revs.push('HEAD');
   if (revs.length === 0) return [];
-  return [{ kind: 'push', what, cwd: dir, revs: Array.from(new Set(revs)) }];
+  return [{ kind: 'push', what, cwd: dir, revs: Array.from(new Set(revs)), ...(pos[0] !== undefined ? { remote: pos[0] } : {}) }];
 }
 
 const GH_VALUE_OPTS = new Set(['-R', '--repo', '-H', '--head', '-B', '--base', '-t', '--title', '-b', '--body', '-F', '--body-file', '-a', '--assignee', '-l', '--label', '-m', '--milestone', '-p', '--project', '-r', '--reviewer', '-T', '--template', '-s', '--source-branch', '--target-branch', '-d', '--description', '--hostname']);
@@ -957,4 +975,17 @@ export function checkHandoff(
     return { ok: false, why: 'no-result', rev, tree, ...(differs ? { differs } : {}), ...(rejected ? { rejected } : {}) };
   }
   return Object.keys(docRevs).length > 0 ? { ok: true, docsOnly: docRevs } : { ok: true };
+}
+
+/** (N8b, lib/deferral.ts) The passing layer-1 records of `rev`'s tree, judged as `checkHandoff` judges them. */
+export function passingForTree(cwd: string, rev: string, tree: string, results: readonly TestResult[]): TestResult[] {
+  const forTree = results.filter((r) => treesOf(r).includes(tree));
+  if (forTree.length === 0) return [];
+  const lines = pushedTestLines(cwd, rev);
+  return forTree.filter((r) => notPassing(r, lines) === null);
+}
+
+/** The real top of the repo `dir` is in (the key of a record's `trees`), or null outside a repo. */
+export function realRepoTop(dir: string): string | null {
+  return realTopOf(dir);
 }

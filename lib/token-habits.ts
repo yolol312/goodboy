@@ -159,6 +159,9 @@ export interface HabitState {
   modelSwitchWarned?: boolean;
   /** 층1: 테스트 게이트가 이 저장소에서 비활성이라는 안내를 냈는지(세션당 1회). */
   testGateInactiveWarned?: boolean;
+  /** (N8b) The Stop's one notice per session and kind: files deferred to the next push, and globs that wait for the
+   *  next session. */
+  deferNoticeShown?: { review?: boolean; test?: boolean; waitingReview?: boolean; waitingTest?: boolean };
   /** Layer 1 (#34, #37): whether the "dev-cycle criteria not asked of this session" notice was shown (once per session). */
   cycleCriteriaIdleWarned?: boolean;
   /** Layer 1 (#32, #37): per project dir, the turn counter at the last full Stop that judged layer 1 there; edits at or after it are this turn's. */

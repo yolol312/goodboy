@@ -32,8 +32,8 @@
 // comes back; the edit and unswept logs keep their lines plus the copy's (a union only adds obligations); the turn
 // counter takes the highest valid value of the copy, the file and the edit log. A guarded log past the state cap is
 // not copied, and the Stop blocks on it (`oversizedLogs`). The model can still read the key, a call that removes both
-// the snapshot dir and its note reads as one that took none, and a pin it forges while the index is gone stays: this
-// raises the bar only.
+// the snapshot dir and its note reads as one that took none (but for the policy watch's record, N8b, which such a call
+// leaves written), and a pin it forges while the index is gone stays: this raises the bar only.
 
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { existsSync, linkSync, lstatSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
@@ -44,7 +44,7 @@ import { safeToolUseId } from './approval-marker';
 import { MAX_STATE_BYTES, readRegular, readStateText } from './safe-read';
 import { failureMarkerRoot, findProjectRoot, validationPassFile } from './validation-state';
 
-const GUARDED = /^(?:turn\.txt|oversized-logs\.json|edits\.jsonl|unswept\.jsonl|dispatch-log\.jsonl|skill-evidence\.jsonl|commit-issue-pins\.json|marker-evidence\.jsonl|project-mode-pin\.json|coverage-pin\.json|criteria-pin\.json|criteria-seen\.json|judged-weakened\.json|agent-deferral\.json|worktrees\.txt|start-tips(?:-[0-9a-f]{16})?\.json|(?:start-pin|criteria-pin|criteria-seen)-[0-9a-f]{16}\.json|\.goodboy-last-(?:review|test)-[0-9a-f]+\.json|\.goodboy-validation-failed\.json|validation-passed\.json)$/;
+const GUARDED = /^(?:turn\.txt|oversized-logs\.json|edits\.jsonl|unswept\.jsonl|dispatch-log\.jsonl|skill-evidence\.jsonl|commit-issue-pins\.json|marker-evidence\.jsonl|project-mode-pin\.json|coverage-pin\.json|criteria-pin\.json|criteria-seen\.json|judged-weakened\.json|agent-deferral\.json|policy-seen\.json|worktrees\.txt|start-tips(?:-[0-9a-f]{16})?\.json|(?:start-pin|criteria-pin|criteria-seen)-[0-9a-f]{16}\.json|\.goodboy-last-(?:review|test)-[0-9a-f]+\.json|\.goodboy-validation-failed\.json|validation-passed\.json)$/;
 const CURSOR = /^\.goodboy-last-(?:review|test)-[0-9a-f]+\.json$/;
 /** Evidence logs: a line added during a model Bash call would be forged evidence (a skill run,
  *  the user's non-project answer), so these keep only their old lines, and one the call
@@ -62,8 +62,10 @@ const EVIDENCE = /^(?:skill-evidence|marker-evidence)\.jsonl$/;
  *  checkout's start. The tips are one file per repository (#39): `start-tips.json` for the session's
  *  own, `start-tips-<hash>.json` for each nested repo of a project dir that is no repo. The deferral clock
  *  (`agent-deferral.json`, lib/agent-deferral.ts, #44) is the Stop's: a call that restarted or removed it would
- *  lengthen the time the gates wait for agents. */
-const HOOK_ONLY = /^(?:(?:project-mode-pin|coverage-pin|criteria-pin|criteria-seen|judged-weakened|agent-deferral|oversized-logs)\.json|worktrees\.txt|start-tips(?:-[0-9a-f]{16})?\.json|(?:start-pin|criteria-pin|criteria-seen)-[0-9a-f]{16}\.json)$/;
+ *  lengthen the time the gates wait for agents. The policy watch's record (`policy-seen.json`, lib/deferral.ts, N8b) is
+ *  the hooks': a call that rewrote it to the policy file's new content would make a deferral glob the call added count
+ *  in this session. */
+const HOOK_ONLY = /^(?:(?:project-mode-pin|coverage-pin|criteria-pin|criteria-seen|judged-weakened|agent-deferral|policy-seen|oversized-logs)\.json|worktrees\.txt|start-tips(?:-[0-9a-f]{16})?\.json|(?:start-pin|criteria-pin|criteria-seen)-[0-9a-f]{16}\.json)$/;
 
 function keptEvidenceLine(name: string, line: string): boolean {
   if (name !== 'skill-evidence.jsonl') return false;
@@ -383,6 +385,28 @@ const TURN_SLACK = 2;
 const UNION_LOGS = new Set(['edits.jsonl', 'unswept.jsonl']);
 /** A failed validation blocks the Stop: an untrusted restore puts back one the call removed. */
 const VALIDATION_FAILED = '.goodboy-validation-failed.json';
+/** lib/deferral.ts POLICY_SEEN_FILE. */
+const POLICY_SEEN = 'policy-seen.json';
+
+/** (N8b) The record an untrusted restore leaves: `written` set, with the union of the deferral globs the given texts
+ *  hold (the record now and the snapshot's copy; a planted glob only adds what a push owes). Keys are a fixed list. */
+export function untrustedPolicySeen(texts: readonly (string | null | undefined)[]): string {
+  const globs: { 'defer-review'?: string[]; 'defer-test'?: string[] } = {};
+  for (const t of texts) {
+    let g: unknown;
+    try {
+      g = typeof t === 'string' ? (JSON.parse(t) as { globs?: unknown } | null)?.globs : undefined;
+    } catch {
+      g = undefined;
+    }
+    if (g === null || typeof g !== 'object') continue;
+    for (const k of ['defer-review', 'defer-test'] as const) {
+      const v = Object.hasOwn(g, k) ? (g as Record<string, unknown>)[k] : undefined;
+      if (Array.isArray(v)) globs[k] = [...new Set([...(globs[k] ?? []), ...v.filter((x): x is string => typeof x === 'string')])];
+    }
+  }
+  return JSON.stringify({ hash: 'untrusted', written: true, ...(Object.keys(globs).length > 0 ? { globs } : {}) });
+}
 
 /** The text of a plain state file, or null when it is none. */
 function textOrNull(p: string): string | null {
@@ -451,6 +475,8 @@ function restoreFrom(sessionId: string, snap: string): string[] {
         }
         continue;
       }
+      // (N8b) Written after the loop, with or without a copy (untrustedPolicySeen).
+      if (!trusted && name === POLICY_SEEN) continue;
       if (!trusted && HOOK_ONLY.test(name)) {
         if (now === null) {
           writeFileSync(p, before, 'utf8');
@@ -544,9 +570,30 @@ function restoreFrom(sessionId: string, snap: string): string[] {
       // this one could not be removed; the others still are
     }
   }
+  // (N8b) An untrusted restore always leaves the policy watch's record written, whether or not the snapshot still holds
+  //   its copy (security delta review: a call that removed its snapshot, or only that copy, kept a record it rewrote to
+  //   the policy file's new hash, and a deferral glob it added counted at once). Fails closed: such a glob waits for the
+  //   next session. The deferral globs of the record and of the copy are kept (they only add what a push owes).
+  if (!trusted && markPolicySeenUntrusted(dir, copies.get(POLICY_SEEN)) && !restored.includes(POLICY_SEEN)) restored.push(POLICY_SEEN);
   rmSync(snap, { recursive: true, force: true });
   dropNote(sessionId, id);
   return restored;
+}
+
+/** (N8b) Leaves the policy watch's record written (`untrustedPolicySeen` of the record now and `copy`); whether it
+ *  changed. Never throws: a record that cannot be written is read as written by the watch anyway. */
+function markPolicySeenUntrusted(dir: string, copy?: string): boolean {
+  const p = join(dir, POLICY_SEEN);
+  try {
+    const now = plainState(p) ? textOrNull(p) : null;
+    const want = untrustedPolicySeen([now, copy]);
+    if (now === want) return false;
+    rmSync(p, { recursive: true, force: true });
+    writeFileSync(p, want, 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** After a model Bash call: puts back what it removed or rewrote. Returns the file names. */
@@ -554,7 +601,16 @@ export function restoreGateState(sessionId: string, toolUseId: string | undefine
   if (!toolUseId) return [];
   const snap = snapDir(sessionId, toolUseId);
   // No snapshot dir: none was taken, unless its note says one was (the call removed it: an untrusted restore).
-  if (!existsSync(snap) && !hasNote(sessionId, safeToolUseId(toolUseId))) return [];
+  if (!existsSync(snap) && !hasNote(sessionId, safeToolUseId(toolUseId))) {
+    // (N8b) PreToolUse snapshots every Bash call it lets run (hooks/pre-tool-use.ts, the last step before its pass), so
+    //   a call that reports back with neither its snapshot nor its note removed both (security delta review: then the
+    //   policy watch's record it rewrote stayed, and a deferral glob it added counted at once). Only the policy record
+    //   is marked here: the other guarded files keep the limit stated in the header (an untrusted restore would remove
+    //   every cursor, and a second post hook for one call, or a PreToolUse that failed, would then cost the user's
+    //   reviews and tests). A false mark makes a glob added in this session wait for the next session, no more.
+    markPolicySeenUntrusted(ensureSessionDir(sessionId));
+    return [];
+  }
   try {
     return restoreFrom(sessionId, snap);
   } catch {
