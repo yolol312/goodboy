@@ -60,7 +60,7 @@ so work is released in batches:
 | v0.38.0 | the first track N release: the quick fixes N2–N5, and N7 (#31) settled by a measurement (file tools open the path collapsed by name: their guards keep `resolve`, and their recorders, on the OS-opened path since #29, return to it), §20.9; N1 needed no change (§20.3 status) |
 | v0.38.1 | N6, the review plan: at most three review runs, sized by substantive lines from the session's start commit, a delta plan sized from the last review with a security run when security-sensitive, and a schedule from the free agent slots, §20.10 (#47). Released 2026-11-25 |
 | v0.38.2 | N8, one Stop block for every unmet obligation, with stable ids and the smallest rerun plan; the agent-deferral clock per wait and `test-write`'s check of a `coverage.changed` entry (both carried from §20.10 item 8), §20.11 (#49). Released 2026-11-26 |
-| v0.38.3 | N8b, a review or test the user defers to the next push (`defer-review`/`defer-test` in the policy), §20.12 |
+| v0.38.3 | N8b, a review or test the user defers to the next push (`defer-review`/`defer-test` in the policy), §20.12 (#44). Released 2026-11-27 |
 | v0.38.x | proposed: the rest of track N in the §20.8 order (the eval set N18; tests, criteria and structure, §20.4–§20.6), with a push judged by the test results gathered since the last push (§21, N24–N30, #43, #45) |
 | v1.0.0-rc | D (release readiness) + F9–F10 |
 
